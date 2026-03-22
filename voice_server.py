@@ -1,0 +1,231 @@
+#!/usr/bin/env python3
+"""
+OpenClaw 语音服务端
+- 接收 Core2 发来的 WAV 音频
+- 百度语音识别 → openclaw agent → edge-tts 合成
+- 返回 MP3 给 Core2 播放
+
+启动: python3 voice_server.py
+端口: 5000
+"""
+
+import base64
+import json
+import os
+import re
+import subprocess
+import time
+import uuid
+import urllib.request
+from pathlib import Path
+from flask import Flask, request, send_file, jsonify
+
+# ── 路径配置 ──────────────────────────────────────────────────────────────────
+
+OPENCLAW_DIR = Path.home() / ".openclaw"
+TTS_SCRIPT = str(OPENCLAW_DIR / "workspace/skills/edge-tts/scripts/tts-converter.js")
+TTS_VOICE = "zh-CN-XiaoxiaoNeural"
+OPENCLAW_BIN = str(Path.home() / ".npm-global/bin/openclaw")
+AGENT_ID = "main"
+
+PULSE_ENV = {**os.environ, "PULSE_SERVER": "unix:/mnt/wslg/PulseServer"}
+
+WAV_PATH = "/tmp/oc_server_input.wav"
+MP3_PATH = "/tmp/oc_server_response.mp3"
+
+SAMPLE_RATE = 16000
+
+# ── 百度语音识别 ──────────────────────────────────────────────────────────────
+
+from config import BAIDU_API_KEY, BAIDU_SECRET_KEY
+
+_baidu_token = None
+_baidu_token_expire = 0
+
+
+def get_baidu_token():
+    global _baidu_token, _baidu_token_expire
+    if _baidu_token and time.time() < _baidu_token_expire:
+        return _baidu_token
+    url = (
+        "https://aip.baidubce.com/oauth/2.0/token"
+        f"?grant_type=client_credentials"
+        f"&client_id={BAIDU_API_KEY}"
+        f"&client_secret={BAIDU_SECRET_KEY}"
+    )
+    with urllib.request.urlopen(url, timeout=10) as resp:
+        data = json.loads(resp.read())
+    _baidu_token = data["access_token"]
+    _baidu_token_expire = time.time() + data["expires_in"] - 60
+    return _baidu_token
+
+
+def transcribe(audio_path):
+    with open(audio_path, "rb") as f:
+        audio_data = f.read()
+    payload = json.dumps({
+        "format": "wav",
+        "rate": SAMPLE_RATE,
+        "channel": 1,
+        "cuid": "core2_client",
+        "token": get_baidu_token(),
+        "speech": base64.b64encode(audio_data).decode("utf-8"),
+        "len": len(audio_data),
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        "https://vop.baidu.com/server_api",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        result = json.loads(resp.read())
+    if result.get("err_no") != 0:
+        raise RuntimeError(f"百度识别失败: {result.get('err_msg')}")
+    return result["result"][0].strip()
+
+
+# ── 对话 ──────────────────────────────────────────────────────────────────────
+
+def _extract_json(raw):
+    clean = re.sub(r"\x1b\[[0-9;]*m", "", raw)
+    depth = 0
+    start = None
+    for i, ch in enumerate(clean):
+        if ch == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0 and start is not None:
+                return json.loads(clean[start: i + 1])
+    raise ValueError(f"未找到完整 JSON: {raw[:200]}")
+
+
+def chat(user_text, session_id):
+    result = subprocess.run(
+        [
+            OPENCLAW_BIN, "agent",
+            "--agent", AGENT_ID,
+            "--message", user_text,
+            "--session-id", session_id,
+            "--json",
+            "--timeout", "120",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=130,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"openclaw 失败: {result.stderr[:200]}")
+    data = _extract_json(result.stdout)
+    if data.get("status") != "ok":
+        raise RuntimeError(f"agent 状态异常: {data.get('status')}")
+    return data["result"]["payloads"][0]["text"]
+
+
+# ── TTS ───────────────────────────────────────────────────────────────────────
+
+def strip_markdown(text):
+    text = re.sub(r"```[\s\S]*?```", "", text)
+    text = re.sub(r"`[^`]+`", "", text)
+    text = re.sub(r"#{1,6}\s+", "", text)
+    text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)
+    text = re.sub(r"\*(.+?)\*", r"\1", text)
+    text = re.sub(r"~~(.+?)~~", r"\1", text)
+    text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
+    text = re.sub(r"!\[[^\]]*\]\([^)]+\)", "", text)
+    text = re.sub(r"^\s*[-*+]\s+", "", text, flags=re.MULTILINE)
+    text = re.sub(r"^\s*\d+\.\s+", "", text, flags=re.MULTILINE)
+    text = re.sub(r"\n{2,}", "\n", text)
+    return text.strip()
+
+
+def synthesize(text):
+    clean = strip_markdown(text)
+    if not clean:
+        return None
+    result = subprocess.run(
+        ["node", TTS_SCRIPT, clean, "--voice", TTS_VOICE, "--output", MP3_PATH],
+        capture_output=True, text=True, timeout=30,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"TTS 失败: {result.stderr[:200]}")
+    return MP3_PATH
+
+
+# ── 会话管理 ──────────────────────────────────────────────────────────────────
+
+# 每个设备 ID 对应一个独立会话
+_sessions = {}
+
+
+def get_session(device_id):
+    if device_id not in _sessions:
+        _sessions[device_id] = str(uuid.uuid4())
+        print(f"[新设备] {device_id} → session {_sessions[device_id][:8]}...")
+    return _sessions[device_id]
+
+
+# ── Flask 路由 ────────────────────────────────────────────────────────────────
+
+app = Flask(__name__)
+
+
+@app.route("/chat", methods=["POST"])
+def handle_chat():
+    """
+    接收 WAV 文件，返回 MP3 文件。
+    请求头: X-Device-Id: <设备唯一ID>（用于区分会话）
+    请求体: WAV 音频（16kHz, 单声道, 16bit）
+    """
+    device_id = request.headers.get("X-Device-Id", "default")
+    session_id = get_session(device_id)
+
+    # 保存 WAV
+    audio_data = request.get_data()
+    if not audio_data:
+        return jsonify({"error": "没有收到音频数据"}), 400
+
+    with open(WAV_PATH, "wb") as f:
+        f.write(audio_data)
+
+    try:
+        # 1. 语音识别
+        user_text = transcribe(WAV_PATH)
+        print(f"[{device_id}] 🗣️  {user_text}")
+
+        # 2. 对话
+        reply = chat(user_text, session_id)
+        preview = reply[:80].replace("\n", " ")
+        print(f"[{device_id}] 💬  {preview}{'...' if len(reply) > 80 else ''}")
+
+        # 3. TTS
+        mp3_path = synthesize(reply)
+        if not mp3_path:
+            return jsonify({"error": "TTS 生成失败"}), 500
+
+        return send_file(mp3_path, mimetype="audio/mpeg")
+
+    except Exception as e:
+        print(f"[{device_id}] ⚠️  错误: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/health", methods=["GET"])
+def health():
+    return jsonify({"status": "ok"})
+
+
+# ── 启动 ──────────────────────────────────────────────────────────────────────
+
+if __name__ == "__main__":
+    print("=" * 50)
+    print("  OpenClaw 语音服务端")
+    print("=" * 50)
+    print("获取百度 token...", end="", flush=True)
+    get_baidu_token()
+    print(" OK")
+    print(f"Agent : {AGENT_ID}  |  TTS : {TTS_VOICE}")
+    print("监听 0.0.0.0:5000，Ctrl+C 退出\n")
+    app.run(host="0.0.0.0", port=5000, debug=False)
