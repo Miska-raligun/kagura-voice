@@ -7,7 +7,9 @@ import struct
 import math
 
 # 修改为你的服务端地址
-SERVER_URL = "http://YOUR_SERVER_IP:5000/chat"
+SERVER_BASE = "http://YOUR_SERVER_IP:5000"
+SERVER_URL = SERVER_BASE + "/chat"
+PENDING_URL = SERVER_BASE + "/pending/"
 DEVICE_ID = "cores3"
 SAMPLE_RATE = 16000
 CHUNK_SEC = 0.5
@@ -85,20 +87,41 @@ def record_and_send():
   data = resp.content
   resp.close()
   print("WAV size:", len(data))
+  draw_status("Playing...")
+  play_wav(data)
+  draw_status("Touch to talk")
+  time.sleep(2)
+  while M5.Touch.getCount() > 0:
+    M5.update()
+    time.sleep(0.1)
+  is_busy = False
+
+last_poll = 0
+POLL_INTERVAL = 3
+
+def play_wav(data):
   with open("/flash/response.wav", "wb") as f:
     f.write(data)
-  draw_status("Playing...")
   Speaker.begin()
   Speaker.setVolumePercentage(0.6)
   Speaker.playWavFile("/flash/response.wav")
   while Speaker.isPlaying():
     time.sleep(0.1)
   Speaker.end()
+
+def check_pending():
+  global is_busy
+  resp = urequests.get(PENDING_URL + DEVICE_ID)
+  if resp.status_code == 204:
+    resp.close()
+    return
+  is_busy = True
+  data = resp.content
+  resp.close()
+  print("Push WAV size:", len(data))
+  draw_status("Broadcast...")
+  play_wav(data)
   draw_status("Touch to talk")
-  time.sleep(2)
-  while M5.Touch.getCount() > 0:
-    M5.update()
-    time.sleep(0.1)
   is_busy = False
 
 def setup():
@@ -107,9 +130,14 @@ def setup():
   draw_status("Touch to talk")
 
 def loop():
+  global last_poll
   M5.update()
   if not is_busy and M5.Touch.getCount() > 0:
     record_and_send()
+  now = time.time()
+  if not is_busy and now - last_poll > POLL_INTERVAL:
+    last_poll = now
+    check_pending()
 
 if __name__ == '__main__':
   setup()

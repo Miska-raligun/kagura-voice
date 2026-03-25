@@ -76,6 +76,18 @@ netsh interface portproxy add v4tov4 listenport=5000 listenaddress=0.0.0.0 conne
 4. 修改 `SERVER_URL` 为服务端的局域网 IP
 5. 点击下载按钮写入设备（开机自动运行）
 
+### 主动播报
+
+服务端提供 `/push` 接口，可通过 HTTP 推送文字消息，CoreS3 会自动轮询并播放：
+
+```bash
+curl -X POST http://localhost:5000/push \
+  -H "Content-Type: application/json" \
+  -d '{"text": "主人，今天多云转晴，气温25度", "device_id": "cores3"}'
+```
+
+可配合 OpenClaw 的定时任务使用，例如每天早上播报天气。
+
 ## 项目结构
 
 ```
@@ -88,6 +100,7 @@ netsh interface portproxy add v4tov4 listenport=5000 listenaddress=0.0.0.0 conne
 
 ## TODO
 
+- [x] 主动播报：服务端推送消息，CoreS3 自动播放
 - [ ] 屏幕 UI 优化：不同状态显示不同表情/动画
 - [ ] 连续对话模式：不需要每次触摸，自动监听
 - [ ] 摄像头图像识别：语音触发拍照，发送给 OpenClaw 分析
