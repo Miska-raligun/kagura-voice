@@ -1,19 +1,25 @@
 # Kagura Voice
 
-基于 OpenClaw 的语音对话助手，支持本地麦克风模式和硬件终端模式（M5Stack CoreS3）。
+基于 OpenClaw 的语音对话助手，支持本地麦克风模式和 M5Stack CoreS3 硬件终端模式。
 
 ## 功能
 
-- 麦克风录音，自动检测说话开始/结束
-- 百度语音识别（中文）
+- 百度语音识别（中文 ASR）
 - OpenClaw Agent 对话
-- Edge-TTS 语音合成播放
+- 百度语音合成（中文 TTS）
+- M5Stack CoreS3 硬件终端：触摸录音、VAD 自动停止、语音播放
+- 本地模式：麦克风录音、自动检测说话开始/结束
+
+## 硬件要求（CoreS3 模式）
+
+- M5Stack CoreS3（或 CoreS3 SE）
+- 运行 OpenClaw 的服务器（PC / WSL / Linux）
+- CoreS3 和服务器在同一局域网
 
 ## 依赖
 
 - [OpenClaw](https://openclaw.ai)（需在本机运行）
-- ffmpeg / ffplay
-- Node.js（用于 edge-tts）
+- ffmpeg / ffplay（本地模式需要）
 - Python 3.10+
 
 ```bash
@@ -22,13 +28,15 @@ pip install flask numpy
 
 ## 配置
 
-复制 `config.example.py` 为 `config.py`，填入百度语音识别的 API Key 和 Secret Key：
+1. 复制 `config.example.py` 为 `config.py`：
 
 ```bash
 cp config.example.py config.py
 ```
 
-百度语音识别 API 在[百度智能云](https://console.bce.baidu.com)申请，新用户有免费额度。
+2. 在[百度智能云](https://console.bce.baidu.com)创建**两个应用**：
+   - 语音识别应用 → 填入 `BAIDU_API_KEY` 和 `BAIDU_SECRET_KEY`
+   - 语音合成应用（需开通语音合成权限）→ 填入 `BAIDU_TTS_API_KEY` 和 `BAIDU_TTS_SECRET_KEY`
 
 ## 使用
 
@@ -40,35 +48,50 @@ python3 voice_assistant.py
 
 说话 → 识别 → OpenClaw 回复 → 语音播放，按 `Ctrl+C` 退出。
 
-也可以用文字输入模式：
+文字输入模式：
 
 ```bash
 python3 voice_assistant.py --text
 ```
 
-### 硬件终端模式（M5Stack CoreS3）
+### CoreS3 硬件终端模式
 
-启动服务端：
+**服务端**（PC / WSL）：
 
 ```bash
 python3 voice_server.py
 ```
 
-服务端监听 `0.0.0.0:5000`，CoreS3 通过 WiFi 发送录音，服务端完成识别和对话后返回 MP3。
-
-**WSL 用户**：需要在 Windows（管理员 PowerShell）中开启端口转发，让局域网设备能访问 WSL 内的服务：
+**WSL 用户**需要在 Windows 管理员 PowerShell 中开启端口转发：
 
 ```powershell
-netsh interface portproxy add v4tov4 listenport=5000 listenaddress=0.0.0.0 connectport=5000 connectaddress=127.0.0.1
+netsh interface portproxy add v4tov4 listenport=5000 listenaddress=0.0.0.0 connectport=5000 connectaddress=<WSL_IP>
 ```
 
-CoreS3 端代码待更新。
+**CoreS3 端**：
+
+1. 用 M5Burner 烧录 UIFlow2 固件，配置 WiFi
+2. 打开 uiflow2.m5stack.com 连接设备
+3. 将 `cores3_client.py` 的内容粘贴到编辑器
+4. 修改 `SERVER_URL` 为服务端的局域网 IP
+5. 点击下载按钮写入设备（开机自动运行）
 
 ## 项目结构
 
 ```
-├── voice_assistant.py   # 本地语音对话
-├── voice_server.py      # CoreS3 服务端
+├── voice_assistant.py   # 本地语音对话（麦克风 + 扬声器）
+├── voice_server.py      # CoreS3 服务端（ASR + OpenClaw + TTS）
+├── cores3_client.py     # CoreS3 设备端代码（MicroPython）
 ├── config.py            # API Key 配置（不提交）
 └── config.example.py    # 配置示例
 ```
+
+## TODO
+
+- [ ] 屏幕 UI 优化：不同状态显示不同表情/动画
+- [ ] 连续对话模式：不需要每次触摸，自动监听
+- [ ] 摄像头图像识别：语音触发拍照，发送给 OpenClaw 分析
+- [ ] 音色优化：寻找更符合神乐风格的 TTS 声音
+- [ ] 中文显示：CoreS3 屏幕支持中文字体
+- [ ] 录音指示：录音/发送/播放时的 LED 或动画反馈
+- [ ] 离线唤醒词：不需要触摸，说唤醒词激活
