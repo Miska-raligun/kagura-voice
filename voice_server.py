@@ -17,8 +17,9 @@ import subprocess
 import time
 import uuid
 import urllib.request
+import urllib.parse
 from pathlib import Path
-from flask import Flask, request, send_file, jsonify
+from flask import Flask, request, send_file, jsonify, Response
 
 # ── 路径配置 ──────────────────────────────────────────────────────────────────
 
@@ -32,46 +33,60 @@ PULSE_ENV = {**os.environ, "PULSE_SERVER": "unix:/mnt/wslg/PulseServer"}
 
 WAV_PATH = "/tmp/oc_server_input.wav"
 MP3_PATH = "/tmp/oc_server_response.mp3"
+OUT_WAV_PATH = "/tmp/oc_server_response.wav"
 
 SAMPLE_RATE = 16000
 
 # ── 百度语音识别 ──────────────────────────────────────────────────────────────
 
-from config import BAIDU_API_KEY, BAIDU_SECRET_KEY
+from config import BAIDU_API_KEY, BAIDU_SECRET_KEY, BAIDU_TTS_API_KEY, BAIDU_TTS_SECRET_KEY
 
 _baidu_token = None
 _baidu_token_expire = 0
+_baidu_tts_token = None
+_baidu_tts_token_expire = 0
+
+
+def _get_token(api_key, secret_key):
+    url = (
+        "https://aip.baidubce.com/oauth/2.0/token"
+        f"?grant_type=client_credentials"
+        f"&client_id={api_key}"
+        f"&client_secret={secret_key}"
+    )
+    with urllib.request.urlopen(url, timeout=10) as resp:
+        data = json.loads(resp.read())
+    return data["access_token"], time.time() + data["expires_in"] - 60
 
 
 def get_baidu_token():
     global _baidu_token, _baidu_token_expire
     if _baidu_token and time.time() < _baidu_token_expire:
         return _baidu_token
-    url = (
-        "https://aip.baidubce.com/oauth/2.0/token"
-        f"?grant_type=client_credentials"
-        f"&client_id={BAIDU_API_KEY}"
-        f"&client_secret={BAIDU_SECRET_KEY}"
-    )
-    with urllib.request.urlopen(url, timeout=10) as resp:
-        data = json.loads(resp.read())
-    _baidu_token = data["access_token"]
-    _baidu_token_expire = time.time() + data["expires_in"] - 60
+    _baidu_token, _baidu_token_expire = _get_token(BAIDU_API_KEY, BAIDU_SECRET_KEY)
     return _baidu_token
+
+
+def get_baidu_tts_token():
+    global _baidu_tts_token, _baidu_tts_token_expire
+    if _baidu_tts_token and time.time() < _baidu_tts_token_expire:
+        return _baidu_tts_token
+    _baidu_tts_token, _baidu_tts_token_expire = _get_token(BAIDU_TTS_API_KEY, BAIDU_TTS_SECRET_KEY)
+    return _baidu_tts_token
 
 
 def transcribe(audio_path):
     with open(audio_path, "rb") as f:
         audio_data = f.read()
-    payload = json.dumps({
-        "format": "wav",
-        "rate": SAMPLE_RATE,
-        "channel": 1,
-        "cuid": "core2_client",
-        "token": get_baidu_token(),
-        "speech": base64.b64encode(audio_data).decode("utf-8"),
-        "len": len(audio_data),
-    }).encode("utf-8")
+        payload = json.dumps({
+            "format": "wav",
+            "rate": SAMPLE_RATE,
+            "channel": 1,
+            "cuid": "core2_client",
+            "token": get_baidu_token(),
+            "speech": base64.b64encode(audio_data).decode("utf-8"),
+            "len": len(audio_data),
+            }).encode("utf-8")
     req = urllib.request.Request(
         "https://vop.baidu.com/server_api",
         data=payload,
@@ -80,9 +95,11 @@ def transcribe(audio_path):
     with urllib.request.urlopen(req, timeout=15) as resp:
         result = json.loads(resp.read())
     if result.get("err_no") != 0:
-        raise RuntimeError(f"百度识别失败: {result.get('err_msg')}")
-    return result["result"][0].strip()
-
+        return ""
+    results = result.get("result", [])
+    if not results:
+        return ""
+    return results[0].strip()
 
 # ── 对话 ──────────────────────────────────────────────────────────────────────
 
@@ -142,16 +159,44 @@ def strip_markdown(text):
 
 
 def synthesize(text):
+    """百度 TTS：文字 → PCM → 干净 WAV"""
     clean = strip_markdown(text)
     if not clean:
         return None
-    result = subprocess.run(
-        ["node", TTS_SCRIPT, clean, "--voice", TTS_VOICE, "--output", MP3_PATH],
-        capture_output=True, text=True, timeout=30,
+    token = get_baidu_tts_token()
+    params = urllib.parse.urlencode({
+        "tex": clean,
+        "tok": token,
+        "cuid": "core2_client",
+        "ctp": 1,
+        "lan": "zh",
+        "spd": 5,
+        "pit": 5,
+        "vol": 10,
+        "per": 111,    # 111=度小萌(可爱女声)
+        "aue": 4,       # 4=pcm-16k
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        "https://tsn.baidu.com/text2audio",
+        data=params,
     )
-    if result.returncode != 0:
-        raise RuntimeError(f"TTS 失败: {result.stderr[:200]}")
-    return MP3_PATH
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        ct = resp.headers.get("Content-Type", "")
+        body = resp.read()
+    # 如果返回 JSON 说明出错了
+    if "json" in ct or body[:1] == b"{":
+        raise RuntimeError(f"百度 TTS 失败: {body[:200]}")
+    # body 是裸 PCM (16kHz, 16bit, mono)，加干净 WAV 头
+    import struct as _struct
+    sr, ch, bits = 16000, 1, 16
+    data_len = len(body)
+    header = _struct.pack('<4sI4s4sIHHIIHH4sI',
+        b'RIFF', 36 + data_len, b'WAVE',
+        b'fmt ', 16, 1, ch, sr, sr * ch * bits // 8, ch * bits // 8, bits,
+        b'data', data_len)
+    with open(OUT_WAV_PATH, "wb") as f:
+        f.write(header + body)
+    return OUT_WAV_PATH
 
 
 # ── 会话管理 ──────────────────────────────────────────────────────────────────
@@ -194,6 +239,8 @@ def handle_chat():
         # 1. 语音识别
         user_text = transcribe(WAV_PATH)
         print(f"[{device_id}] 🗣️  {user_text}")
+        if not user_text:
+            user_text = "我没有听清楚，请重说一遍"
 
         # 2. 对话
         reply = chat(user_text, session_id)
@@ -205,7 +252,11 @@ def handle_chat():
         if not mp3_path:
             return jsonify({"error": "TTS 生成失败"}), 500
 
-        return send_file(mp3_path, mimetype="audio/mpeg")
+        with open(mp3_path, "rb") as f:
+            wav_data = f.read()
+        print(f"[{device_id}] 📤  WAV {len(wav_data)} bytes")
+        return Response(wav_data, mimetype="audio/wav",
+                        headers={"Content-Length": len(wav_data)})
 
     except Exception as e:
         print(f"[{device_id}] ⚠️  错误: {e}")
@@ -215,6 +266,28 @@ def handle_chat():
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({"status": "ok"})
+
+
+@app.route("/test-tone", methods=["GET"])
+def test_tone():
+    """返回一个 1 秒 440Hz 正弦波 WAV，用于测试 CoreS3 扬声器。"""
+    import struct, math
+    sr = 16000
+    duration = 1
+    samples = sr * duration
+    raw = bytearray()
+    for i in range(samples):
+        val = int(16000 * math.sin(2 * math.pi * 440 * i / sr))
+        raw += struct.pack('<h', val)
+    # WAV header
+    data_len = len(raw)
+    header = struct.pack('<4sI4s4sIHHIIHH4sI',
+        b'RIFF', 36 + data_len, b'WAVE',
+        b'fmt ', 16, 1, 1, sr, sr * 2, 2, 16,
+        b'data', data_len)
+    import io
+    buf = io.BytesIO(header + raw)
+    return send_file(buf, mimetype="audio/wav", download_name="test.wav")
 
 
 # ── 启动 ──────────────────────────────────────────────────────────────────────
