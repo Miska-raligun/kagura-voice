@@ -86,8 +86,7 @@ _is_sleeping   = False
 
 STATE_UI = {
     "idle":           ("(^w^)",   "Touch to talk",    0x888888),
-    "listening":      ("(o_o)",   "Listening...",      0xff4444),
-    "recording":      ("(O_O)",   "Recording...",      0xff2222),
+    "recording":      ("(O_O)",   "Recording...",      0xff4444),  # Bug 4 Fix: 合并 listening/recording
     "processing":     ("(@_@)",   "Thinking...",       0xffcc00),
     "playing":        ("(>v<)",   "Playing...",        0x44ff44),
     "error":          ("(;_;)",   "Error!",            0xff6600),
@@ -196,6 +195,7 @@ def check_touch():
             pos      = _touch_pos
             _touch_start = None
             if duration >= LONG_PRESS_MS:
+                _tap_times.clear()   # Bug 3 Fix: 防止长按后残留点击记录意外触发三击
                 return ('long', pos)
             elif duration > 0:
                 now = time.ticks_ms()
@@ -224,9 +224,9 @@ def toggle_continuous():
     global continuous_mode, WAKE_MODE
     continuous_mode = not continuous_mode
     if continuous_mode:
-        WAKE_MODE = False   # Fix 5: 互斥
+        WAKE_MODE = False
     draw_state("continuous_on" if continuous_mode else "continuous_off")
-    time.sleep(1.5)
+    time.sleep(0.8)   # Bug 3 Fix: 1.5→0.8s，缩短切换反馈时间
     draw_state("idle")
 
 
@@ -235,9 +235,9 @@ def toggle_wake_mode():
     global WAKE_MODE, continuous_mode
     WAKE_MODE = not WAKE_MODE
     if WAKE_MODE:
-        continuous_mode = False   # Fix 5: 互斥
+        continuous_mode = False
     draw_state("wake_on" if WAKE_MODE else "wake_off")
-    time.sleep(1.5)
+    time.sleep(0.8)   # Bug 3 Fix: 1.5→0.8s，缩短切换反馈时间
     draw_state("idle")
 
 
@@ -258,9 +258,7 @@ def _record_audio():
         time.sleep(CHUNK_SEC + 0.05)
         level = rms(buf)
         if level > SILENCE_THRESHOLD:
-            if not started:
-                started = True
-                draw_state("recording")   # Fix 4: 声音检测到，切换到录音状态
+            started = True
             silent  = 0
             chunks.append(bytes(buf))
         elif started:
@@ -306,7 +304,7 @@ def record_and_send():
     gc.collect()
 
     while True:
-        draw_state("listening")
+        draw_state("recording")   # Bug 4 Fix: 立刻显示录音状态，用户看到就说话
         chunks = _record_audio()
 
         if not chunks:
@@ -379,6 +377,9 @@ def record_and_send():
         if not continuous_mode:
             break
 
+        # ── 连续模式：轮间检查主动播报（Bug 1 Fix）───────────────
+        _poll_pending_now()
+
         # ── 连续模式：1.5s 退出窗口（长按退出）──────────────────
         draw_state("idle")
         t_start = time.ticks_ms()
@@ -403,17 +404,30 @@ def record_and_send():
 def capture_photo():
     """
     调用 CoreS3 摄像头拍一张 QQVGA JPEG。
-    返回 base64 字符串，失败返回 None。
+    返回 base64 字符串（无换行），失败返回 None。
     """
     try:
         import camera
         camera.init()
-        time.sleep(0.3)
-        img = camera.capture()
+        time.sleep(0.5)          # Bug 2 Fix: 0.3→0.5s，给传感器更多稳定时间
+        camera.capture()         # 丢弃第一帧（初始化帧往往偏暗/不稳定）
+        time.sleep(0.1)
+        img = camera.capture()   # 取第二帧
         camera.deinit()
         if img is None:
+            print("camera: capture returned None")
             return None
-        return ubinascii.b2a_base64(img).decode("utf-8").strip()
+        # 验证 JPEG magic bytes (FF D8)
+        if len(img) < 4 or img[0] != 0xff or img[1] != 0xd8:
+            print("camera: not JPEG, first bytes:", img[0], img[1])
+            return None
+        print("camera: JPEG size =", len(img))
+        # Bug 2 Fix: b2a_base64 每行插 \n，去除所有换行防止 base64 解码失败
+        b64 = ubinascii.b2a_base64(img).decode("utf-8")
+        b64 = b64.replace("\n", "").replace("\r", "")
+        del img
+        gc.collect()
+        return b64
     except Exception as e:
         print("camera error:", e)
         return None
@@ -432,7 +446,7 @@ def record_and_send_vision():
     draw_state("camera")
     image_b64 = capture_photo()
 
-    draw_state("listening")
+    draw_state("recording")   # Bug 4 Fix: 立刻显示录音状态
     chunks = _record_audio()
 
     if not chunks:
@@ -485,29 +499,56 @@ def record_and_send_vision():
 
 # ── 主动推送轮询 ──────────────────────────────────────────────
 
-def check_pending():
-    """轮询服务端，有推送消息则播放。休眠中收到消息会自动唤醒。"""
-    global is_busy, _last_activity
+def _poll_pending_now():
+    """
+    在 is_busy=True 期间（连续模式内）也能安全调用的推送检查。
+    不修改 is_busy，仅执行网络请求+播放。
+    调用后更新 last_poll，避免退出连续模式后立即重复轮询。
+    """
+    global last_poll
+    last_poll = time.time()
     try:
         resp = urequests.get(PENDING_URL + DEVICE_ID)
         if resp.status_code == 204:
             resp.close()
             return
-        is_busy = True
+        data = resp.content
+        resp.close()
+        print("Push WAV size (inline):", len(data))
+        draw_state("broadcast")
+        play_wav(data)
+        _set_led(0, 0, 0)
+    except OSError as e:
+        print("pending (inline) err:", e)
+
+
+def check_pending():
+    """loop() 空闲时轮询推送消息。休眠中收到消息会自动唤醒。"""
+    global is_busy, _last_activity
+    is_busy = True
+    # 先临时检查是否有消息（轻量请求，不下载完整 WAV）
+    try:
+        resp = urequests.get(PENDING_URL + DEVICE_ID)
+        if resp.status_code == 204:
+            resp.close()
+            is_busy = False
+            return
         data = resp.content
         resp.close()
         # 有推送消息 → 唤醒设备
         if _is_sleeping:
             wake_up()
         _last_activity = time.time()
+        global last_poll
+        last_poll = time.time()
         print("Push WAV size:", len(data))
         draw_state("broadcast")
         play_wav(data)
         draw_state("idle")
         _set_led(0, 0, 0)
-        is_busy = False
     except OSError as e:
         print("pending err:", e)
+    is_busy = False
 
 
 # ── 主循环 ────────────────────────────────────────────────────

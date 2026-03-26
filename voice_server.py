@@ -356,9 +356,14 @@ def handle_chat_vision():
 
         image_path = None
         if image_b64:
+            # Bug 2 Fix: 兼容 MicroPython 可能残留的换行符，并补足 base64 padding
+            image_b64_clean = image_b64.replace("\n", "").replace("\r", "")
+            padding = len(image_b64_clean) % 4
+            if padding:
+                image_b64_clean += "=" * (4 - padding)
             image_path = "/tmp/oc_vision_input.jpg"
             with open(image_path, "wb") as f:
-                f.write(base64.b64decode(image_b64))
+                f.write(base64.b64decode(image_b64_clean))
 
         reply = chat(user_text, session_id, image_path=image_path)
         preview = reply[:80].replace("\n", " ")
