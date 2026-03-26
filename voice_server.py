@@ -14,6 +14,7 @@ import json
 import os
 import re
 import subprocess
+import tempfile
 import time
 import uuid
 import urllib.request
@@ -242,27 +243,28 @@ def handle_chat():
     device_id = request.headers.get("X-Device-Id", "default")
     session_id = get_session(device_id)
 
-    # 保存 WAV
     audio_data = request.get_data()
     if not audio_data:
         return jsonify({"error": "没有收到音频数据"}), 400
 
-    with open(WAV_PATH, "wb") as f:
+    # Fix 2: 请求级临时文件，避免并发路由互相覆盖
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+        wav_path = f.name
         f.write(audio_data)
 
     try:
         # 1. 语音识别
-        user_text = transcribe(WAV_PATH)
+        user_text = transcribe(wav_path)
         print(f"[{device_id}] 🗣️  {user_text}")
         if not user_text:
             user_text = "我没有听清楚，请重说一遍"
 
         need_photo = _needs_photo(user_text)
 
-        # 2. 对话（触发拍照时先给一句简短应答，实际分析等图片到来后进行）
+        # 2. 对话
+        # Fix 3: 拍照应答硬编码，不经过 LLM，避免污染 session 历史
         if need_photo:
-            prompt = f"用户说：{user_text}。请用一句简短的话回应，说明你马上要看一看。"
-            reply = chat(prompt, session_id)
+            reply = "好的，让我看看～"
             print(f"[{device_id}] 📷  检测到拍照关键词，返回 X-Need-Photo: 1")
         else:
             reply = chat(user_text, session_id)
@@ -270,11 +272,11 @@ def handle_chat():
         print(f"[{device_id}] 💬  {preview}{'...' if len(reply) > 80 else ''}")
 
         # 3. TTS
-        mp3_path = synthesize(reply)
-        if not mp3_path:
+        wav_out = synthesize(reply)
+        if not wav_out:
             return jsonify({"error": "TTS 生成失败"}), 500
 
-        with open(mp3_path, "rb") as f:
+        with open(wav_out, "rb") as f:
             wav_data = f.read()
         print(f"[{device_id}] 📤  WAV {len(wav_data)} bytes")
         resp_headers = {"Content-Length": len(wav_data)}
@@ -285,6 +287,8 @@ def handle_chat():
     except Exception as e:
         print(f"[{device_id}] ⚠️  错误: {e}")
         return jsonify({"error": str(e)}), 500
+    finally:
+        os.unlink(wav_path)
 
 
 @app.route("/push", methods=["POST"])
@@ -340,11 +344,13 @@ def handle_chat_vision():
     wav_bytes = base64.b64decode(data["wav"])
     image_b64 = data.get("image", "")
 
-    with open(WAV_PATH, "wb") as f:
+    # Fix 2: 请求级临时文件
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+        wav_path = f.name
         f.write(wav_bytes)
 
     try:
-        user_text = transcribe(WAV_PATH) or "请分析这张图片"
+        user_text = transcribe(wav_path) or "请分析这张图片"
         print(f"[{device_id}] 🗣️  {user_text}")
 
         image_path = None
@@ -357,11 +363,11 @@ def handle_chat_vision():
         preview = reply[:80].replace("\n", " ")
         print(f"[{device_id}] 💬  {preview}{'...' if len(reply) > 80 else ''}")
 
-        wav_path = synthesize(reply)
-        if not wav_path:
+        wav_out = synthesize(reply)
+        if not wav_out:
             return jsonify({"error": "TTS 生成失败"}), 500
 
-        with open(wav_path, "rb") as f:
+        with open(wav_out, "rb") as f:
             wav_data = f.read()
         print(f"[{device_id}] 📤  WAV {len(wav_data)} bytes")
         return Response(wav_data, mimetype="audio/wav",
@@ -370,6 +376,8 @@ def handle_chat_vision():
     except Exception as e:
         print(f"[{device_id}] ⚠️  vision 错误: {e}")
         return jsonify({"error": str(e)}), 500
+    finally:
+        os.unlink(wav_path)
 
 
 @app.route("/health", methods=["GET"])

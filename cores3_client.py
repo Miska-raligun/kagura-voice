@@ -63,7 +63,8 @@ POLL_INTERVAL = 3
 
 STATE_UI = {
     "idle":           ("(・ω・)",  "触摸屏幕说话",  0x888888),
-    "listening":      ("(ﾟДﾟ)",   "聆听中...",     0xff4444),
+    "listening":      ("(ﾟДﾟ)",   "等待说话...",   0xff4444),
+    "recording":      ("(ﾟДﾟ)",   "录音中...",     0xff2222),  # VAD 触发后
     "processing":     ("(＠_＠)",  "思考中...",     0xffcc00),
     "playing":        ("(≧▽≦)",  "播放中...",     0x44ff44),
     "error":          ("(；ω；)",  "出错啦！",      0xff6600),
@@ -194,18 +195,22 @@ def drain_touch():
 # ── 模式切换 ──────────────────────────────────────────────────
 
 def toggle_continuous():
-    """长按切换连续对话模式。"""
-    global continuous_mode
+    """长按切换连续对话模式。开启时自动关闭声控唤醒（两者互斥）。"""
+    global continuous_mode, WAKE_MODE
     continuous_mode = not continuous_mode
+    if continuous_mode:
+        WAKE_MODE = False   # Fix 5: 互斥
     draw_state("continuous_on" if continuous_mode else "continuous_off")
     time.sleep(1.5)
     draw_state("idle")
 
 
 def toggle_wake_mode():
-    """三击切换唤醒词模式（不需要触摸即可激活录音）。"""
-    global WAKE_MODE
+    """三击切换声控唤醒模式。开启时自动关闭连续对话（两者互斥）。"""
+    global WAKE_MODE, continuous_mode
     WAKE_MODE = not WAKE_MODE
+    if WAKE_MODE:
+        continuous_mode = False   # Fix 5: 互斥
     draw_state("wake_on" if WAKE_MODE else "wake_off")
     time.sleep(1.5)
     draw_state("idle")
@@ -228,7 +233,9 @@ def _record_audio():
         time.sleep(CHUNK_SEC + 0.05)
         level = rms(buf)
         if level > SILENCE_THRESHOLD:
-            started = True
+            if not started:
+                started = True
+                draw_state("recording")   # Fix 4: 声音检测到，切换到录音状态
             silent  = 0
             chunks.append(bytes(buf))
         elif started:
@@ -243,13 +250,19 @@ def _record_audio():
 # ── 播放 ──────────────────────────────────────────────────────
 
 def play_wav(data):
-    """将 WAV 数据写入 flash 并播放。"""
+    """将 WAV 数据写入 flash 并播放。触摸屏幕可随时中断播放。"""
     with open("/flash/response.wav", "wb") as f:
         f.write(data)
     Speaker.begin()
     Speaker.setVolumePercentage(0.6)
     Speaker.playWavFile("/flash/response.wav")
     while Speaker.isPlaying():
+        M5.update()
+        if M5.Touch.getCount() > 0:   # Fix 6: 触摸中断
+            Speaker.stop()
+            time.sleep(0.2)           # 让扬声器余音散去
+            drain_touch()
+            break
         time.sleep(0.1)
     Speaker.end()
 
@@ -468,11 +481,34 @@ def check_pending():
 
 # ── 主循环 ────────────────────────────────────────────────────
 
+def calibrate_noise():
+    """
+    Fix 8: 启动时采样 1s 环境底噪，自动设置说话和唤醒阈值。
+    阈值 = max(底噪峰值 × 倍数, 最低保障值)，避免安静环境误触发。
+    """
+    global SILENCE_THRESHOLD, WAKE_THRESHOLD
+    Widgets.Label("校准环境噪音...", 40, 155, 1, 0x666666, 0x1a1a1a,
+                  Widgets.FONTS.efontCN_16)
+    sample_buf = bytearray(int(16000 * 2 * 0.1))
+    samples = []
+    Mic.begin()
+    for _ in range(10):   # 10 × 100ms = 1s
+        Mic.record(sample_buf, 16000)
+        time.sleep(0.1)
+        samples.append(rms(sample_buf))
+    Mic.end()
+    noise_floor = max(samples)
+    SILENCE_THRESHOLD = max(200, noise_floor * 3)
+    WAKE_THRESHOLD    = max(300, noise_floor * 4)
+    print(f"校准完成：底噪={noise_floor}，说话阈值={SILENCE_THRESHOLD}，唤醒阈值={WAKE_THRESHOLD}")
+
+
 def setup():
     M5.begin()
     Widgets.setRotation(1)
     Rgb.setColorAll(0, 0, 0)
     draw_state("idle")
+    calibrate_noise()   # Fix 8: 自动噪音校准
 
 
 def loop():
