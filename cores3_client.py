@@ -78,22 +78,50 @@ STATE_UI = {
 
 
 def draw_state(state):
-    """更新屏幕和 LED 到指定状态。"""
+    """
+    更新屏幕和 LED 到指定状态。
+
+    屏幕布局（320×240，横屏）:
+      y=0-2   : 3px 彩色顶部状态条（当前状态主题色）
+      y=3-25  : 模式指示行（● 连续 / ★ 唤醒，亮色=激活）
+      y=26    : 分割线
+      y=27-167: 主内容区（kaomoji + 状态文字）
+      y=168   : 分割线
+      y=168-240: 底部触摸分区提示（[ 说话 ] | [ 拍照 ]）
+    """
     face, status, color = STATE_UI.get(state, STATE_UI["idle"])
     r = (color >> 16) & 0xff
     g = (color >> 8)  & 0xff
     b = color & 0xff
     # LED 亮度降低，防止刺眼
     Rgb.setColorAll(r // 4, g // 4, b // 4)
-    Widgets.fillScreen(0x222222)
-    # 上方大表情（efontCN_24 支持中文及常用 Unicode）
-    Widgets.Label(face, 30, 60, 2, color, 0x222222, Widgets.FONTS.efontCN_24)
-    # 下方状态文字
-    Widgets.Label(status, 30, 150, 2, 0xffffff, 0x222222, Widgets.FONTS.efontCN_16)
-    # 空闲时显示触摸区域提示
-    if state == "idle":
-        Widgets.Label("[下方触摸:拍照]", 150, 210, 1, 0x444444, 0x222222,
-                      Widgets.FONTS.efontCN_16)
+
+    Widgets.fillScreen(0x1a1a1a)
+
+    # 顶部 3px 彩色状态条
+    Widgets.Line(0, 0, 320, 0, color)
+    Widgets.Line(0, 1, 320, 1, color)
+    Widgets.Line(0, 2, 320, 2, color)
+
+    # 模式指示行：亮色=激活，暗灰=关闭
+    cm_color = 0x00ffcc if continuous_mode else 0x3a3a3a
+    wm_color = 0xffcc00 if WAKE_MODE       else 0x3a3a3a
+    Widgets.Label("● 连续", 10, 6, 1, cm_color, 0x1a1a1a, Widgets.FONTS.efontCN_16)
+    Widgets.Label("★ 唤醒", 115, 6, 1, wm_color, 0x1a1a1a, Widgets.FONTS.efontCN_16)
+
+    # 分割线（模式行底边）
+    Widgets.Line(0, 26, 320, 26, 0x2e2e2e)
+
+    # 主表情（大）
+    Widgets.Label(face, 40, 55, 2, color, 0x1a1a1a, Widgets.FONTS.efontCN_24)
+    # 状态文字
+    Widgets.Label(status, 40, 122, 2, 0xcccccc, 0x1a1a1a, Widgets.FONTS.efontCN_16)
+
+    # 底部触摸分区（始终显示，帮助用户了解操作）
+    Widgets.Line(0, 168, 320, 168, 0x2e2e2e)
+    Widgets.Line(160, 169, 160, 240, 0x2e2e2e)
+    Widgets.Label("[ 说话 ]", 25, 192, 1, 0x664444, 0x1a1a1a, Widgets.FONTS.efontCN_16)
+    Widgets.Label("[ 拍照 ]", 185, 192, 1, 0x553366, 0x1a1a1a, Widgets.FONTS.efontCN_16)
 
 
 # ── WAV 工具 ──────────────────────────────────────────────────
@@ -264,6 +292,7 @@ def record_and_send():
                 if not continuous_mode:
                     break
                 continue
+            need_photo = resp.headers.get("X-Need-Photo", "") == "1"
             data = resp.content
             resp.close()
         except OSError as e:
@@ -278,6 +307,35 @@ def record_and_send():
         draw_state("playing")
         play_wav(data)
         gc.collect()
+
+        # ── 语音触发拍照：播完简短应答后立即拍照并发送 /chat-vision ──
+        if need_photo:
+            draw_state("camera")
+            image_b64 = capture_photo()
+            draw_state("processing")
+            wav_b64 = ubinascii.b2a_base64(wav).decode("utf-8").strip()
+            payload = ujson.dumps({"wav": wav_b64, "image": image_b64 or ""})
+            try:
+                resp2 = urequests.post(
+                    VISION_URL,
+                    data=payload.encode("utf-8"),
+                    headers={"X-Device-Id": DEVICE_ID,
+                             "Content-Type": "application/json"},
+                )
+                if resp2.status_code == 200:
+                    data2 = resp2.content
+                    resp2.close()
+                    draw_state("playing")
+                    play_wav(data2)
+                    gc.collect()
+                else:
+                    resp2.close()
+                    draw_state("error")
+                    time.sleep(2)
+            except OSError as e:
+                print("vision follow-up err:", e)
+                draw_state("error")
+                time.sleep(2)
 
         if not continuous_mode:
             break

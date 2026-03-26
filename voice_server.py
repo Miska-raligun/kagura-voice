@@ -219,13 +219,25 @@ def get_session(device_id):
 
 app = Flask(__name__)
 
+# ── 语音触发拍照关键词 ─────────────────────────────────────────
+
+PHOTO_KEYWORDS = ["看看", "看一下", "拍照", "图片", "照片", "拍个照", "帮我看看", "这是什么"]
+
+
+def _needs_photo(text):
+    """判断用户说话内容是否包含拍照相关关键词。"""
+    return any(kw in text for kw in PHOTO_KEYWORDS)
+
 
 @app.route("/chat", methods=["POST"])
 def handle_chat():
     """
-    接收 WAV 文件，返回 MP3 文件。
+    接收 WAV 文件，返回 WAV 文件。
     请求头: X-Device-Id: <设备唯一ID>（用于区分会话）
     请求体: WAV 音频（16kHz, 单声道, 16bit）
+
+    若识别到拍照关键词，响应头额外携带 X-Need-Photo: 1，
+    客户端收到后应拍照并将原始音频+图片发送至 /chat-vision。
     """
     device_id = request.headers.get("X-Device-Id", "default")
     session_id = get_session(device_id)
@@ -245,8 +257,15 @@ def handle_chat():
         if not user_text:
             user_text = "我没有听清楚，请重说一遍"
 
-        # 2. 对话
-        reply = chat(user_text, session_id)
+        need_photo = _needs_photo(user_text)
+
+        # 2. 对话（触发拍照时先给一句简短应答，实际分析等图片到来后进行）
+        if need_photo:
+            prompt = f"用户说：{user_text}。请用一句简短的话回应，说明你马上要看一看。"
+            reply = chat(prompt, session_id)
+            print(f"[{device_id}] 📷  检测到拍照关键词，返回 X-Need-Photo: 1")
+        else:
+            reply = chat(user_text, session_id)
         preview = reply[:80].replace("\n", " ")
         print(f"[{device_id}] 💬  {preview}{'...' if len(reply) > 80 else ''}")
 
@@ -258,8 +277,10 @@ def handle_chat():
         with open(mp3_path, "rb") as f:
             wav_data = f.read()
         print(f"[{device_id}] 📤  WAV {len(wav_data)} bytes")
-        return Response(wav_data, mimetype="audio/wav",
-                        headers={"Content-Length": len(wav_data)})
+        resp_headers = {"Content-Length": len(wav_data)}
+        if need_photo:
+            resp_headers["X-Need-Photo"] = "1"
+        return Response(wav_data, mimetype="audio/wav", headers=resp_headers)
 
     except Exception as e:
         print(f"[{device_id}] ⚠️  错误: {e}")
