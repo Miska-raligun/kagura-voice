@@ -121,16 +121,17 @@ def _extract_json(raw):
 
 
 def chat(user_text, session_id, image_path=None):
+    message = user_text
+    if image_path:
+        message = f"{user_text}\n\n[用户通过CoreS3摄像头拍了一张照片，保存在 {image_path}，请读取这张图片来回答问题]"
     cmd = [
         OPENCLAW_BIN, "agent",
         "--agent", AGENT_ID,
-        "--message", user_text,
+        "--message", message,
         "--session-id", session_id,
         "--json",
         "--timeout", "120",
     ]
-    if image_path:
-        cmd += ["--image", image_path]
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=130)
     if result.returncode != 0:
         raise RuntimeError(f"openclaw 失败: {result.stderr[:200]}")
