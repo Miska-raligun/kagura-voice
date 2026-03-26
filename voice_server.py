@@ -119,20 +119,18 @@ def _extract_json(raw):
     raise ValueError(f"未找到完整 JSON: {raw[:200]}")
 
 
-def chat(user_text, session_id):
-    result = subprocess.run(
-        [
-            OPENCLAW_BIN, "agent",
-            "--agent", AGENT_ID,
-            "--message", user_text,
-            "--session-id", session_id,
-            "--json",
-            "--timeout", "120",
-        ],
-        capture_output=True,
-        text=True,
-        timeout=130,
-    )
+def chat(user_text, session_id, image_path=None):
+    cmd = [
+        OPENCLAW_BIN, "agent",
+        "--agent", AGENT_ID,
+        "--message", user_text,
+        "--session-id", session_id,
+        "--json",
+        "--timeout", "120",
+    ]
+    if image_path:
+        cmd += ["--image", image_path]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=130)
     if result.returncode != 0:
         raise RuntimeError(f"openclaw 失败: {result.stderr[:200]}")
     data = _extract_json(result.stdout)
@@ -302,6 +300,55 @@ def pending(device_id):
     wav_data = queue.pop(0)
     return Response(wav_data, mimetype="audio/wav",
                     headers={"Content-Length": len(wav_data)})
+
+
+@app.route("/chat-vision", methods=["POST"])
+def handle_chat_vision():
+    """
+    接收 JSON: {"wav": "<base64 WAV>", "image": "<base64 JPEG>"}
+    图片可为空字符串（仅语音不含图片时）。
+    返回 WAV 音频。
+    """
+    device_id  = request.headers.get("X-Device-Id", "default")
+    session_id = get_session(device_id)
+
+    data = request.get_json()
+    if not data or "wav" not in data:
+        return jsonify({"error": "missing wav"}), 400
+
+    wav_bytes = base64.b64decode(data["wav"])
+    image_b64 = data.get("image", "")
+
+    with open(WAV_PATH, "wb") as f:
+        f.write(wav_bytes)
+
+    try:
+        user_text = transcribe(WAV_PATH) or "请分析这张图片"
+        print(f"[{device_id}] 🗣️  {user_text}")
+
+        image_path = None
+        if image_b64:
+            image_path = "/tmp/oc_vision_input.jpg"
+            with open(image_path, "wb") as f:
+                f.write(base64.b64decode(image_b64))
+
+        reply = chat(user_text, session_id, image_path=image_path)
+        preview = reply[:80].replace("\n", " ")
+        print(f"[{device_id}] 💬  {preview}{'...' if len(reply) > 80 else ''}")
+
+        wav_path = synthesize(reply)
+        if not wav_path:
+            return jsonify({"error": "TTS 生成失败"}), 500
+
+        with open(wav_path, "rb") as f:
+            wav_data = f.read()
+        print(f"[{device_id}] 📤  WAV {len(wav_data)} bytes")
+        return Response(wav_data, mimetype="audio/wav",
+                        headers={"Content-Length": len(wav_data)})
+
+    except Exception as e:
+        print(f"[{device_id}] ⚠️  vision 错误: {e}")
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/health", methods=["GET"])
