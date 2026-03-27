@@ -142,12 +142,12 @@ def draw_state(state):
     Widgets.Line(0, 26, 320, 26, 0x2e2e2e)
 
     # 主表情（scale=3，大号，垂直居中偏上）
-    face_x = max(0, (320 - len(face) * 30) // 2)
+    face_x = max(0, (320 - len(face) * 34) // 2)   # 34px/char @ DejaVu18 scale=3
     Widgets.Label(face, face_x, 65, 3, color, 0x1a1a1a, _FONT_16)
 
     # 状态文字（scale=1，小号，表情下方）
     status_x = max(0, (320 - len(status) * 11) // 2)
-    Widgets.Label(status, status_x, 175, 1, 0x666666, 0x1a1a1a, _FONT_16)
+    Widgets.Label(status, status_x, 195, 1, 0x666666, 0x1a1a1a, _FONT_16)
 
 
 # ── WAV 工具 ──────────────────────────────────────────────────
@@ -247,16 +247,20 @@ def toggle_wake_mode():
 def _record_audio():
     """
     启动麦克风，用 VAD 检测说话，返回 PCM 数据块列表。
-    无说话返回空列表。
+    无说话返回空列表 []。
+    若用户在录音期间长按屏幕，立即停止录音并返回 None（哨兵，表示用户主动中断）。
     """
     Mic.begin()
-    chunks  = []
-    silent  = 0
-    started = False
+    chunks, silent, started = [], 0, False
     for _ in range(MAX_CHUNKS):
         buf = bytearray(CHUNK_SIZE)
         Mic.record(buf, SAMPLE_RATE)
         time.sleep(CHUNK_SEC + 0.05)
+        # 长按优先检测：优先级高于录音，continuous/wake 模式均可退出
+        t, _ = check_touch()
+        if t == 'long':
+            Mic.end()
+            return None          # 哨兵：用户请求退出当前模式
         level = rms(buf)
         if level > SILENCE_THRESHOLD:
             started = True
@@ -288,6 +292,7 @@ def play_wav(data):
             drain_touch()
             break
         time.sleep(0.1)
+    time.sleep(0.15)   # 让音频信号归零，避免 Speaker.end() 产生 pop 声
     Speaker.end()
 
 
@@ -305,8 +310,16 @@ def record_and_send():
     gc.collect()
 
     while True:
-        draw_state("recording")   # Bug 4 Fix: 立刻显示录音状态，用户看到就说话
+        draw_state("recording")
         chunks = _record_audio()
+
+        if chunks is None:         # 用户长按中断录音 → 退出当前模式
+            if continuous_mode:
+                toggle_continuous()
+            elif WAKE_MODE:
+                toggle_wake_mode()
+            is_busy = False
+            return
 
         if not chunks:
             draw_state("no_speech")
@@ -409,8 +422,8 @@ def capture_photo():
     """
     try:
         import camera
-        camera.init()
-        time.sleep(0.5)          # Bug 2 Fix: 0.3→0.5s，给传感器更多稳定时间
+        camera.init(0, format=camera.JPEG, framesize=camera.FRAME_QQVGA)
+        time.sleep(0.5)
         camera.capture()         # 丢弃第一帧（初始化帧往往偏暗/不稳定）
         time.sleep(0.1)
         img = camera.capture()   # 取第二帧
@@ -419,6 +432,7 @@ def capture_photo():
             print("camera: capture returned None")
             return None
         # 验证 JPEG magic bytes (FF D8)
+        print("camera raw[0:4]:", [img[i] for i in range(min(4, len(img)))])
         if len(img) < 4 or img[0] != 0xff or img[1] != 0xd8:
             print("camera: not JPEG, first bytes:", img[0], img[1])
             return None
@@ -622,7 +636,20 @@ def loop():
         elif touch == 'triple':
             toggle_wake_mode()           # 三击：切换唤醒模式（在模式内再次三击则退出）
         elif touch == 'short':
-            record_and_send()            # 单触：单次对话
+            # 350ms 等待窗口：判断是否为三击的第一击
+            triggered = False
+            t0 = time.ticks_ms()
+            while time.ticks_diff(time.ticks_ms(), t0) < 350:
+                t2, _ = check_touch()
+                if t2 == 'triple':
+                    toggle_wake_mode()
+                    triggered = True
+                    break
+                elif t2 == 'short':
+                    t0 = time.ticks_ms()   # 有第二击，重置计时等待第三击
+                time.sleep(0.05)
+            if not triggered:
+                record_and_send()
         elif WAKE_MODE:
             now_ms = time.ticks_ms()
             if time.ticks_diff(now_ms, _wake_last_ms) >= 100:
