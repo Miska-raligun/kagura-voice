@@ -127,43 +127,46 @@ def draw_state(state):
     img_shown = False
     if img_name:
         try:
-            Lcd.drawJpgFile("/flash/{}.jpg".format(img_name), 0, 0)
+            with open("/flash/{}.jpg".format(img_name), "rb") as _f:
+                Lcd.drawJpg(_f.read(), 0, 0)
             img_shown = True
         except Exception as e:
             print("img err:", e)
     if not img_shown:
         try:
-            Lcd.drawJpgFile("/flash/img_bg.jpg", 0, 0)
+            with open("/flash/img_bg.jpg", "rb") as _f:
+                Lcd.drawJpg(_f.read(), 0, 0)
         except Exception:
             Widgets.fillScreen(0x1a1a1a)
 
     # ── 步骤 2：顶部黑色底条 + 彩色状态条 + 标签（叠加在图片上）──
-    M5.Lcd.fillRect(0, 0, 320, 27, 0x000000)
+    #M5.Lcd.fillRect(0, 0, 320, 27, 0x000000)
     Widgets.Line(0, 0, 320, 0, color)
     Widgets.Line(0, 1, 320, 1, color)
     Widgets.Line(0, 2, 320, 2, color)
     cm_color = 0x00ffcc if continuous_mode else 0x3a3a3a
     wm_color = 0xffcc00 if WAKE_MODE       else 0x3a3a3a
-    Widgets.Label("CONT", 10, 6, 1, cm_color, 0x000000, _FONT_16)
-    Widgets.Label("WAKE", 90, 6, 1, wm_color, 0x000000, _FONT_16)
+    txt_color = 0xffffff if img_shown else 0x999999
+    Widgets.Label("CONT", 10, 6, 1, cm_color, -1, _FONT_16)
+    Widgets.Label("WAKE", 90, 6, 1, wm_color, -1, _FONT_16)
     try:
         bat = M5.Power.getBatteryLevel()
         bat_str = "{}%".format(bat)
     except Exception:
         bat_str = "--"
     bat_x = max(220, 310 - len(bat_str) * 10)
-    Widgets.Label(bat_str, bat_x, 6, 1, 0x666666, 0x000000, _FONT_16)
+    Widgets.Label(bat_str, bat_x, 6, 1, 0x666666, -1, _FONT_16)
 
     # ── 步骤 3：非图片状态显示 kaomoji（叠加在背景图上）──────────
-    if not img_shown:
-        face_x = max(0, (320 - len(face) * 34) // 2)
-        Widgets.Label(face, face_x, 90, 3, color, 0x1a1a1a, _FONT_16)
+    #if not img_shown:
+        #face_x = max(0, (320 - len(face) * 34) // 2)
+        #Widgets.Label(face, face_x, 90, 3, color, 0x1a1a1a, _FONT_16)
 
     # ── 步骤 4：底部黑色条 + 状态文字（叠加在图片上）────────────
-    M5.Lcd.fillRect(0, 212, 320, 28, 0x000000)
+    #M5.Lcd.fillRect(0, 212, 320, 28, -1)
     status_x = max(0, (320 - len(status) * 11) // 2)
     txt_color = 0xffffff if img_shown else 0x999999
-    Widgets.Label(status, status_x, 216, 1, txt_color, 0x000000, _FONT_16)
+    Widgets.Label(status, status_x, 216, 1, txt_color, -1, _FONT_16)
 
 
 # ── WAV 工具 ──────────────────────────────────────────────────
@@ -608,8 +611,7 @@ def calibrate_noise():
     阈值 = max(底噪峰值 × 倍数, 最低保障值)，避免安静环境误触发。
     """
     global SILENCE_THRESHOLD, WAKE_THRESHOLD
-    Widgets.Label("Calibrating...", 40, 155, 1, 0x666666, 0x1a1a1a,
-                  _FONT_16)
+    #Widgets.Label("Calibrating...", 40, 155, 1, 0x666666, 0x1a1a1a,_FONT_16)
     sample_buf = bytearray(int(16000 * 2 * 0.1))
     samples = []
     Mic.begin()
