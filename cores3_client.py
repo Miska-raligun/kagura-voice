@@ -88,10 +88,10 @@ STATE_UI = {
     "idle":           ("(^w^)",   "Touch to talk",    0x888888),
     "recording":      ("(O_O)",   "Recording...",      0xff4444),  # Bug 4 Fix: 合并 listening/recording
     "processing":     ("(@_@)",   "Thinking...",       0xffcc00),
-    "playing":        ("(>v<)",   "Playing...",        0x44ff44),
+    "playing":        ("(>v<)",   "Talking...",        0x44ff44),
     "error":          ("(;_;)",   "Error!",            0xff6600),
     "no_speech":      ("(-_-)",   "No speech",         0x888888),
-    "broadcast":      ("(^o^)",   "Broadcast",         0x00ccff),
+    "broadcast":      ("(^o^)",   "Talking...",        0x00ccff),
     "camera":         ("(0o0)",   "Camera...",         0xaa00ff),
     "continuous_on":  ("(^o^)",   "Continuous ON",     0x00ffff),
     "continuous_off": ("(^w^)",   "Continuous OFF",    0x888888),
@@ -105,18 +105,15 @@ def draw_state(state):
     更新屏幕和 LED 到指定状态。
 
     屏幕布局（320×240，横屏）:
-      y=0-2   : 3px 彩色顶部状态条（当前状态主题色）
-      y=3-25  : 模式指示行（● 连续 / ★ 唤醒，亮色=激活）
+      y=0-2   : 3px 彩色顶部状态条
+      y=3-25  : 顶部信息行（左:CONT  中:WAKE  右:电量%）
       y=26    : 分割线
-      y=27-167: 主内容区（kaomoji + 状态文字）
-      y=168   : 分割线
-      y=168-240: 底部触摸分区提示（[ 说话 ] | [ 拍照 ]）
+      y=27-240: 主内容区（大号 kaomoji + 小号状态文字）
     """
     face, status, color = STATE_UI.get(state, STATE_UI["idle"])
     r = (color >> 16) & 0xff
     g = (color >> 8)  & 0xff
     b = color & 0xff
-    # LED 亮度降低，防止刺眼
     _set_led(r // 4, g // 4, b // 4)
 
     Widgets.fillScreen(0x1a1a1a)
@@ -126,27 +123,31 @@ def draw_state(state):
     Widgets.Line(0, 1, 320, 1, color)
     Widgets.Line(0, 2, 320, 2, color)
 
-    # 模式指示行：亮色=激活，暗灰=关闭
+    # 模式指示：亮色=激活，暗灰=关闭
     cm_color = 0x00ffcc if continuous_mode else 0x3a3a3a
     wm_color = 0xffcc00 if WAKE_MODE       else 0x3a3a3a
-    Widgets.Label("CONT", 10, 6, 1, cm_color, 0x1a1a1a, _FONT_16)
-    Widgets.Label("WAKE", 115, 6, 1, wm_color, 0x1a1a1a, _FONT_16)
+    Widgets.Label("CONT", 10,  6, 1, cm_color, 0x1a1a1a, _FONT_16)
+    Widgets.Label("WAKE", 90,  6, 1, wm_color, 0x1a1a1a, _FONT_16)
 
-    # 分割线（模式行底边）
+    # 右上角电量
+    try:
+        bat = M5.Power.getBatteryLevel()
+        bat_str = "{}%".format(bat)
+    except Exception:
+        bat_str = "--"
+    bat_x = max(220, 310 - len(bat_str) * 10)
+    Widgets.Label(bat_str, bat_x, 6, 1, 0x666666, 0x1a1a1a, _FONT_16)
+
+    # 分割线
     Widgets.Line(0, 26, 320, 26, 0x2e2e2e)
 
-    # 主表情（大，居中）
-    face_x = max(0, (320 - len(face) * 22) // 2)
-    Widgets.Label(face, face_x, 55, 2, color, 0x1a1a1a, _FONT_24)
-    # 状态文字（居中）
-    status_x = max(0, (320 - len(status) * 22) // 2)
-    Widgets.Label(status, status_x, 122, 2, 0xcccccc, 0x1a1a1a, _FONT_16)
+    # 主表情（scale=3，大号，垂直居中偏上）
+    face_x = max(0, (320 - len(face) * 30) // 2)
+    Widgets.Label(face, face_x, 65, 3, color, 0x1a1a1a, _FONT_16)
 
-    # 底部触摸分区（始终显示，帮助用户了解操作）
-    Widgets.Line(0, 168, 320, 168, 0x2e2e2e)
-    Widgets.Line(160, 169, 160, 240, 0x2e2e2e)
-    Widgets.Label("[ TALK ]", 25, 192, 1, 0x664444, 0x1a1a1a, _FONT_16)
-    Widgets.Label("[ PHOTO ]", 185, 192, 1, 0x553366, 0x1a1a1a, _FONT_16)
+    # 状态文字（scale=1，小号，表情下方）
+    status_x = max(0, (320 - len(status) * 11) // 2)
+    Widgets.Label(status, status_x, 175, 1, 0x666666, 0x1a1a1a, _FONT_16)
 
 
 # ── WAV 工具 ──────────────────────────────────────────────────
@@ -616,23 +617,12 @@ def loop():
     elif not is_busy:
         if touch is not None:
             _last_activity = time.time()
-        if touch == 'short' or touch == 'long':
-            x, y = pos
-            if y < 26:
-                # 顶部模式栏：左半=CONT，右半=WAKE
-                if x < 160:
-                    toggle_continuous()
-                else:
-                    toggle_wake_mode()
-            elif y > 168:
-                # 底部：左半=说话，右半=拍照
-                if x < 160:
-                    record_and_send()
-                else:
-                    record_and_send_vision()
-            else:
-                # 中间区域=说话
-                record_and_send()
+        if touch == 'long':
+            toggle_continuous()          # 长按：切换连续模式（在模式内再次长按则退出）
+        elif touch == 'triple':
+            toggle_wake_mode()           # 三击：切换唤醒模式（在模式内再次三击则退出）
+        elif touch == 'short':
+            record_and_send()            # 单触：单次对话
         elif WAKE_MODE:
             now_ms = time.ticks_ms()
             if time.ticks_diff(now_ms, _wake_last_ms) >= 100:
