@@ -116,47 +116,54 @@ def draw_state(state):
     b = color & 0xff
     _set_led(r // 4, g // 4, b // 4)
 
-    Widgets.fillScreen(0x1a1a1a)
+    # ── 步骤 1：背景层（图片优先，全屏 320×240 从 0,0 开始）────────
+    _IMG_MAP = {
+        "recording":  "img_recording",
+        "processing": "img_processing",
+        "playing":    "img_playing",
+        "broadcast":  "img_playing",   # broadcast 复用 playing 图片
+    }
+    img_name = _IMG_MAP.get(state)
+    img_shown = False
+    if img_name:
+        try:
+            Lcd.drawJpgFile("/flash/{}.jpg".format(img_name), 0, 0)
+            img_shown = True
+        except Exception as e:
+            print("img err:", e)
+    if not img_shown:
+        try:
+            Lcd.drawJpgFile("/flash/img_bg.jpg", 0, 0)
+        except Exception:
+            Widgets.fillScreen(0x1a1a1a)
 
-    # 顶部 3px 彩色状态条
+    # ── 步骤 2：顶部黑色底条 + 彩色状态条 + 标签（叠加在图片上）──
+    M5.Lcd.fillRect(0, 0, 320, 27, 0x000000)
     Widgets.Line(0, 0, 320, 0, color)
     Widgets.Line(0, 1, 320, 1, color)
     Widgets.Line(0, 2, 320, 2, color)
-
-    # 模式指示：亮色=激活，暗灰=关闭
     cm_color = 0x00ffcc if continuous_mode else 0x3a3a3a
     wm_color = 0xffcc00 if WAKE_MODE       else 0x3a3a3a
-    Widgets.Label("CONT", 10,  6, 1, cm_color, 0x1a1a1a, _FONT_16)
-    Widgets.Label("WAKE", 90,  6, 1, wm_color, 0x1a1a1a, _FONT_16)
-
-    # 右上角电量
+    Widgets.Label("CONT", 10, 6, 1, cm_color, 0x000000, _FONT_16)
+    Widgets.Label("WAKE", 90, 6, 1, wm_color, 0x000000, _FONT_16)
     try:
         bat = M5.Power.getBatteryLevel()
         bat_str = "{}%".format(bat)
     except Exception:
         bat_str = "--"
     bat_x = max(220, 310 - len(bat_str) * 10)
-    Widgets.Label(bat_str, bat_x, 6, 1, 0x666666, 0x1a1a1a, _FONT_16)
+    Widgets.Label(bat_str, bat_x, 6, 1, 0x666666, 0x000000, _FONT_16)
 
-    # 分割线
-    Widgets.Line(0, 26, 320, 26, 0x2e2e2e)
-
-    # 主表情：recording/processing/playing 三个状态优先显示图片，其余用 kaomoji
-    _IMG_STATES = ("recording", "processing", "playing")
-    img_shown = False
-    if state in _IMG_STATES:
-        try:
-            M5.Lcd.drawJpgFile("/flash/img_{}.jpg".format(state), 100, 40)
-            img_shown = True
-        except Exception:
-            pass   # 图片不存在则回退到 kaomoji
+    # ── 步骤 3：非图片状态显示 kaomoji（叠加在背景图上）──────────
     if not img_shown:
         face_x = max(0, (320 - len(face) * 34) // 2)
-        Widgets.Label(face, face_x, 65, 3, color, 0x1a1a1a, _FONT_16)
+        Widgets.Label(face, face_x, 90, 3, color, 0x1a1a1a, _FONT_16)
 
-    # 状态文字（scale=1，小号，表情下方）
+    # ── 步骤 4：底部黑色条 + 状态文字（叠加在图片上）────────────
+    M5.Lcd.fillRect(0, 212, 320, 28, 0x000000)
     status_x = max(0, (320 - len(status) * 11) // 2)
-    Widgets.Label(status, status_x, 195, 1, 0x666666, 0x1a1a1a, _FONT_16)
+    txt_color = 0xffffff if img_shown else 0x999999
+    Widgets.Label(status, status_x, 216, 1, txt_color, 0x000000, _FONT_16)
 
 
 # ── WAV 工具 ──────────────────────────────────────────────────
