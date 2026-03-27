@@ -146,7 +146,7 @@ def draw_state(state):
     img_shown = False
     if state in _IMG_STATES:
         try:
-            M5.Lcd.drawBmpFile("/flash/img_{}.bmp".format(state), 100, 40)
+            M5.Lcd.drawJpgFile("/flash/img_{}.jpg".format(state), 100, 40)
             img_shown = True
         except Exception:
             pass   # 图片不存在则回退到 kaomoji
