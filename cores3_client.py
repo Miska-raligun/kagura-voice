@@ -141,9 +141,18 @@ def draw_state(state):
     # 分割线
     Widgets.Line(0, 26, 320, 26, 0x2e2e2e)
 
-    # 主表情（scale=3，大号，垂直居中偏上）
-    face_x = max(0, (320 - len(face) * 34) // 2)   # 34px/char @ DejaVu18 scale=3
-    Widgets.Label(face, face_x, 65, 3, color, 0x1a1a1a, _FONT_16)
+    # 主表情：recording/processing/playing 三个状态优先显示图片，其余用 kaomoji
+    _IMG_STATES = ("recording", "processing", "playing")
+    img_shown = False
+    if state in _IMG_STATES:
+        try:
+            M5.Lcd.drawBmpFile("/flash/img_{}.bmp".format(state), 100, 40)
+            img_shown = True
+        except Exception:
+            pass   # 图片不存在则回退到 kaomoji
+    if not img_shown:
+        face_x = max(0, (320 - len(face) * 34) // 2)
+        Widgets.Label(face, face_x, 65, 3, color, 0x1a1a1a, _FONT_16)
 
     # 状态文字（scale=1，小号，表情下方）
     status_x = max(0, (320 - len(status) * 11) // 2)
