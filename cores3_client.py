@@ -23,6 +23,8 @@ def _set_led(r, g, b):
         except:
             pass
 
+# ── 字体 ───────────────────────────────────────────────────────
+_FONT_16 = Widgets.FONTS.DejaVu18
 
 # ── 服务端地址 ────────────────────────────────────────────────
 
@@ -142,7 +144,7 @@ def draw_state(state):
     Widgets.Line(0, 2, 320, 2, color)
     cm_color = 0x00ffcc if continuous_mode else 0x3a3a3a
     wm_color = 0xffcc00 if WAKE_MODE       else 0x3a3a3a
-    Lcd.setTextFont(2)
+    Lcd.setFont(_FONT_16)
     Lcd.setTextSize(1)
     Lcd.setTextColor(cm_color, -1)
     Lcd.drawString("CONT", 10, 6)
@@ -160,16 +162,16 @@ def draw_state(state):
 
     # ── 步骤 3：非图片状态显示 kaomoji（透明背景，悬浮在背景图上）──
     if not img_shown:
-        face_x = max(0, (320 - len(face) * 26) // 2)
-        Lcd.setTextFont(4)
-        Lcd.setTextSize(2)
+        face_x = max(0, (320 - len(face) * 34) // 2)
+        Lcd.setFont(_FONT_16)
+        Lcd.setTextSize(3)
         Lcd.setTextColor(color, -1)
-        Lcd.drawString(face, face_x, 85)
+        Lcd.drawString(face, face_x, 90)
 
     # ── 步骤 4：状态文字（透明背景，悬浮在图片上）────────────────
-    status_x = max(0, (320 - len(status) * 10) // 2)
+    status_x = max(0, (320 - len(status) * 11) // 2)
     txt_color = 0xffffff if img_shown else 0x999999
-    Lcd.setTextFont(2)
+    Lcd.setFont(_FONT_16)
     Lcd.setTextSize(1)
     Lcd.setTextColor(txt_color, -1)
     Lcd.drawString(status, status_x, 216)
