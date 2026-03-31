@@ -8,6 +8,7 @@ import math
 import gc
 import ubinascii
 import ujson
+import usocket
 
 # ── RGB LED 安全封装（CoreS3 SE 无 RGB）──────────────────────
 try:
@@ -28,7 +29,7 @@ _FONT_16 = Widgets.FONTS.DejaVu18
 
 # ── 服务端地址 ────────────────────────────────────────────────
 
-# 修改为你的服务端地址
+# UDP 发现失败时的 fallback 地址
 SERVER_BASE = "http://192.168.31.66:5000"
 SERVER_URL    = SERVER_BASE + "/chat"
 VISION_URL    = SERVER_BASE + "/chat-vision"
@@ -96,6 +97,7 @@ STATE_UI = {
     "continuous_off": ("(^w^)",   "Continuous OFF",    0x888888),
     "wake_on":        ("(-_-)",   "Wake mode ON",      0x00ff88),
     "wake_off":       ("(^w^)",   "Wake mode OFF",     0x888888),
+    "discovering":    ("(o_o)",   "Searching...",      0xffaa00),
 }
 
 
@@ -635,13 +637,62 @@ def calibrate_noise():
     print(f"校准完成：底噪={noise_floor}，说话阈值={SILENCE_THRESHOLD}，唤醒阈值={WAKE_THRESHOLD}")
 
 
+# ── UDP 自动发现服务端 ────────────────────────────────────────────────────────
+
+_DISC_PORT    = 5001
+_DISC_MSG     = b"KAGURA_DISCOVER"
+_DISC_TIMEOUT = 2
+_DISC_RETRIES = 3
+
+def discover_server():
+    """
+    广播 KAGURA_DISCOVER，从回包源地址更新 SERVER_BASE 等全局变量。
+    失败则保留硬编码 fallback 地址（最多等待 6 秒）。
+    """
+    global SERVER_BASE, SERVER_URL, VISION_URL, PENDING_URL
+
+    draw_state("discovering")
+
+    sock = usocket.socket(usocket.AF_INET, usocket.SOCK_DGRAM)
+    try:
+        try:
+            sock.setsockopt(usocket.SOL_SOCKET, usocket.SO_BROADCAST, 1)
+        except Exception:
+            pass   # 部分固件无此常量，ESP32 lwIP 默认允许广播
+
+        sock.settimeout(_DISC_TIMEOUT)
+
+        for attempt in range(1, _DISC_RETRIES + 1):
+            print("discovery attempt", attempt)
+            try:
+                sock.sendto(_DISC_MSG, ("255.255.255.255", _DISC_PORT))
+                data, addr = sock.recvfrom(32)
+                if data.strip() == b"KAGURA_HERE":
+                    ip = addr[0]
+                    SERVER_BASE = "http://{}:5000".format(ip)
+                    SERVER_URL  = SERVER_BASE + "/chat"
+                    VISION_URL  = SERVER_BASE + "/chat-vision"
+                    PENDING_URL = SERVER_BASE + "/pending/"
+                    print("discovered:", SERVER_BASE)
+                    return True
+            except OSError:
+                pass   # timeout，继续下一次
+
+        print("discovery failed, fallback:", SERVER_BASE)
+        return False
+    finally:
+        sock.close()
+
+
 def setup():
     global _last_activity
     M5.begin()
     Widgets.setRotation(1)
     _set_led(0, 0, 0)
     draw_state("idle")
-    calibrate_noise()   # Fix 8: 自动噪音校准
+    discover_server()
+    draw_state("idle")       # 发现完成后恢复空闲界面
+    calibrate_noise()
     _last_activity = time.time()
 
 
