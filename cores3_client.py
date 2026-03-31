@@ -146,9 +146,9 @@ def draw_state(state):
     wm_color = 0xffcc00 if WAKE_MODE       else 0x3a3a3a
     Lcd.setFont(_FONT_16)
     Lcd.setTextSize(1)
-    Lcd.setTextColor(cm_color, -1)
+    Lcd.setTextColor(cm_color, cm_color)
     Lcd.drawString("CONT", 10, 6)
-    Lcd.setTextColor(wm_color, -1)
+    Lcd.setTextColor(wm_color, wm_color)
     Lcd.drawString("WAKE", 90, 6)
     try:
         v = M5.Power.getBatteryVoltage()   # mV，3000-4200
@@ -157,7 +157,7 @@ def draw_state(state):
     except Exception:
         bat_str = "--"
     bat_x = max(220, 310 - len(bat_str) * 10)
-    Lcd.setTextColor(0x666666, -1)
+    Lcd.setTextColor(0x666666, 0x666666)
     Lcd.drawString(bat_str, bat_x, 6)
 
     # ── 步骤 3：非图片状态显示 kaomoji（透明背景，悬浮在背景图上）──
@@ -165,7 +165,7 @@ def draw_state(state):
         face_x = max(0, (320 - len(face) * 34) // 2)
         Lcd.setFont(_FONT_16)
         Lcd.setTextSize(3)
-        Lcd.setTextColor(color, -1)
+        Lcd.setTextColor(color, color)
         Lcd.drawString(face, face_x, 90)
 
     # ── 步骤 4：状态文字（透明背景，悬浮在图片上）────────────────
@@ -173,7 +173,7 @@ def draw_state(state):
     txt_color = 0xffffff if img_shown else 0x999999
     Lcd.setFont(_FONT_16)
     Lcd.setTextSize(1)
-    Lcd.setTextColor(txt_color, -1)
+    Lcd.setTextColor(txt_color, txt_color)
     Lcd.drawString(status, status_x, 216)
 
 
