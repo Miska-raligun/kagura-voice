@@ -135,6 +135,7 @@ def draw_state(state):
         try:
             with open("/flash/img_bg.jpg", "rb") as _f:
                 Lcd.drawJpg(_f.read(), 0, 0)
+            img_shown = True
         except Exception:
             Widgets.fillScreen(0x1a1a1a)
 
