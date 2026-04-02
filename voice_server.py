@@ -362,8 +362,18 @@ def handle_chat_vision():
             if padding:
                 image_b64_clean += "=" * (4 - padding)
             image_path = "/tmp/oc_vision_input.jpg"
+            decoded_bytes = base64.b64decode(image_b64_clean)
             with open(image_path, "wb") as f:
-                f.write(base64.b64decode(image_b64_clean))
+                f.write(decoded_bytes)
+            jpeg_size = len(decoded_bytes)
+            if jpeg_size < 4 or decoded_bytes[0] != 0xFF or decoded_bytes[1] != 0xD8:
+                print(f"[{device_id}] bad JPEG start: {decoded_bytes[:2].hex() if jpeg_size >= 2 else 'N/A'}")
+                image_path = None
+            elif decoded_bytes[-2] != 0xFF or decoded_bytes[-1] != 0xD9:
+                print(f"[{device_id}] JPEG truncated: end={decoded_bytes[-2]:02x}{decoded_bytes[-1]:02x}")
+                image_path = None
+            else:
+                print(f"[{device_id}] JPEG OK: {jpeg_size} bytes")
 
         reply = chat(user_text, session_id, image_path=image_path)
         preview = reply[:80].replace("\n", " ")

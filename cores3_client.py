@@ -457,14 +457,19 @@ def capture_photo():
         camera.capture()         # 丢弃第一帧（初始化帧往往偏暗/不稳定）
         time.sleep(0.1)
         img = camera.capture()   # 取第二帧
+        if img is not None:
+            img = bytes(img)     # 复制出独立 bytes，脱离 DMA 缓冲区，再释放硬件
         camera.deinit()
         if img is None:
             print("camera: capture returned None")
             return None
-        # 验证 JPEG magic bytes (FF D8)
+        # 验证 JPEG magic bytes (FF D8 ... FF D9)
         print("camera raw[0:4]:", [img[i] for i in range(min(4, len(img)))])
         if len(img) < 4 or img[0] != 0xff or img[1] != 0xd8:
             print("camera: not JPEG, first bytes:", img[0], img[1])
+            return None
+        if img[-2] != 0xff or img[-1] != 0xd9:
+            print("camera: JPEG missing end marker, last bytes:", img[-2], img[-1])
             return None
         print("camera: JPEG size =", len(img))
         # Bug 2 Fix: b2a_base64 每行插 \n，去除所有换行防止 base64 解码失败
