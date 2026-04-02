@@ -362,9 +362,19 @@ def handle_chat_vision():
                 image_b64_clean += "=" * (4 - padding)
             decoded_bytes = base64.b64decode(image_b64_clean)
             n = len(decoded_bytes)
-            # QQVGA RGB565: 160*120*2 = 38400 bytes
-            W, H = 160, 120
-            if n == W * H * 2:
+            # 根据字节数自动匹配 RGB565 分辨率
+            RGB565_SIZES = {
+                160*120*2: (160,120),   # QQVGA
+                176*144*2: (176,144),   # QCIF
+                240*176*2: (240,176),   # HQVGA
+                240*240*2: (240,240),   # 240x240
+                320*240*2: (320,240),   # QVGA
+                480*320*2: (480,320),   # HVGA
+                640*480*2: (640,480),   # VGA
+                800*600*2: (800,600),   # SVGA
+            }
+            W, H = RGB565_SIZES.get(n, (None, None))
+            if W is not None:
                 import numpy as np
                 from PIL import Image as PILImage
                 import io as _io
@@ -385,7 +395,7 @@ def handle_chat_vision():
                     f.write(decoded_bytes)
                 print(f"[{device_id}] JPEG direct: {n} bytes")
             else:
-                print(f"[{device_id}] unknown image format size={n}, skipping")
+                print(f"[{device_id}] unknown image format size={n} bytes, skipping")
 
         reply = chat(user_text, session_id, image_path=image_path)
         preview = reply[:80].replace("\n", " ")

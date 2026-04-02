@@ -466,7 +466,6 @@ def capture_photo():
         print("camera: initializing...")
         try:
             camera.init()
-            camera.framesize(camera.FRAME_QQVGA)
             _camera_inited = True
             print("camera: init OK")
         except Exception as e:
