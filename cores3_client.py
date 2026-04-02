@@ -361,6 +361,8 @@ def record_and_send():
         draw_state("processing")
         audio = b''.join(chunks)
         wav   = make_wav_header(len(audio)) + audio
+        del chunks, audio   # wav 已包含全部数据，释放 ~96KB
+        gc.collect()
 
         try:
             resp = urequests.post(SERVER_URL, data=wav,
@@ -393,10 +395,12 @@ def record_and_send():
         if need_photo:
             del data      # 回复 WAV 已写入 flash 并播完，释放 ~52KB 给摄像头
             gc.collect()
+            wav_b64 = ubinascii.b2a_base64(wav).decode("utf-8").strip()
+            del wav       # base64 字符串已持有数据，释放原始 bytes (~48KB)
+            gc.collect()
             draw_state("camera")
             image_b64 = capture_photo()
             draw_state("processing")
-            wav_b64 = ubinascii.b2a_base64(wav).decode("utf-8").strip()
             payload = ujson.dumps({"wav": wav_b64, "image": image_b64 or ""})
             try:
                 resp2 = urequests.post(
@@ -452,16 +456,34 @@ def capture_photo():
     调用 CoreS3 摄像头拍一张 QQVGA JPEG。
     返回 base64 字符串（无换行），失败返回 None。
     """
+    import camera
+    # 安全复位：防止上次调用 init 成功但后续步骤失败导致 C 层驱动残留已初始化状态
     try:
-        import camera
+        camera.deinit()
+    except Exception:
+        pass
+
+    try:
         camera.init()
         camera.pixformat(camera.JPEG)
         camera.framesize(camera.FRAME_QQVGA)
     except Exception as e:
         print("camera init error:", e)
+        try:
+            camera.deinit()
+        except Exception:
+            pass
         return None
 
-    camera.skip_frames(2)   # 丢弃前几帧，等待曝光稳定
+    try:
+        camera.skip_frames(2)
+    except Exception as e:
+        print("camera skip_frames error:", e)
+        try:
+            camera.deinit()
+        except Exception:
+            pass
+        return None
 
     try:
         img = camera.snapshot()
@@ -469,6 +491,7 @@ def capture_photo():
         print("camera snapshot error:", e)
         camera.deinit()
         return None
+
     print("snapshot type:", type(img))
     if img is None or isinstance(img, bool):
         camera.deinit()
@@ -479,7 +502,7 @@ def capture_photo():
     if isinstance(img, bytes):
         raw = img
     elif hasattr(img, 'compress'):
-        raw = img.compress(80)   # OpenMV 风格：image.compress(quality)
+        raw = img.compress(80)
     elif hasattr(img, 'to_bytes'):
         raw = img.to_bytes()
     else:
