@@ -452,7 +452,9 @@ def capture_photo():
     """
     try:
         import camera
-        camera.init(format=camera.JPEG, framesize=camera.FRAME_QQVGA)
+        camera.init()
+        camera.framesize(camera.FRAME_QQVGA)
+        camera.pixformat(camera.JPEG)
         time.sleep(0.5)
         camera.capture()         # 丢弃第一帧（初始化帧往往偏暗/不稳定）
         time.sleep(0.1)
