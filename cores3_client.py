@@ -391,6 +391,8 @@ def record_and_send():
 
         # ── 语音触发拍照：播完简短应答后立即拍照并发送 /chat-vision ──
         if need_photo:
+            del data      # 回复 WAV 已写入 flash 并播完，释放 ~52KB 给摄像头
+            gc.collect()
             draw_state("camera")
             image_b64 = capture_photo()
             draw_state("processing")
@@ -461,7 +463,12 @@ def capture_photo():
 
     camera.skip_frames(2)   # 丢弃前几帧，等待曝光稳定
 
-    img = camera.snapshot()
+    try:
+        img = camera.snapshot()
+    except Exception as e:
+        print("camera snapshot error:", e)
+        camera.deinit()
+        return None
     print("snapshot type:", type(img))
     if img is None or isinstance(img, bool):
         camera.deinit()
