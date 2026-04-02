@@ -451,54 +451,47 @@ def record_and_send():
 
 # ── 摄像头对话 ────────────────────────────────────────────────
 
+_camera_inited = False
+
 def capture_photo():
     """
     调用 CoreS3 摄像头拍一张 QQVGA JPEG。
+    首次调用时初始化摄像头，之后保持常驻（不 deinit）。
     返回 base64 字符串（无换行），失败返回 None。
     """
+    global _camera_inited
     import camera
-    # 安全复位：防止上次调用 init 成功但后续步骤失败导致 C 层驱动残留已初始化状态
-    try:
-        camera.deinit()
-    except Exception:
-        pass
 
-    try:
-        camera.init()
-        camera.pixformat(camera.JPEG)
-        camera.framesize(camera.FRAME_QQVGA)
-    except Exception as e:
-        print("camera init error:", e)
+    if not _camera_inited:
+        print("camera: initializing...")
         try:
-            camera.deinit()
-        except Exception:
-            pass
-        return None
+            camera.init()
+            camera.pixformat(camera.JPEG)
+            camera.framesize(camera.FRAME_QQVGA)
+            _camera_inited = True
+            print("camera: init OK")
+        except Exception as e:
+            print("camera init error:", e)
+            return None
 
+    print("camera: capturing...")
     try:
         camera.skip_frames(2)
     except Exception as e:
         print("camera skip_frames error:", e)
-        try:
-            camera.deinit()
-        except Exception:
-            pass
         return None
 
     try:
         img = camera.snapshot()
     except Exception as e:
         print("camera snapshot error:", e)
-        camera.deinit()
         return None
 
     print("snapshot type:", type(img))
     if img is None or isinstance(img, bool):
-        camera.deinit()
         print("camera: snapshot returned", img)
         return None
 
-    # snapshot() 可能返回 bytes，也可能返回 image 对象
     if isinstance(img, bytes):
         raw = img
     elif hasattr(img, 'compress'):
@@ -507,22 +500,18 @@ def capture_photo():
         raw = img.to_bytes()
     else:
         print("snapshot unknown type:", type(img), dir(img))
-        camera.deinit()
         return None
 
     print("camera: size =", len(raw), "first bytes:", raw[0], raw[1])
 
     if len(raw) < 4 or raw[0] != 0xff or raw[1] != 0xd8:
-        camera.deinit()
         print("camera: not JPEG, first bytes:", raw[0], raw[1])
         return None
     if raw[-2] != 0xff or raw[-1] != 0xd9:
-        camera.deinit()
         print("camera: JPEG truncated")
         return None
 
     b64 = ubinascii.b2a_base64(raw).decode("utf-8").replace("\n", "").replace("\r", "")
-    camera.deinit()
     gc.collect()
     return b64
 
