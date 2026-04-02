@@ -453,17 +453,18 @@ def capture_photo():
     try:
         import camera
         camera.init()
-        camera.framesize(camera.FRAME_QQVGA)
-        camera.pixformat(camera.JPEG)
         time.sleep(0.5)
         camera.capture()         # 丢弃第一帧（初始化帧往往偏暗/不稳定）
         time.sleep(0.1)
         img = camera.capture()   # 取第二帧
-        if img is not None:
+        print("camera: capture type =", type(img), repr(img) if isinstance(img, bool) else "")
+        if img is not None and not isinstance(img, bool):
             img = bytes(img)     # 复制出独立 bytes，脱离 DMA 缓冲区，再释放硬件
+        else:
+            img = None
         camera.deinit()
         if img is None:
-            print("camera: capture returned None")
+            print("camera: capture returned None/bool")
             return None
         # 验证 JPEG magic bytes (FF D8 ... FF D9)
         print("camera raw[0:4]:", [img[i] for i in range(min(4, len(img)))])
