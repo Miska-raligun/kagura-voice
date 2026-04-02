@@ -453,35 +453,45 @@ def capture_photo():
     try:
         import camera
         camera.init()
+        camera.pixformat(camera.JPEG)
         camera.framesize(camera.FRAME_QQVGA)
     except Exception as e:
         print("camera init error:", e)
         return None
 
-    time.sleep(0.5)
-    camera.capture()   # 丢弃第一帧（初始化帧往往偏暗/不稳定）
-    time.sleep(0.1)
+    camera.skip_frames(2)   # 丢弃前几帧，等待曝光稳定
 
-    # pixformat(JPEG) 会让 capture() 返回 bool；改用 capture_to_jpg() 直接得到 JPEG bytes
-    img = camera.capture_to_jpg(80)
+    img = camera.snapshot()
+    print("snapshot type:", type(img))
     if img is None or isinstance(img, bool):
         camera.deinit()
-        print("camera: capture_to_jpg returned", img)
+        print("camera: snapshot returned", img)
         return None
 
-    print("camera: size =", len(img), "first bytes:", img[0], img[1])
-
-    if len(img) < 4 or img[0] != 0xff or img[1] != 0xd8:
+    # snapshot() 可能返回 bytes，也可能返回 image 对象
+    if isinstance(img, bytes):
+        raw = img
+    elif hasattr(img, 'compress'):
+        raw = img.compress(80)   # OpenMV 风格：image.compress(quality)
+    elif hasattr(img, 'to_bytes'):
+        raw = img.to_bytes()
+    else:
+        print("snapshot unknown type:", type(img), dir(img))
         camera.deinit()
-        print("camera: not JPEG, first bytes:", img[0], img[1])
-        return None
-    if img[-2] != 0xff or img[-1] != 0xd9:
-        camera.deinit()
-        print("camera: JPEG truncated, last bytes:", img[-2], img[-1])
         return None
 
-    # b2a_base64 在 deinit 之前完成，直接读 DMA 缓冲区，无需额外复制
-    b64 = ubinascii.b2a_base64(img).decode("utf-8").replace("\n", "").replace("\r", "")
+    print("camera: size =", len(raw), "first bytes:", raw[0], raw[1])
+
+    if len(raw) < 4 or raw[0] != 0xff or raw[1] != 0xd8:
+        camera.deinit()
+        print("camera: not JPEG, first bytes:", raw[0], raw[1])
+        return None
+    if raw[-2] != 0xff or raw[-1] != 0xd9:
+        camera.deinit()
+        print("camera: JPEG truncated")
+        return None
+
+    b64 = ubinascii.b2a_base64(raw).decode("utf-8").replace("\n", "").replace("\r", "")
     camera.deinit()
     gc.collect()
     return b64
