@@ -123,7 +123,7 @@ def _extract_json(raw):
 def chat(user_text, session_id, image_path=None):
     message = user_text
     if image_path:
-        message = f"{user_text}\n\n[用户通过CoreS3摄像头拍了一张照片，保存在 {image_path}，请读取这张图片来回答问题]"
+        message = f"{user_text}\n\n[用户通过CoreS3摄像头拍了一张照片，保存在 {image_path}，请识别这张图片来回答问题]"
     cmd = [
         OPENCLAW_BIN, "agent",
         "--agent", AGENT_ID,
@@ -385,12 +385,12 @@ def handle_chat_vision():
                 rgb = np.stack([r, g, b], axis=-1).astype(np.uint8).reshape(H, W, 3)
                 buf = _io.BytesIO()
                 PILImage.fromarray(rgb).save(buf, format="JPEG", quality=85)
-                image_path = "/tmp/oc_vision_input.jpg"
+                image_path = "/home/mio/.openclaw/workspace/tmp/oc_vision_input.jpg"
                 with open(image_path, "wb") as f:
                     f.write(buf.getvalue())
                 print(f"[{device_id}] RGB565→JPEG: {buf.tell()} bytes")
             elif n >= 4 and decoded_bytes[0] == 0xFF and decoded_bytes[1] == 0xD8:
-                image_path = "/tmp/oc_vision_input.jpg"
+                image_path = "/home/mio/.openclaw/workspace/tmp/oc_vision_input.jpg"
                 with open(image_path, "wb") as f:
                     f.write(decoded_bytes)
                 print(f"[{device_id}] JPEG direct: {n} bytes")
