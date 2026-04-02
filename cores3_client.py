@@ -447,69 +447,42 @@ def record_and_send():
 
 def capture_photo():
     """
-    调用 CoreS3 摄像头拍一张 JPEG。
+    调用 CoreS3 摄像头拍一张 QQVGA JPEG。
     返回 base64 字符串（无换行），失败返回 None。
     """
     try:
         import camera
-        print("camera attrs:", dir(camera))
-    except Exception as e:
-        print("camera import error:", e)
-        return None
-
-    try:
         camera.init()
-        print("camera.init() OK")
+        camera.pixformat(camera.JPEG)
+        camera.framesize(camera.FRAME_QQVGA)
     except Exception as e:
-        print("camera.init() error:", e)
+        print("camera init error:", e)
         return None
 
     time.sleep(0.5)
-
-    try:
-        camera.capture()   # 丢弃第一帧
-        print("camera.capture() discard OK")
-    except Exception as e:
-        print("camera.capture() discard error:", e)
-        camera.deinit()
-        return None
-
+    camera.capture()   # 丢弃第一帧（初始化帧往往偏暗/不稳定）
     time.sleep(0.1)
 
-    img = None
-    try:
-        img = camera.capture()
-        print("camera.capture() type:", type(img),
-              "len:", len(img) if hasattr(img, '__len__') else "N/A")
-    except Exception as e:
-        print("camera.capture() error:", e)
+    img = camera.capture()
+    if img is None:
         camera.deinit()
+        print("camera: capture returned None")
         return None
 
-    try:
-        camera.deinit()
-        print("camera.deinit() OK")
-    except Exception as e:
-        print("camera.deinit() error:", e)
+    print("camera: size =", len(img), "first bytes:", img[0], img[1])
 
-    if img is None or isinstance(img, bool):
-        print("camera: bad capture result:", img)
-        return None
-
-    img = bytes(img)
-
-    print("camera raw[0:4]:", [img[i] for i in range(min(4, len(img)))])
     if len(img) < 4 or img[0] != 0xff or img[1] != 0xd8:
+        camera.deinit()
         print("camera: not JPEG, first bytes:", img[0], img[1])
         return None
     if img[-2] != 0xff or img[-1] != 0xd9:
-        print("camera: JPEG missing end marker, last bytes:", img[-2], img[-1])
+        camera.deinit()
+        print("camera: JPEG truncated, last bytes:", img[-2], img[-1])
         return None
 
-    print("camera: JPEG size =", len(img))
-    b64 = ubinascii.b2a_base64(img).decode("utf-8")
-    b64 = b64.replace("\n", "").replace("\r", "")
-    del img
+    # b2a_base64 在 deinit 之前完成，直接读 DMA 缓冲区，无需额外复制
+    b64 = ubinascii.b2a_base64(img).decode("utf-8").replace("\n", "").replace("\r", "")
+    camera.deinit()
     gc.collect()
     return b64
 
