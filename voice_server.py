@@ -356,24 +356,36 @@ def handle_chat_vision():
 
         image_path = None
         if image_b64:
-            # Bug 2 Fix: 兼容 MicroPython 可能残留的换行符，并补足 base64 padding
             image_b64_clean = image_b64.replace("\n", "").replace("\r", "")
             padding = len(image_b64_clean) % 4
             if padding:
                 image_b64_clean += "=" * (4 - padding)
-            image_path = "/tmp/oc_vision_input.jpg"
             decoded_bytes = base64.b64decode(image_b64_clean)
-            with open(image_path, "wb") as f:
-                f.write(decoded_bytes)
-            jpeg_size = len(decoded_bytes)
-            if jpeg_size < 4 or decoded_bytes[0] != 0xFF or decoded_bytes[1] != 0xD8:
-                print(f"[{device_id}] bad JPEG start: {decoded_bytes[:2].hex() if jpeg_size >= 2 else 'N/A'}")
-                image_path = None
-            elif decoded_bytes[-2] != 0xFF or decoded_bytes[-1] != 0xD9:
-                print(f"[{device_id}] JPEG truncated: end={decoded_bytes[-2]:02x}{decoded_bytes[-1]:02x}")
-                image_path = None
+            n = len(decoded_bytes)
+            # QQVGA RGB565: 160*120*2 = 38400 bytes
+            W, H = 160, 120
+            if n == W * H * 2:
+                import numpy as np
+                from PIL import Image as PILImage
+                import io as _io
+                pixels = np.frombuffer(decoded_bytes, dtype=np.uint16).byteswap()
+                r = ((pixels >> 11) & 0x1F) * 255 // 31
+                g = ((pixels >> 5)  & 0x3F) * 255 // 63
+                b = (pixels         & 0x1F) * 255 // 31
+                rgb = np.stack([r, g, b], axis=-1).astype(np.uint8).reshape(H, W, 3)
+                buf = _io.BytesIO()
+                PILImage.fromarray(rgb).save(buf, format="JPEG", quality=85)
+                image_path = "/tmp/oc_vision_input.jpg"
+                with open(image_path, "wb") as f:
+                    f.write(buf.getvalue())
+                print(f"[{device_id}] RGB565→JPEG: {buf.tell()} bytes")
+            elif n >= 4 and decoded_bytes[0] == 0xFF and decoded_bytes[1] == 0xD8:
+                image_path = "/tmp/oc_vision_input.jpg"
+                with open(image_path, "wb") as f:
+                    f.write(decoded_bytes)
+                print(f"[{device_id}] JPEG direct: {n} bytes")
             else:
-                print(f"[{device_id}] JPEG OK: {jpeg_size} bytes")
+                print(f"[{device_id}] unknown image format size={n}, skipping")
 
         reply = chat(user_text, session_id, image_path=image_path)
         preview = reply[:80].replace("\n", " ")

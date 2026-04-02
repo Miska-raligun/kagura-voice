@@ -455,7 +455,7 @@ _camera_inited = False
 
 def capture_photo():
     """
-    调用 CoreS3 摄像头拍一张 QQVGA JPEG。
+    调用 CoreS3 摄像头拍一张 QQVGA raw RGB565 帧。
     首次调用时初始化摄像头，之后保持常驻（不 deinit）。
     返回 base64 字符串（无换行），失败返回 None。
     """
@@ -466,7 +466,6 @@ def capture_photo():
         print("camera: initializing...")
         try:
             camera.init()
-            camera.pixformat(camera.JPEG)
             camera.framesize(camera.FRAME_QQVGA)
             _camera_inited = True
             print("camera: init OK")
@@ -474,44 +473,21 @@ def capture_photo():
             print("camera init error:", e)
             return None
 
+    time.sleep(0.3)   # 等待曝光稳定（替代 skip_frames）
+
     print("camera: capturing...")
     try:
-        camera.skip_frames(2)
+        img = camera.capture()
     except Exception as e:
-        print("camera skip_frames error:", e)
+        print("camera capture error:", e)
         return None
 
-    try:
-        img = camera.snapshot()
-    except Exception as e:
-        print("camera snapshot error:", e)
-        return None
-
-    print("snapshot type:", type(img))
     if img is None or isinstance(img, bool):
-        print("camera: snapshot returned", img)
+        print("camera: capture returned", img)
         return None
 
-    if isinstance(img, bytes):
-        raw = img
-    elif hasattr(img, 'compress'):
-        raw = img.compress(80)
-    elif hasattr(img, 'to_bytes'):
-        raw = img.to_bytes()
-    else:
-        print("snapshot unknown type:", type(img), dir(img))
-        return None
-
-    print("camera: size =", len(raw), "first bytes:", raw[0], raw[1])
-
-    if len(raw) < 4 or raw[0] != 0xff or raw[1] != 0xd8:
-        print("camera: not JPEG, first bytes:", raw[0], raw[1])
-        return None
-    if raw[-2] != 0xff or raw[-1] != 0xd9:
-        print("camera: JPEG truncated")
-        return None
-
-    b64 = ubinascii.b2a_base64(raw).decode("utf-8").replace("\n", "").replace("\r", "")
+    print("camera: raw size =", len(img))
+    b64 = ubinascii.b2a_base64(img).decode("utf-8").replace("\n", "").replace("\r", "")
     gc.collect()
     return b64
 
