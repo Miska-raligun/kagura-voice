@@ -612,20 +612,18 @@ def check_pending():
 # ── 主循环 ────────────────────────────────────────────────────
 
 def enter_sleep():
-    """息屏休眠：关闭背光和 LED，并让 display controller 进入低功耗模式。"""
+    """息屏休眠：关闭背光和 LED。"""
     global _is_sleeping
     _is_sleeping = True
     _set_led(0, 0, 0)
     M5.Lcd.setBrightness(0)
-    M5.Lcd.sleep()           # display controller 进入睡眠，比仅关背光省电得多
 
 
 def wake_up():
-    """唤醒：先恢复 display controller，再开背光，重置活动计时。"""
+    """唤醒：恢复背光，重置活动计时。"""
     global _is_sleeping, _last_activity
     _is_sleeping = False
     _last_activity = time.time()
-    M5.Lcd.wakeup()          # 先唤醒 controller（顺序重要，否则画面错乱）
     M5.Lcd.setBrightness(64)
     draw_state("idle")
 
