@@ -34,6 +34,8 @@ SERVER_BASE = "http://192.168.31.66:5000"
 SERVER_URL    = SERVER_BASE + "/chat"
 VISION_URL    = SERVER_BASE + "/chat-vision"
 PENDING_URL   = SERVER_BASE + "/pending/"
+COMMANDS_URL  = SERVER_BASE + "/commands/"
+UPLOAD_URL    = SERVER_BASE + "/upload-photo"
 DEVICE_ID     = "cores3"
 
 # ── 录音参数 ──────────────────────────────────────────────────
@@ -609,6 +611,47 @@ def check_pending():
     is_busy = False
 
 
+# ── 远程命令轮询 ─────────────────────────────────────────────
+
+def check_commands():
+    """轮询服务端命令（如远程拍照请求）。休眠中收到命令会自动唤醒。"""
+    global is_busy, _last_activity
+    try:
+        resp = urequests.get(COMMANDS_URL + DEVICE_ID)
+        if resp.status_code == 204:
+            resp.close()
+            return
+        cmd = resp.json()
+        resp.close()
+
+        if cmd.get("action") == "capture":
+            if _is_sleeping:
+                wake_up()
+            _last_activity = time.time()
+            is_busy = True
+            draw_state("camera")
+            image_b64 = capture_photo()
+            draw_state("processing")
+            payload = ujson.dumps({
+                "request_id": cmd.get("request_id", ""),
+                "image": image_b64 or "",
+                "device_id": DEVICE_ID,
+            })
+            try:
+                resp2 = urequests.post(
+                    UPLOAD_URL,
+                    data=payload.encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                )
+                resp2.close()
+            except OSError as e:
+                print("upload err:", e)
+            draw_state("idle")
+            is_busy = False
+    except OSError as e:
+        print("commands err:", e)
+
+
 # ── 主循环 ────────────────────────────────────────────────────
 
 def enter_sleep():
@@ -617,7 +660,6 @@ def enter_sleep():
     _is_sleeping = True
     _set_led(0, 0, 0)
     M5.Lcd.setBrightness(0)
-    M5.Lcd.sleep()           # display controller 进入睡眠，比仅关背光省电得多
 
 
 def wake_up():
@@ -625,7 +667,6 @@ def wake_up():
     global _is_sleeping, _last_activity
     _is_sleeping = False
     _last_activity = time.time()
-    M5.Lcd.wakeup()          # 先唤醒 controller（顺序重要，否则画面错乱）
     M5.Lcd.setBrightness(64)
     draw_state("idle")
 
@@ -663,7 +704,7 @@ def discover_server():
     广播 KAGURA_DISCOVER，从回包源地址更新 SERVER_BASE 等全局变量。
     失败则保留硬编码 fallback 地址（最多等待 6 秒）。
     """
-    global SERVER_BASE, SERVER_URL, VISION_URL, PENDING_URL
+    global SERVER_BASE, SERVER_URL, VISION_URL, PENDING_URL, COMMANDS_URL, UPLOAD_URL
 
     draw_state("discovering")
 
@@ -683,10 +724,12 @@ def discover_server():
                 data, addr = sock.recvfrom(32)
                 if data.strip() == b"KAGURA_HERE":
                     ip = addr[0]
-                    SERVER_BASE = "http://{}:5000".format(ip)
-                    SERVER_URL  = SERVER_BASE + "/chat"
-                    VISION_URL  = SERVER_BASE + "/chat-vision"
-                    PENDING_URL = SERVER_BASE + "/pending/"
+                    SERVER_BASE  = "http://{}:5000".format(ip)
+                    SERVER_URL   = SERVER_BASE + "/chat"
+                    VISION_URL   = SERVER_BASE + "/chat-vision"
+                    PENDING_URL  = SERVER_BASE + "/pending/"
+                    COMMANDS_URL = SERVER_BASE + "/commands/"
+                    UPLOAD_URL   = SERVER_BASE + "/upload-photo"
                     print("discovered:", SERVER_BASE)
                     return True
             except OSError:
@@ -767,11 +810,12 @@ def loop():
                         _wake_in_burst = False
                         _wake_silent   = 0
 
-    # 推送消息轮询（休眠中也执行，check_pending 内部会唤醒）
+    # 推送消息 + 命令轮询（休眠中也执行，内部会唤醒）
     now = time.time()
     if not is_busy and now - last_poll > POLL_INTERVAL:
         last_poll = now
         check_pending()
+        check_commands()
 
     # ── 自动休眠检查 ──
     if not _is_sleeping and not is_busy:
