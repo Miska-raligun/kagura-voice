@@ -202,7 +202,7 @@ def synthesize(text):
 
 # ── MQTT 推送客户端 ──────────────────────────────────────────────────────────
 
-_mqtt_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+_mqtt_client = mqtt.Client()
 _mqtt_client.connect("localhost", 1883)
 _mqtt_client.loop_start()
 
