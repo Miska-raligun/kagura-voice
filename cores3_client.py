@@ -33,8 +33,8 @@ _FONT_16 = Widgets.FONTS.DejaVu18
 SERVER_BASE = "http://192.168.31.66:5000"
 SERVER_URL    = SERVER_BASE + "/chat"
 VISION_URL    = SERVER_BASE + "/chat-vision"
-PENDING_URL   = SERVER_BASE + "/pending/"
 DEVICE_ID     = "cores3"
+MQTT_BROKER   = "192.168.31.66"
 
 # ── 录音参数 ──────────────────────────────────────────────────
 
@@ -73,8 +73,6 @@ _wake_last_ms  = 0
 # ── 其他全局 ──────────────────────────────────────────────────
 
 is_busy    = False
-last_poll  = 0
-POLL_INTERVAL = 3
 
 # ── 自动休眠 ────────────────────────────────────────────────
 SLEEP_TIMEOUT  = 300         # 5 分钟无操作后息屏
@@ -427,8 +425,8 @@ def record_and_send():
         if not continuous_mode:
             break
 
-        # ── 连续模式：轮间检查主动播报（Bug 1 Fix）───────────────
-        _poll_pending_now()
+        # ── 连续模式：轮间检查主动播报 ───────────────────────────
+        mqtt_check()
 
         # ── 连续模式：1.5s 退出窗口（长按退出）──────────────────
         draw_state("idle")
@@ -555,58 +553,47 @@ def record_and_send_vision():
     is_busy = False
 
 
-# ── 主动推送轮询 ──────────────────────────────────────────────
+# ── MQTT 推送订阅 ─────────────────────────────────────────────
 
-def _poll_pending_now():
-    """
-    在 is_busy=True 期间（连续模式内）也能安全调用的推送检查。
-    不修改 is_busy，仅执行网络请求+播放。
-    调用后更新 last_poll，避免退出连续模式后立即重复轮询。
-    """
-    global last_poll
-    last_poll = time.time()
+_mqtt = None
+
+
+def _mqtt_callback(topic, msg):
+    """收到服务端推送的 WAV bytes → 播放。休眠中自动唤醒。"""
+    global _last_activity
+    print("MQTT push:", len(msg), "bytes")
+    if _is_sleeping:
+        wake_up()
+    _last_activity = time.time()
+    draw_state("broadcast")
+    play_wav(msg)
+    draw_state("idle")
+    _set_led(0, 0, 0)
+
+
+def init_mqtt():
+    """连接 MQTT broker 并订阅推送 topic。"""
+    global _mqtt
     try:
-        resp = urequests.get(PENDING_URL + DEVICE_ID)
-        if resp.status_code == 204:
-            resp.close()
-            return
-        data = resp.content
-        resp.close()
-        print("Push WAV size (inline):", len(data))
-        draw_state("broadcast")
-        play_wav(data)
-        _set_led(0, 0, 0)
-    except OSError as e:
-        print("pending (inline) err:", e)
+        from umqtt.robust import MQTTClient
+        client = MQTTClient(DEVICE_ID, MQTT_BROKER, port=1883, keepalive=60)
+        client.set_callback(_mqtt_callback)
+        client.connect()
+        client.subscribe("kagura/push/{}".format(DEVICE_ID))
+        _mqtt = client
+        print("MQTT connected:", MQTT_BROKER)
+    except Exception as e:
+        print("MQTT init error:", e)
+        _mqtt = None
 
 
-def check_pending():
-    """loop() 空闲时轮询推送消息。休眠中收到消息会自动唤醒。"""
-    global is_busy, _last_activity
-    is_busy = True
-    # 先临时检查是否有消息（轻量请求，不下载完整 WAV）
-    try:
-        resp = urequests.get(PENDING_URL + DEVICE_ID)
-        if resp.status_code == 204:
-            resp.close()
-            is_busy = False
-            return
-        data = resp.content
-        resp.close()
-        # 有推送消息 → 唤醒设备
-        if _is_sleeping:
-            wake_up()
-        _last_activity = time.time()
-        global last_poll
-        last_poll = time.time()
-        print("Push WAV size:", len(data))
-        draw_state("broadcast")
-        play_wav(data)
-        draw_state("idle")
-        _set_led(0, 0, 0)
-    except OSError as e:
-        print("pending err:", e)
-    is_busy = False
+def mqtt_check():
+    """主循环调用：非阻塞检查是否有待处理的 MQTT 消息。"""
+    if _mqtt:
+        try:
+            _mqtt.check_msg()
+        except Exception as e:
+            print("MQTT check error:", e)
 
 
 # ── 主循环 ────────────────────────────────────────────────────
@@ -661,7 +648,7 @@ def discover_server():
     广播 KAGURA_DISCOVER，从回包源地址更新 SERVER_BASE 等全局变量。
     失败则保留硬编码 fallback 地址（最多等待 6 秒）。
     """
-    global SERVER_BASE, SERVER_URL, VISION_URL, PENDING_URL
+    global SERVER_BASE, SERVER_URL, VISION_URL, MQTT_BROKER
 
     draw_state("discovering")
 
@@ -684,7 +671,7 @@ def discover_server():
                     SERVER_BASE = "http://{}:5000".format(ip)
                     SERVER_URL  = SERVER_BASE + "/chat"
                     VISION_URL  = SERVER_BASE + "/chat-vision"
-                    PENDING_URL = SERVER_BASE + "/pending/"
+                    MQTT_BROKER = ip
                     print("discovered:", SERVER_BASE)
                     return True
             except OSError:
@@ -703,13 +690,14 @@ def setup():
     _set_led(0, 0, 0)
     draw_state("idle")
     discover_server()
+    init_mqtt()
     draw_state("idle")       # 发现完成后恢复空闲界面
     calibrate_noise()
     _last_activity = time.time()
 
 
 def loop():
-    global last_poll, _last_activity, _wake_burst, _wake_in_burst, _wake_silent, _wake_last_ms
+    global _last_activity, _wake_burst, _wake_in_burst, _wake_silent, _wake_last_ms
 
     touch, pos = check_touch()
 
@@ -765,13 +753,11 @@ def loop():
                         _wake_in_burst = False
                         _wake_silent   = 0
 
-    # 推送消息轮询（休眠中也执行，check_pending 内部会唤醒）
-    now = time.time()
-    if not is_busy and now - last_poll > POLL_INTERVAL:
-        last_poll = now
-        check_pending()
+    # MQTT 推送消息（非阻塞，回调在 _mqtt_callback 中处理）
+    mqtt_check()
 
     # ── 自动休眠检查 ──
+    now = time.time()
     if not _is_sleeping and not is_busy:
         if now - _last_activity > SLEEP_TIMEOUT:
             enter_sleep()

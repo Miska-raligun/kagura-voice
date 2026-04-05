@@ -21,6 +21,7 @@ import urllib.request
 import urllib.parse
 from pathlib import Path
 from flask import Flask, request, send_file, jsonify, Response
+import paho.mqtt.client as mqtt
 
 # ── 路径配置 ──────────────────────────────────────────────────────────────────
 
@@ -199,9 +200,11 @@ def synthesize(text):
     return OUT_WAV_PATH
 
 
-# ── 消息队列（主动推送） ──────────────────────────────────────────────────────
+# ── MQTT 推送客户端 ──────────────────────────────────────────────────────────
 
-_message_queue = {}  # device_id → [wav_bytes, ...]
+_mqtt_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+_mqtt_client.connect("localhost", 1883)
+_mqtt_client.loop_start()
 
 
 # ── 会话管理 ──────────────────────────────────────────────────────────────────
@@ -295,7 +298,7 @@ def handle_chat():
 @app.route("/push", methods=["POST"])
 def push_message():
     """
-    主动推送文字消息，TTS 转 WAV 后存入队列，等待设备轮询。
+    主动推送文字消息，TTS 转 WAV 后通过 MQTT 直接推送给设备。
     请求体: {"text": "要播报的内容", "device_id": "cores3"}
     """
     data = request.get_json()
@@ -309,23 +312,13 @@ def push_message():
             return jsonify({"error": "TTS 生成失败"}), 500
         with open(wav_path, "rb") as f:
             wav_data = f.read()
-        _message_queue.setdefault(device_id, []).append(wav_data)
-        print(f"[push] → {device_id}: {text[:50]}{'...' if len(text) > 50 else ''} ({len(wav_data)} bytes)")
-        return jsonify({"status": "queued", "device_id": device_id})
+        topic = f"kagura/push/{device_id}"
+        _mqtt_client.publish(topic, wav_data)
+        print(f"[push] → {device_id} via MQTT: {text[:50]}{'...' if len(text) > 50 else ''} ({len(wav_data)} bytes)")
+        return jsonify({"status": "ok", "device_id": device_id})
     except Exception as e:
         print(f"[push] ⚠️  错误: {e}")
         return jsonify({"error": str(e)}), 500
-
-
-@app.route("/pending/<device_id>", methods=["GET"])
-def pending(device_id):
-    """设备轮询接口。有消息返回 WAV (200)，没有返回 204。"""
-    queue = _message_queue.get(device_id, [])
-    if not queue:
-        return "", 204
-    wav_data = queue.pop(0)
-    return Response(wav_data, mimetype="audio/wav",
-                    headers={"Content-Length": len(wav_data)})
 
 
 @app.route("/chat-vision", methods=["POST"])
@@ -456,4 +449,4 @@ if __name__ == "__main__":
     print(" OK")
     print(f"Agent : {AGENT_ID}  |  TTS : {TTS_VOICE}")
     print("监听 0.0.0.0:5000，Ctrl+C 退出\n")
-    app.run(host="0.0.0.0", port=5000, debug=False)
+    app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)
