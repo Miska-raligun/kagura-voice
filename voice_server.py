@@ -224,16 +224,6 @@ def get_session(device_id):
 
 app = Flask(__name__)
 
-# ── 语音触发拍照关键词 ─────────────────────────────────────────
-
-PHOTO_KEYWORDS = ["看看", "看一下", "拍照", "图片", "照片", "拍个照", "帮我看看", "这是什么"]
-
-
-def _needs_photo(text):
-    """判断用户说话内容是否包含拍照相关关键词。"""
-    return any(kw in text for kw in PHOTO_KEYWORDS)
-
-
 @app.route("/chat", methods=["POST"])
 def handle_chat():
     """
@@ -263,15 +253,15 @@ def handle_chat():
         if not user_text:
             user_text = "我没有听清楚，请重说一遍"
 
-        need_photo = _needs_photo(user_text)
+        # 2. 对话（由 OpenClaw 判断是否需要拍照，回复以 [PHOTO] 开头则触发）
+        reply = chat(user_text, session_id)
 
-        # 2. 对话
-        # Fix 3: 拍照应答硬编码，不经过 LLM，避免污染 session 历史
-        if need_photo:
-            reply = "好的，让我看看～"
-            print(f"[{device_id}] 📷  检测到拍照关键词，返回 X-Need-Photo: 1")
-        else:
-            reply = chat(user_text, session_id)
+        need_photo = False
+        if reply.startswith("[PHOTO]"):
+            need_photo = True
+            reply = reply[len("[PHOTO]"):].strip()
+            print(f"[{device_id}] 📷  OpenClaw 请求拍照，返回 X-Need-Photo: 1")
+
         preview = reply[:80].replace("\n", " ")
         print(f"[{device_id}] 💬  {preview}{'...' if len(reply) > 80 else ''}")
 
@@ -319,6 +309,103 @@ def push_message():
     except Exception as e:
         print(f"[push] ⚠️  错误: {e}")
         return jsonify({"error": str(e)}), 500
+
+
+# ── 远程拍照命令 ──────────────────────────────────────────────────────────────
+
+_photo_results = {}   # request_id → {"status": "pending"/"done", "image_path": "..."}
+
+
+@app.route("/capture-request", methods=["POST"])
+def capture_request():
+    """OpenClaw skill 调用：通过 MQTT 发送拍照命令给设备，返回 request_id。"""
+    data = request.get_json() or {}
+    device_id = data.get("device_id", "cores3")
+    request_id = str(uuid.uuid4())[:8]
+    cmd = {"action": "capture", "request_id": request_id}
+    _photo_results[request_id] = {"status": "pending"}
+    _mqtt_client.publish(f"kagura/cmd/{device_id}", json.dumps(cmd))
+    print(f"[capture] 📷  MQTT 拍照命令 {request_id} → {device_id}")
+    return jsonify({"request_id": request_id, "status": "queued"})
+
+
+@app.route("/upload-photo", methods=["POST"])
+def upload_photo():
+    """设备拍照后上传图片。复用 RGB565→JPEG 转换逻辑。"""
+    data = request.get_json()
+    if not data or "request_id" not in data:
+        return jsonify({"error": "missing request_id"}), 400
+
+    request_id = data["request_id"]
+    image_b64 = data.get("image", "")
+    device_id = data.get("device_id", "cores3")
+
+    if request_id not in _photo_results:
+        return jsonify({"error": "unknown request_id"}), 404
+
+    image_path = None
+    if image_b64:
+        image_b64_clean = image_b64.replace("\n", "").replace("\r", "")
+        padding = len(image_b64_clean) % 4
+        if padding:
+            image_b64_clean += "=" * (4 - padding)
+        decoded_bytes = base64.b64decode(image_b64_clean)
+        n = len(decoded_bytes)
+        RGB565_SIZES = {
+            160*120*2: (160,120),
+            176*144*2: (176,144),
+            240*176*2: (240,176),
+            240*240*2: (240,240),
+            320*240*2: (320,240),
+            480*320*2: (480,320),
+            640*480*2: (640,480),
+            800*600*2: (800,600),
+        }
+        W, H = RGB565_SIZES.get(n, (None, None))
+        if W is not None:
+            import numpy as np
+            from PIL import Image as PILImage
+            import io as _io
+            pixels = np.frombuffer(decoded_bytes, dtype=np.uint16).byteswap()
+            r = ((pixels >> 11) & 0x1F) * 255 // 31
+            g = ((pixels >> 5)  & 0x3F) * 255 // 63
+            b = (pixels         & 0x1F) * 255 // 31
+            rgb = np.stack([r, g, b], axis=-1).astype(np.uint8).reshape(H, W, 3)
+            buf = _io.BytesIO()
+            PILImage.fromarray(rgb).save(buf, format="JPEG", quality=85)
+            image_path = "/home/mio/.openclaw/workspace/tmp/oc_vision_input.jpg"
+            with open(image_path, "wb") as f:
+                f.write(buf.getvalue())
+            print(f"[upload] {device_id} RGB565→JPEG: {buf.tell()} bytes")
+        elif n >= 4 and decoded_bytes[0] == 0xFF and decoded_bytes[1] == 0xD8:
+            image_path = "/home/mio/.openclaw/workspace/tmp/oc_vision_input.jpg"
+            with open(image_path, "wb") as f:
+                f.write(decoded_bytes)
+            print(f"[upload] {device_id} JPEG direct: {n} bytes")
+        else:
+            print(f"[upload] {device_id} unknown image format size={n}, skipping")
+
+    if image_path:
+        _photo_results[request_id] = {"status": "done", "image_path": image_path}
+        print(f"[upload] ✅  {request_id} 照片已保存: {image_path}")
+    else:
+        _photo_results[request_id] = {"status": "error", "error": "no valid image"}
+        print(f"[upload] ⚠️  {request_id} 无有效图片")
+
+    return jsonify({"status": "ok", "request_id": request_id})
+
+
+@app.route("/capture-result/<request_id>", methods=["GET"])
+def capture_result(request_id):
+    """Skill 轮询拍照结果。pending→202, done→200, 未知→404。"""
+    result = _photo_results.get(request_id)
+    if result is None:
+        return jsonify({"error": "unknown request_id"}), 404
+    if result["status"] == "pending":
+        return jsonify({"status": "pending"}), 202
+    if result["status"] == "error":
+        return jsonify(result), 500
+    return jsonify(result), 200
 
 
 @app.route("/chat-vision", methods=["POST"])

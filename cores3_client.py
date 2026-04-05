@@ -33,6 +33,7 @@ _FONT_16 = Widgets.FONTS.DejaVu18
 SERVER_BASE = "http://192.168.31.66:5000"
 SERVER_URL    = SERVER_BASE + "/chat"
 VISION_URL    = SERVER_BASE + "/chat-vision"
+UPLOAD_URL    = SERVER_BASE + "/upload-photo"
 DEVICE_ID     = "cores3"
 MQTT_BROKER   = "192.168.31.66"
 
@@ -559,16 +560,52 @@ _mqtt = None
 
 
 def _mqtt_callback(topic, msg):
-    """收到服务端推送的 WAV bytes → 播放。休眠中自动唤醒。"""
-    global _last_activity
-    print("MQTT push:", len(msg), "bytes")
-    if _is_sleeping:
-        wake_up()
-    _last_activity = time.time()
-    draw_state("broadcast")
-    play_wav(msg)
-    draw_state("idle")
-    _set_led(0, 0, 0)
+    """MQTT 消息回调：广播音频或拍照命令。"""
+    global _last_activity, is_busy
+    topic_str = topic.decode("utf-8") if isinstance(topic, bytes) else topic
+
+    if "/push/" in topic_str:
+        # 广播消息：WAV bytes → 播放
+        print("MQTT push:", len(msg), "bytes")
+        if _is_sleeping:
+            wake_up()
+        _last_activity = time.time()
+        draw_state("broadcast")
+        play_wav(msg)
+        draw_state("idle")
+        _set_led(0, 0, 0)
+
+    elif "/cmd/" in topic_str:
+        # 远程命令：JSON payload
+        try:
+            cmd = ujson.loads(msg)
+        except Exception:
+            print("MQTT cmd parse error")
+            return
+        if cmd.get("action") == "capture":
+            if _is_sleeping:
+                wake_up()
+            _last_activity = time.time()
+            is_busy = True
+            draw_state("camera")
+            image_b64 = capture_photo()
+            draw_state("processing")
+            payload = ujson.dumps({
+                "request_id": cmd.get("request_id", ""),
+                "image": image_b64 or "",
+                "device_id": DEVICE_ID,
+            })
+            try:
+                resp = urequests.post(
+                    UPLOAD_URL,
+                    data=payload.encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                )
+                resp.close()
+            except OSError as e:
+                print("upload err:", e)
+            draw_state("idle")
+            is_busy = False
 
 
 def init_mqtt():
@@ -580,6 +617,7 @@ def init_mqtt():
         client.set_callback(_mqtt_callback)
         client.connect()
         client.subscribe("kagura/push/{}".format(DEVICE_ID))
+        client.subscribe("kagura/cmd/{}".format(DEVICE_ID))
         _mqtt = client
         print("MQTT connected:", MQTT_BROKER)
     except Exception as e:
@@ -648,7 +686,7 @@ def discover_server():
     广播 KAGURA_DISCOVER，从回包源地址更新 SERVER_BASE 等全局变量。
     失败则保留硬编码 fallback 地址（最多等待 6 秒）。
     """
-    global SERVER_BASE, SERVER_URL, VISION_URL, MQTT_BROKER
+    global SERVER_BASE, SERVER_URL, VISION_URL, UPLOAD_URL, MQTT_BROKER
 
     draw_state("discovering")
 
@@ -671,6 +709,7 @@ def discover_server():
                     SERVER_BASE = "http://{}:5000".format(ip)
                     SERVER_URL  = SERVER_BASE + "/chat"
                     VISION_URL  = SERVER_BASE + "/chat-vision"
+                    UPLOAD_URL  = SERVER_BASE + "/upload-photo"
                     MQTT_BROKER = ip
                     print("discovered:", SERVER_BASE)
                     return True
@@ -753,7 +792,7 @@ def loop():
                         _wake_in_burst = False
                         _wake_silent   = 0
 
-    # MQTT 推送消息（非阻塞，回调在 _mqtt_callback 中处理）
+    # MQTT 推送消息 + 命令（非阻塞，回调在 _mqtt_callback 中处理）
     mqtt_check()
 
     # ── 自动休眠检查 ──
