@@ -557,6 +557,7 @@ def record_and_send_vision():
 # ── MQTT 推送订阅 ─────────────────────────────────────────────
 
 _mqtt = None
+_MQTT_TOPICS = []
 
 
 def _mqtt_callback(topic, msg):
@@ -608,16 +609,32 @@ def _mqtt_callback(topic, msg):
             is_busy = False
 
 
-def init_mqtt():
-    """连接 MQTT broker 并订阅推送 topic。"""
+def _reconnect_mqtt():
+    """重连 MQTT 并重新订阅所有 topic。"""
     global _mqtt
     try:
-        from umqtt.robust import MQTTClient
+        _mqtt.connect()
+        for t in _MQTT_TOPICS:
+            _mqtt.subscribe(t)
+        print("MQTT reconnected")
+    except Exception as e:
+        print("MQTT reconnect failed:", e)
+
+
+def init_mqtt():
+    """连接 MQTT broker 并订阅推送 topic。"""
+    global _mqtt, _MQTT_TOPICS
+    try:
+        from umqtt.simple import MQTTClient
+        _MQTT_TOPICS = [
+            "kagura/push/{}".format(DEVICE_ID),
+            "kagura/cmd/{}".format(DEVICE_ID),
+        ]
         client = MQTTClient(DEVICE_ID, MQTT_BROKER, port=1883, keepalive=60)
         client.set_callback(_mqtt_callback)
         client.connect()
-        client.subscribe("kagura/push/{}".format(DEVICE_ID))
-        client.subscribe("kagura/cmd/{}".format(DEVICE_ID))
+        for t in _MQTT_TOPICS:
+            client.subscribe(t)
         _mqtt = client
         print("MQTT connected:", MQTT_BROKER)
     except Exception as e:
@@ -626,12 +643,13 @@ def init_mqtt():
 
 
 def mqtt_check():
-    """主循环调用：非阻塞检查是否有待处理的 MQTT 消息。"""
+    """主循环调用：非阻塞检查 MQTT 消息，断连时自动重连+重订阅。"""
     if _mqtt:
         try:
             _mqtt.check_msg()
-        except Exception as e:
-            print("MQTT check error:", e)
+        except OSError as e:
+            print("MQTT disconnected:", e)
+            _reconnect_mqtt()
 
 
 # ── 主循环 ────────────────────────────────────────────────────
