@@ -566,13 +566,27 @@ def _mqtt_callback(topic, msg):
     topic_str = topic.decode("utf-8") if isinstance(topic, bytes) else topic
 
     if "/push/" in topic_str:
-        # 广播消息：WAV bytes → 播放
-        print("MQTT push:", len(msg), "bytes")
+        # 广播通知：JSON → HTTP GET 下载 WAV → 播放
+        try:
+            info = ujson.loads(msg)
+        except Exception:
+            print("push parse error")
+            return
+        url = info.get("url", "")
+        if not url:
+            return
         if _is_sleeping:
             wake_up()
         _last_activity = time.time()
         draw_state("broadcast")
-        play_wav(msg)
+        try:
+            full_url = SERVER_BASE + url
+            resp = urequests.get(full_url)
+            if resp.status_code == 200:
+                play_wav(resp.content)
+            resp.close()
+        except OSError as e:
+            print("push download err:", e)
         draw_state("idle")
         _set_led(0, 0, 0)
 
@@ -613,9 +627,9 @@ def _reconnect_mqtt():
     """重连 MQTT 并重新订阅所有 topic。"""
     global _mqtt
     try:
-        _mqtt.connect()
+        _mqtt.connect(clean_session=False)
         for t in _MQTT_TOPICS:
-            _mqtt.subscribe(t)
+            _mqtt.subscribe(t, 1)
         print("MQTT reconnected")
     except Exception as e:
         print("MQTT reconnect failed:", e)
@@ -632,9 +646,9 @@ def init_mqtt():
         ]
         client = MQTTClient(DEVICE_ID, MQTT_BROKER, port=1883, keepalive=60)
         client.set_callback(_mqtt_callback)
-        client.connect()
+        client.connect(clean_session=False)
         for t in _MQTT_TOPICS:
-            client.subscribe(t)
+            client.subscribe(t, 1)
         _mqtt = client
         print("MQTT connected:", MQTT_BROKER)
     except Exception as e:

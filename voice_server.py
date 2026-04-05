@@ -20,7 +20,8 @@ import uuid
 import urllib.request
 import urllib.parse
 from pathlib import Path
-from flask import Flask, request, send_file, jsonify, Response
+import shutil
+from flask import Flask, request, send_file, jsonify, Response, after_this_request
 import paho.mqtt.client as mqtt
 
 # ── 路径配置 ──────────────────────────────────────────────────────────────────
@@ -36,6 +37,9 @@ PULSE_ENV = {**os.environ, "PULSE_SERVER": "unix:/mnt/wslg/PulseServer"}
 WAV_PATH = "/tmp/oc_server_input.wav"
 MP3_PATH = "/tmp/oc_server_response.mp3"
 OUT_WAV_PATH = "/tmp/oc_server_response.wav"
+
+PUSH_AUDIO_DIR = Path(__file__).parent / "push_audio"
+PUSH_AUDIO_DIR.mkdir(exist_ok=True)
 
 SAMPLE_RATE = 16000
 
@@ -288,7 +292,8 @@ def handle_chat():
 @app.route("/push", methods=["POST"])
 def push_message():
     """
-    主动推送文字消息，TTS 转 WAV 后通过 MQTT 直接推送给设备。
+    主动推送文字消息，TTS 转 WAV 后存到磁盘，通过 MQTT 发 JSON 通知，
+    设备收到后 HTTP GET 下载音频。
     请求体: {"text": "要播报的内容", "device_id": "cores3"}
     """
     data = request.get_json()
@@ -300,15 +305,34 @@ def push_message():
         wav_path = synthesize(text)
         if not wav_path:
             return jsonify({"error": "TTS 生成失败"}), 500
-        with open(wav_path, "rb") as f:
-            wav_data = f.read()
-        topic = f"kagura/push/{device_id}"
-        _mqtt_client.publish(topic, wav_data)
-        print(f"[push] → {device_id} via MQTT: {text[:50]}{'...' if len(text) > 50 else ''} ({len(wav_data)} bytes)")
+        fname = f"{uuid.uuid4().hex[:8]}.wav"
+        dest = PUSH_AUDIO_DIR / fname
+        shutil.copy(wav_path, dest)
+        notify = json.dumps({"type": "push", "url": f"/push-audio/{fname}"})
+        _mqtt_client.publish(f"kagura/push/{device_id}", notify, qos=1)
+        print(f"[push] → {device_id} via MQTT notify: {text[:50]}{'...' if len(text) > 50 else ''}")
         return jsonify({"status": "ok", "device_id": device_id})
     except Exception as e:
         print(f"[push] ⚠️  错误: {e}")
         return jsonify({"error": str(e)}), 500
+
+
+@app.route("/push-audio/<filename>", methods=["GET"])
+def serve_push_audio(filename):
+    """设备下载推送音频。下载后自动删除文件。"""
+    fpath = PUSH_AUDIO_DIR / filename
+    if not fpath.exists():
+        return "", 404
+
+    @after_this_request
+    def cleanup(response):
+        try:
+            os.unlink(fpath)
+        except OSError:
+            pass
+        return response
+
+    return send_file(fpath, mimetype="audio/wav")
 
 
 # ── 远程拍照命令 ──────────────────────────────────────────────────────────────
@@ -324,7 +348,7 @@ def capture_request():
     request_id = str(uuid.uuid4())[:8]
     cmd = {"action": "capture", "request_id": request_id}
     _photo_results[request_id] = {"status": "pending"}
-    _mqtt_client.publish(f"kagura/cmd/{device_id}", json.dumps(cmd))
+    _mqtt_client.publish(f"kagura/cmd/{device_id}", json.dumps(cmd), qos=1)
     print(f"[capture] 📷  MQTT 拍照命令 {request_id} → {device_id}")
     return jsonify({"request_id": request_id, "status": "queued"})
 
