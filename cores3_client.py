@@ -720,10 +720,8 @@ def sync_rtc():
             ts = data.get("timestamp", 0)
             resp.close()
             if ts > 0:
-                # MicroPython time 模块的 epoch 是 2000-01-01，需要减去偏移
-                import machine
+                # MicroPython time.localtime() 使用 2000-01-01 epoch
                 tm = time.localtime(ts - 946684800 + 8 * 3600)  # UTC+8
-                # setDateTime 参数: (year, month, day, hour, minute, second)
                 M5.Rtc.setDateTime(tm[0], tm[1], tm[2], tm[3], tm[4], tm[5])
                 _rtc_synced = True
                 print("RTC synced:", tm[:6])
@@ -793,19 +791,15 @@ def imu_shake_tick():
         if magnitude > IMU_SHAKE_G:
             now_ms = time.ticks_ms()
             _imu_shake_times.append(now_ms)
-            # 只保留最近 500ms 内的记录
-            _imu_shake_times[:] = [t for t in _imu_shake_times
-                                    if time.ticks_diff(now_ms, t) < 500]
+            _imu_shake_times[:] = [t for t in _imu_shake_times if time.ticks_diff(now_ms, t) < 500]
             if len(_imu_shake_times) >= IMU_SHAKE_COUNT:
                 _imu_shake_times.clear()
                 _imu_last_shake = now
                 _show_shake_easter_egg()
         else:
-            # 非超阈值时也清理过期记录
             if _imu_shake_times:
                 now_ms = time.ticks_ms()
-                _imu_shake_times[:] = [t for t in _imu_shake_times
-                                        if time.ticks_diff(now_ms, t) < 500]
+                _imu_shake_times[:] = [t for t in _imu_shake_times if time.ticks_diff(now_ms, t) < 500]
     except Exception:
         pass
 
