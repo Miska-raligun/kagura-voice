@@ -571,8 +571,18 @@ def handle_presence():
     # 写入 OpenClaw workspace 状态文件
     presence_file = OPENCLAW_DIR / "workspace" / "tmp" / "user_presence.txt"
     presence_file.parent.mkdir(parents=True, exist_ok=True)
-    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    timestamp = time.strftime("%Y-%m-%dT%H:%M:%S+08:00")
     presence_file.write_text(f"{status}\n{timestamp}\n{device_id}\n")
+
+    # 同步更新 mio-home-status.json（OpenClaw agent 实际读取的文件）
+    home_status_file = OPENCLAW_DIR / "workspace" / "tmp" / "mio-home-status.json"
+    home_status = {
+        "at_home": status == "home",
+        "last_updated": timestamp,
+        "last_action": "ble_detected_home" if status == "home" else "ble_detected_away",
+    }
+    home_status_file.write_text(json.dumps(home_status, ensure_ascii=False))
+
     print(f"[presence] {device_id} → {status} @ {timestamp}")
 
     return jsonify({"status": "ok"})

@@ -106,6 +106,8 @@ _imu_available    = False    # IMU 是否可用
 
 # ── RTC 时间 ─────────────────────────────────────────────────
 _rtc_synced = False          # RTC 是否已同步
+_has_rtc = hasattr(M5, 'Rtc')  # CoreS3 SE 无 RTC 硬件
+_soft_time_offset = 0        # 软件时间偏移（秒），用于无 RTC 时
 
 # ── 屏幕状态 UI ───────────────────────────────────────────────
 # (kaomoji, 状态文字, 主题颜色)
@@ -711,8 +713,8 @@ def mqtt_check():
 # ── RTC 时间同步 ─────────────────────────────────────────────
 
 def sync_rtc():
-    """从服务端获取时间并设置 RTC。"""
-    global _rtc_synced
+    """从服务端获取时间并设置 RTC（无 RTC 硬件时用软件偏移代替）。"""
+    global _rtc_synced, _soft_time_offset
     try:
         resp = urequests.get(SERVER_BASE + "/time")
         if resp.status_code == 200:
@@ -722,9 +724,14 @@ def sync_rtc():
             if ts > 0:
                 # MicroPython time.localtime() 使用 2000-01-01 epoch
                 tm = time.localtime(ts - 946684800 + 8 * 3600)  # UTC+8
-                M5.Rtc.setDateTime(tm[0], tm[1], tm[2], tm[3], tm[4], tm[5])
+                if _has_rtc:
+                    M5.Rtc.setDateTime(tm[0], tm[1], tm[2], tm[3], tm[4], tm[5])
+                    print("RTC synced:", tm[:6])
+                else:
+                    # 无 RTC：记录服务端时间与本地 ticks 的偏移
+                    _soft_time_offset = (ts + 8 * 3600) - time.time()
+                    print("Soft time synced:", tm[:6])
                 _rtc_synced = True
-                print("RTC synced:", tm[:6])
                 return
         else:
             resp.close()
@@ -733,12 +740,21 @@ def sync_rtc():
     print("RTC sync failed")
 
 
+def _get_datetime():
+    """返回 (year, month, day, hour, minute, second) 元组，兼容有/无 RTC。"""
+    if _has_rtc:
+        return M5.Rtc.getDateTime()
+    # 无 RTC：用 MicroPython time + 偏移计算
+    t = time.localtime(int(time.time() + _soft_time_offset))
+    return t  # (year, month, mday, hour, minute, second, weekday, yearday)
+
+
 def get_rtc_time_str():
-    """返回 RTC 当前时间字符串 "HH:MM"，未同步则返回空字符串。"""
+    """返回当前时间字符串 "HH:MM"，未同步则返回空字符串。"""
     if not _rtc_synced:
         return ""
     try:
-        dt = M5.Rtc.getDateTime()
+        dt = _get_datetime()
         return "{:02d}:{:02d}".format(dt[3], dt[4])
     except Exception:
         return ""
@@ -749,7 +765,7 @@ def get_local_time_header():
     if not _rtc_synced:
         return ""
     try:
-        dt = M5.Rtc.getDateTime()
+        dt = _get_datetime()
         return "{:04d}-{:02d}-{:02d} {:02d}:{:02d}".format(dt[0], dt[1], dt[2], dt[3], dt[4])
     except Exception:
         return ""
@@ -839,15 +855,40 @@ def _decode_ble_name(adv_data):
     return None
 
 
+def _is_apple_device(adv_data):
+    """检查 BLE 广播是否包含 Apple 厂商数据（company ID 0x004C）。"""
+    i = 0
+    while i < len(adv_data):
+        length = adv_data[i]
+        if length == 0:
+            break
+        if i + length >= len(adv_data):
+            break
+        ad_type = adv_data[i + 1]
+        if ad_type == 0xFF and length >= 3:  # Manufacturer Specific Data
+            company_id = adv_data[i + 2] | (adv_data[i + 3] << 8)
+            if company_id == 0x004C:  # Apple Inc.
+                return True
+        i += 1 + length
+    return False
+
+
 def _ble_irq(event, data):
-    """BLE 扫描回调：检测目标手机名称。"""
+    """BLE 扫描回调：检测目标手机（Apple 厂商 ID 或设备名称匹配）。"""
     global _ble_phone_found
     if event == 5:  # _IRQ_SCAN_RESULT
         addr_type, addr, adv_type, rssi, adv_data = data
-        name = _decode_ble_name(bytes(adv_data))
+        if rssi < BLE_RSSI_THRESHOLD:
+            return
+        raw = bytes(adv_data)
+        # 优先：设备名称匹配（部分 Android 等会广播名称）
+        name = _decode_ble_name(raw)
         if name and BLE_PHONE_NAME and BLE_PHONE_NAME in name:
-            if rssi > BLE_RSSI_THRESHOLD:
-                _ble_phone_found = True
+            _ble_phone_found = True
+            return
+        # Fallback：iPhone 不广播名称，检测 Apple 厂商 ID
+        if _is_apple_device(raw):
+            _ble_phone_found = True
 
 
 def init_ble():
@@ -892,6 +933,8 @@ def ble_scan_tick():
     # 扫描是异步的，结果在回调中处理。
     # 下次 tick 时检查上一轮扫描结果。
     # 这里检查的是上一轮的结果（扫描回调在期间已触发）。
+    print("BLE scan:", "found" if _ble_phone_found else "not found",
+          "count={}".format(_ble_seen_count))
     if _ble_phone_found:
         _ble_last_seen = now
         _ble_seen_count += 1
