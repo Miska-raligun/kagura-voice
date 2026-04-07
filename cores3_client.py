@@ -52,24 +52,20 @@ continuous_mode = False
 
 WAKE_MODE        = False
 WAKE_THRESHOLD   = 600      # 高于环境底噪，低于正常说话音量
-WAKE_MIN_CHUNKS  = 2        # 至少 200ms 声音才触发
-WAKE_MAX_CHUNKS  = 8        # 超过 800ms 视为持续噪音，忽略
 WAKE_CHUNK_SIZE  = int(16000 * 2 * 0.1)  # 每次采样 100ms
+WAKE_LOUD_NEED   = 3        # 连续 N 次超阈值触发（N×100ms）
 
 # ── 触摸状态 ──────────────────────────────────────────────────
 
 _touch_start = None
 _touch_pos   = (0, 0)
 LONG_PRESS_MS = 800         # 长按阈值（ms）
-_tap_times    = []          # 用于三击检测
 
 # ── 唤醒词检测状态 ─────────────────────────────────────────────
 
-_wake_buf      = bytearray(WAKE_CHUNK_SIZE)
-_wake_burst    = 0
-_wake_in_burst = False
-_wake_silent   = 0
-_wake_last_ms  = 0
+_wake_buf        = bytearray(WAKE_CHUNK_SIZE)
+_wake_last_ms    = 0
+_wake_loud_count = 0
 
 # ── 其他全局 ──────────────────────────────────────────────────
 
@@ -241,10 +237,10 @@ def rms(buf):
 def check_touch():
     """
     返回 (事件类型, 坐标)。
-    事件类型: 'short' / 'long' / 'triple' / None
+    事件类型: 'short' / 'long' / None
     坐标: (x, y) 为按下时的位置
     """
-    global _touch_start, _touch_pos, _tap_times
+    global _touch_start, _touch_pos
     M5.update()
     count = M5.Touch.getCount()
     if count > 0:
@@ -258,17 +254,8 @@ def check_touch():
             pos      = _touch_pos
             _touch_start = None
             if duration >= LONG_PRESS_MS:
-                _tap_times.clear()   # Bug 3 Fix: 防止长按后残留点击记录意外触发三击
                 return ('long', pos)
             elif duration > 0:
-                now = time.ticks_ms()
-                _tap_times.append(now)
-                # 只保留最近 1500ms 内的点击
-                _tap_times[:] = [t for t in _tap_times
-                                 if time.ticks_diff(now, t) < 1500]
-                if len(_tap_times) >= 3:
-                    _tap_times.clear()
-                    return ('triple', pos)
                 return ('short', pos)
     return (None, (0, 0))
 
@@ -283,18 +270,18 @@ def drain_touch():
 # ── 模式切换 ──────────────────────────────────────────────────
 
 def toggle_continuous():
-    """长按切换连续对话模式。开启时自动关闭声控唤醒（两者互斥）。"""
+    """摇晃切换连续对话模式。开启时自动关闭声控唤醒（两者互斥）。"""
     global continuous_mode, WAKE_MODE
     continuous_mode = not continuous_mode
     if continuous_mode:
         WAKE_MODE = False
     draw_state("continuous_on" if continuous_mode else "continuous_off")
-    time.sleep(0.8)   # Bug 3 Fix: 1.5→0.8s，缩短切换反馈时间
+    time.sleep(0.8)
     draw_state("idle")
 
 
 def toggle_wake_mode():
-    """三击切换声控唤醒模式。开启时自动关闭连续对话（两者互斥）。"""
+    """长按切换声控唤醒模式。开启时自动关闭连续对话（两者互斥）。"""
     global WAKE_MODE, continuous_mode
     WAKE_MODE = not WAKE_MODE
     if WAKE_MODE:
@@ -821,17 +808,16 @@ def imu_shake_tick():
 
 
 def _show_shake_easter_egg():
-    """显示摇晃彩蛋图片 2 秒后恢复。"""
+    """显示摇晃彩蛋图片 2 秒，然后切换连续对话模式。"""
     global _last_activity
     _last_activity = time.time()
-    # 优先显示专属图片，没有则显示 kaomoji
     try:
         with open("/flash/img_shake.jpg", "rb") as f:
             Lcd.drawJpg(f.read(), 0, 0)
     except Exception:
         draw_state("shake")
     time.sleep(2)
-    draw_state("idle")
+    toggle_continuous()
 
 
 # ── BLE 扫描 ─────────────────────────────────────────────────
@@ -1077,7 +1063,7 @@ def setup():
 
 
 def loop():
-    global _last_activity, _wake_burst, _wake_in_burst, _wake_silent, _wake_last_ms
+    global _last_activity, _wake_last_ms, _wake_loud_count
 
     touch, pos = check_touch()
 
@@ -1090,25 +1076,11 @@ def loop():
         if touch is not None:
             _last_activity = time.time()
         if touch == 'long':
-            toggle_continuous()          # 长按：切换连续模式（在模式内再次长按则退出）
-        elif touch == 'triple':
-            toggle_wake_mode()           # 三击：切换唤醒模式（在模式内再次三击则退出）
+            toggle_wake_mode()           # 长按：切换声控唤醒模式
         elif touch == 'short':
-            # 350ms 等待窗口：判断是否为三击的第一击
-            triggered = False
-            t0 = time.ticks_ms()
-            while time.ticks_diff(time.ticks_ms(), t0) < 350:
-                t2, _ = check_touch()
-                if t2 == 'triple':
-                    toggle_wake_mode()
-                    triggered = True
-                    break
-                elif t2 == 'short':
-                    t0 = time.ticks_ms()   # 有第二击，重置计时等待第三击
-                time.sleep(0.05)
-            if not triggered:
-                record_and_send()
+            record_and_send()            # 短按：直接录音
         elif WAKE_MODE:
+            # 简化的声控唤醒：连续 N×100ms 音量超阈值 → 触发录音
             now_ms = time.ticks_ms()
             if time.ticks_diff(now_ms, _wake_last_ms) >= 100:
                 _wake_last_ms = now_ms
@@ -1118,20 +1090,13 @@ def loop():
                 Mic.end()
                 level = rms(_wake_buf)
                 if level > WAKE_THRESHOLD:
-                    if not _wake_in_burst:
-                        _wake_in_burst = True
-                        _wake_burst    = 0
-                    _wake_burst  += 1
-                    _wake_silent  = 0
-                elif _wake_in_burst:
-                    _wake_silent += 1
-                    if _wake_silent >= 2:
-                        if WAKE_MIN_CHUNKS <= _wake_burst <= WAKE_MAX_CHUNKS:
-                            _last_activity = time.time()
-                            record_and_send()
-                        _wake_burst    = 0
-                        _wake_in_burst = False
-                        _wake_silent   = 0
+                    _wake_loud_count += 1
+                    if _wake_loud_count >= WAKE_LOUD_NEED:
+                        _wake_loud_count = 0
+                        _last_activity = time.time()
+                        record_and_send()
+                else:
+                    _wake_loud_count = 0
 
     # MQTT 推送消息 + 命令（非阻塞，回调在 _mqtt_callback 中处理）
     mqtt_check()
