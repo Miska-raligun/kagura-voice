@@ -15,6 +15,7 @@ import os
 import re
 import subprocess
 import tempfile
+import threading
 import time
 import uuid
 import urllib.request
@@ -41,7 +42,16 @@ OUT_WAV_PATH = "/tmp/oc_server_response.wav"
 PUSH_AUDIO_DIR = Path(__file__).parent / "push_audio"
 PUSH_AUDIO_DIR.mkdir(exist_ok=True)
 
+VISION_TMP_DIR = OPENCLAW_DIR / "workspace" / "tmp"
+VISION_TMP_DIR.mkdir(parents=True, exist_ok=True)
+
 SAMPLE_RATE = 16000
+
+# ── 线程锁 ───────────────────────────────────────────────────────────────────
+
+_token_lock = threading.Lock()
+_sessions_lock = threading.Lock()
+_photo_lock = threading.Lock()
 
 # ── 百度语音识别 ──────────────────────────────────────────────────────────────
 
@@ -69,16 +79,22 @@ def get_baidu_token():
     global _baidu_token, _baidu_token_expire
     if _baidu_token and time.time() < _baidu_token_expire:
         return _baidu_token
-    _baidu_token, _baidu_token_expire = _get_token(BAIDU_API_KEY, BAIDU_SECRET_KEY)
-    return _baidu_token
+    with _token_lock:
+        if _baidu_token and time.time() < _baidu_token_expire:
+            return _baidu_token
+        _baidu_token, _baidu_token_expire = _get_token(BAIDU_API_KEY, BAIDU_SECRET_KEY)
+        return _baidu_token
 
 
 def get_baidu_tts_token():
     global _baidu_tts_token, _baidu_tts_token_expire
     if _baidu_tts_token and time.time() < _baidu_tts_token_expire:
         return _baidu_tts_token
-    _baidu_tts_token, _baidu_tts_token_expire = _get_token(BAIDU_TTS_API_KEY, BAIDU_TTS_SECRET_KEY)
-    return _baidu_tts_token
+    with _token_lock:
+        if _baidu_tts_token and time.time() < _baidu_tts_token_expire:
+            return _baidu_tts_token
+        _baidu_tts_token, _baidu_tts_token_expire = _get_token(BAIDU_TTS_API_KEY, BAIDU_TTS_SECRET_KEY)
+        return _baidu_tts_token
 
 
 def transcribe(audio_path):
@@ -125,10 +141,12 @@ def _extract_json(raw):
     raise ValueError(f"未找到完整 JSON: {raw[:200]}")
 
 
-def chat(user_text, session_id, image_path=None):
+def chat(user_text, session_id, image_path=None, local_time=None):
     message = user_text
+    if local_time:
+        message = f"[当前时间: {local_time}] {message}"
     if image_path:
-        message = f"{user_text}\n\n[用户通过CoreS3摄像头拍了一张照片，保存在 {image_path}，请识别这张图片来回答问题]"
+        message = f"{message}\n\n[用户通过CoreS3摄像头拍了一张照片，保存在 {image_path}，请识别这张图片来回答问题]"
     cmd = [
         OPENCLAW_BIN, "agent",
         "--agent", AGENT_ID,
@@ -206,27 +224,100 @@ def synthesize(text):
 
 # ── MQTT 推送客户端 ──────────────────────────────────────────────────────────
 
-_mqtt_client = mqtt.Client()
-_mqtt_client.connect("localhost", 1883)
-_mqtt_client.loop_start()
+_mqtt_client = None
 
 
-# ── 会话管理 ──────────────────────────────────────────────────────────────────
+def _init_mqtt():
+    """延迟初始化 MQTT 客户端，broker 不可用时不影响服务端启动。"""
+    global _mqtt_client
+    try:
+        client = mqtt.Client()
+        client.connect("localhost", 1883)
+        client.loop_start()
+        _mqtt_client = client
+        print("MQTT 已连接 localhost:1883")
+    except Exception as e:
+        print(f"⚠️  MQTT 连接失败（推送功能不可用）: {e}")
+        _mqtt_client = None
 
-# 每个设备 ID 对应一个独立会话
+
+# ── 会话管理（带大小限制） ────────────────────────────────────────────────────
+
 _sessions = {}
+_MAX_SESSIONS = 100
 
 
 def get_session(device_id):
-    if device_id not in _sessions:
-        _sessions[device_id] = str(uuid.uuid4())
-        print(f"[新设备] {device_id} → session {_sessions[device_id][:8]}...")
-    return _sessions[device_id]
+    with _sessions_lock:
+        if device_id not in _sessions:
+            if len(_sessions) >= _MAX_SESSIONS:
+                oldest = next(iter(_sessions))
+                del _sessions[oldest]
+            _sessions[device_id] = str(uuid.uuid4())
+            print(f"[新设备] {device_id} → session {_sessions[device_id][:8]}...")
+        return _sessions[device_id]
 
 
 # ── Flask 路由 ────────────────────────────────────────────────────────────────
 
 app = Flask(__name__)
+
+_DEVICE_ID_RE = re.compile(r'^[a-zA-Z0-9_-]{1,32}$')
+
+RGB565_SIZES = {
+    160*120*2: (160,120),
+    176*144*2: (176,144),
+    240*176*2: (240,176),
+    240*240*2: (240,240),
+    320*240*2: (320,240),
+    480*320*2: (480,320),
+    640*480*2: (640,480),
+    800*600*2: (800,600),
+}
+
+
+def _decode_image_b64(image_b64, device_id="unknown", tag=""):
+    """解码 base64 图片（RGB565 或 JPEG），保存为 JPEG，返回路径。失败返回 None。"""
+    image_b64_clean = image_b64.replace("\n", "").replace("\r", "")
+    padding = len(image_b64_clean) % 4
+    if padding:
+        image_b64_clean += "=" * (4 - padding)
+    decoded_bytes = base64.b64decode(image_b64_clean)
+    n = len(decoded_bytes)
+    image_path = str(VISION_TMP_DIR / f"oc_vision_{uuid.uuid4().hex[:8]}.jpg")
+
+    W, H = RGB565_SIZES.get(n, (None, None))
+    if W is not None:
+        import numpy as np
+        from PIL import Image as PILImage
+        import io as _io
+        pixels = np.frombuffer(decoded_bytes, dtype=np.uint16).byteswap()
+        r = ((pixels >> 11) & 0x1F) * 255 // 31
+        g = ((pixels >> 5)  & 0x3F) * 255 // 63
+        b = (pixels         & 0x1F) * 255 // 31
+        rgb = np.stack([r, g, b], axis=-1).astype(np.uint8).reshape(H, W, 3)
+        buf = _io.BytesIO()
+        PILImage.fromarray(rgb).save(buf, format="JPEG", quality=85)
+        with open(image_path, "wb") as f:
+            f.write(buf.getvalue())
+        print(f"[{tag}] {device_id} RGB565→JPEG: {buf.tell()} bytes")
+        return image_path
+    elif n >= 4 and decoded_bytes[0] == 0xFF and decoded_bytes[1] == 0xD8:
+        with open(image_path, "wb") as f:
+            f.write(decoded_bytes)
+        print(f"[{tag}] {device_id} JPEG direct: {n} bytes")
+        return image_path
+    else:
+        print(f"[{tag}] {device_id} unknown image format size={n}, skipping")
+        return None
+
+
+def _validate_device_id(raw):
+    """校验 device_id，不合法时返回安全的默认值。"""
+    if raw and _DEVICE_ID_RE.match(raw):
+        return raw
+    return "default"
+
 
 @app.route("/chat", methods=["POST"])
 def handle_chat():
@@ -238,7 +329,8 @@ def handle_chat():
     若识别到拍照关键词，响应头额外携带 X-Need-Photo: 1，
     客户端收到后应拍照并将原始音频+图片发送至 /chat-vision。
     """
-    device_id = request.headers.get("X-Device-Id", "default")
+    device_id = _validate_device_id(request.headers.get("X-Device-Id"))
+    local_time = request.headers.get("X-Local-Time", "")
     session_id = get_session(device_id)
 
     audio_data = request.get_data()
@@ -258,7 +350,7 @@ def handle_chat():
             user_text = "我没有听清楚，请重说一遍"
 
         # 2. 对话（由 OpenClaw 判断是否需要拍照，回复以 [PHOTO] 开头则触发）
-        reply = chat(user_text, session_id)
+        reply = chat(user_text, session_id, local_time=local_time)
 
         need_photo = False
         if reply.startswith("[PHOTO]"):
@@ -300,7 +392,9 @@ def push_message():
     if not data or not data.get("text"):
         return jsonify({"error": "text is required"}), 400
     text = data["text"]
-    device_id = data.get("device_id", "cores3")
+    device_id = _validate_device_id(data.get("device_id", "cores3"))
+    if _mqtt_client is None:
+        return jsonify({"error": "MQTT 不可用，推送功能已禁用"}), 503
     try:
         wav_path = synthesize(text)
         if not wav_path:
@@ -337,17 +431,30 @@ def serve_push_audio(filename):
 
 # ── 远程拍照命令 ──────────────────────────────────────────────────────────────
 
-_photo_results = {}   # request_id → {"status": "pending"/"done", "image_path": "..."}
+_photo_results = {}   # request_id → {"status": "pending"/"done", "image_path": "...", "_ts": time.time()}
+_MAX_PHOTO_RESULTS = 200
+
+
+def _cleanup_photo_results():
+    """清理超过 5 分钟的旧记录。"""
+    now = time.time()
+    expired = [k for k, v in _photo_results.items() if now - v.get("_ts", 0) > 300]
+    for k in expired:
+        del _photo_results[k]
 
 
 @app.route("/capture-request", methods=["POST"])
 def capture_request():
     """OpenClaw skill 调用：通过 MQTT 发送拍照命令给设备，返回 request_id。"""
     data = request.get_json() or {}
-    device_id = data.get("device_id", "cores3")
+    device_id = _validate_device_id(data.get("device_id", "cores3"))
+    if _mqtt_client is None:
+        return jsonify({"error": "MQTT 不可用"}), 503
     request_id = str(uuid.uuid4())[:8]
     cmd = {"action": "capture", "request_id": request_id}
-    _photo_results[request_id] = {"status": "pending"}
+    with _photo_lock:
+        _cleanup_photo_results()
+        _photo_results[request_id] = {"status": "pending", "_ts": time.time()}
     _mqtt_client.publish(f"kagura/cmd/{device_id}", json.dumps(cmd), qos=1)
     print(f"[capture] 📷  MQTT 拍照命令 {request_id} → {device_id}")
     return jsonify({"request_id": request_id, "status": "queued"})
@@ -362,59 +469,21 @@ def upload_photo():
 
     request_id = data["request_id"]
     image_b64 = data.get("image", "")
-    device_id = data.get("device_id", "cores3")
+    device_id = _validate_device_id(data.get("device_id", "cores3"))
 
-    if request_id not in _photo_results:
-        return jsonify({"error": "unknown request_id"}), 404
+    with _photo_lock:
+        if request_id not in _photo_results:
+            return jsonify({"error": "unknown request_id"}), 404
 
-    image_path = None
-    if image_b64:
-        image_b64_clean = image_b64.replace("\n", "").replace("\r", "")
-        padding = len(image_b64_clean) % 4
-        if padding:
-            image_b64_clean += "=" * (4 - padding)
-        decoded_bytes = base64.b64decode(image_b64_clean)
-        n = len(decoded_bytes)
-        RGB565_SIZES = {
-            160*120*2: (160,120),
-            176*144*2: (176,144),
-            240*176*2: (240,176),
-            240*240*2: (240,240),
-            320*240*2: (320,240),
-            480*320*2: (480,320),
-            640*480*2: (640,480),
-            800*600*2: (800,600),
-        }
-        W, H = RGB565_SIZES.get(n, (None, None))
-        if W is not None:
-            import numpy as np
-            from PIL import Image as PILImage
-            import io as _io
-            pixels = np.frombuffer(decoded_bytes, dtype=np.uint16).byteswap()
-            r = ((pixels >> 11) & 0x1F) * 255 // 31
-            g = ((pixels >> 5)  & 0x3F) * 255 // 63
-            b = (pixels         & 0x1F) * 255 // 31
-            rgb = np.stack([r, g, b], axis=-1).astype(np.uint8).reshape(H, W, 3)
-            buf = _io.BytesIO()
-            PILImage.fromarray(rgb).save(buf, format="JPEG", quality=85)
-            image_path = "/home/mio/.openclaw/workspace/tmp/oc_vision_input.jpg"
-            with open(image_path, "wb") as f:
-                f.write(buf.getvalue())
-            print(f"[upload] {device_id} RGB565→JPEG: {buf.tell()} bytes")
-        elif n >= 4 and decoded_bytes[0] == 0xFF and decoded_bytes[1] == 0xD8:
-            image_path = "/home/mio/.openclaw/workspace/tmp/oc_vision_input.jpg"
-            with open(image_path, "wb") as f:
-                f.write(decoded_bytes)
-            print(f"[upload] {device_id} JPEG direct: {n} bytes")
+    image_path = _decode_image_b64(image_b64, device_id, tag="upload") if image_b64 else None
+
+    with _photo_lock:
+        if image_path:
+            _photo_results[request_id] = {"status": "done", "image_path": image_path, "_ts": time.time()}
+            print(f"[upload] ✅  {request_id} 照片已保存: {image_path}")
         else:
-            print(f"[upload] {device_id} unknown image format size={n}, skipping")
-
-    if image_path:
-        _photo_results[request_id] = {"status": "done", "image_path": image_path}
-        print(f"[upload] ✅  {request_id} 照片已保存: {image_path}")
-    else:
-        _photo_results[request_id] = {"status": "error", "error": "no valid image"}
-        print(f"[upload] ⚠️  {request_id} 无有效图片")
+            _photo_results[request_id] = {"status": "error", "error": "no valid image", "_ts": time.time()}
+            print(f"[upload] ⚠️  {request_id} 无有效图片")
 
     return jsonify({"status": "ok", "request_id": request_id})
 
@@ -422,7 +491,8 @@ def upload_photo():
 @app.route("/capture-result/<request_id>", methods=["GET"])
 def capture_result(request_id):
     """Skill 轮询拍照结果。pending→202, done→200, 未知→404。"""
-    result = _photo_results.get(request_id)
+    with _photo_lock:
+        result = _photo_results.get(request_id)
     if result is None:
         return jsonify({"error": "unknown request_id"}), 404
     if result["status"] == "pending":
@@ -439,7 +509,8 @@ def handle_chat_vision():
     图片可为空字符串（仅语音不含图片时）。
     返回 WAV 音频。
     """
-    device_id  = request.headers.get("X-Device-Id", "default")
+    device_id  = _validate_device_id(request.headers.get("X-Device-Id"))
+    local_time = request.headers.get("X-Local-Time", "")
     session_id = get_session(device_id)
 
     data = request.get_json()
@@ -458,50 +529,9 @@ def handle_chat_vision():
         user_text = transcribe(wav_path) or "请分析这张图片"
         print(f"[{device_id}] 🗣️  {user_text}")
 
-        image_path = None
-        if image_b64:
-            image_b64_clean = image_b64.replace("\n", "").replace("\r", "")
-            padding = len(image_b64_clean) % 4
-            if padding:
-                image_b64_clean += "=" * (4 - padding)
-            decoded_bytes = base64.b64decode(image_b64_clean)
-            n = len(decoded_bytes)
-            # 根据字节数自动匹配 RGB565 分辨率
-            RGB565_SIZES = {
-                160*120*2: (160,120),   # QQVGA
-                176*144*2: (176,144),   # QCIF
-                240*176*2: (240,176),   # HQVGA
-                240*240*2: (240,240),   # 240x240
-                320*240*2: (320,240),   # QVGA
-                480*320*2: (480,320),   # HVGA
-                640*480*2: (640,480),   # VGA
-                800*600*2: (800,600),   # SVGA
-            }
-            W, H = RGB565_SIZES.get(n, (None, None))
-            if W is not None:
-                import numpy as np
-                from PIL import Image as PILImage
-                import io as _io
-                pixels = np.frombuffer(decoded_bytes, dtype=np.uint16).byteswap()
-                r = ((pixels >> 11) & 0x1F) * 255 // 31
-                g = ((pixels >> 5)  & 0x3F) * 255 // 63
-                b = (pixels         & 0x1F) * 255 // 31
-                rgb = np.stack([r, g, b], axis=-1).astype(np.uint8).reshape(H, W, 3)
-                buf = _io.BytesIO()
-                PILImage.fromarray(rgb).save(buf, format="JPEG", quality=85)
-                image_path = "/home/mio/.openclaw/workspace/tmp/oc_vision_input.jpg"
-                with open(image_path, "wb") as f:
-                    f.write(buf.getvalue())
-                print(f"[{device_id}] RGB565→JPEG: {buf.tell()} bytes")
-            elif n >= 4 and decoded_bytes[0] == 0xFF and decoded_bytes[1] == 0xD8:
-                image_path = "/home/mio/.openclaw/workspace/tmp/oc_vision_input.jpg"
-                with open(image_path, "wb") as f:
-                    f.write(decoded_bytes)
-                print(f"[{device_id}] JPEG direct: {n} bytes")
-            else:
-                print(f"[{device_id}] unknown image format size={n} bytes, skipping")
+        image_path = _decode_image_b64(image_b64, device_id, tag="vision") if image_b64 else None
 
-        reply = chat(user_text, session_id, image_path=image_path)
+        reply = chat(user_text, session_id, image_path=image_path, local_time=local_time)
         preview = reply[:80].replace("\n", " ")
         print(f"[{device_id}] 💬  {preview}{'...' if len(reply) > 80 else ''}")
 
@@ -520,6 +550,38 @@ def handle_chat_vision():
         return jsonify({"error": str(e)}), 500
     finally:
         os.unlink(wav_path)
+
+
+@app.route("/presence", methods=["POST"])
+def handle_presence():
+    """
+    接收设备端 BLE 在家/出门状态变化通知。
+    请求体: {"device_id": "cores3", "status": "home"|"away"}
+    写入 OpenClaw workspace 状态文件，供 agent 读取。
+    """
+    data = request.get_json()
+    if not data or "status" not in data:
+        return jsonify({"error": "status is required"}), 400
+
+    device_id = _validate_device_id(data.get("device_id", "cores3"))
+    status = data["status"]
+    if status not in ("home", "away"):
+        return jsonify({"error": "status must be 'home' or 'away'"}), 400
+
+    # 写入 OpenClaw workspace 状态文件
+    presence_file = OPENCLAW_DIR / "workspace" / "tmp" / "user_presence.txt"
+    presence_file.parent.mkdir(parents=True, exist_ok=True)
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    presence_file.write_text(f"{status}\n{timestamp}\n{device_id}\n")
+    print(f"[presence] {device_id} → {status} @ {timestamp}")
+
+    return jsonify({"status": "ok"})
+
+
+@app.route("/time", methods=["GET"])
+def get_time():
+    """返回服务端当前 Unix 时间戳，供设备同步 RTC。"""
+    return jsonify({"timestamp": int(time.time())})
 
 
 @app.route("/health", methods=["GET"])
@@ -558,6 +620,7 @@ if __name__ == "__main__":
     print("获取百度 token...", end="", flush=True)
     get_baidu_token()
     print(" OK")
+    _init_mqtt()
     print(f"Agent : {AGENT_ID}  |  TTS : {TTS_VOICE}")
     print("监听 0.0.0.0:5000，Ctrl+C 退出\n")
     app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)

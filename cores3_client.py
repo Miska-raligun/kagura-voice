@@ -21,7 +21,7 @@ def _set_led(r, g, b):
     if _has_rgb:
         try:
             Rgb.setColorAll(r, g, b)
-        except:
+        except Exception:
             pass
 
 # ── 字体 ───────────────────────────────────────────────────────
@@ -80,6 +80,33 @@ SLEEP_TIMEOUT  = 300         # 5 分钟无操作后息屏
 _last_activity = 0
 _is_sleeping   = False
 
+# ── BLE 在家感知 ─────────────────────────────────────────────
+BLE_PHONE_NAME    = ""       # 用户手机蓝牙名称（部分匹配），为空则禁用
+BLE_SCAN_INTERVAL = 30       # 扫描间隔（秒）
+BLE_SCAN_DURATION = 3000     # 每次扫描时长（毫秒）
+BLE_RSSI_THRESHOLD = -70     # RSSI 阈值（> 此值视为在附近）
+BLE_HOME_COUNT    = 2        # 连续检测到 N 次 → 判定在家
+BLE_AWAY_TIMEOUT  = 300      # 未检测到 N 秒 → 判定出门
+
+_ble = None
+_ble_phone_found  = False    # 本次扫描是否找到目标手机
+_ble_last_scan    = 0        # 上次扫描时间
+_ble_last_seen    = 0        # 上次检测到手机的时间
+_ble_seen_count   = 0        # 连续检测到的次数
+_user_home        = False    # 当前在家状态
+_ble_status_sent  = None     # 上次发送给服务端的状态（避免重复发送）
+
+# ── IMU 摇晃彩蛋 ─────────────────────────────────────────────
+IMU_SHAKE_G       = 2.5      # 加速度阈值（g）
+IMU_SHAKE_COUNT   = 3        # 500ms 内需要达到的次数
+IMU_SHAKE_COOLDOWN = 2.0     # 冷却时间（秒）
+_imu_shake_times  = []       # 超阈值时间戳列表
+_imu_last_shake   = 0        # 上次触发彩蛋的时间
+_imu_available    = False    # IMU 是否可用
+
+# ── RTC 时间 ─────────────────────────────────────────────────
+_rtc_synced = False          # RTC 是否已同步
+
 # ── 屏幕状态 UI ───────────────────────────────────────────────
 # (kaomoji, 状态文字, 主题颜色)
 
@@ -97,6 +124,7 @@ STATE_UI = {
     "wake_on":        ("(-_-)",   "Wake mode ON",      0x00ff88),
     "wake_off":       ("(^w^)",   "Wake mode OFF",     0x888888),
     "discovering":    ("(o_o)",   "Searching...",      0xffaa00),
+    "shake":          ("(*/ω＼*)", "!",                 0xff88cc),
 }
 
 
@@ -152,15 +180,18 @@ def draw_state(state):
     Lcd.drawString("CONT", 10, 6)
     Lcd.setTextColor(wm_color, wm_color)
     Lcd.drawString("WAKE", 90, 6)
+    # 右侧：时间 + 电量
+    time_str = get_rtc_time_str()
     try:
         v = M5.Power.getBatteryVoltage()   # mV，3000-4200
         bat = max(0, min(100, (v - 3000) * 100 // 1200))
         bat_str = "{}%".format(bat)
     except Exception:
         bat_str = "--"
-    bat_x = max(220, 310 - len(bat_str) * 10)
+    right_str = "{} {}".format(time_str, bat_str) if time_str else bat_str
+    right_x = max(180, 310 - len(right_str) * 10)
     Lcd.setTextColor(0x666666, 0x666666)
-    Lcd.drawString(bat_str, bat_x, 6)
+    Lcd.drawString(right_str, right_x, 6)
 
     # ── 步骤 3：非图片状态显示 kaomoji（透明背景，悬浮在背景图上）──
     if not img_shown:
@@ -364,8 +395,11 @@ def record_and_send():
         gc.collect()
 
         try:
-            resp = urequests.post(SERVER_URL, data=wav,
-                                  headers={"X-Device-Id": DEVICE_ID})
+            hdrs = {"X-Device-Id": DEVICE_ID}
+            lt = get_local_time_header()
+            if lt:
+                hdrs["X-Local-Time"] = lt
+            resp = urequests.post(SERVER_URL, data=wav, headers=hdrs)
             if resp.status_code != 200:
                 print("chat err:", resp.text)
                 resp.close()
@@ -402,11 +436,15 @@ def record_and_send():
             draw_state("processing")
             payload = ujson.dumps({"wav": wav_b64, "image": image_b64 or ""})
             try:
+                v_hdrs = {"X-Device-Id": DEVICE_ID,
+                          "Content-Type": "application/json"}
+                lt2 = get_local_time_header()
+                if lt2:
+                    v_hdrs["X-Local-Time"] = lt2
                 resp2 = urequests.post(
                     VISION_URL,
                     data=payload.encode("utf-8"),
-                    headers={"X-Device-Id": DEVICE_ID,
-                             "Content-Type": "application/json"},
+                    headers=v_hdrs,
                 )
                 if resp2.status_code == 200:
                     data2 = resp2.content
@@ -520,11 +558,15 @@ def record_and_send_vision():
     payload = ujson.dumps({"wav": wav_b64, "image": image_b64 or ""})
 
     try:
+        v_hdrs = {"X-Device-Id": DEVICE_ID,
+                  "Content-Type": "application/json"}
+        lt = get_local_time_header()
+        if lt:
+            v_hdrs["X-Local-Time"] = lt
         resp = urequests.post(
             VISION_URL,
             data=payload.encode("utf-8"),
-            headers={"X-Device-Id": DEVICE_ID,
-                     "Content-Type": "application/json"},
+            headers=v_hdrs,
         )
         if resp.status_code != 200:
             print("vision err:", resp.text)
@@ -666,6 +708,233 @@ def mqtt_check():
             _reconnect_mqtt()
 
 
+# ── RTC 时间同步 ─────────────────────────────────────────────
+
+def sync_rtc():
+    """从服务端获取时间并设置 RTC。"""
+    global _rtc_synced
+    try:
+        resp = urequests.get(SERVER_BASE + "/time")
+        if resp.status_code == 200:
+            data = ujson.loads(resp.text)
+            ts = data.get("timestamp", 0)
+            resp.close()
+            if ts > 0:
+                # MicroPython time 模块的 epoch 是 2000-01-01，需要减去偏移
+                import machine
+                tm = time.localtime(ts - 946684800 + 8 * 3600)  # UTC+8
+                # setDateTime 参数: (year, month, day, hour, minute, second)
+                M5.Rtc.setDateTime(tm[0], tm[1], tm[2], tm[3], tm[4], tm[5])
+                _rtc_synced = True
+                print("RTC synced:", tm[:6])
+                return
+        else:
+            resp.close()
+    except Exception as e:
+        print("RTC sync error:", e)
+    print("RTC sync failed")
+
+
+def get_rtc_time_str():
+    """返回 RTC 当前时间字符串 "HH:MM"，未同步则返回空字符串。"""
+    if not _rtc_synced:
+        return ""
+    try:
+        dt = M5.Rtc.getDateTime()
+        return "{:02d}:{:02d}".format(dt[3], dt[4])
+    except Exception:
+        return ""
+
+
+def get_local_time_header():
+    """返回用于 X-Local-Time header 的时间字符串。"""
+    if not _rtc_synced:
+        return ""
+    try:
+        dt = M5.Rtc.getDateTime()
+        return "{:04d}-{:02d}-{:02d} {:02d}:{:02d}".format(dt[0], dt[1], dt[2], dt[3], dt[4])
+    except Exception:
+        return ""
+
+
+# ── IMU 摇晃检测 ─────────────────────────────────────────────
+
+def init_imu():
+    """尝试初始化 IMU，失败则静默跳过。"""
+    global _imu_available
+    try:
+        val = M5.Imu.getAccel()
+        if val is not None:
+            _imu_available = True
+            print("IMU: available")
+    except Exception as e:
+        print("IMU: not available:", e)
+        _imu_available = False
+
+
+def imu_shake_tick():
+    """主循环调用：检测摇晃手势，触发彩蛋图片显示。"""
+    global _imu_shake_times, _imu_last_shake
+
+    if not _imu_available or is_busy:
+        return
+
+    now = time.time()
+    if now - _imu_last_shake < IMU_SHAKE_COOLDOWN:
+        return
+
+    try:
+        acc = M5.Imu.getAccel()
+        if acc is None:
+            return
+        ax, ay, az = acc
+        # 计算总加速度幅值（含重力约 1g）
+        magnitude = math.sqrt(ax * ax + ay * ay + az * az)
+        if magnitude > IMU_SHAKE_G:
+            now_ms = time.ticks_ms()
+            _imu_shake_times.append(now_ms)
+            # 只保留最近 500ms 内的记录
+            _imu_shake_times[:] = [t for t in _imu_shake_times
+                                    if time.ticks_diff(now_ms, t) < 500]
+            if len(_imu_shake_times) >= IMU_SHAKE_COUNT:
+                _imu_shake_times.clear()
+                _imu_last_shake = now
+                _show_shake_easter_egg()
+        else:
+            # 非超阈值时也清理过期记录
+            if _imu_shake_times:
+                now_ms = time.ticks_ms()
+                _imu_shake_times[:] = [t for t in _imu_shake_times
+                                        if time.ticks_diff(now_ms, t) < 500]
+    except Exception:
+        pass
+
+
+def _show_shake_easter_egg():
+    """显示摇晃彩蛋图片 2 秒后恢复。"""
+    global _last_activity
+    _last_activity = time.time()
+    # 优先显示专属图片，没有则显示 kaomoji
+    try:
+        with open("/flash/img_shake.jpg", "rb") as f:
+            Lcd.drawJpg(f.read(), 0, 0)
+    except Exception:
+        draw_state("shake")
+    time.sleep(2)
+    draw_state("idle")
+
+
+# ── BLE 扫描 ─────────────────────────────────────────────────
+
+def _decode_ble_name(adv_data):
+    """从 BLE 广播数据中解析设备名称（Complete/Short Local Name）。"""
+    i = 0
+    while i < len(adv_data):
+        length = adv_data[i]
+        if length == 0:
+            break
+        if i + length >= len(adv_data):
+            break
+        ad_type = adv_data[i + 1]
+        if ad_type in (0x08, 0x09):  # Short / Complete Local Name
+            try:
+                return adv_data[i + 2:i + 1 + length].decode('utf-8')
+            except Exception:
+                pass
+        i += 1 + length
+    return None
+
+
+def _ble_irq(event, data):
+    """BLE 扫描回调：检测目标手机名称。"""
+    global _ble_phone_found
+    if event == 5:  # _IRQ_SCAN_RESULT
+        addr_type, addr, adv_type, rssi, adv_data = data
+        name = _decode_ble_name(bytes(adv_data))
+        if name and BLE_PHONE_NAME and BLE_PHONE_NAME in name:
+            if rssi > BLE_RSSI_THRESHOLD:
+                _ble_phone_found = True
+
+
+def init_ble():
+    """初始化 BLE 扫描器（仅当配置了手机名称时启用）。"""
+    global _ble
+    if not BLE_PHONE_NAME:
+        print("BLE: disabled (BLE_PHONE_NAME is empty)")
+        return
+    try:
+        import bluetooth
+        _ble = bluetooth.BLE()
+        _ble.active(True)
+        _ble.irq(_ble_irq)
+        print("BLE: initialized, target name:", BLE_PHONE_NAME)
+    except Exception as e:
+        print("BLE init error:", e)
+        _ble = None
+
+
+def ble_scan_tick():
+    """主循环调用：定期执行 BLE 扫描并更新在家状态。"""
+    global _ble_last_scan, _ble_phone_found, _ble_last_seen, _ble_seen_count
+    global _user_home, _ble_status_sent
+
+    if _ble is None:
+        return
+
+    now = time.time()
+    if now - _ble_last_scan < BLE_SCAN_INTERVAL:
+        return
+
+    _ble_last_scan = now
+    _ble_phone_found = False
+
+    try:
+        # active scan 以获取 Scan Response 中的设备名称
+        _ble.gap_scan(BLE_SCAN_DURATION, 100000, 50000, True)
+    except Exception as e:
+        print("BLE scan error:", e)
+        return
+
+    # 扫描是异步的，结果在回调中处理。
+    # 下次 tick 时检查上一轮扫描结果。
+    # 这里检查的是上一轮的结果（扫描回调在期间已触发）。
+    if _ble_phone_found:
+        _ble_last_seen = now
+        _ble_seen_count += 1
+    else:
+        _ble_seen_count = 0
+
+    # 状态机：判定在家/出门
+    prev_home = _user_home
+    if not _user_home and _ble_seen_count >= BLE_HOME_COUNT:
+        _user_home = True
+        print("BLE: 在家 (detected {} times)".format(_ble_seen_count))
+    elif _user_home and _ble_last_seen > 0 and (now - _ble_last_seen > BLE_AWAY_TIMEOUT):
+        _user_home = False
+        print("BLE: 出门 (not seen for {}s)".format(int(now - _ble_last_seen)))
+
+    # 状态变化时通知服务端
+    if _user_home != prev_home:
+        _notify_presence("home" if _user_home else "away")
+
+
+def _notify_presence(status):
+    """通知服务端用户在家/出门状态变化。"""
+    global _ble_status_sent
+    if _ble_status_sent == status:
+        return
+    _ble_status_sent = status
+    try:
+        url = SERVER_BASE + "/presence"
+        payload = ujson.dumps({"device_id": DEVICE_ID, "status": status})
+        resp = urequests.post(url, data=payload.encode("utf-8"),
+                              headers={"Content-Type": "application/json"})
+        print("BLE presence →", status, ":", resp.status_code)
+        resp.close()
+    except Exception as e:
+        print("BLE presence notify error:", e)
+
+
 # ── 主循环 ────────────────────────────────────────────────────
 
 def enter_sleep():
@@ -761,7 +1030,10 @@ def setup():
     _set_led(0, 0, 0)
     draw_state("idle")
     discover_server()
+    sync_rtc()
     init_mqtt()
+    init_ble()
+    init_imu()
     draw_state("idle")       # 发现完成后恢复空闲界面
     calibrate_noise()
     _last_activity = time.time()
@@ -826,6 +1098,12 @@ def loop():
 
     # MQTT 推送消息 + 命令（非阻塞，回调在 _mqtt_callback 中处理）
     mqtt_check()
+
+    # BLE 在家感知（非阻塞定期扫描）
+    ble_scan_tick()
+
+    # IMU 摇晃彩蛋检测
+    imu_shake_tick()
 
     # ── 自动休眠检查 ──
     now = time.time()
