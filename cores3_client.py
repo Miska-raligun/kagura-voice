@@ -709,8 +709,8 @@ def sync_rtc():
             ts = data.get("timestamp", 0)
             resp.close()
             if ts > 0:
-                # MicroPython time.localtime() 使用 2000-01-01 epoch
-                tm = time.localtime(ts - 946684800 + 8 * 3600)  # UTC+8
+                # UIFlow2 的 time.localtime() 使用 Unix epoch (1970)
+                tm = time.localtime(ts + 8 * 3600)  # UTC+8
                 if _has_rtc:
                     M5.Rtc.setDateTime(tm[0], tm[1], tm[2], tm[3], tm[4], tm[5])
                     print("RTC synced:", tm[:6])
