@@ -67,6 +67,8 @@ _wake_buf        = bytearray(WAKE_CHUNK_SIZE)
 _wake_last_ms    = 0
 _wake_loud_count = 0
 
+_mqtt_last_ping  = 0         # 上次 MQTT ping 时间
+
 # ── 其他全局 ──────────────────────────────────────────────────
 
 is_busy    = False
@@ -688,13 +690,20 @@ def init_mqtt():
 
 
 def mqtt_check():
-    """主循环调用：非阻塞检查 MQTT 消息，断连时自动重连+重订阅。"""
+    """主循环调用：非阻塞检查 MQTT 消息，定期 ping 保活，断连时自动重连。"""
+    global _mqtt_last_ping
     if _mqtt:
         try:
             _mqtt.check_msg()
+            # 每 30 秒发送 ping 保活（keepalive=60s，需在超时前 ping）
+            now = time.time()
+            if now - _mqtt_last_ping > 30:
+                _mqtt.ping()
+                _mqtt_last_ping = now
         except OSError as e:
             print("MQTT disconnected:", e)
             _reconnect_mqtt()
+            _mqtt_last_ping = time.time()
 
 
 # ── RTC 时间同步 ─────────────────────────────────────────────
