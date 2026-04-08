@@ -600,6 +600,9 @@ def _mqtt_callback(topic, msg):
 
     if "/push/" in topic_str:
         # 广播通知：JSON → HTTP GET 下载 WAV → 播放
+        if is_busy:
+            print("push skipped: device busy")
+            return
         try:
             info = ujson.loads(msg)
         except Exception:
@@ -818,7 +821,8 @@ def imu_shake_tick():
 
 def _show_shake_easter_egg():
     """显示摇晃彩蛋图片 2 秒，然后切换连续对话模式。continuous off→on 时额外调用 /shake 让 AI 主动聊天。"""
-    global _last_activity
+    global _last_activity, is_busy, _imu_last_shake, _touch_start
+    is_busy = True
     _last_activity = time.time()
     was_off = not continuous_mode
     try:
@@ -847,6 +851,10 @@ def _show_shake_easter_egg():
         except OSError as e:
             print("shake network err:", e)
         draw_state("idle")
+    _touch_start = None
+    drain_touch()
+    _imu_last_shake = time.time()
+    is_busy = False
 
 
 # ── BLE 扫描 ─────────────────────────────────────────────────
