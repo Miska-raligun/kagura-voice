@@ -600,9 +600,6 @@ def _mqtt_callback(topic, msg):
 
     if "/push/" in topic_str:
         # 广播通知：JSON → HTTP GET 下载 WAV → 播放
-        if is_busy:
-            print("push skipped: device busy")
-            return
         try:
             info = ujson.loads(msg)
         except Exception:
@@ -840,21 +837,13 @@ def _show_shake_easter_egg():
             if lt:
                 hdrs["X-Local-Time"] = lt
             resp = urequests.get(SERVER_BASE + "/shake", headers=hdrs)
-            if resp.status_code == 200:
-                data = resp.content
-                resp.close()
-                draw_state("playing")
-                play_wav(data)
-            else:
-                print("shake err:", resp.status_code)
-                resp.close()
+            resp.close()
         except OSError as e:
             print("shake network err:", e)
         draw_state("idle")
     _touch_start = None
     drain_touch()
     _imu_last_shake = time.time()
-    mqtt_check()       # 趁 is_busy=True 消费掉 OpenClaw 触发的 MQTT push
     is_busy = False
 
 
