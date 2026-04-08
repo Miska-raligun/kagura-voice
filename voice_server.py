@@ -597,22 +597,23 @@ def get_time():
 @app.route("/shake", methods=["GET"])
 def handle_shake():
     """
-    摇晃触发：预设文字发给 OpenClaw 对话（不做 TTS）。
-    OpenClaw 处理后会自动通过 /push 推送语音，设备端通过 MQTT 接收播放。
+    摇晃触发：立即返回，后台发消息给 OpenClaw。
+    OpenClaw 处理后自动通过 /push 推送语音，设备通过 MQTT 接收播放。
     """
     device_id = _validate_device_id(request.headers.get("X-Device-Id"))
     local_time = request.headers.get("X-Local-Time", "")
     session_id = get_session(device_id)
 
-    try:
-        reply = chat("用户摇了摇你，用语音跟她随便聊几句吧", session_id, local_time=local_time)
-        preview = reply[:80].replace("\n", " ")
-        print(f"[{device_id}] 🫨  shake → {preview}{'...' if len(reply) > 80 else ''}")
-        return jsonify({"status": "ok", "reply": reply})
+    def _bg():
+        try:
+            reply = chat("用户摇了摇你，用语音跟她随便聊几句吧", session_id, local_time=local_time)
+            preview = reply[:80].replace("\n", " ")
+            print(f"[{device_id}] 🫨  shake → {preview}{'...' if len(reply) > 80 else ''}")
+        except Exception as e:
+            print(f"[{device_id}] ⚠️  shake 错误: {e}")
 
-    except Exception as e:
-        print(f"[{device_id}] ⚠️  shake 错误: {e}")
-        return jsonify({"error": str(e)}), 500
+    threading.Thread(target=_bg, daemon=True).start()
+    return jsonify({"status": "ok"})
 
 
 @app.route("/health", methods=["GET"])
