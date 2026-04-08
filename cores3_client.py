@@ -453,6 +453,7 @@ def record_and_send():
                 time.sleep(2)
 
         if not continuous_mode:
+            mqtt_check()   # 趁 is_busy=True 消费掉 OpenClaw 触发的重复 push
             break
 
         # ── 连续模式：轮间检查主动播报 ───────────────────────────
@@ -581,6 +582,7 @@ def record_and_send_vision():
     print("Vision WAV size:", len(data))
     draw_state("playing")
     play_wav(data)
+    mqtt_check()   # 趁 is_busy=True 消费掉 OpenClaw 触发的重复 push
     draw_state("idle")
     time.sleep(1)
     drain_touch()
@@ -600,6 +602,9 @@ def _mqtt_callback(topic, msg):
 
     if "/push/" in topic_str:
         # 广播通知：JSON → HTTP GET 下载 WAV → 播放
+        if is_busy:
+            print("push skipped: device busy")
+            return
         try:
             info = ujson.loads(msg)
         except Exception:
