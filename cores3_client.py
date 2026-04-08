@@ -854,6 +854,7 @@ def _show_shake_easter_egg():
     _touch_start = None
     drain_touch()
     _imu_last_shake = time.time()
+    mqtt_check()       # 趁 is_busy=True 消费掉 OpenClaw 触发的 MQTT push
     is_busy = False
 
 
