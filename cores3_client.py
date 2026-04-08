@@ -817,9 +817,10 @@ def imu_shake_tick():
 
 
 def _show_shake_easter_egg():
-    """显示摇晃彩蛋图片 2 秒，然后切换连续对话模式。"""
+    """显示摇晃彩蛋图片 2 秒，然后切换连续对话模式。continuous off→on 时额外调用 /shake 让 AI 主动聊天。"""
     global _last_activity
     _last_activity = time.time()
+    was_off = not continuous_mode
     try:
         with open("/flash/img_shake.jpg", "rb") as f:
             Lcd.drawJpg(f.read(), 0, 0)
@@ -827,6 +828,25 @@ def _show_shake_easter_egg():
         draw_state("shake")
     time.sleep(2)
     toggle_continuous()
+    if was_off:
+        draw_state("processing")
+        try:
+            hdrs = {"X-Device-Id": DEVICE_ID}
+            lt = get_local_time_header()
+            if lt:
+                hdrs["X-Local-Time"] = lt
+            resp = urequests.get(SERVER_BASE + "/shake", headers=hdrs)
+            if resp.status_code == 200:
+                data = resp.content
+                resp.close()
+                draw_state("playing")
+                play_wav(data)
+            else:
+                print("shake err:", resp.status_code)
+                resp.close()
+        except OSError as e:
+            print("shake network err:", e)
+        draw_state("idle")
 
 
 # ── BLE 扫描 ─────────────────────────────────────────────────

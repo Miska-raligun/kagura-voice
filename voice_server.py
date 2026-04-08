@@ -594,6 +594,35 @@ def get_time():
     return jsonify({"timestamp": int(time.time())})
 
 
+@app.route("/shake", methods=["GET"])
+def handle_shake():
+    """
+    摇晃触发：预设文字发给 OpenClaw 对话，TTS 后返回 WAV。
+    设备端在 continuous off → on 切换时调用。
+    """
+    device_id = _validate_device_id(request.headers.get("X-Device-Id"))
+    local_time = request.headers.get("X-Local-Time", "")
+    session_id = get_session(device_id)
+
+    try:
+        reply = chat("用户摇了摇你，用语音跟她随便聊几句吧", session_id, local_time=local_time)
+        preview = reply[:80].replace("\n", " ")
+        print(f"[{device_id}] 🫨  shake → {preview}{'...' if len(reply) > 80 else ''}")
+
+        wav_out = synthesize(reply)
+        if not wav_out:
+            return jsonify({"error": "TTS 生成失败"}), 500
+
+        with open(wav_out, "rb") as f:
+            wav_data = f.read()
+        return Response(wav_data, mimetype="audio/wav",
+                        headers={"Content-Length": len(wav_data)})
+
+    except Exception as e:
+        print(f"[{device_id}] ⚠️  shake 错误: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({"status": "ok"})
