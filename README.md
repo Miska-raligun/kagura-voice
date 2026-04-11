@@ -78,11 +78,22 @@ netsh interface portproxy add v4tov4 listenport=5000 listenaddress=0.0.0.0 conne
 
 **CoreS3 端**：
 
-1. 用 M5Burner 烧录 UIFlow2 固件，配置 WiFi
+1. 用 M5Burner 烧录 UIFlow2 固件（WiFi 可不配，见下文"在设备上配置 WiFi"）
 2. 打开 uiflow2.m5stack.com 连接设备
 3. 将 `cores3_client.py` 的内容粘贴到编辑器
-4. 修改 `SERVER_BASE` 为服务端的局域网 IP
-5. 点击下载按钮写入设备（开机自动运行）
+4. 点击下载按钮写入设备（开机自动运行）
+5. 服务端 IP 由 UDP 广播自动发现，无需修改 `SERVER_BASE`
+
+#### 在设备上配置 WiFi
+
+`cores3_client.py` 自带屏上 WiFi 配网流程，不需要再拿数据线连电脑：
+
+- **首次开机**：如果没有可用 WiFi（未预设 / 存档缺失），自动弹出配网界面
+- **修改网络**：开机瞬间按住屏幕 2 秒内进入配网界面（即使已连上旧 WiFi）
+- **操作流程**：扫描附近网络 → 点选 SSID → 屏幕软键盘输入密码（支持大小写 / 符号切换）→ 自动连接
+- **凭据存储**：保存在设备 flash 上的 `/flash/wifi.json`，下次开机自动连接
+- **隐藏网络**：在 picker 底栏点 "Manual" 手动输入 SSID 和密码
+- **开放网络**：选中无锁标记的 SSID，跳过密码直接连接
 
 ### 操作手势（CoreS3）
 
