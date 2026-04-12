@@ -39,14 +39,20 @@ UPLOAD_URL    = SERVER_BASE + "/upload-photo"
 DEVICE_ID     = "cores3"
 MQTT_BROKER   = "192.168.31.66"
 
+# ── 网络超时 ──────────────────────────────────────────────────
+# 服务端处理包含 LLM 推理，时间较长；设备无线程，超时可避免永久挂起
+REQUEST_TIMEOUT_CHAT  = 30   # /chat、/chat-vision（含 LLM 推理）
+REQUEST_TIMEOUT_SHORT = 10   # /time、/shake、/presence 等短请求
+REQUEST_TIMEOUT_UPLOAD = 15  # /upload-photo
+
 # ── 录音参数 ──────────────────────────────────────────────────
 
 SAMPLE_RATE      = 16000
 CHUNK_SEC        = 0.5
 CHUNK_SIZE       = int(SAMPLE_RATE * 2 * CHUNK_SEC)
-SILENCE_THRESHOLD = 500
-SILENCE_CHUNKS   = 4
-MAX_CHUNKS       = 20
+SILENCE_THRESHOLD = 500   # RMS 低于此值视为静音
+SILENCE_CHUNKS   = 4      # 连续 N 个静音块后停止录音
+MAX_CHUNKS       = 20     # 最大录音块数（上限：MAX_CHUNKS × CHUNK_SEC 秒）
 
 # ── 连续对话 / 唤醒词模式 ──────────────────────────────────────
 
@@ -897,7 +903,7 @@ def record_and_send():
             lt = get_local_time_header()
             if lt:
                 hdrs["X-Local-Time"] = lt
-            resp = urequests.post(SERVER_URL, data=wav, headers=hdrs)
+            resp = urequests.post(SERVER_URL, data=wav, headers=hdrs, timeout=REQUEST_TIMEOUT_CHAT)
             if resp.status_code != 200:
                 print("chat err:", resp.text)
                 resp.close()
@@ -943,6 +949,7 @@ def record_and_send():
                     VISION_URL,
                     data=payload.encode("utf-8"),
                     headers=v_hdrs,
+                    timeout=REQUEST_TIMEOUT_CHAT,
                 )
                 if resp2.status_code == 200:
                     data2 = resp2.content
@@ -1066,6 +1073,7 @@ def record_and_send_vision():
             VISION_URL,
             data=payload.encode("utf-8"),
             headers=v_hdrs,
+            timeout=REQUEST_TIMEOUT_CHAT,
         )
         if resp.status_code != 200:
             print("vision err:", resp.text)
@@ -1126,7 +1134,7 @@ def _mqtt_callback(topic, msg):
         draw_state("broadcast")
         try:
             full_url = SERVER_BASE + url
-            resp = urequests.get(full_url)
+            resp = urequests.get(full_url, timeout=REQUEST_TIMEOUT_SHORT)
             if resp.status_code == 200:
                 play_wav(resp.content)
             resp.close()
@@ -1147,25 +1155,28 @@ def _mqtt_callback(topic, msg):
                 wake_up()
             _last_activity = time.time()
             is_busy = True
-            draw_state("camera")
-            image_b64 = capture_photo()
-            draw_state("processing")
-            payload = ujson.dumps({
-                "request_id": cmd.get("request_id", ""),
-                "image": image_b64 or "",
-                "device_id": DEVICE_ID,
-            })
             try:
-                resp = urequests.post(
-                    UPLOAD_URL,
-                    data=payload.encode("utf-8"),
-                    headers={"Content-Type": "application/json"},
-                )
-                resp.close()
-            except OSError as e:
-                print("upload err:", e)
-            draw_state("idle")
-            is_busy = False
+                draw_state("camera")
+                image_b64 = capture_photo()
+                draw_state("processing")
+                payload = ujson.dumps({
+                    "request_id": cmd.get("request_id", ""),
+                    "image": image_b64 or "",
+                    "device_id": DEVICE_ID,
+                })
+                try:
+                    resp = urequests.post(
+                        UPLOAD_URL,
+                        data=payload.encode("utf-8"),
+                        headers={"Content-Type": "application/json"},
+                        timeout=REQUEST_TIMEOUT_UPLOAD,
+                    )
+                    resp.close()
+                except OSError as e:
+                    print("upload err:", e)
+            finally:
+                draw_state("idle")
+                is_busy = False
 
 
 def _reconnect_mqtt():
@@ -1224,7 +1235,7 @@ def sync_rtc():
     """从服务端获取时间并设置 RTC（无 RTC 硬件时用软件偏移代替）。"""
     global _rtc_synced, _soft_time_offset
     try:
-        resp = urequests.get(SERVER_BASE + "/time")
+        resp = urequests.get(SERVER_BASE + "/time", timeout=REQUEST_TIMEOUT_SHORT)
         if resp.status_code == 200:
             data = ujson.loads(resp.text)
             ts = data.get("timestamp", 0)
@@ -1333,30 +1344,32 @@ def _show_shake_easter_egg():
     global _last_activity, is_busy, _imu_last_shake, _touch_start
     is_busy = True
     _last_activity = time.time()
-    was_off = not continuous_mode
     try:
-        with open("/flash/img_shake.jpg", "rb") as f:
-            Lcd.drawJpg(f.read(), 0, 0)
-    except Exception:
-        draw_state("shake")
-    time.sleep(2)
-    toggle_continuous()
-    if was_off:
-        draw_state("processing")
+        was_off = not continuous_mode
         try:
-            hdrs = {"X-Device-Id": DEVICE_ID}
-            lt = get_local_time_header()
-            if lt:
-                hdrs["X-Local-Time"] = lt
-            resp = urequests.get(SERVER_BASE + "/shake", headers=hdrs)
-            resp.close()
-        except OSError as e:
-            print("shake network err:", e)
-        draw_state("idle")
-    _touch_start = None
-    drain_touch()
-    _imu_last_shake = time.time()
-    is_busy = False
+            with open("/flash/img_shake.jpg", "rb") as f:
+                Lcd.drawJpg(f.read(), 0, 0)
+        except Exception:
+            draw_state("shake")
+        time.sleep(2)
+        toggle_continuous()
+        if was_off:
+            draw_state("processing")
+            try:
+                hdrs = {"X-Device-Id": DEVICE_ID}
+                lt = get_local_time_header()
+                if lt:
+                    hdrs["X-Local-Time"] = lt
+                resp = urequests.get(SERVER_BASE + "/shake", headers=hdrs, timeout=REQUEST_TIMEOUT_SHORT)
+                resp.close()
+            except OSError as e:
+                print("shake network err:", e)
+            draw_state("idle")
+        _touch_start = None
+        drain_touch()
+        _imu_last_shake = time.time()
+    finally:
+        is_busy = False
 
 
 # ── BLE 扫描 ─────────────────────────────────────────────────
@@ -1490,7 +1503,8 @@ def _notify_presence(status):
         url = SERVER_BASE + "/presence"
         payload = ujson.dumps({"device_id": DEVICE_ID, "status": status})
         resp = urequests.post(url, data=payload.encode("utf-8"),
-                              headers={"Content-Type": "application/json"})
+                              headers={"Content-Type": "application/json"},
+                              timeout=REQUEST_TIMEOUT_SHORT)
         print("BLE presence →", status, ":", resp.status_code)
         resp.close()
     except Exception as e:

@@ -49,13 +49,15 @@ SAMPLE_RATE = 16000
 
 # ── 线程锁 ───────────────────────────────────────────────────────────────────
 
-_token_lock = threading.Lock()
+_asr_token_lock = threading.Lock()   # 仅用于 ASR token，避免与 TTS token 互相阻塞
+_tts_token_lock = threading.Lock()   # 仅用于 TTS token
 _sessions_lock = threading.Lock()
 _photo_lock = threading.Lock()
 
 # ── 百度语音识别 ──────────────────────────────────────────────────────────────
 
 from config import BAIDU_API_KEY, BAIDU_SECRET_KEY, BAIDU_TTS_API_KEY, BAIDU_TTS_SECRET_KEY
+from oc_utils import _extract_json, strip_markdown
 
 _baidu_token = None
 _baidu_token_expire = 0
@@ -72,14 +74,17 @@ def _get_token(api_key, secret_key):
     )
     with urllib.request.urlopen(url, timeout=10) as resp:
         data = json.loads(resp.read())
-    return data["access_token"], time.time() + data["expires_in"] - 60
+    if "access_token" not in data:
+        raise RuntimeError(f"百度 token 获取失败: {data.get('error', data)}")
+    expires_in = data.get("expires_in", 2592000)  # 默认 30 天
+    return data["access_token"], time.time() + expires_in - 60
 
 
 def get_baidu_token():
     global _baidu_token, _baidu_token_expire
     if _baidu_token and time.time() < _baidu_token_expire:
         return _baidu_token
-    with _token_lock:
+    with _asr_token_lock:
         if _baidu_token and time.time() < _baidu_token_expire:
             return _baidu_token
         _baidu_token, _baidu_token_expire = _get_token(BAIDU_API_KEY, BAIDU_SECRET_KEY)
@@ -90,7 +95,7 @@ def get_baidu_tts_token():
     global _baidu_tts_token, _baidu_tts_token_expire
     if _baidu_tts_token and time.time() < _baidu_tts_token_expire:
         return _baidu_tts_token
-    with _token_lock:
+    with _tts_token_lock:
         if _baidu_tts_token and time.time() < _baidu_tts_token_expire:
             return _baidu_tts_token
         _baidu_tts_token, _baidu_tts_token_expire = _get_token(BAIDU_TTS_API_KEY, BAIDU_TTS_SECRET_KEY)
@@ -125,22 +130,6 @@ def transcribe(audio_path):
 
 # ── 对话 ──────────────────────────────────────────────────────────────────────
 
-def _extract_json(raw):
-    clean = re.sub(r"\x1b\[[0-9;]*m", "", raw)
-    depth = 0
-    start = None
-    for i, ch in enumerate(clean):
-        if ch == "{":
-            if depth == 0:
-                start = i
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0 and start is not None:
-                return json.loads(clean[start: i + 1])
-    raise ValueError(f"未找到完整 JSON: {raw[:200]}")
-
-
 def chat(user_text, session_id, image_path=None, local_time=None):
     message = user_text
     if local_time:
@@ -165,21 +154,6 @@ def chat(user_text, session_id, image_path=None, local_time=None):
 
 
 # ── TTS ───────────────────────────────────────────────────────────────────────
-
-def strip_markdown(text):
-    text = re.sub(r"```[\s\S]*?```", "", text)
-    text = re.sub(r"`[^`]+`", "", text)
-    text = re.sub(r"#{1,6}\s+", "", text)
-    text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)
-    text = re.sub(r"\*(.+?)\*", r"\1", text)
-    text = re.sub(r"~~(.+?)~~", r"\1", text)
-    text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
-    text = re.sub(r"!\[[^\]]*\]\([^)]+\)", "", text)
-    text = re.sub(r"^\s*[-*+]\s+", "", text, flags=re.MULTILINE)
-    text = re.sub(r"^\s*\d+\.\s+", "", text, flags=re.MULTILINE)
-    text = re.sub(r"\n{2,}", "\n", text)
-    return text.strip()
-
 
 def synthesize(text):
     """百度 TTS：文字 → PCM → 干净 WAV"""
@@ -258,6 +232,27 @@ def get_session(device_id):
         return _sessions[device_id]
 
 
+# ── 简单限流（无外部依赖，基于 device_id 的滑动窗口） ───────────────────────
+
+_rate_buckets: dict = {}   # device_id → (window_start: float, count: int)
+_RATE_WINDOW  = 60         # 秒
+_RATE_MAX     = 20         # 每设备每分钟最多请求次数
+
+
+def _check_rate(device_id: str) -> bool:
+    """返回 True 表示允许，False 表示已超限。使用 _sessions_lock 复用现有锁。"""
+    now = time.time()
+    with _sessions_lock:
+        bucket = _rate_buckets.get(device_id)
+        if bucket is None or now - bucket[0] > _RATE_WINDOW:
+            _rate_buckets[device_id] = (now, 1)
+            return True
+        if bucket[1] >= _RATE_MAX:
+            return False
+        _rate_buckets[device_id] = (bucket[0], bucket[1] + 1)
+        return True
+
+
 # ── Flask 路由 ────────────────────────────────────────────────────────────────
 
 app = Flask(__name__)
@@ -276,13 +271,24 @@ RGB565_SIZES = {
 }
 
 
+_MAX_IMAGE_B64_BYTES = 5 * 1024 * 1024   # 5 MB base64 上限（约 3.75 MB 解码后）
+_MAX_AUDIO_BYTES    = 5 * 1024 * 1024   # 5 MB WAV 上限
+
+
 def _decode_image_b64(image_b64, device_id="unknown", tag=""):
     """解码 base64 图片（RGB565 或 JPEG），保存为 JPEG，返回路径。失败返回 None。"""
+    if len(image_b64) > _MAX_IMAGE_B64_BYTES:
+        print(f"[{tag}] {device_id} image base64 过大: {len(image_b64)} bytes，拒绝")
+        return None
     image_b64_clean = image_b64.replace("\n", "").replace("\r", "")
     padding = len(image_b64_clean) % 4
     if padding:
         image_b64_clean += "=" * (4 - padding)
-    decoded_bytes = base64.b64decode(image_b64_clean)
+    try:
+        decoded_bytes = base64.b64decode(image_b64_clean)
+    except Exception as e:
+        print(f"[{tag}] {device_id} base64 解码失败: {e}")
+        return None
     n = len(decoded_bytes)
     image_path = str(VISION_TMP_DIR / f"oc_vision_{uuid.uuid4().hex[:8]}.jpg")
 
@@ -330,12 +336,16 @@ def handle_chat():
     客户端收到后应拍照并将原始音频+图片发送至 /chat-vision。
     """
     device_id = _validate_device_id(request.headers.get("X-Device-Id"))
+    if not _check_rate(device_id):
+        return jsonify({"error": "请求过于频繁，请稍后再试"}), 429
     local_time = request.headers.get("X-Local-Time", "")
     session_id = get_session(device_id)
 
     audio_data = request.get_data()
     if not audio_data:
         return jsonify({"error": "没有收到音频数据"}), 400
+    if len(audio_data) > _MAX_AUDIO_BYTES:
+        return jsonify({"error": "音频数据过大"}), 413
 
     # Fix 2: 请求级临时文件，避免并发路由互相覆盖
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
@@ -436,11 +446,25 @@ _MAX_PHOTO_RESULTS = 200
 
 
 def _cleanup_photo_results():
-    """清理超过 5 分钟的旧记录。"""
+    """清理超过 5 分钟的旧记录，同时删除对应磁盘文件。"""
     now = time.time()
     expired = [k for k, v in _photo_results.items() if now - v.get("_ts", 0) > 300]
     for k in expired:
-        del _photo_results[k]
+        entry = _photo_results.pop(k)
+        img = entry.get("image_path")
+        if img:
+            try:
+                os.unlink(img)
+            except OSError:
+                pass
+
+
+def _photo_cleanup_loop():
+    """后台定期（每 5 分钟）清理过期照片记录，不依赖请求触发。"""
+    while True:
+        time.sleep(300)
+        with _photo_lock:
+            _cleanup_photo_results()
 
 
 @app.route("/capture-request", methods=["POST"])
@@ -510,6 +534,8 @@ def handle_chat_vision():
     返回 WAV 音频。
     """
     device_id  = _validate_device_id(request.headers.get("X-Device-Id"))
+    if not _check_rate(device_id):
+        return jsonify({"error": "请求过于频繁，请稍后再试"}), 429
     local_time = request.headers.get("X-Local-Time", "")
     session_id = get_session(device_id)
 
@@ -517,7 +543,13 @@ def handle_chat_vision():
     if not data or "wav" not in data:
         return jsonify({"error": "missing wav"}), 400
 
-    wav_bytes = base64.b64decode(data["wav"])
+    wav_b64 = data["wav"]
+    if len(wav_b64) > _MAX_AUDIO_BYTES:
+        return jsonify({"error": "WAV 数据过大"}), 413
+    try:
+        wav_bytes = base64.b64decode(wav_b64)
+    except Exception:
+        return jsonify({"error": "WAV base64 解码失败"}), 400
     image_b64 = data.get("image", "")
 
     # Fix 2: 请求级临时文件
@@ -601,6 +633,8 @@ def handle_shake():
     OpenClaw 处理后自动通过 /push 推送语音，设备通过 MQTT 接收播放。
     """
     device_id = _validate_device_id(request.headers.get("X-Device-Id"))
+    if not _check_rate(device_id):
+        return jsonify({"error": "请求过于频繁，请稍后再试"}), 429
     local_time = request.headers.get("X-Local-Time", "")
     session_id = get_session(device_id)
 
@@ -609,6 +643,15 @@ def handle_shake():
             reply = chat("用户摇了摇你，用语音跟她随便聊几句吧", session_id, local_time=local_time)
             preview = reply[:80].replace("\n", " ")
             print(f"[{device_id}] 🫨  shake → {preview}{'...' if len(reply) > 80 else ''}")
+            # 通过 push 机制将回复推送给设备（TTS→WAV→MQTT 通知）
+            if _mqtt_client is not None:
+                wav_path = synthesize(reply)
+                if wav_path:
+                    fname = f"{uuid.uuid4().hex[:8]}.wav"
+                    dest = PUSH_AUDIO_DIR / fname
+                    shutil.copy(wav_path, dest)
+                    notify = json.dumps({"type": "push", "url": f"/push-audio/{fname}"})
+                    _mqtt_client.publish(f"kagura/push/{device_id}", notify, qos=1)
         except Exception as e:
             print(f"[{device_id}] ⚠️  shake 错误: {e}")
 
@@ -653,6 +696,7 @@ if __name__ == "__main__":
     get_baidu_token()
     print(" OK")
     _init_mqtt()
+    threading.Thread(target=_photo_cleanup_loop, daemon=True, name="photo-cleanup").start()
     print(f"Agent : {AGENT_ID}  |  TTS : {TTS_VOICE}")
     print("监听 0.0.0.0:5000，Ctrl+C 退出\n")
     app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)
