@@ -606,7 +606,7 @@ def handle_shake():
 
     def _bg():
         try:
-            reply = chat("用户摇了摇你，用语音跟她随便聊几句吧", session_id, local_time=local_time)
+            reply = chat("mio摇了摇你，用语音跟他随便聊几句吧", session_id, local_time=local_time)
             preview = reply[:80].replace("\n", " ")
             print(f"[{device_id}] 🫨  shake → {preview}{'...' if len(reply) > 80 else ''}")
         except Exception as e:
