@@ -643,15 +643,6 @@ def handle_shake():
             reply = chat("用户摇了摇你，用语音跟她随便聊几句吧", session_id, local_time=local_time)
             preview = reply[:80].replace("\n", " ")
             print(f"[{device_id}] 🫨  shake → {preview}{'...' if len(reply) > 80 else ''}")
-            # 通过 push 机制将回复推送给设备（TTS→WAV→MQTT 通知）
-            if _mqtt_client is not None:
-                wav_path = synthesize(reply)
-                if wav_path:
-                    fname = f"{uuid.uuid4().hex[:8]}.wav"
-                    dest = PUSH_AUDIO_DIR / fname
-                    shutil.copy(wav_path, dest)
-                    notify = json.dumps({"type": "push", "url": f"/push-audio/{fname}"})
-                    _mqtt_client.publish(f"kagura/push/{device_id}", notify, qos=1)
         except Exception as e:
             print(f"[{device_id}] ⚠️  shake 错误: {e}")
 
