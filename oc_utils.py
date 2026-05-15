@@ -2,11 +2,14 @@
 共享工具函数，供 voice_assistant.py 和 voice_server.py 共同使用。
 """
 
+from __future__ import annotations
+
 import json
 import re
+from typing import Any
 
 
-def _extract_json(raw):
+def _extract_json(raw: str) -> dict[str, Any]:
     """
     从混有 ANSI 日志的 stdout 中提取完整的顶层 JSON 对象。
     用括号计数法定位，避免被嵌套 { 干扰。
@@ -26,7 +29,7 @@ def _extract_json(raw):
     raise ValueError(f"未找到完整 JSON 对象: {raw[:200]}")
 
 
-def strip_markdown(text):
+def strip_markdown(text: str) -> str:
     """去除常见 Markdown 标记，避免 TTS 读出符号。"""
     text = re.sub(r"```[\s\S]*?```", "", text)
     text = re.sub(r"`[^`]+`", "", text)

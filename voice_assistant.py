@@ -11,6 +11,8 @@ OpenClaw 语音对话助手
 退出: Ctrl+C
 """
 
+from __future__ import annotations
+
 import base64
 import json
 import os
@@ -21,6 +23,7 @@ import time
 import uuid
 import wave
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 import urllib.request
@@ -59,7 +62,7 @@ from oc_utils import _extract_json, strip_markdown
 
 # ── 提示音 ────────────────────────────────────────────────────────────────────
 
-def beep(freq=880, duration=0.12, block=False):
+def beep(freq: int = 880, duration: float = 0.12, block: bool = False) -> None:
     """播放短提示音。block=True 时等待播完再返回（用于录音前）。"""
     args = [
         "ffplay", "-autoexit", "-nodisp", "-loglevel", "error",
@@ -75,7 +78,7 @@ def beep(freq=880, duration=0.12, block=False):
 
 # ── 百度 Token ────────────────────────────────────────────────────────────────
 
-def get_baidu_token():
+def get_baidu_token() -> str:
     """获取百度 access token，有效期 30 天。"""
     url = (
         "https://aip.baidubce.com/oauth/2.0/token"
@@ -92,7 +95,7 @@ def get_baidu_token():
 
 # ── 录音 ──────────────────────────────────────────────────────────────────────
 
-def record_until_silence():
+def record_until_silence() -> Optional[str]:
     """
     从麦克风录音，检测到说话后开始收集，
     静音超过 SILENCE_DURATION 秒后停止。
@@ -178,7 +181,7 @@ def record_until_silence():
 
 # ── 语音识别 ──────────────────────────────────────────────────────────────────
 
-def transcribe(token, audio_path):
+def transcribe(token: str, audio_path: str) -> str:
     """调用百度语音识别 API，返回文字。"""
     print("💬  识别中...", end="", flush=True)
 
@@ -218,7 +221,7 @@ def transcribe(token, audio_path):
 
 # ── 对话 ──────────────────────────────────────────────────────────────────────
 
-def chat(user_text, session_id):
+def chat(user_text: str, session_id: str) -> str:
     """
     调用 openclaw agent CLI 发送消息，返回回复文字。
     session_id 由调用方在启动时生成，整个会话复用，与主对话隔离。
@@ -255,7 +258,7 @@ def chat(user_text, session_id):
 
 # ── TTS ───────────────────────────────────────────────────────────────────────
 
-def synthesize(text):
+def synthesize(text: str) -> Optional[str]:
     """调用 edge-tts 生成 MP3，返回文件路径。"""
     clean = strip_markdown(text)
     if not clean:
@@ -277,7 +280,7 @@ def synthesize(text):
 
 # ── 播放 ──────────────────────────────────────────────────────────────────────
 
-def play(mp3_path):
+def play(mp3_path: str) -> None:
     """用 ffplay 播放 MP3，阻塞直到播放完毕，再稍作延迟防止回声入麦。"""
     print("\r🔊  播放中...  ", end="", flush=True)
     subprocess.run(
@@ -291,7 +294,7 @@ def play(mp3_path):
 
 # ── 主循环 ────────────────────────────────────────────────────────────────────
 
-def main():
+def main() -> None:
     print("=" * 50)
     print("  OpenClaw 语音对话助手")
     print("=" * 50)
@@ -342,7 +345,7 @@ def main():
             print(f"\n⚠️  错误: {e}")
 
 
-def main_text():
+def main_text() -> None:
     """文字输入模式：输入文字 → openclaw 回复 → 语音播放。"""
     print("=" * 50)
     print("  OpenClaw 语音助手（文字模式）")

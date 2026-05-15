@@ -177,7 +177,8 @@ def draw_state(state):
             with open("/flash/img_bg.jpg", "rb") as _f:
                 Lcd.drawJpg(_f.read(), 0, 0)
             img_shown = True
-        except Exception:
+        except Exception as e:
+            print("[ui] bg fallback to solid color:", e)
             Widgets.fillScreen(0x1a1a1a)
 
     # ── 步骤 2：彩色状态条 + 标签（透明背景，悬浮在图片上）──────
@@ -302,8 +303,8 @@ def _wlan_if():
     try:
         if not _wlan.active():
             _wlan.active(True)
-    except Exception:
-        pass
+    except Exception as e:
+        print("[wifi] STA activate failed:", e)
     return _wlan
 
 
@@ -1122,8 +1123,8 @@ def _mqtt_callback(topic, msg):
             return
         try:
             info = ujson.loads(msg)
-        except Exception:
-            print("push parse error")
+        except Exception as e:
+            print("[mqtt] push parse error:", e)
             return
         url = info.get("url", "")
         if not url:
@@ -1147,8 +1148,8 @@ def _mqtt_callback(topic, msg):
         # 远程命令：JSON payload
         try:
             cmd = ujson.loads(msg)
-        except Exception:
-            print("MQTT cmd parse error")
+        except Exception as e:
+            print("[mqtt] cmd parse error:", e)
             return
         if cmd.get("action") == "capture":
             if _is_sleeping:
@@ -1349,7 +1350,8 @@ def _show_shake_easter_egg():
         try:
             with open("/flash/img_shake.jpg", "rb") as f:
                 Lcd.drawJpg(f.read(), 0, 0)
-        except Exception:
+        except Exception as e:
+            print("[shake] img_shake.jpg unavailable, falling back to kaomoji:", e)
             draw_state("shake")
         time.sleep(2)
         toggle_continuous()
