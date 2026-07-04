@@ -10,6 +10,7 @@ OpenClaw 语音服务端
 """
 
 import base64
+import hashlib
 import json
 import os
 import re
@@ -41,10 +42,14 @@ PULSE_ENV = {**os.environ, "PULSE_SERVER": "unix:/mnt/wslg/PulseServer"}
 
 WAV_PATH = "/tmp/oc_server_input.wav"
 MP3_PATH = "/tmp/oc_server_response.mp3"
-OUT_WAV_PATH = "/tmp/oc_server_response.wav"
-
 PUSH_AUDIO_DIR = Path(__file__).parent / "push_audio"
 PUSH_AUDIO_DIR.mkdir(exist_ok=True)
+PUSH_AUDIO_MAX_FILES = 50    # 设备下载即删,这里只兜底清理下载失败的孤儿文件
+
+# TTS 内容寻址缓存:同一文本+音色只调一次百度 API(固定提示语零成本/零延迟)
+TTS_CACHE_DIR = Path(__file__).parent / "tts_cache"
+TTS_CACHE_DIR.mkdir(exist_ok=True)
+TTS_CACHE_MAX_FILES = 200
 
 VISION_TMP_DIR = OPENCLAW_DIR / "workspace" / "tmp"
 VISION_TMP_DIR.mkdir(parents=True, exist_ok=True)
@@ -113,11 +118,32 @@ def chat(user_text: str, session_id: str, image_path: Optional[str] = None, loca
 
 # ── TTS ───────────────────────────────────────────────────────────────────────
 
+def _prune_dir(dirpath: Path, max_files: int) -> None:
+    """按 mtime 保留最新 max_files 个 wav，其余删除（LRU 兜底，防止目录无限膨胀）。"""
+    files = sorted(dirpath.glob("*.wav"), key=lambda p: p.stat().st_mtime, reverse=True)
+    for stale in files[max_files:]:
+        try:
+            stale.unlink()
+        except OSError:
+            pass
+
+
 def synthesize(text: str) -> Optional[str]:
-    """百度 TTS：文字 → PCM → 干净 WAV"""
+    """百度 TTS：文字 → PCM → 干净 WAV。
+
+    结果按 md5(文本+音色参数) 缓存于 TTS_CACHE_DIR，命中直接返回，
+    不再调百度 API——固定提示语（如 Claude 权限提醒）只合成一次。
+    """
     clean = strip_markdown(text)
     if not clean:
         return None
+    # key 带上音色参数：以后改音色/语速，旧缓存自动失效
+    cache_key = hashlib.md5(f"{clean}|spd5|pit5|vol10|per111|aue4".encode("utf-8")).hexdigest()
+    cache_path = TTS_CACHE_DIR / f"{cache_key}.wav"
+    if cache_path.exists():
+        cache_path.touch()  # 刷新 mtime，供 LRU 保留热门条目
+        print(f"[tts] ♻️  缓存命中: {clean[:30]}{'...' if len(clean) > 30 else ''}")
+        return str(cache_path)
     token = _tts_tokens.get()
     params = urllib.parse.urlencode({
         "tex": clean,
@@ -149,9 +175,13 @@ def synthesize(text: str) -> Optional[str]:
         b'RIFF', 36 + data_len, b'WAVE',
         b'fmt ', 16, 1, ch, sr, sr * ch * bits // 8, ch * bits // 8, bits,
         b'data', data_len)
-    with open(OUT_WAV_PATH, "wb") as f:
+    # 先写临时文件再原子改名：并发合成同一文本时不会读到半个 WAV
+    fd, tmp = tempfile.mkstemp(suffix=".part", dir=TTS_CACHE_DIR)
+    with os.fdopen(fd, "wb") as f:
         f.write(header + body)
-    return OUT_WAV_PATH
+    os.replace(tmp, cache_path)
+    _prune_dir(TTS_CACHE_DIR, TTS_CACHE_MAX_FILES)
+    return str(cache_path)
 
 
 # ── MQTT 推送客户端 ──────────────────────────────────────────────────────────
@@ -395,6 +425,7 @@ def push_message():
         fname = f"{uuid.uuid4().hex[:8]}.wav"
         dest = PUSH_AUDIO_DIR / fname
         shutil.copy(wav_path, dest)
+        _prune_dir(PUSH_AUDIO_DIR, PUSH_AUDIO_MAX_FILES)
         notify = json.dumps({"type": "push", "url": f"/push-audio/{fname}"})
         _mqtt_client.publish(f"kagura/push/{device_id}", notify, qos=1)
         print(f"[push] → {device_id} via MQTT notify: {text[:50]}{'...' if len(text) > 50 else ''}")
