@@ -32,7 +32,13 @@
 - Python 3.10+
 
 ```bash
-pip install flask numpy
+pip install -r requirements.txt
+```
+
+运行测试（服务端逻辑，无需硬件和外部服务）：
+
+```bash
+pytest tests/
 ```
 
 ## 配置
@@ -46,6 +52,21 @@ cp config.example.py config.py
 2. 在[百度智能云](https://console.bce.baidu.com)创建**两个应用**：
    - 语音识别应用 → 填入 `BAIDU_API_KEY` 和 `BAIDU_SECRET_KEY`
    - 语音合成应用（需开通语音合成权限）→ 填入 `BAIDU_TTS_API_KEY` 和 `BAIDU_TTS_SECRET_KEY`
+
+### 安全说明
+
+服务端设计为**在可信局域网内运行**，HTTP 接口默认不做鉴权（方便多个 agent
+直接调用 `/push` 等接口协作）。请不要将 5000 端口暴露到公网。
+
+如果局域网内有不可信设备，可在 `config.py` 中设置共享密钥：
+
+```python
+API_TOKEN = "随便一串足够长的字符串"
+```
+
+设置后 `/push` 与 `/capture-request`（远程拍照）需携带 `X-Api-Token` 头才能调用；
+留空则完全开放（默认）。另外服务端对 `/chat` 类接口有按设备 + 按来源 IP
+的双层限流，防止恶意刷 LLM 调用。
 
 ## 使用
 
@@ -100,11 +121,13 @@ netsh interface portproxy add v4tov4 listenport=5000 listenaddress=0.0.0.0 conne
 
 | 手势 | 功能 |
 |---|---|
-| 短按上方区域 | 普通语音对话 |
-| 短按下方区域 | 拍照 + 语音对话 |
+| 短按屏幕 | 普通语音对话 |
 | 说出拍照关键词 | 自动触发拍照（"看看"、"拍照"、"图片"等） |
 | 长按 | 切换声控唤醒模式（再次长按退出） |
 | 摇晃设备 | 显示彩蛋图片 + 切换连续对话（off→on 时 AI 主动聊天） |
+
+> 拍照有两条路径：对话中说出拍照关键词（由 OpenClaw 判断后回拍照指令），
+> 或服务端通过 MQTT 下发远程拍照命令（`/capture-request`）。
 
 ### LED 状态指示
 
@@ -193,6 +216,8 @@ CoreS3 启动时自动从服务端同步时间，待机界面显示当前时钟�
 ├── baidu_tokens.py      # 百度 access token 缓存（线程安全）
 ├── quick_commands.py    # 快捷指令规则（时间/日期/星期本地秒回）
 ├── oc_utils.py          # 共享工具（JSON 提取、Markdown 清洗）
+├── tests/               # 服务端单元测试（外部依赖全打桩）
+├── requirements.txt     # Python 依赖
 ├── config.py            # API Key 配置（不提交）
 └── config.example.py    # 配置示例
 ```
@@ -211,4 +236,6 @@ CoreS3 启动时自动从服务端同步时间，待机界面显示当前时钟�
 - [x] IMU 摇晃彩蛋：摇晃设备显示隐藏图片 + AI 主动聊天
 - [x] 服务端可靠性：线程安全、内存泄漏修复、MQTT 容错
 - [x] 快捷指令短路：时间/日期/星期等问题本地秒回，不走 LLM
+- [x] 服务端单测 + 可选 API_TOKEN + IP 兜底限流 + openclaw 并发控制
+- [x] 设备端功耗优化：主循环限速、唤醒模式麦克风常开、rms 提速
 - [ ] 音色优化：寻找更符合神乐风格的 TTS 声音

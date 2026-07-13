@@ -76,11 +76,19 @@ def _mic_off():
         Mic.end()
         _mic_active = False
 
-# ── 连续对话 / 唤醒词模式 ──────────────────────────────────────
+# ── 设备运行状态（跨子系统共享的 flag 全部集中在这里） ──────────
+#
+# 模式互斥/转移只应通过 toggle_continuous() / toggle_wake_mode() /
+# enter_sleep() / wake_up() 这些入口函数改动，不要在业务代码里直接翻 flag。
 
-continuous_mode = False
+class St:
+    busy          = False   # 正在录音/请求/播放（MQTT push 会看它跳过重复播放）
+    continuous    = False   # 连续对话模式
+    wake          = False   # 声控唤醒模式（与 continuous 互斥）
+    sleeping      = False   # 息屏休眠中
+    last_activity = 0       # 最近一次交互时间戳（休眠计时）
 
-WAKE_MODE        = False
+
 WAKE_THRESHOLD   = 600      # 高于环境底噪，低于正常说话音量
 WAKE_CHUNK_SIZE  = int(16000 * 2 * 0.1)  # 每次采样 100ms
 WAKE_LOUD_NEED   = 3        # 连续 N 次超阈值触发（N×100ms）
@@ -99,14 +107,8 @@ _wake_loud_count = 0
 
 _mqtt_last_ping  = 0         # 上次 MQTT ping 时间
 
-# ── 其他全局 ──────────────────────────────────────────────────
-
-is_busy    = False
-
 # ── 自动休眠 ────────────────────────────────────────────────
 SLEEP_TIMEOUT  = 300         # 5 分钟无操作后息屏
-_last_activity = 0
-_is_sleeping   = False
 
 # ── BLE 在家感知 ─────────────────────────────────────────────
 BLE_PHONE_NAME    = ""       # 用户手机蓝牙名称（部分匹配），为空则禁用
@@ -207,8 +209,8 @@ def draw_state(state):
     Widgets.Line(0, 0, 320, 0, color)
     Widgets.Line(0, 1, 320, 1, color)
     Widgets.Line(0, 2, 320, 2, color)
-    cm_color = 0x00ffcc if continuous_mode else 0x3a3a3a
-    wm_color = 0xffcc00 if WAKE_MODE       else 0x3a3a3a
+    cm_color = 0x00ffcc if St.continuous else 0x3a3a3a
+    wm_color = 0xffcc00 if St.wake       else 0x3a3a3a
     Lcd.setFont(_FONT_16)
     Lcd.setTextSize(1)
     Lcd.setTextColor(cm_color, cm_color)
@@ -811,24 +813,22 @@ def ensure_wifi(force_setup=False):
 
 def toggle_continuous():
     """摇晃切换连续对话模式。开启时自动关闭声控唤醒（两者互斥）。"""
-    global continuous_mode, WAKE_MODE
-    continuous_mode = not continuous_mode
-    if continuous_mode:
-        WAKE_MODE = False
-    draw_state("continuous_on" if continuous_mode else "continuous_off")
+    St.continuous = not St.continuous
+    if St.continuous:
+        St.wake = False
+    draw_state("continuous_on" if St.continuous else "continuous_off")
     time.sleep(0.8)
     draw_state("idle")
 
 
 def toggle_wake_mode():
     """长按切换声控唤醒模式。开启时自动关闭连续对话（两者互斥）。"""
-    global WAKE_MODE, continuous_mode
-    WAKE_MODE = not WAKE_MODE
-    if WAKE_MODE:
-        continuous_mode = False
+    St.wake = not St.wake
+    if St.wake:
+        St.continuous = False
     else:
         _mic_off()   # 退出唤醒模式时释放常开的麦克风
-    draw_state("wake_on" if WAKE_MODE else "wake_off")
+    draw_state("wake_on" if St.wake else "wake_off")
     time.sleep(0.8)   # Bug 3 Fix: 1.5→0.8s，缩短切换反馈时间
     draw_state("idle")
 
@@ -893,12 +893,11 @@ def play_wav(data):
 def record_and_send():
     """
     录音 → 发送服务端 → 播放回复。
-    若 continuous_mode 开启则自动进入下一轮；
+    若 St.continuous 开启则自动进入下一轮；
     播放结束后有 1.5s 窗口，长按可退出连续模式。
     """
-    global is_busy, _last_activity
-    is_busy = True
-    _last_activity = time.time()
+    St.busy = True
+    St.last_activity = time.time()
     gc.collect()
 
     while True:
@@ -906,17 +905,17 @@ def record_and_send():
         chunks = _record_audio()
 
         if chunks is None:         # 用户长按中断录音 → 退出当前模式
-            if continuous_mode:
+            if St.continuous:
                 toggle_continuous()
-            elif WAKE_MODE:
+            elif St.wake:
                 toggle_wake_mode()
-            is_busy = False
+            St.busy = False
             return
 
         if not chunks:
             draw_state("no_speech")
             time.sleep(1)
-            if not continuous_mode:
+            if not St.continuous:
                 break
             continue
 
@@ -937,7 +936,7 @@ def record_and_send():
                 resp.close()
                 draw_state("error")
                 time.sleep(2)
-                if not continuous_mode:
+                if not St.continuous:
                     break
                 continue
             need_photo = resp.headers.get("X-Need-Photo", "") == "1"
@@ -947,7 +946,7 @@ def record_and_send():
             print("network err:", e)
             draw_state("error")
             time.sleep(2)
-            if not continuous_mode:
+            if not St.continuous:
                 break
             continue
 
@@ -994,8 +993,8 @@ def record_and_send():
                 draw_state("error")
                 time.sleep(2)
 
-        if not continuous_mode:
-            mqtt_check()   # 趁 is_busy=True 消费掉 OpenClaw 触发的重复 push
+        if not St.continuous:
+            mqtt_check()   # 趁 St.busy=True 消费掉 OpenClaw 触发的重复 push
             break
 
         # ── 连续模式：轮间检查主动播报 ───────────────────────────
@@ -1008,7 +1007,7 @@ def record_and_send():
             touch, pos = check_touch()
             if touch == 'long':
                 toggle_continuous()   # 关闭连续模式
-                is_busy = False
+                St.busy = False
                 return
             time.sleep(0.05)
         drain_touch()
@@ -1017,7 +1016,7 @@ def record_and_send():
     draw_state("idle")
     time.sleep(1)
     drain_touch()
-    is_busy = False
+    St.busy = False
 
 
 # ── 摄像头对话 ────────────────────────────────────────────────
@@ -1062,74 +1061,8 @@ def capture_photo():
     return b64
 
 
-def record_and_send_vision():
-    """
-    拍照 + 录音 → 发送 /chat-vision → 播放回复。
-    触发方式：触摸屏幕下方区域（y > 160）。
-    """
-    global is_busy, _last_activity
-    is_busy = True
-    _last_activity = time.time()
-    gc.collect()
-
-    draw_state("camera")
-    image_b64 = capture_photo()
-
-    draw_state("recording")   # Bug 4 Fix: 立刻显示录音状态
-    chunks = _record_audio()
-
-    if not chunks:
-        draw_state("no_speech")
-        time.sleep(1)
-        draw_state("idle")
-        is_busy = False
-        return
-
-    draw_state("processing")
-    audio   = b''.join(chunks)
-    wav     = make_wav_header(len(audio)) + audio
-    wav_b64 = ubinascii.b2a_base64(wav).decode("utf-8").strip()
-    payload = ujson.dumps({"wav": wav_b64, "image": image_b64 or ""})
-
-    try:
-        v_hdrs = {"X-Device-Id": DEVICE_ID,
-                  "Content-Type": "application/json"}
-        lt = get_local_time_header()
-        if lt:
-            v_hdrs["X-Local-Time"] = lt
-        resp = urequests.post(
-            VISION_URL,
-            data=payload.encode("utf-8"),
-            headers=v_hdrs,
-            timeout=REQUEST_TIMEOUT_CHAT,
-        )
-        if resp.status_code != 200:
-            print("vision err:", resp.text)
-            resp.close()
-            draw_state("error")
-            time.sleep(2)
-            draw_state("idle")
-            is_busy = False
-            return
-        data = resp.content
-        resp.close()
-    except OSError as e:
-        print("network err:", e)
-        draw_state("error")
-        time.sleep(2)
-        draw_state("idle")
-        is_busy = False
-        return
-
-    gc.collect()
-    print("Vision WAV size:", len(data))
-    draw_state("playing")
-    play_wav(data)
-    mqtt_check()   # 趁 is_busy=True 消费掉 OpenClaw 触发的重复 push
-    draw_state("idle")
-    time.sleep(1)
-    drain_touch()
-    is_busy = False
+# 注：曾有触摸下半屏触发的 record_and_send_vision()，但主循环从未接线，
+# 已删除。拍照路径现有两条：语音关键词（服务端回 X-Need-Photo）和 MQTT 远程命令。
 
 
 # ── MQTT 推送订阅 ─────────────────────────────────────────────
@@ -1140,12 +1073,11 @@ _MQTT_TOPICS = []
 
 def _mqtt_callback(topic, msg):
     """MQTT 消息回调：广播音频或拍照命令。"""
-    global _last_activity, is_busy
     topic_str = topic.decode("utf-8") if isinstance(topic, bytes) else topic
 
     if "/push/" in topic_str:
         # 广播通知：JSON → HTTP GET 下载 WAV → 播放
-        if is_busy:
+        if St.busy:
             print("push skipped: device busy")
             return
         try:
@@ -1156,9 +1088,9 @@ def _mqtt_callback(topic, msg):
         url = info.get("url", "")
         if not url:
             return
-        if _is_sleeping:
+        if St.sleeping:
             wake_up()
-        _last_activity = time.time()
+        St.last_activity = time.time()
         draw_state("broadcast")
         try:
             full_url = SERVER_BASE + url
@@ -1179,10 +1111,10 @@ def _mqtt_callback(topic, msg):
             print("[mqtt] cmd parse error:", e)
             return
         if cmd.get("action") == "capture":
-            if _is_sleeping:
+            if St.sleeping:
                 wake_up()
-            _last_activity = time.time()
-            is_busy = True
+            St.last_activity = time.time()
+            St.busy = True
             try:
                 draw_state("camera")
                 image_b64 = capture_photo()
@@ -1204,7 +1136,7 @@ def _mqtt_callback(topic, msg):
                     print("upload err:", e)
             finally:
                 draw_state("idle")
-                is_busy = False
+                St.busy = False
 
 
 def _reconnect_mqtt():
@@ -1337,7 +1269,7 @@ def imu_shake_tick():
     """主循环调用：检测摇晃手势，触发彩蛋图片显示。"""
     global _imu_shake_times, _imu_last_shake
 
-    if not _imu_available or is_busy:
+    if not _imu_available or St.busy:
         return
 
     now = time.time()
@@ -1369,11 +1301,11 @@ def imu_shake_tick():
 
 def _show_shake_easter_egg():
     """显示摇晃彩蛋图片 2 秒，然后切换连续对话模式。continuous off→on 时额外调用 /shake 让 AI 主动聊天。"""
-    global _last_activity, is_busy, _imu_last_shake, _touch_start
-    is_busy = True
-    _last_activity = time.time()
+    global _imu_last_shake, _touch_start
+    St.busy = True
+    St.last_activity = time.time()
     try:
-        was_off = not continuous_mode
+        was_off = not St.continuous
         try:
             with open("/flash/img_shake.jpg", "rb") as f:
                 Lcd.drawJpg(f.read(), 0, 0)
@@ -1398,7 +1330,7 @@ def _show_shake_easter_egg():
         drain_touch()
         _imu_last_shake = time.time()
     finally:
-        is_busy = False
+        St.busy = False
 
 
 # ── BLE 扫描 ─────────────────────────────────────────────────
@@ -1544,8 +1476,7 @@ def _notify_presence(status):
 
 def enter_sleep():
     """息屏休眠：关闭背光和 LED，释放麦克风。"""
-    global _is_sleeping
-    _is_sleeping = True
+    St.sleeping = True
     _set_led(0, 0, 0)
     _mic_off()
     M5.Lcd.setBrightness(0)
@@ -1553,9 +1484,8 @@ def enter_sleep():
 
 def wake_up():
     """唤醒：恢复背光，重置活动计时。"""
-    global _is_sleeping, _last_activity
-    _is_sleeping = False
-    _last_activity = time.time()
+    St.sleeping = False
+    St.last_activity = time.time()
     M5.Lcd.setBrightness(64)
     draw_state("idle")
 
@@ -1630,7 +1560,6 @@ def discover_server():
 
 
 def setup():
-    global _last_activity
     M5.begin()
     Widgets.setRotation(1)
     _set_led(0, 0, 0)
@@ -1661,27 +1590,27 @@ def setup():
     init_imu()
     draw_state("idle")       # 发现完成后恢复空闲界面
     calibrate_noise()
-    _last_activity = time.time()
+    St.last_activity = time.time()
 
 
 def loop():
-    global _last_activity, _wake_last_ms, _wake_loud_count
+    global _wake_last_ms, _wake_loud_count
 
     touch, pos = check_touch()
 
     # ── 休眠中：触摸仅唤醒，不执行其他操作 ──
-    if _is_sleeping:
+    if St.sleeping:
         if touch is not None:
             wake_up()
             drain_touch()
-    elif not is_busy:
+    elif not St.busy:
         if touch is not None:
-            _last_activity = time.time()
+            St.last_activity = time.time()
         if touch == 'long':
             toggle_wake_mode()           # 长按：切换声控唤醒模式
         elif touch == 'short':
             record_and_send()            # 短按：直接录音
-        elif WAKE_MODE:
+        elif St.wake:
             # 简化的声控唤醒：连续 N×100ms 音量超阈值 → 触发录音
             now_ms = time.ticks_ms()
             if time.ticks_diff(now_ms, _wake_last_ms) >= 100:
@@ -1700,7 +1629,7 @@ def loop():
                     _wake_loud_count += 1
                     if _wake_loud_count >= WAKE_LOUD_NEED:
                         _wake_loud_count = 0
-                        _last_activity = time.time()
+                        St.last_activity = time.time()
                         record_and_send()
                 else:
                     _wake_loud_count = 0
@@ -1716,8 +1645,8 @@ def loop():
 
     # ── 自动休眠检查 ──
     now = time.time()
-    if not _is_sleeping and not is_busy:
-        if now - _last_activity > SLEEP_TIMEOUT:
+    if not St.sleeping and not St.busy:
+        if now - St.last_activity > SLEEP_TIMEOUT:
             enter_sleep()
 
 
