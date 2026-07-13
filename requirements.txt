@@ -1,0 +1,10 @@
+# 服务端（voice_server.py）
+flask>=2.3,<4
+paho-mqtt>=1.6,<2      # 代码使用 1.x Client() 构造函数，勿升 2.x
+numpy>=1.24            # RGB565→JPEG 转换（/chat-vision、/upload-photo）
+pillow>=10.0           # 同上
+
+# 本地模式（voice_assistant.py）复用 numpy；另需系统安装 ffmpeg/ffplay 与 node(edge-tts)
+
+# 测试
+pytest>=7.4

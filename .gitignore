@@ -4,3 +4,4 @@ __pycache__/
 push_audio/
 tts_cache/
 *.log
+.pytest_cache/
