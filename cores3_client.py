@@ -5,6 +5,7 @@ import requests as urequests
 import time
 import struct
 import math
+import array as uarray
 import gc
 import ubinascii
 import ujson
@@ -53,6 +54,27 @@ CHUNK_SIZE       = int(SAMPLE_RATE * 2 * CHUNK_SEC)
 SILENCE_THRESHOLD = 500   # RMS 低于此值视为静音
 SILENCE_CHUNKS   = 4      # 连续 N 个静音块后停止录音
 MAX_CHUNKS       = 20     # 最大录音块数（上限：MAX_CHUNKS × CHUNK_SEC 秒）
+
+# 唤醒模式下麦克风常开（避免每 100ms 建拆一次 I2S 驱动）。
+# 真机上如与 Speaker 冲突（无声/杂音），改回 False 即恢复旧行为。
+WAKE_MIC_PERSISTENT = True
+
+_mic_active = False
+
+
+def _mic_on():
+    """幂等开麦。Mic 与 Speaker 共享音频通路，播放前必须 _mic_off()。"""
+    global _mic_active
+    if not _mic_active:
+        Mic.begin()
+        _mic_active = True
+
+
+def _mic_off():
+    global _mic_active
+    if _mic_active:
+        Mic.end()
+        _mic_active = False
 
 # ── 连续对话 / 唤醒词模式 ──────────────────────────────────────
 
@@ -237,13 +259,15 @@ def make_wav_header(data_len, sample_rate=16000, channels=1, bits=16):
 
 
 def rms(buf):
-    n = len(buf) // 2
+    # array('h') 直接迭代比逐样本 struct.unpack_from 快约一个数量级；
+    # calibrate_noise() 与此同函数，阈值尺度自洽，无需重新校准。
+    a = uarray.array('h', buf)
+    n = len(a)
     if n == 0:
         return 0
     total = 0
-    for i in range(0, len(buf), 2):
-        val = struct.unpack_from('<h', buf, i)[0]
-        total += val * val
+    for v in a:
+        total += v * v
     return int(math.sqrt(total / n))
 
 
@@ -802,6 +826,8 @@ def toggle_wake_mode():
     WAKE_MODE = not WAKE_MODE
     if WAKE_MODE:
         continuous_mode = False
+    else:
+        _mic_off()   # 退出唤醒模式时释放常开的麦克风
     draw_state("wake_on" if WAKE_MODE else "wake_off")
     time.sleep(0.8)   # Bug 3 Fix: 1.5→0.8s，缩短切换反馈时间
     draw_state("idle")
@@ -815,7 +841,7 @@ def _record_audio():
     无说话返回空列表 []。
     若用户在录音期间长按屏幕，立即停止录音并返回 None（哨兵，表示用户主动中断）。
     """
-    Mic.begin()
+    _mic_on()
     chunks, silent, started = [], 0, False
     for _ in range(MAX_CHUNKS):
         buf = bytearray(CHUNK_SIZE)
@@ -824,7 +850,7 @@ def _record_audio():
         # 长按优先检测：优先级高于录音，continuous/wake 模式均可退出
         t, _ = check_touch()
         if t == 'long':
-            Mic.end()
+            _mic_off()
             return None          # 哨兵：用户请求退出当前模式
         level = rms(buf)
         if level > SILENCE_THRESHOLD:
@@ -836,7 +862,7 @@ def _record_audio():
             silent += 1
             if silent >= SILENCE_CHUNKS:
                 break
-    Mic.end()
+    _mic_off()
     return chunks
 
 
@@ -844,6 +870,7 @@ def _record_audio():
 
 def play_wav(data):
     """将 WAV 数据写入 flash 并播放。触摸屏幕可随时中断播放。"""
+    _mic_off()   # Mic/Speaker 共享音频通路：播放前确保麦克风已释放
     with open("/flash/response.wav", "wb") as f:
         f.write(data)
     Speaker.begin()
@@ -1516,10 +1543,11 @@ def _notify_presence(status):
 # ── 主循环 ────────────────────────────────────────────────────
 
 def enter_sleep():
-    """息屏休眠：关闭背光和 LED。"""
+    """息屏休眠：关闭背光和 LED，释放麦克风。"""
     global _is_sleeping
     _is_sleeping = True
     _set_led(0, 0, 0)
+    _mic_off()
     M5.Lcd.setBrightness(0)
 
 
@@ -1541,12 +1569,12 @@ def calibrate_noise():
     #Widgets.Label("Calibrating...", 40, 155, 1, 0x666666, 0x1a1a1a,_FONT_16)
     sample_buf = bytearray(int(16000 * 2 * 0.1))
     samples = []
-    Mic.begin()
+    _mic_on()
     for _ in range(10):   # 10 × 100ms = 1s
         Mic.record(sample_buf, 16000)
         time.sleep(0.1)
         samples.append(rms(sample_buf))
-    Mic.end()
+    _mic_off()
     noise_floor = max(samples)
     SILENCE_THRESHOLD = max(200, noise_floor * 3)
     WAKE_THRESHOLD    = max(300, noise_floor * 4)
@@ -1658,10 +1686,15 @@ def loop():
             now_ms = time.ticks_ms()
             if time.ticks_diff(now_ms, _wake_last_ms) >= 100:
                 _wake_last_ms = now_ms
-                Mic.begin()
-                Mic.record(_wake_buf, 16000)
-                time.sleep(0.05)
-                Mic.end()
+                if WAKE_MIC_PERSISTENT:
+                    _mic_on()            # 幂等：常开，播放时由 play_wav 释放
+                    Mic.record(_wake_buf, 16000)
+                    time.sleep(0.05)
+                else:
+                    Mic.begin()          # 旧行为：每次建拆驱动（回退开关）
+                    Mic.record(_wake_buf, 16000)
+                    time.sleep(0.05)
+                    Mic.end()
                 level = rms(_wake_buf)
                 if level > WAKE_THRESHOLD:
                     _wake_loud_count += 1
@@ -1692,3 +1725,4 @@ if __name__ == '__main__':
     setup()
     while True:
         loop()
+        time.sleep(0.02)   # 空闲时不再全速自旋；触摸按抬起时长判定，20ms 粒度无感
