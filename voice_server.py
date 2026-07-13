@@ -61,6 +61,13 @@ SAMPLE_RATE = 16000
 from config import BAIDU_API_KEY, BAIDU_SECRET_KEY, BAIDU_TTS_API_KEY, BAIDU_TTS_SECRET_KEY
 from oc_utils import _extract_json, strip_markdown
 
+# 可选共享密钥：config.py 里设置 API_TOKEN 后，/push 与 /capture-request 需携带
+# X-Api-Token 头。留空（或旧版 config.py 没有此项）= 完全开放，行为与之前一致。
+try:
+    from config import API_TOKEN
+except ImportError:
+    API_TOKEN = ""
+
 _asr_tokens = BaiduTokenCache(BAIDU_API_KEY, BAIDU_SECRET_KEY, name="ASR")
 _tts_tokens = BaiduTokenCache(BAIDU_TTS_API_KEY, BAIDU_TTS_SECRET_KEY, name="TTS")
 
@@ -93,6 +100,25 @@ def transcribe(audio_path: str) -> str:
 
 # ── 对话 ──────────────────────────────────────────────────────────────────────
 
+# openclaw CLI 每次调用起一个子进程：全局最多 2 个并发；同一 session 串行，
+# 避免两台设备（或 /shake 后台线程与 /chat）同时写同一 session 文件。
+_chat_semaphore = threading.Semaphore(2)
+_session_locks: dict = {}
+_session_locks_guard = threading.Lock()
+
+
+def _get_session_lock(session_id: str) -> threading.Lock:
+    with _session_locks_guard:
+        if len(_session_locks) > 200:
+            for k in [k for k, v in _session_locks.items() if not v.locked()][:100]:
+                del _session_locks[k]
+        lock = _session_locks.get(session_id)
+        if lock is None:
+            lock = threading.Lock()
+            _session_locks[session_id] = lock
+        return lock
+
+
 def chat(user_text: str, session_id: str, image_path: Optional[str] = None, local_time: Optional[str] = None) -> str:
     message = user_text
     if local_time:
@@ -107,7 +133,8 @@ def chat(user_text: str, session_id: str, image_path: Optional[str] = None, loca
         "--json",
         "--timeout", "120",
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=130)
+    with _get_session_lock(session_id), _chat_semaphore:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=130)
     if result.returncode != 0:
         raise RuntimeError(f"openclaw 失败: {result.stderr[:200]}")
     data = _extract_json(result.stdout)
@@ -332,6 +359,22 @@ def _validate_device_id(raw: Optional[str]) -> str:
     return "default"
 
 
+def _token_ok() -> bool:
+    """API_TOKEN 未设置时永远放行（默认开放）；设置后校验 X-Api-Token 头。"""
+    if not API_TOKEN:
+        return True
+    return request.headers.get("X-Api-Token", "") == API_TOKEN
+
+
+_IP_RATE_MAX = 60   # 按来源 IP 的兜底限流（次/分钟）：防 device_id 换名刷请求
+
+
+def _ip_rate_ok() -> bool:
+    """来源 IP 兜底桶。注意 WSL 端口转发下所有设备共享代理 IP，上限须宽于单设备限额。"""
+    ip = request.remote_addr or "unknown"
+    return state.check_rate(ip, bucket="ip", limit=_IP_RATE_MAX)
+
+
 @app.route("/chat", methods=["POST"])
 def handle_chat():
     """
@@ -343,7 +386,7 @@ def handle_chat():
     客户端收到后应拍照并将原始音频+图片发送至 /chat-vision。
     """
     device_id = _validate_device_id(request.headers.get("X-Device-Id"))
-    if not state.check_rate(device_id):
+    if not state.check_rate(device_id) or not _ip_rate_ok():
         return jsonify({"error": "请求过于频繁，请稍后再试"}), 429
     local_time = request.headers.get("X-Local-Time", "")
     session_id = state.get_session(device_id)
@@ -411,6 +454,8 @@ def push_message():
     设备收到后 HTTP GET 下载音频。
     请求体: {"text": "要播报的内容", "device_id": "cores3"}
     """
+    if not _token_ok():
+        return jsonify({"error": "invalid or missing X-Api-Token"}), 401
     data = request.get_json()
     if not data or not data.get("text"):
         return jsonify({"error": "text is required"}), 400
@@ -483,6 +528,8 @@ def _photo_cleanup_loop() -> None:
 @app.route("/capture-request", methods=["POST"])
 def capture_request():
     """OpenClaw skill 调用：通过 MQTT 发送拍照命令给设备，返回 request_id。"""
+    if not _token_ok():
+        return jsonify({"error": "invalid or missing X-Api-Token"}), 401
     data = request.get_json() or {}
     device_id = _validate_device_id(data.get("device_id", "cores3"))
     if _mqtt_client is None:
@@ -550,7 +597,7 @@ def handle_chat_vision():
     返回 WAV 音频。
     """
     device_id  = _validate_device_id(request.headers.get("X-Device-Id"))
-    if not state.check_rate(device_id):
+    if not state.check_rate(device_id) or not _ip_rate_ok():
         return jsonify({"error": "请求过于频繁，请稍后再试"}), 429
     local_time = request.headers.get("X-Local-Time", "")
     session_id = state.get_session(device_id)
