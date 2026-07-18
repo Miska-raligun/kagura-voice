@@ -33,3 +33,18 @@ def test_strip_markdown_code_block_removed():
     out = strip_markdown("看代码：\n```python\nprint(1)\n```\n结束")
     assert "print" not in out
     assert "看代码" in out and "结束" in out
+
+
+def test_strip_markdown_divider_lines_removed():
+    # 晚安简报实例：==== 分隔线曾被 TTS 念成"等于等于…"
+    text = "🌙 晚安简报\n========================================\n今晚天气：雷暴\n----\n晚安！"
+    out = strip_markdown(text)
+    assert "=" not in out
+    assert "----" not in out
+    assert "今晚天气：雷暴" in out
+
+
+def test_strip_markdown_inline_symbol_runs_collapsed():
+    out = strip_markdown("标题====结尾")
+    assert "==" not in out
+    assert "标题" in out and "结尾" in out
