@@ -683,6 +683,28 @@ def handle_presence():
     return jsonify({"status": "ok"})
 
 
+@app.route("/crash-report", methods=["POST"])
+def crash_report():
+    """
+    设备开机上报：每次重启后调用一次，log 非空时为上次崩溃的堆栈。
+    请求体: {"device_id": "cores3", "log": "<crash.log 内容，可为空>"}
+    日志落盘 crash_reports/，同时打印到控制台，用于远程排查设备死机。
+    """
+    data = request.get_json(silent=True) or {}
+    device_id = _validate_device_id(data.get("device_id", "cores3"))
+    log = str(data.get("log", ""))[:65536]
+    ts = time.strftime("%Y-%m-%d %H:%M:%S")
+    if log:
+        report_dir = Path("crash_reports")
+        report_dir.mkdir(exist_ok=True)
+        fname = report_dir / f"{device_id}_{time.strftime('%Y%m%d_%H%M%S')}.log"
+        fname.write_text(log)
+        print(f"[{device_id}] 💥 开机上报携带崩溃日志 {len(log)} bytes → {fname}")
+    else:
+        print(f"[{device_id}] 🔄 设备重启（无崩溃日志）@ {ts}")
+    return jsonify({"status": "ok"})
+
+
 @app.route("/time", methods=["GET"])
 def get_time():
     """返回服务端当前 Unix 时间戳，供设备同步 RTC。"""

@@ -5,3 +5,4 @@ push_audio/
 tts_cache/
 *.log
 .pytest_cache/
+crash_reports/

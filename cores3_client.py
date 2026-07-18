@@ -1172,9 +1172,12 @@ def init_mqtt():
         _mqtt = None
 
 
+_mqtt_last_reconnect = 0     # 重连退避：WiFi 长时间断开时避免每 20ms 重连一次打爆 socket 池
+
+
 def mqtt_check():
-    """主循环调用：非阻塞检查 MQTT 消息，定期 ping 保活，断连时自动重连。"""
-    global _mqtt_last_ping
+    """主循环调用：非阻塞检查 MQTT 消息，定期 ping 保活，断连时自动重连（5s 退避）。"""
+    global _mqtt_last_ping, _mqtt_last_reconnect
     if _mqtt:
         try:
             _mqtt.check_msg()
@@ -1184,9 +1187,12 @@ def mqtt_check():
                 _mqtt.ping()
                 _mqtt_last_ping = now
         except OSError as e:
-            print("MQTT disconnected:", e)
-            _reconnect_mqtt()
-            _mqtt_last_ping = time.time()
+            now = time.time()
+            if now - _mqtt_last_reconnect >= 5:
+                print("MQTT disconnected:", e)
+                _mqtt_last_reconnect = now
+                _reconnect_mqtt()
+                _mqtt_last_ping = time.time()
 
 
 # ── RTC 时间同步 ─────────────────────────────────────────────
@@ -1559,6 +1565,34 @@ def discover_server():
         sock.close()
 
 
+def _boot_report():
+    """开机上报服务端：携带上次崩溃日志（如有），成功后删除本地日志。
+
+    作用：1) 服务端能记录设备每次重启的时间点；2) 崩溃堆栈自动送达
+    服务端 crash_reports/，无需 USB 连接取证。失败静默，不阻塞启动。
+    """
+    log = ""
+    try:
+        with open("/flash/crash.log", "r") as f:
+            log = f.read(8192)   # 只取前 8KB，防大文件撑爆内存
+    except OSError:
+        pass                     # 无崩溃记录，仅作开机通知
+    try:
+        resp = urequests.post(
+            SERVER_BASE + "/crash-report",
+            data=ujson.dumps({"device_id": DEVICE_ID, "log": log}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            timeout=REQUEST_TIMEOUT_SHORT,
+        )
+        ok = resp.status_code == 200
+        resp.close()
+        if ok and log:
+            uos.remove("/flash/crash.log")
+            print("crash log uploaded")
+    except Exception as e:
+        print("boot report failed:", e)
+
+
 def setup():
     M5.begin()
     Widgets.setRotation(1)
@@ -1584,6 +1618,7 @@ def setup():
         machine.reset()
 
     discover_server()
+    _boot_report()
     sync_rtc()
     init_mqtt()
     init_ble()
@@ -1650,8 +1685,38 @@ def loop():
             enter_sleep()
 
 
+def _log_crash(e):
+    """崩溃现场写入 /flash/crash.log，供重启后排查死因。"""
+    try:
+        import sys, io
+        try:
+            if uos.stat("/flash/crash.log")[6] > 32768:
+                return   # 上限 32KB：反复崩溃复位时避免写穿 flash
+        except OSError:
+            pass
+        buf = io.StringIO()
+        sys.print_exception(e, buf)
+        with open("/flash/crash.log", "a") as f:
+            f.write("=== crash @ {} uptime={}s ===\n{}\n".format(
+                get_rtc_time_str() or "?", int(time.time()), buf.getvalue()))
+    except Exception:
+        pass
+
+
 if __name__ == '__main__':
     setup()
+    _last_gc = time.time()
     while True:
-        loop()
-        time.sleep(0.02)   # 空闲时不再全速自旋；触摸按抬起时长判定，20ms 粒度无感
+        # 崩溃守护：任何未捕获异常（含 MemoryError）记录日志后整机复位自愈，
+        # 而不是留下黑屏死机等人按重启键。
+        try:
+            loop()
+            time.sleep(0.02)   # 空闲时不再全速自旋；触摸按抬起时长判定，20ms 粒度无感
+            if time.time() - _last_gc > 30:   # 空闲期定期 GC，缓解长时间运行的堆碎片化
+                gc.collect()
+                _last_gc = time.time()
+        except Exception as e:
+            _log_crash(e)
+            time.sleep(3)
+            import machine
+            machine.reset()
