@@ -136,7 +136,15 @@ def chat(user_text: str, session_id: str, image_path: Optional[str] = None, loca
     with _get_session_lock(session_id), _chat_semaphore:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=130)
     if result.returncode != 0:
-        raise RuntimeError(f"openclaw 失败: {result.stderr[:200]}")
+        # stderr 开头常是无害的 state-migrations 警告，真实错误在末尾；
+        # 去掉 ANSI 颜色码和警告行，只留最后几行有效内容
+        err = re.sub(r"\x1b\[[0-9;]*m", "", result.stderr or "")
+        lines = [l.strip() for l in err.splitlines()
+                 if l.strip() and "state-migrations" not in l
+                 and "migration warnings" not in l.lower()
+                 and not l.strip().startswith("- Left")]
+        detail = " | ".join(lines[-3:]) if lines else err[-300:]
+        raise RuntimeError(f"openclaw 失败(rc={result.returncode}): {detail[:500]}")
     data = _extract_json(result.stdout)
     if data.get("status") != "ok":
         raise RuntimeError(f"agent 状态异常: {data.get('status')}")
@@ -727,19 +735,23 @@ def handle_shake():
     session_id = state.get_session(device_id)
 
     def _bg():
-        try:
-            reply = chat(
-                "用户摇了摇你——她现在就在你面前的 Cores3 设备旁。"
-                "你必须用 cores3-speak skill 把语音说出来，跟她随便聊几句。"
-                "这是硬性要求：收到摇一摇必须用 Cores3 语音回复，"
-                "不要只回文字（纯文字她根本听不到）。",
-                session_id,
-                local_time=local_time,
-            )
-            preview = reply[:80].replace("\n", " ")
-            print(f"[{device_id}] 🫨  shake → {preview}{'...' if len(reply) > 80 else ''}")
-        except Exception as e:
-            print(f"[{device_id}] ⚠️  shake 错误: {e}")
+        prompt = (
+            "用户摇了摇你——她现在就在你面前的 Cores3 设备旁。"
+            "你必须用 cores3-speak skill 把语音说出来，跟她随便聊几句。"
+            "这是硬性要求：收到摇一摇必须用 Cores3 语音回复，"
+            "不要只回文字（纯文字她根本听不到）。"
+        )
+        # openclaw CLI 偶发瞬态失败（升级迁移、gateway 忙等），重试一次
+        for attempt in (1, 2):
+            try:
+                reply = chat(prompt, session_id, local_time=local_time)
+                preview = reply[:80].replace("\n", " ")
+                print(f"[{device_id}] 🫨  shake → {preview}{'...' if len(reply) > 80 else ''}")
+                return
+            except Exception as e:
+                print(f"[{device_id}] ⚠️  shake 错误(第{attempt}次): {e}")
+                if attempt == 1:
+                    time.sleep(3)
 
     threading.Thread(target=_bg, daemon=True).start()
     return jsonify({"status": "ok"})
