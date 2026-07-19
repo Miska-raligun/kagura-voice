@@ -76,6 +76,30 @@ def _mic_off():
         Mic.end()
         _mic_active = False
 
+# ── 硬件看门狗 ────────────────────────────────────────────────
+# 主循环喂狗。任何层面的硬冻结（I2S/WiFi 驱动死锁、lwip 卡死等 Python
+# 异常守护抓不到的情况）都会因停止喂狗在 2 分钟内被硬件强制复位，
+# 设备自愈，并在开机上报的 reset_cause 里留下"WDT 复位"的死因证据。
+# 注意：接 REPL 调试时主循环停止喂狗会导致每 2 分钟复位一次，
+# 调试前把开关改为 False 重新烧录。
+WATCHDOG_ENABLED = True
+WATCHDOG_TIMEOUT_MS = 120000
+
+_wdt = None
+
+
+def _wdt_init():
+    global _wdt
+    if WATCHDOG_ENABLED and _wdt is None:
+        import machine
+        _wdt = machine.WDT(timeout=WATCHDOG_TIMEOUT_MS)
+        print("watchdog armed: {}s".format(WATCHDOG_TIMEOUT_MS // 1000))
+
+
+def _wdt_feed():
+    if _wdt:
+        _wdt.feed()
+
 # ── 设备运行状态（跨子系统共享的 flag 全部集中在这里） ──────────
 #
 # 模式互斥/转移只应通过 toggle_continuous() / toggle_wake_mode() /
@@ -844,6 +868,7 @@ def _record_audio():
     _mic_on()
     chunks, silent, started = [], 0, False
     for _ in range(MAX_CHUNKS):
+        _wdt_feed()   # 满长录音 10s，喂狗防误咬
         buf = bytearray(CHUNK_SIZE)
         Mic.record(buf, SAMPLE_RATE)
         time.sleep(CHUNK_SEC + 0.05)
@@ -877,6 +902,7 @@ def play_wav(data):
     Speaker.setVolumePercentage(0.6)
     Speaker.playWavFile("/flash/response.wav")
     while Speaker.isPlaying():
+        _wdt_feed()   # 长音频播放可超过 WDT 窗口
         M5.update()
         if M5.Touch.getCount() > 0:   # Fix 6: 触摸中断
             Speaker.stop()
@@ -1578,9 +1604,15 @@ def _boot_report():
     except OSError:
         pass                     # 无崩溃记录，仅作开机通知
     try:
+        import machine
+        cause = machine.reset_cause()
+    except Exception:
+        cause = -1
+    try:
         resp = urequests.post(
             SERVER_BASE + "/crash-report",
-            data=ujson.dumps({"device_id": DEVICE_ID, "log": log}).encode("utf-8"),
+            data=ujson.dumps({"device_id": DEVICE_ID, "log": log,
+                              "reset_cause": cause}).encode("utf-8"),
             headers={"Content-Type": "application/json"},
             timeout=REQUEST_TIMEOUT_SHORT,
         )
@@ -1626,6 +1658,7 @@ def setup():
     draw_state("idle")       # 发现完成后恢复空闲界面
     calibrate_noise()
     St.last_activity = time.time()
+    _wdt_init()   # 最后再武装看门狗：WiFi 配置 UI 等交互流程不受 2 分钟窗口限制
 
 
 def loop():
@@ -1711,6 +1744,7 @@ if __name__ == '__main__':
         # 而不是留下黑屏死机等人按重启键。
         try:
             loop()
+            _wdt_feed()
             time.sleep(0.02)   # 空闲时不再全速自旋；触摸按抬起时长判定，20ms 粒度无感
             if time.time() - _last_gc > 30:   # 空闲期定期 GC，缓解长时间运行的堆碎片化
                 gc.collect()

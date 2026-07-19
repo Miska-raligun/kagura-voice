@@ -693,15 +693,18 @@ def crash_report():
     data = request.get_json(silent=True) or {}
     device_id = _validate_device_id(data.get("device_id", "cores3"))
     log = str(data.get("log", ""))[:65536]
+    # MicroPython esp32 machine.reset_cause() 取值
+    _RESET_CAUSES = {1: "上电/复位键", 2: "硬复位", 3: "看门狗复位⚠️", 4: "深睡唤醒", 5: "软复位"}
+    cause = _RESET_CAUSES.get(data.get("reset_cause"), f"未知({data.get('reset_cause')})")
     ts = time.strftime("%Y-%m-%d %H:%M:%S")
     if log:
         report_dir = Path("crash_reports")
         report_dir.mkdir(exist_ok=True)
         fname = report_dir / f"{device_id}_{time.strftime('%Y%m%d_%H%M%S')}.log"
         fname.write_text(log)
-        print(f"[{device_id}] 💥 开机上报携带崩溃日志 {len(log)} bytes → {fname}")
+        print(f"[{device_id}] 💥 开机上报携带崩溃日志 {len(log)} bytes → {fname}（{cause}）")
     else:
-        print(f"[{device_id}] 🔄 设备重启（无崩溃日志）@ {ts}")
+        print(f"[{device_id}] 🔄 设备重启（无崩溃日志，{cause}）@ {ts}")
     return jsonify({"status": "ok"})
 
 
