@@ -156,3 +156,21 @@ def test_capture_result_lifecycle(client, vs):
     rid = client.post("/capture-request", json={}).get_json()["request_id"]
     assert client.get(f"/capture-result/{rid}").status_code == 202     # pending
     assert client.get("/capture-result/unknown").status_code == 404
+
+
+def test_heartbeat_and_device_status(client, vs, tmp_path, monkeypatch):
+    monkeypatch.setattr(vs, "DEVICE_LOGS_DIR", tmp_path / "device_logs")
+    r = client.post("/heartbeat", json={
+        "device_id": "cores3", "up": 120, "heap": 100000,
+        "mqtt": True, "rssi": -55, "logs": ["12:00 wifi LOST", "12:01 wifi restored"],
+    })
+    assert r.status_code == 200
+    s = client.get("/device-status").get_json()
+    assert s["cores3"]["online"] is True
+    assert s["cores3"]["last_heartbeat"]["heap"] == 100000
+    assert any("wifi LOST" in l for l in s["cores3"]["recent_logs"])
+
+
+def test_heartbeat_missing_body_ok(client):
+    # 设备端 payload 异常也不该 500——心跳链路必须皮实
+    assert client.post("/heartbeat", json={}).status_code == 200

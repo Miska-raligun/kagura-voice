@@ -6,3 +6,4 @@ tts_cache/
 *.log
 .pytest_cache/
 crash_reports/
+device_logs/

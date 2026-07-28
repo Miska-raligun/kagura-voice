@@ -691,6 +691,79 @@ def handle_presence():
     return jsonify({"status": "ok"})
 
 
+# ── 设备心跳 / 远程诊断 ──────────────────────────────────────────────────────
+# 设备每分钟 POST /heartbeat（状态 + 增量 dbg 日志）。日志落盘 device_logs/，
+# 失联/恢复在服务端日志留下带时长的记录。GET /device-status 随时查当前状态。
+
+DEVICE_LOGS_DIR = Path("device_logs")
+_HB_SILENT_SECS = 200          # 超过此秒数无心跳视为失联（心跳间隔 60s）
+
+_hb_devices: dict = {}         # device_id → {"ts", "data", "alerted"}
+_hb_lock = threading.Lock()
+
+
+@app.route("/heartbeat", methods=["POST"])
+def device_heartbeat():
+    """设备心跳：{"device_id", "up", "heap", "mqtt", "rssi", "logs": [...]}"""
+    data = request.get_json(silent=True) or {}
+    device_id = _validate_device_id(data.get("device_id", "cores3"))
+    logs = data.pop("logs", None) or []
+    now = time.time()
+    with _hb_lock:
+        prev = _hb_devices.get(device_id)
+        _hb_devices[device_id] = {"ts": now, "data": data, "alerted": False}
+    if prev is None:
+        print(f"[{device_id}] 💓 心跳开始 heap={data.get('heap')} rssi={data.get('rssi')}")
+    elif now - prev["ts"] > _HB_SILENT_SECS:
+        gap = int(now - prev["ts"])
+        print(f"[{device_id}] 💓 心跳恢复（中断 {gap // 60}分{gap % 60}秒）"
+              f" heap={data.get('heap')} rssi={data.get('rssi')} mqtt={data.get('mqtt')}")
+    if logs:
+        DEVICE_LOGS_DIR.mkdir(exist_ok=True)
+        stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        with open(DEVICE_LOGS_DIR / f"{device_id}.log", "a", encoding="utf-8") as f:
+            for line in logs[:40]:
+                f.write(f"[{stamp}] {str(line)[:200]}\n")
+        for line in logs[:40]:
+            print(f"[{device_id}] 📟 {str(line)[:200]}")
+    return jsonify({"status": "ok"})
+
+
+@app.route("/device-status", methods=["GET"])
+def device_status():
+    """诊断视图：每台设备最近心跳 + 距今秒数 + 最近设备日志。curl 即可查看。"""
+    now = time.time()
+    out = {}
+    with _hb_lock:
+        snapshot = {k: dict(v) for k, v in _hb_devices.items()}
+    for device_id, rec in snapshot.items():
+        log_tail = []
+        log_file = DEVICE_LOGS_DIR / f"{device_id}.log"
+        if log_file.exists():
+            log_tail = log_file.read_text(encoding="utf-8").splitlines()[-20:]
+        out[device_id] = {
+            "last_seen_secs_ago": int(now - rec["ts"]),
+            "online": (now - rec["ts"]) < _HB_SILENT_SECS,
+            "last_heartbeat": rec["data"],
+            "recent_logs": log_tail,
+        }
+    return jsonify(out or {"info": "尚未收到任何设备心跳"})
+
+
+def _hb_watch_loop() -> None:
+    """后台线程：设备心跳静默超阈值时打一条失联记录（每次失联仅一条）。"""
+    while True:
+        time.sleep(30)
+        now = time.time()
+        with _hb_lock:
+            for device_id, rec in _hb_devices.items():
+                if now - rec["ts"] > _HB_SILENT_SECS and not rec["alerted"]:
+                    rec["alerted"] = True
+                    last = time.strftime("%H:%M:%S", time.localtime(rec["ts"]))
+                    print(f"[{device_id}] 🔇 设备失联（最后心跳 {last}，"
+                          f"heap={rec['data'].get('heap')} mqtt={rec['data'].get('mqtt')}）")
+
+
 @app.route("/crash-report", methods=["POST"])
 def crash_report():
     """
@@ -795,6 +868,7 @@ if __name__ == "__main__":
     print(" OK")
     _init_mqtt()
     threading.Thread(target=_photo_cleanup_loop, daemon=True, name="photo-cleanup").start()
+    threading.Thread(target=_hb_watch_loop, daemon=True, name="hb-watch").start()
     print(f"Agent : {AGENT_ID}  |  TTS : {TTS_VOICE}")
     print("监听 0.0.0.0:5000，Ctrl+C 退出\n")
     app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)

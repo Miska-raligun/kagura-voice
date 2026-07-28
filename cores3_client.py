@@ -100,6 +100,131 @@ def _wdt_feed():
     if _wdt:
         _wdt.feed()
 
+# ── 远程诊断：事件环形日志 + 心跳上报 ─────────────────────────
+# dbg() 记录网络/MQTT 关键事件到内存环形缓冲（40 条），随每分钟心跳
+# POST /heartbeat 上传服务端落盘。设备"开着机但失联"期间发生了什么，
+# 恢复后第一个心跳就能在服务端看到，无需 USB 串口。
+
+_HB_INTERVAL   = 60    # 心跳间隔（秒）
+_NET_CHECK_IVL = 15    # 网络自检间隔（秒）
+
+_dbg_buf  = []
+_dbg_sent = 0          # 下一条未上传日志的下标
+_hb_last  = 0
+_net_last_check      = 0
+_wifi_reconnect_last = 0
+_wifi_was_ok = True
+_mqtt_ok     = False
+_net_dot     = None    # 屏幕右上角状态点当前色: 'g'/'y'/'r'
+_boot_ticks  = time.ticks_ms()
+
+
+def dbg(msg):
+    """记录一条诊断事件（内存环形缓冲 + 串口）。"""
+    global _dbg_buf, _dbg_sent
+    ts = get_rtc_time_str() or "--:--"
+    _dbg_buf.append("{} {}".format(ts, msg))
+    if len(_dbg_buf) > 40:
+        drop = len(_dbg_buf) - 40
+        _dbg_buf = _dbg_buf[drop:]
+        _dbg_sent = max(0, _dbg_sent - drop)
+    print("[dbg]", msg)
+
+
+def _wifi_ok():
+    try:
+        return _wlan is not None and _wlan.isconnected()
+    except Exception:
+        return False
+
+
+def _draw_net_dot(state):
+    """右上角 5px 状态点：绿=在线 黄=WiFi通/MQTT断 红=WiFi断。"""
+    color = {"g": 0x00cc44, "y": 0xffcc00, "r": 0xff3333}[state]
+    try:
+        Lcd.fillCircle(310, 10, 5, color)
+    except Exception:
+        try:
+            Lcd.fillRect(305, 5, 10, 10, color)
+        except Exception:
+            pass
+
+
+def net_watch_tick():
+    """主循环调用：15s 一次连通性自检。WiFi 掉线自动重连（30s 退避），
+    状态变化写 dbg 日志并更新屏幕状态点。"""
+    global _net_last_check, _wifi_reconnect_last, _wifi_was_ok, _net_dot
+    now = time.time()
+    if now - _net_last_check < _NET_CHECK_IVL:
+        return
+    _net_last_check = now
+
+    wifi_ok = _wifi_ok()
+    if wifi_ok != _wifi_was_ok:
+        dbg("wifi restored" if wifi_ok else "wifi LOST")
+        _wifi_was_ok = wifi_ok
+
+    if not wifi_ok and now - _wifi_reconnect_last >= 30:
+        _wifi_reconnect_last = now
+        cfg = _wifi_load()
+        if cfg and cfg.get("ssid"):
+            dbg("wifi reconnect -> {}".format(cfg["ssid"]))
+            try:
+                wlan = _wlan_if()
+                try:
+                    wlan.disconnect()
+                except Exception:
+                    pass
+                # 非阻塞发起连接，结果由下轮自检确认
+                if cfg.get("password"):
+                    wlan.connect(cfg["ssid"], cfg["password"])
+                else:
+                    wlan.connect(cfg["ssid"])
+            except Exception as e:
+                dbg("wifi reconnect err: {}".format(e))
+
+    dot = "r" if not wifi_ok else ("g" if _mqtt_ok else "y")
+    if dot != _net_dot and not St.sleeping:
+        _draw_net_dot(dot)
+    globals()["_net_dot"] = dot
+
+
+def heartbeat_tick():
+    """主循环调用：每分钟向服务端上报状态 + 增量诊断日志。
+    交互中(busy)或 WiFi 断开时跳过，不阻塞语音流程。"""
+    global _hb_last, _dbg_sent
+    now = time.time()
+    if now - _hb_last < _HB_INTERVAL or St.busy or not _wifi_ok():
+        return
+    _hb_last = now
+    payload = {
+        "device_id": DEVICE_ID,
+        "up": time.ticks_diff(time.ticks_ms(), _boot_ticks) // 1000,
+        "heap": gc.mem_free(),
+        "mqtt": _mqtt_ok,
+        "sleeping": St.sleeping,
+    }
+    try:
+        payload["rssi"] = _wlan.status("rssi")
+    except Exception:
+        pass
+    new_logs = _dbg_buf[_dbg_sent:]
+    if new_logs:
+        payload["logs"] = new_logs[-20:]
+    try:
+        resp = urequests.post(
+            SERVER_BASE + "/heartbeat",
+            data=ujson.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            timeout=5,
+        )
+        ok = resp.status_code == 200
+        resp.close()
+        if ok:
+            _dbg_sent = len(_dbg_buf)
+    except Exception as e:
+        print("hb fail:", e)   # 不进 dbg，避免失联期间刷满缓冲
+
 # ── 设备运行状态（跨子系统共享的 flag 全部集中在这里） ──────────
 #
 # 模式互斥/转移只应通过 toggle_continuous() / toggle_wake_mode() /
@@ -1117,6 +1242,7 @@ def _mqtt_callback(topic, msg):
         if St.sleeping:
             wake_up()
         St.last_activity = time.time()
+        dbg("push recv")
         draw_state("broadcast")
         try:
             full_url = SERVER_BASE + url
@@ -1167,13 +1293,15 @@ def _mqtt_callback(topic, msg):
 
 def _reconnect_mqtt():
     """重连 MQTT 并重新订阅所有 topic。"""
-    global _mqtt
+    global _mqtt, _mqtt_ok
     try:
         _mqtt.connect(clean_session=False)
         for t in _MQTT_TOPICS:
             _mqtt.subscribe(t, 1)
-        print("MQTT reconnected")
+        _mqtt_ok = True
+        dbg("mqtt reconnected")
     except Exception as e:
+        _mqtt_ok = False
         print("MQTT reconnect failed:", e)
 
 
@@ -1192,6 +1320,7 @@ def init_mqtt():
         for t in _MQTT_TOPICS:
             client.subscribe(t, 1)
         _mqtt = client
+        globals()["_mqtt_ok"] = True
         print("MQTT connected:", MQTT_BROKER)
     except Exception as e:
         print("MQTT init error:", e)
@@ -1213,9 +1342,12 @@ def mqtt_check():
                 _mqtt.ping()
                 _mqtt_last_ping = now
         except OSError as e:
+            global _mqtt_ok
+            if _mqtt_ok:
+                _mqtt_ok = False
+                dbg("mqtt disconnected: {}".format(e))
             now = time.time()
             if now - _mqtt_last_reconnect >= 5:
-                print("MQTT disconnected:", e)
                 _mqtt_last_reconnect = now
                 _reconnect_mqtt()
                 _mqtt_last_ping = time.time()
@@ -1704,6 +1836,10 @@ def loop():
 
     # MQTT 推送消息 + 命令（非阻塞，回调在 _mqtt_callback 中处理）
     mqtt_check()
+
+    # 网络自检（WiFi 掉线自动重连）+ 心跳上报
+    net_watch_tick()
+    heartbeat_tick()
 
     # BLE 在家感知（非阻塞定期扫描）
     ble_scan_tick()
