@@ -107,9 +107,12 @@ def _wdt_feed():
 
 _HB_INTERVAL   = 60    # 心跳间隔（秒）
 _NET_CHECK_IVL = 15    # 网络自检间隔（秒）
+_NET_FIX1_SECS = 600   # 与服务端失联 10 分钟 → WiFi 栈软重建
+_NET_FIX2_SECS = 1500  # 失联 25 分钟 → 整机复位（uptime>1h 门槛=每小时最多一次）
 
 _dbg_buf  = []
-_dbg_sent = 0          # 下一条未上传日志的下标
+_dbg_sent      = 0     # 下一条未上传（心跳）日志的下标
+_dbg_persisted = 0     # 下一条未持久化（flash）日志的下标
 _hb_last  = 0
 _net_last_check      = 0
 _wifi_reconnect_last = 0
@@ -117,18 +120,43 @@ _wifi_was_ok = True
 _mqtt_ok     = False
 _net_dot     = None    # 屏幕右上角状态点当前色: 'g'/'y'/'r'
 _boot_ticks  = time.ticks_ms()
+_boot_time   = time.time()
+_last_server_ok = time.time()   # 最近一次成功联络服务端（心跳 200）
+_net_fix_stage  = 0             # 0=正常 1=已做过 WiFi 栈重建
 
 
 def dbg(msg):
     """记录一条诊断事件（内存环形缓冲 + 串口）。"""
-    global _dbg_buf, _dbg_sent
+    global _dbg_buf, _dbg_sent, _dbg_persisted
     ts = get_rtc_time_str() or "--:--"
     _dbg_buf.append("{} {}".format(ts, msg))
     if len(_dbg_buf) > 40:
         drop = len(_dbg_buf) - 40
         _dbg_buf = _dbg_buf[drop:]
         _dbg_sent = max(0, _dbg_sent - drop)
+        _dbg_persisted = max(0, _dbg_persisted - drop)
     print("[dbg]", msg)
+
+
+def _persist_dbg(reason):
+    """把未持久化的 dbg 日志追加进 /flash/crash.log——开机上报会带走它。
+    失联期间的事件因此能挺过断电/硬重启（7/29 失联 4h 的证据就是这样丢的）。
+    24KB 上限防反复写穿 flash。"""
+    global _dbg_persisted
+    try:
+        try:
+            if uos.stat("/flash/crash.log")[6] > 24576:
+                return
+        except OSError:
+            pass
+        lines = _dbg_buf[_dbg_persisted:]
+        with open("/flash/crash.log", "a") as f:
+            f.write("=== netlog ({}) ===\n".format(reason))
+            for l in lines:
+                f.write(l + "\n")
+        _dbg_persisted = len(_dbg_buf)
+    except Exception:
+        pass
 
 
 def _wifi_ok():
@@ -188,6 +216,38 @@ def net_watch_tick():
         _draw_net_dot(dot)
     globals()["_net_dot"] = dot
 
+    # ── 自愈升级（LRN 7/29：WiFi 驱动 wedge 后软重连 4h 无效，断电才恢复）──
+    # 失联 10 分钟：WiFi 栈整个关掉重建（active False→True），比裸 connect 更狠；
+    # 失联 25 分钟：整机复位。uptime>1h 才允许复位 = 服务端长时间不在
+    # （如 PC 关机）时最多每小时重启一次，不会无限快速重启。
+    global _net_fix_stage
+    dead_for = now - _last_server_ok
+    if (not wifi_ok or not _mqtt_ok) and not St.busy:
+        if _net_fix_stage == 0 and dead_for > _NET_FIX1_SECS:
+            _net_fix_stage = 1
+            dbg("netfix1 wifi-stack-reinit dead={}s".format(int(dead_for)))
+            _persist_dbg("netfix1")
+            try:
+                wlan = _wlan_if()
+                wlan.active(False)
+                time.sleep(1)
+                wlan.active(True)
+                cfg = _wifi_load()
+                if cfg and cfg.get("ssid"):
+                    if cfg.get("password"):
+                        wlan.connect(cfg["ssid"], cfg["password"])
+                    else:
+                        wlan.connect(cfg["ssid"])
+            except Exception as e:
+                dbg("netfix1 err: {}".format(e))
+        elif _net_fix_stage == 1 and dead_for > _NET_FIX2_SECS \
+                and time.time() - _boot_time > 3600:
+            dbg("netfix2 machine-reset dead={}s".format(int(dead_for)))
+            _persist_dbg("netfix2-reset")
+            time.sleep(1)
+            import machine
+            machine.reset()
+
 
 def heartbeat_tick():
     """主循环调用：每分钟向服务端上报状态 + 增量诊断日志。
@@ -222,6 +282,10 @@ def heartbeat_tick():
         resp.close()
         if ok:
             _dbg_sent = len(_dbg_buf)
+            globals()["_last_server_ok"] = now
+            globals()["_net_fix_stage"] = 0
+            if not _rtc_synced:
+                sync_rtc()   # 开机时网络未就绪的话，恢复后补同步时间
     except Exception as e:
         print("hb fail:", e)   # 不进 dbg，避免失联期间刷满缓冲
 
@@ -950,10 +1014,17 @@ def ensure_wifi(force_setup=False):
         pwd  = cfg.get("password", "")
         if ssid:
             draw_state("wifi_connect")
-            if _wifi_connect(ssid, pwd):
-                print("wifi restored from file:", ssid)
-                return True
-            print("stored wifi failed, entering setup")
+            # 无人值守设备：存档凭据连不上时循环重试（≈15 分钟）后整机复位
+            # 刷新 WiFi 栈，绝不停在配置 UI 等人——那会失联到有人来按键为止。
+            # 凭据真的变了时：开机 2 秒内按住屏幕仍可强制进入配置界面。
+            for attempt in range(20):
+                if _wifi_connect(ssid, pwd):
+                    print("wifi restored from file:", ssid)
+                    return True
+                print("wifi retry {}/20".format(attempt + 1))
+                time.sleep(30)
+            import machine
+            machine.reset()
 
     return wifi_setup_flow()
 
@@ -1330,9 +1401,21 @@ def init_mqtt():
 _mqtt_last_reconnect = 0     # 重连退避：WiFi 长时间断开时避免每 20ms 重连一次打爆 socket 池
 
 
+_mqtt_init_last = 0
+
+
 def mqtt_check():
     """主循环调用：非阻塞检查 MQTT 消息，定期 ping 保活，断连时自动重连（5s 退避）。"""
-    global _mqtt_last_ping, _mqtt_last_reconnect
+    global _mqtt_last_ping, _mqtt_last_reconnect, _mqtt_init_last
+    if _mqtt is None:
+        # 开机时网络未就绪导致 init 失败的话，之前永远不会再试 → 补 60s 重试
+        now = time.time()
+        if _wifi_ok() and now - _mqtt_init_last >= 60:
+            _mqtt_init_last = now
+            init_mqtt()
+            if _mqtt:
+                dbg("mqtt late-init ok")
+        return
     if _mqtt:
         try:
             _mqtt.check_msg()
