@@ -119,6 +119,7 @@ _wifi_reconnect_last = 0
 _wifi_was_ok = True
 _mqtt_ok     = False
 _net_dot     = None    # 屏幕右上角状态点当前色: 'g'/'y'/'r'
+_pwr_last    = None    # USB 供电状态（isCharging）上次采样值
 _boot_ticks  = time.ticks_ms()
 _boot_time   = time.time()
 _last_server_ok = time.time()   # 最近一次成功联络服务端（心跳 200）
@@ -216,6 +217,20 @@ def net_watch_tick():
         _draw_net_dot(dot)
     globals()["_net_dot"] = dot
 
+    # ── 供电监视（LRN 7/30：夜间"关机"疑似断电/掉电，非软件）──
+    # USB 供电状态翻转立即记录并持久化——如果设备靠电池残喘，哪怕只有
+    # 几十秒，flash 里也会留下"断电时刻"的证据。
+    global _pwr_last
+    try:
+        chg = M5.Power.isCharging()
+        if _pwr_last is not None and chg != _pwr_last:
+            dbg("power: charging {}->{} bat={}%".format(
+                _pwr_last, chg, M5.Power.getBatteryLevel()))
+            _persist_dbg("power-change")
+        _pwr_last = chg
+    except Exception:
+        pass
+
     # ── 自愈升级（LRN 7/29：WiFi 驱动 wedge 后软重连 4h 无效，断电才恢复）──
     # 失联 10 分钟：WiFi 栈整个关掉重建（active False→True），比裸 connect 更狠；
     # 失联 25 分钟：整机复位。uptime>1h 才允许复位 = 服务端长时间不在
@@ -266,6 +281,11 @@ def heartbeat_tick():
     }
     try:
         payload["rssi"] = _wlan.status("rssi")
+    except Exception:
+        pass
+    try:
+        payload["bat"] = M5.Power.getBatteryLevel()
+        payload["chg"] = M5.Power.isCharging()
     except Exception:
         pass
     new_logs = _dbg_buf[_dbg_sent:]

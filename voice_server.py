@@ -713,11 +713,13 @@ def device_heartbeat():
         prev = _hb_devices.get(device_id)
         _hb_devices[device_id] = {"ts": now, "data": data, "alerted": False}
     if prev is None:
-        print(f"[{device_id}] 💓 心跳开始 heap={data.get('heap')} rssi={data.get('rssi')}")
+        print(f"[{device_id}] 💓 心跳开始 heap={data.get('heap')} rssi={data.get('rssi')}"
+              f" bat={data.get('bat')}% chg={data.get('chg')}")
     elif now - prev["ts"] > _HB_SILENT_SECS:
         gap = int(now - prev["ts"])
         print(f"[{device_id}] 💓 心跳恢复（中断 {gap // 60}分{gap % 60}秒）"
-              f" heap={data.get('heap')} rssi={data.get('rssi')} mqtt={data.get('mqtt')}")
+              f" heap={data.get('heap')} rssi={data.get('rssi')} mqtt={data.get('mqtt')}"
+              f" bat={data.get('bat')}% chg={data.get('chg')}")
     if logs:
         DEVICE_LOGS_DIR.mkdir(exist_ok=True)
         stamp = time.strftime("%Y-%m-%d %H:%M:%S")
