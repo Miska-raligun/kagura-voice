@@ -11,21 +11,20 @@ from typing import Any
 
 def _extract_json(raw: str) -> dict[str, Any]:
     """
-    从混有 ANSI 日志的 stdout 中提取完整的顶层 JSON 对象。
-    用括号计数法定位，避免被嵌套 { 干扰。
+    从混有 ANSI 日志的 stdout 中提取第一个完整的顶层 JSON 对象。
+    用 raw_decode 而非括号计数：字符串值里出现不成对的 {} 也不会解析错位。
     """
     clean = re.sub(r"\x1b\[[0-9;]*m", "", raw)  # 去除所有 ANSI 转义
-    depth = 0
-    start = None
-    for i, ch in enumerate(clean):
-        if ch == "{":
-            if depth == 0:
-                start = i
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0 and start is not None:
-                return json.loads(clean[start: i + 1])
+    decoder = json.JSONDecoder()
+    idx = clean.find("{")
+    while idx != -1:
+        try:
+            obj, _end = decoder.raw_decode(clean, idx)
+            if isinstance(obj, dict):
+                return obj
+        except ValueError:
+            pass
+        idx = clean.find("{", idx + 1)
     raise ValueError(f"未找到完整 JSON 对象: {raw[:200]}")
 
 

@@ -49,6 +49,51 @@ def test_chat_empty_body_400(client):
     assert client.post("/chat", data=b"").status_code == 400
 
 
+def test_chat_volume_command_sets_header(client, vs, fake_wav, monkeypatch):
+    monkeypatch.setattr(vs, "transcribe", lambda p: "小声一点")
+    resp = client.post("/chat", data=b"x", headers={"X-Device-Id": "tv"})
+    assert resp.status_code == 200
+    assert resp.headers.get("X-Volume") == "down"
+
+
+def test_chat_reminder_schedules(client, vs, fake_wav, monkeypatch):
+    scheduled = []
+    monkeypatch.setattr(vs.reminders, "schedule",
+                        lambda ts, task, dev: scheduled.append((task, dev)))
+    monkeypatch.setattr(vs, "transcribe", lambda p: "三分钟后提醒我关火")
+    resp = client.post("/chat", data=b"x",
+                       headers={"X-Device-Id": "tr", "X-Local-Time": "2026-05-15 14:23"})
+    assert resp.status_code == 200
+    assert scheduled == [("关火", "tr")]
+
+
+def test_chat_text_headers_present(client, vs, fake_wav, monkeypatch):
+    import base64
+    monkeypatch.setattr(vs, "transcribe", lambda p: "现在几点")
+    resp = client.post("/chat", data=b"x",
+                       headers={"X-Device-Id": "tt", "X-Local-Time": "2026-05-15 14:23"})
+    user = base64.b64decode(resp.headers["X-User-Text"]).decode("utf-8")
+    reply = base64.b64decode(resp.headers["X-Reply-Text"]).decode("utf-8")
+    assert user == "现在几点"
+    assert reply.startswith("现在是")
+
+
+def test_quick_context_carried_to_llm(client, vs, fake_wav, monkeypatch):
+    """快捷指令命中后，下一次 LLM 对话应带上该问答作为背景。"""
+    monkeypatch.setattr(vs, "transcribe", lambda p: "现在几点")
+    hdrs = {"X-Device-Id": "ctx", "X-Local-Time": "2026-05-15 14:23"}
+    client.post("/chat", data=b"x", headers=hdrs)          # quick 命中
+
+    seen = []
+    monkeypatch.setattr(vs, "transcribe", lambda p: "那半小时后叫我")
+    # 注意"半小时后叫我"会命中 reminder，为测上下文改用普通句子
+    monkeypatch.setattr(vs, "transcribe", lambda p: "为什么天是蓝的")
+    monkeypatch.setattr(vs, "chat", lambda text, *a, **k: seen.append(text) or "回答")
+    client.post("/chat", data=b"x", headers=hdrs)
+    assert len(seen) == 1
+    assert "现在几点" in seen[0] and "为什么天是蓝的" in seen[0]
+
+
 def test_chat_device_rate_limit_429(client, vs, fake_wav, monkeypatch):
     vs.state = vs.ServerState(rate_max=2)
     monkeypatch.setattr(vs, "transcribe", lambda p: "现在几点")
