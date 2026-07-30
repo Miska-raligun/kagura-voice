@@ -20,6 +20,18 @@ def test_extract_json_no_json_raises():
         _extract_json("plain log output without json")
 
 
+def test_extract_json_braces_inside_string_values():
+    """LLM 回复文本里带不成对的花括号，不应导致解析错位。"""
+    raw = 'log {invalid} more {"status": "ok", "text": "这里有个}括号{哈哈"} tail'
+    data = _extract_json(raw)
+    assert data["text"] == "这里有个}括号{哈哈"
+
+
+def test_extract_json_skips_non_json_brace_noise():
+    raw = "\x1b[33m{warn}\x1b[0m\n{\"a\": 1}"
+    assert _extract_json(raw) == {"a": 1}
+
+
 def test_strip_markdown():
     text = "# 标题\n**加粗** 和 *斜体*，`代码`，[链接](http://x.com)\n- 列表项\n1. 有序项"
     out = strip_markdown(text)

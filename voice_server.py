@@ -19,16 +19,16 @@ import tempfile
 import threading
 import time
 import uuid
-import urllib.request
-import urllib.parse
 from pathlib import Path
 from typing import Optional
 import shutil
+import requests as http_requests
 from flask import Flask, request, send_file, jsonify, Response, after_this_request
 import paho.mqtt.client as mqtt
 
 from baidu_tokens import BaiduTokenCache
 import quick_commands
+import reminders
 
 # ── 路径配置 ──────────────────────────────────────────────────────────────────
 
@@ -71,6 +71,24 @@ except ImportError:
 _asr_tokens = BaiduTokenCache(BAIDU_API_KEY, BAIDU_SECRET_KEY, name="ASR")
 _tts_tokens = BaiduTokenCache(BAIDU_TTS_API_KEY, BAIDU_TTS_SECRET_KEY, name="TTS")
 
+# 连接池复用：省去每次调百度 API 的 TLS 握手（每轮对话 ASR+TTS 各省 100-200ms）
+_http = http_requests.Session()
+
+
+def _post_with_retry(url: str, *, data, headers: Optional[dict] = None,
+                     timeout: float = 15, attempts: int = 2):
+    """百度 API 调用带一次退避重试，网络抖动不再直接把错误抛给用户。"""
+    last_err: Exception = RuntimeError("unreachable")
+    for i in range(attempts):
+        try:
+            return _http.post(url, data=data, headers=headers, timeout=timeout)
+        except http_requests.RequestException as e:
+            last_err = e
+            if i + 1 < attempts:
+                print(f"[http] 请求失败重试 ({i + 1}/{attempts}): {e}")
+                time.sleep(0.5 * (i + 1))
+    raise last_err
+
 
 def transcribe(audio_path: str) -> str:
     with open(audio_path, "rb") as f:
@@ -84,13 +102,13 @@ def transcribe(audio_path: str) -> str:
             "speech": base64.b64encode(audio_data).decode("utf-8"),
             "len": len(audio_data),
             }).encode("utf-8")
-    req = urllib.request.Request(
+    resp = _post_with_retry(
         "https://vop.baidu.com/server_api",
         data=payload,
         headers={"Content-Type": "application/json"},
+        timeout=15,
     )
-    with urllib.request.urlopen(req, timeout=15) as resp:
-        result = json.loads(resp.read())
+    result = resp.json()
     if result.get("err_no") != 0:
         return ""
     results = result.get("result", [])
@@ -172,25 +190,24 @@ def synthesize(text: str) -> Optional[str]:
         print(f"[tts] ♻️  缓存命中: {clean[:30]}{'...' if len(clean) > 30 else ''}")
         return str(cache_path)
     token = _tts_tokens.get()
-    params = urllib.parse.urlencode({
-        "tex": clean,
-        "tok": token,
-        "cuid": "core2_client",
-        "ctp": 1,
-        "lan": "zh",
-        "spd": 5,
-        "pit": 5,
-        "vol": 10,
-        "per": 111,    # 111=度小萌(可爱女声)
-        "aue": 4,       # 4=pcm-16k
-    }).encode("utf-8")
-    req = urllib.request.Request(
+    resp = _post_with_retry(
         "https://tsn.baidu.com/text2audio",
-        data=params,
+        data={
+            "tex": clean,
+            "tok": token,
+            "cuid": "core2_client",
+            "ctp": 1,
+            "lan": "zh",
+            "spd": 5,
+            "pit": 5,
+            "vol": 10,
+            "per": 111,    # 111=度小萌(可爱女声)
+            "aue": 4,       # 4=pcm-16k
+        },
+        timeout=15,
     )
-    with urllib.request.urlopen(req, timeout=15) as resp:
-        ct = resp.headers.get("Content-Type", "")
-        body = resp.read()
+    ct = resp.headers.get("Content-Type", "")
+    body = resp.content
     # 如果返回 JSON 说明出错了
     if "json" in ct or body[:1] == b"{":
         raise RuntimeError(f"百度 TTS 失败: {body[:200]}")
@@ -257,6 +274,17 @@ class ServerState:
 
         self.photo_results: dict[str, dict] = {}
         self.photos_lock = threading.Lock()
+
+        # 快捷指令命中的问答暂存：下次走 LLM 时作为背景带上，避免上下文断层
+        self.last_quick: dict[str, tuple[str, str]] = {}
+
+    def set_last_quick(self, session_id: str, question: str, answer: str) -> None:
+        with self.sessions_lock:
+            self.last_quick[session_id] = (question, answer)
+
+    def pop_last_quick(self, session_id: str) -> Optional[tuple[str, str]]:
+        with self.sessions_lock:
+            return self.last_quick.pop(session_id, None)
 
     def get_session(self, device_id: str) -> str:
         with self.sessions_lock:
@@ -359,6 +387,11 @@ def _validate_device_id(raw: Optional[str]) -> str:
     return "default"
 
 
+def _b64_header(text: str, max_chars: int = 60) -> str:
+    """把 UTF-8 文本裁剪后 b64 编码，塞进 HTTP 响应头供设备屏显。"""
+    return base64.b64encode(text[:max_chars].encode("utf-8")).decode("ascii")
+
+
 def _token_ok() -> bool:
     """API_TOKEN 未设置时永远放行（默认开放）；设置后校验 X-Api-Token 头。"""
     if not API_TOKEN:
@@ -409,15 +442,39 @@ def handle_chat():
         if not user_text:
             user_text = "我没有听清楚，请重说一遍"
 
-        # 2. 快捷指令短路（时间/日期/星期），命中则跳过 OpenClaw
-        quick = quick_commands.match(user_text, local_time=local_time)
+        # 2. 本地短路链：定时提醒 → 音量控制 → 快捷指令，命中则跳过 OpenClaw
         need_photo = False
-        if quick is not None:
-            reply = quick
-            print(f"[{device_id}] ⚡  [quick] {reply}")
+        extra_headers: dict = {}
+        reply = None
+
+        rem = quick_commands.match_reminder(user_text, local_time=local_time)
+        if rem is not None:
+            fire_ts, task, reply = rem
+            reminders.schedule(fire_ts, task, device_id)
+            print(f"[{device_id}] ⏰  [reminder] {reply}")
+        if reply is None:
+            vol = quick_commands.match_volume(user_text)
+            if vol is not None:
+                direction, reply = vol
+                extra_headers["X-Volume"] = direction
+                print(f"[{device_id}] 🔊  [volume] {direction}")
+        if reply is None:
+            quick = quick_commands.match(user_text, local_time=local_time)
+            if quick is not None:
+                reply = quick
+                print(f"[{device_id}] ⚡  [quick] {reply}")
+
+        if reply is not None:
+            # 短路命中：记入 pending 上下文，下次走 LLM 时带给它
+            state.set_last_quick(session_id, user_text, reply)
         else:
             # 3. 对话（由 OpenClaw 判断是否需要拍照，回复以 [PHOTO] 开头则触发）
-            reply = chat(user_text, session_id, local_time=local_time)
+            llm_text = user_text
+            prev = state.pop_last_quick(session_id)
+            if prev:
+                llm_text = (f"[背景：用户刚才问「{prev[0]}」，快捷指令已回复「{prev[1]}」]\n"
+                            f"{user_text}")
+            reply = chat(llm_text, session_id, local_time=local_time)
 
             if reply.startswith("[PHOTO]"):
                 need_photo = True
@@ -435,9 +492,12 @@ def handle_chat():
         with open(wav_out, "rb") as f:
             wav_data = f.read()
         print(f"[{device_id}] 📤  WAV {len(wav_data)} bytes")
-        resp_headers = {"Content-Length": len(wav_data)}
+        resp_headers = {"Content-Length": len(wav_data), **extra_headers}
         if need_photo:
             resp_headers["X-Need-Photo"] = "1"
+        # 屏显文本（HTTP 头只能 ASCII，b64 编码 UTF-8）
+        resp_headers["X-User-Text"] = _b64_header(user_text)
+        resp_headers["X-Reply-Text"] = _b64_header(reply)
         return Response(wav_data, mimetype="audio/wav", headers=resp_headers)
 
     except Exception as e:
@@ -445,6 +505,23 @@ def handle_chat():
         return jsonify({"error": str(e)}), 500
     finally:
         os.unlink(wav_path)
+
+
+def _send_push(text: str, device_id: str) -> bool:
+    """TTS 合成 → 存盘 → MQTT 通知设备下载播放。/push 路由与提醒调度共用。"""
+    if _mqtt_client is None:
+        return False
+    wav_path = synthesize(text)
+    if not wav_path:
+        return False
+    fname = f"{uuid.uuid4().hex[:8]}.wav"
+    dest = PUSH_AUDIO_DIR / fname
+    shutil.copy(wav_path, dest)
+    _prune_dir(PUSH_AUDIO_DIR, PUSH_AUDIO_MAX_FILES)
+    notify = json.dumps({"type": "push", "url": f"/push-audio/{fname}"})
+    _mqtt_client.publish(f"kagura/push/{device_id}", notify, qos=1)
+    print(f"[push] → {device_id} via MQTT notify: {text[:50]}{'...' if len(text) > 50 else ''}")
+    return True
 
 
 @app.route("/push", methods=["POST"])
@@ -464,16 +541,8 @@ def push_message():
     if _mqtt_client is None:
         return jsonify({"error": "MQTT 不可用，推送功能已禁用"}), 503
     try:
-        wav_path = synthesize(text)
-        if not wav_path:
+        if not _send_push(text, device_id):
             return jsonify({"error": "TTS 生成失败"}), 500
-        fname = f"{uuid.uuid4().hex[:8]}.wav"
-        dest = PUSH_AUDIO_DIR / fname
-        shutil.copy(wav_path, dest)
-        _prune_dir(PUSH_AUDIO_DIR, PUSH_AUDIO_MAX_FILES)
-        notify = json.dumps({"type": "push", "url": f"/push-audio/{fname}"})
-        _mqtt_client.publish(f"kagura/push/{device_id}", notify, qos=1)
-        print(f"[push] → {device_id} via MQTT notify: {text[:50]}{'...' if len(text) > 50 else ''}")
         return jsonify({"status": "ok", "device_id": device_id})
     except Exception as e:
         print(f"[push] ⚠️  错误: {e}")
@@ -758,6 +827,7 @@ if __name__ == "__main__":
     print(" OK")
     _init_mqtt()
     threading.Thread(target=_photo_cleanup_loop, daemon=True, name="photo-cleanup").start()
+    reminders.init(_send_push)
     print(f"Agent : {AGENT_ID}  |  TTS : {TTS_VOICE}")
     print("监听 0.0.0.0:5000，Ctrl+C 退出\n")
     app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)
