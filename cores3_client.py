@@ -29,6 +29,28 @@ def _set_led(r, g, b):
 
 # ── 字体 ───────────────────────────────────────────────────────
 _FONT_16 = Widgets.FONTS.DejaVu18
+# 中文字体：UIFlow2 固件带 EFontCN 系列则用于屏显对话文本，否则跳过文本显示
+_FONT_CN = (getattr(Widgets.FONTS, "EFontCN16", None)
+            or getattr(Widgets.FONTS, "EFontCN14", None))
+
+# ── 屏显对话文本（服务端 X-User-Text / X-Reply-Text 头，b64 UTF-8） ──
+SHOW_CHAT_TEXT = True
+_last_user_text  = ""
+_last_reply_text = ""
+
+
+def _update_chat_text(user_b64, reply_b64):
+    """解码响应头里的对话文本，供待机界面显示。解码失败静默跳过。"""
+    global _last_user_text, _last_reply_text
+    if not SHOW_CHAT_TEXT:
+        return
+    try:
+        if user_b64:
+            _last_user_text = ubinascii.a2b_base64(user_b64).decode("utf-8")
+        if reply_b64:
+            _last_reply_text = ubinascii.a2b_base64(reply_b64).decode("utf-8")
+    except Exception as e:
+        print("[ui] chat text decode err:", e)
 
 # ── 服务端地址 ────────────────────────────────────────────────
 
@@ -49,15 +71,43 @@ REQUEST_TIMEOUT_UPLOAD = 15  # /upload-photo
 # ── 录音参数 ──────────────────────────────────────────────────
 
 SAMPLE_RATE      = 16000
-CHUNK_SEC        = 0.5
+CHUNK_SEC        = 0.25   # 0.5→0.25：块越小，说话结束判定越快（需真机确认 VAD 稳定）
 CHUNK_SIZE       = int(SAMPLE_RATE * 2 * CHUNK_SEC)
 SILENCE_THRESHOLD = 500   # RMS 低于此值视为静音
-SILENCE_CHUNKS   = 4      # 连续 N 个静音块后停止录音
-MAX_CHUNKS       = 20     # 最大录音块数（上限：MAX_CHUNKS × CHUNK_SEC 秒）
+SILENCE_CHUNKS   = 5      # 连续 N 个静音块后停止录音（5×0.25=1.25s，原为 2s）
+MAX_CHUNKS       = 40     # 最大录音块数（上限：MAX_CHUNKS × CHUNK_SEC = 10 秒不变）
 
 # 唤醒模式下麦克风常开（避免每 100ms 建拆一次 I2S 驱动）。
 # 真机上如与 Speaker 冲突（无声/杂音），改回 False 即恢复旧行为。
 WAKE_MIC_PERSISTENT = True
+
+# ── 音量（语音可调："小声一点/大声一点"，服务端回 X-Volume 头） ──
+_VOLUME_PATH = "/flash/volume.json"
+_volume = 0.6
+
+
+def _volume_load():
+    global _volume
+    try:
+        with open(_VOLUME_PATH, "r") as f:
+            v = ujson.load(f).get("volume")
+        if isinstance(v, (int, float)) and 0.2 <= v <= 1.0:
+            _volume = v
+    except Exception:
+        pass   # 无存档用默认值
+
+
+def _volume_adjust(direction):
+    """direction: 'up'/'down'，步进 0.2，范围 [0.2, 1.0]，持久化到 flash。"""
+    global _volume
+    step = 0.2 if direction == "up" else -0.2
+    _volume = max(0.2, min(1.0, round(_volume + step, 1)))
+    try:
+        with open(_VOLUME_PATH, "w") as f:
+            ujson.dump({"volume": _volume}, f)
+    except Exception as e:
+        print("[vol] save err:", e)
+    print("[vol] volume =", _volume)
 
 _mic_active = False
 
@@ -92,6 +142,22 @@ class St:
 WAKE_THRESHOLD   = 600      # 高于环境底噪，低于正常说话音量
 WAKE_CHUNK_SIZE  = int(16000 * 2 * 0.1)  # 每次采样 100ms
 WAKE_LOUD_NEED   = 3        # 连续 N 次超阈值触发（N×100ms）
+
+# ── 硬件看门狗 ────────────────────────────────────────────────
+# 未捕获异常/死循环时自动复位，always-on 设备不再假死。
+# 注意：ESP32 的 WDT 一旦创建无法关闭；设为 False 则完全不启用。
+WATCHDOG_ENABLED = True
+WATCHDOG_TIMEOUT_MS = 120000   # 必须大于最长合法阻塞（单次 HTTP 30s + 余量）
+
+_wdt = None
+
+
+def _wdt_feed():
+    if _wdt:
+        try:
+            _wdt.feed()
+        except Exception:
+            pass
 
 # ── 触摸状态 ──────────────────────────────────────────────────
 
@@ -245,6 +311,16 @@ def draw_state(state):
     Lcd.setTextSize(1)
     Lcd.setTextColor(txt_color, txt_color)
     Lcd.drawString(status, status_x, 216)
+
+    # ── 步骤 5：待机界面显示最近一轮对话（需固件带中文字体）────────
+    if state == "idle" and SHOW_CHAT_TEXT and _FONT_CN and _last_reply_text:
+        Lcd.setFont(_FONT_CN)
+        Lcd.setTextSize(1)
+        Lcd.setTextColor(0x88ccff, 0x88ccff)
+        Lcd.drawString("> " + _last_user_text[:18], 8, 160)
+        Lcd.setTextColor(0xcccccc, 0xcccccc)
+        Lcd.drawString(_last_reply_text[:19], 8, 184)
+        Lcd.setFont(_FONT_16)
 
 
 # ── WAV 工具 ──────────────────────────────────────────────────
@@ -844,6 +920,7 @@ def _record_audio():
     _mic_on()
     chunks, silent, started = [], 0, False
     for _ in range(MAX_CHUNKS):
+        _wdt_feed()
         buf = bytearray(CHUNK_SIZE)
         Mic.record(buf, SAMPLE_RATE)
         time.sleep(CHUNK_SEC + 0.05)
@@ -874,7 +951,7 @@ def play_wav(data):
     with open("/flash/response.wav", "wb") as f:
         f.write(data)
     Speaker.begin()
-    Speaker.setVolumePercentage(0.6)
+    Speaker.setVolumePercentage(_volume)
     Speaker.playWavFile("/flash/response.wav")
     while Speaker.isPlaying():
         M5.update()
@@ -883,6 +960,8 @@ def play_wav(data):
             time.sleep(0.2)           # 让扬声器余音散去
             drain_touch()
             break
+        _wdt_feed()
+        mqtt_check()   # 长播放期间维持心跳（回调只入队，不会嵌套播放）
         time.sleep(0.1)
     time.sleep(0.15)   # 让音频信号归零，避免 Speaker.end() 产生 pop 声
     Speaker.end()
@@ -901,6 +980,7 @@ def record_and_send():
     gc.collect()
 
     while True:
+        _wdt_feed()
         draw_state("recording")
         chunks = _record_audio()
 
@@ -940,8 +1020,13 @@ def record_and_send():
                     break
                 continue
             need_photo = resp.headers.get("X-Need-Photo", "") == "1"
+            vol_cmd = resp.headers.get("X-Volume", "")
+            _update_chat_text(resp.headers.get("X-User-Text", ""),
+                              resp.headers.get("X-Reply-Text", ""))
             data = resp.content
             resp.close()
+            if vol_cmd in ("up", "down"):
+                _volume_adjust(vol_cmd)
         except OSError as e:
             print("network err:", e)
             draw_state("error")
@@ -1066,18 +1151,23 @@ def capture_photo():
 
 
 # ── MQTT 推送订阅 ─────────────────────────────────────────────
+#
+# 回调只解析+入队（毫秒级返回），下载/播放/拍照在主循环消费。
+# 好处：长任务不再阻塞 MQTT 心跳（之前 30s+ 播放会触发 keepalive 超时断连）。
 
 _mqtt = None
 _MQTT_TOPICS = []
+_pending_push = []   # 待播放的 push 音频 URL
+_pending_cmd  = []   # 待执行的远程命令 dict
 
 
 def _mqtt_callback(topic, msg):
-    """MQTT 消息回调：广播音频或拍照命令。"""
+    """MQTT 消息回调：只入队，不做任何耗时操作。"""
     topic_str = topic.decode("utf-8") if isinstance(topic, bytes) else topic
 
     if "/push/" in topic_str:
-        # 广播通知：JSON → HTTP GET 下载 WAV → 播放
         if St.busy:
+            # 保留去重语义：对话期间 OpenClaw 触发的重复 push 直接丢弃
             print("push skipped: device busy")
             return
         try:
@@ -1086,57 +1176,75 @@ def _mqtt_callback(topic, msg):
             print("[mqtt] push parse error:", e)
             return
         url = info.get("url", "")
-        if not url:
-            return
-        if St.sleeping:
-            wake_up()
-        St.last_activity = time.time()
-        draw_state("broadcast")
-        try:
-            full_url = SERVER_BASE + url
-            resp = urequests.get(full_url, timeout=REQUEST_TIMEOUT_SHORT)
-            if resp.status_code == 200:
-                play_wav(resp.content)
-            resp.close()
-        except OSError as e:
-            print("push download err:", e)
-        draw_state("idle")
-        _set_led(0, 0, 0)
+        if url:
+            _pending_push.append(url)
 
     elif "/cmd/" in topic_str:
-        # 远程命令：JSON payload
         try:
             cmd = ujson.loads(msg)
         except Exception as e:
             print("[mqtt] cmd parse error:", e)
             return
+        _pending_cmd.append(cmd)
+
+
+def _play_push(url):
+    """下载并播放一条 push 音频（主循环调用）。"""
+    if St.sleeping:
+        wake_up()
+    St.last_activity = time.time()
+    draw_state("broadcast")
+    try:
+        resp = urequests.get(SERVER_BASE + url, timeout=REQUEST_TIMEOUT_SHORT)
+        if resp.status_code == 200:
+            play_wav(resp.content)
+        resp.close()
+    except OSError as e:
+        print("push download err:", e)
+    draw_state("idle")
+    _set_led(0, 0, 0)
+
+
+def _run_capture_cmd(cmd):
+    """执行远程拍照命令（主循环调用）。"""
+    if St.sleeping:
+        wake_up()
+    St.last_activity = time.time()
+    St.busy = True
+    try:
+        draw_state("camera")
+        image_b64 = capture_photo()
+        draw_state("processing")
+        payload = ujson.dumps({
+            "request_id": cmd.get("request_id", ""),
+            "image": image_b64 or "",
+            "device_id": DEVICE_ID,
+        })
+        try:
+            resp = urequests.post(
+                UPLOAD_URL,
+                data=payload.encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                timeout=REQUEST_TIMEOUT_UPLOAD,
+            )
+            resp.close()
+        except OSError as e:
+            print("upload err:", e)
+    finally:
+        draw_state("idle")
+        St.busy = False
+
+
+def process_mqtt_queue():
+    """主循环调用：每 tick 最多消费一项，空闲时才执行。"""
+    if St.busy:
+        return
+    if _pending_push:
+        _play_push(_pending_push.pop(0))
+    elif _pending_cmd:
+        cmd = _pending_cmd.pop(0)
         if cmd.get("action") == "capture":
-            if St.sleeping:
-                wake_up()
-            St.last_activity = time.time()
-            St.busy = True
-            try:
-                draw_state("camera")
-                image_b64 = capture_photo()
-                draw_state("processing")
-                payload = ujson.dumps({
-                    "request_id": cmd.get("request_id", ""),
-                    "image": image_b64 or "",
-                    "device_id": DEVICE_ID,
-                })
-                try:
-                    resp = urequests.post(
-                        UPLOAD_URL,
-                        data=payload.encode("utf-8"),
-                        headers={"Content-Type": "application/json"},
-                        timeout=REQUEST_TIMEOUT_UPLOAD,
-                    )
-                    resp.close()
-                except OSError as e:
-                    print("upload err:", e)
-            finally:
-                draw_state("idle")
-                St.busy = False
+            _run_capture_cmd(cmd)
 
 
 def _reconnect_mqtt():
@@ -1588,6 +1696,7 @@ def setup():
     init_mqtt()
     init_ble()
     init_imu()
+    _volume_load()
     draw_state("idle")       # 发现完成后恢复空闲界面
     calibrate_noise()
     St.last_activity = time.time()
@@ -1634,8 +1743,9 @@ def loop():
                 else:
                     _wake_loud_count = 0
 
-    # MQTT 推送消息 + 命令（非阻塞，回调在 _mqtt_callback 中处理）
+    # MQTT 推送消息 + 命令（回调只入队，这里接收；下面统一消费）
     mqtt_check()
+    process_mqtt_queue()
 
     # BLE 在家感知（非阻塞定期扫描）
     ble_scan_tick()
@@ -1652,6 +1762,25 @@ def loop():
 
 if __name__ == '__main__':
     setup()
+    # 看门狗在 setup 之后启动：配网界面等待用户输入不受超时限制
+    if WATCHDOG_ENABLED:
+        try:
+            from machine import WDT
+            _wdt = WDT(timeout=WATCHDOG_TIMEOUT_MS)
+            print("watchdog armed:", WATCHDOG_TIMEOUT_MS, "ms")
+        except Exception as e:
+            print("watchdog unavailable:", e)
     while True:
-        loop()
+        try:
+            loop()
+            _wdt_feed()
+        except Exception as e:
+            # 未捕获异常不再让设备假死：报错后继续跑；若连喂狗都做不到则 WDT 复位
+            print("[loop] uncaught:", e)
+            try:
+                draw_state("error")
+                time.sleep(1)
+                draw_state("idle")
+            except Exception:
+                pass
         time.sleep(0.02)   # 空闲时不再全速自旋；触摸按抬起时长判定，20ms 粒度无感
