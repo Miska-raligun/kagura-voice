@@ -203,6 +203,74 @@ def test_capture_result_lifecycle(client, vs):
     assert client.get("/capture-result/unknown").status_code == 404
 
 
+# ── /chat-vision ─────────────────────────────────────────────────────────────
+
+def _vision_stubs(vs, monkeypatch):
+    """打桩 ASR/图片解码/LLM，返回收集到的 (user_text, image_path) 列表。"""
+    seen = []
+    monkeypatch.setattr(vs, "_decode_image_b64", lambda b64, dev, tag="": "/tmp/shot.jpg")
+    monkeypatch.setattr(vs, "chat",
+                        lambda text, sid, image_path=None, local_time=None:
+                        seen.append((text, image_path)) or "看起来是只猫")
+    return seen
+
+
+def test_chat_vision_requires_wav_or_image(client, vs, fake_wav):
+    assert client.post("/chat-vision", json={}).status_code == 400
+    assert client.post("/chat-vision", json={"text": "这是啥"}).status_code == 400
+
+
+def test_chat_vision_image_only_uses_default_prompt(client, vs, fake_wav, monkeypatch):
+    """取景模式：只有图片没有 wav，服务端用默认提问，不该碰 ASR。"""
+    seen = _vision_stubs(vs, monkeypatch)
+
+    def _boom(*a, **k):
+        raise AssertionError("无 wav 时不应调用 ASR")
+    monkeypatch.setattr(vs, "transcribe", _boom)
+
+    resp = client.post("/chat-vision", json={"image": "Zm9v"},
+                       headers={"X-Device-Id": "cam1"})
+    assert resp.status_code == 200
+    assert resp.mimetype == "audio/wav"
+    assert seen == [(vs._PHOTO_ONLY_PROMPT, "/tmp/shot.jpg")]
+
+
+def test_chat_vision_text_field_used_as_question(client, vs, fake_wav, monkeypatch):
+    seen = _vision_stubs(vs, monkeypatch)
+    resp = client.post("/chat-vision", json={"image": "Zm9v", "text": "这是什么牌子"},
+                       headers={"X-Device-Id": "cam2"})
+    assert resp.status_code == 200
+    assert seen == [("这是什么牌子", "/tmp/shot.jpg")]
+
+
+def test_chat_vision_wav_still_transcribed(client, vs, fake_wav, monkeypatch):
+    """语音触发拍照的老链路不受影响：有 wav 就以 ASR 结果为提问。"""
+    seen = _vision_stubs(vs, monkeypatch)
+    monkeypatch.setattr(vs, "transcribe", lambda p: "看看这是什么")
+    resp = client.post("/chat-vision",
+                       json={"wav": "Zm9v", "image": "Zm9v", "text": "会被忽略"},
+                       headers={"X-Device-Id": "cam3"})
+    assert resp.status_code == 200
+    assert seen == [("看看这是什么", "/tmp/shot.jpg")]
+
+
+def test_chat_vision_text_headers_present(client, vs, fake_wav, monkeypatch):
+    """设备靠这两个头在待机屏上显示这一轮问答。"""
+    import base64
+    _vision_stubs(vs, monkeypatch)
+    resp = client.post("/chat-vision", json={"image": "Zm9v"},
+                       headers={"X-Device-Id": "cam4"})
+    user = base64.b64decode(resp.headers["X-User-Text"]).decode("utf-8")
+    reply = base64.b64decode(resp.headers["X-Reply-Text"]).decode("utf-8")
+    assert user == vs._PHOTO_ONLY_PROMPT
+    assert reply == "看起来是只猫"
+
+
+def test_chat_vision_bad_wav_b64_400(client, vs, fake_wav):
+    resp = client.post("/chat-vision", json={"wav": "!!!not-base64!!!"})
+    assert resp.status_code == 400
+
+
 def test_heartbeat_and_device_status(client, vs, tmp_path, monkeypatch):
     monkeypatch.setattr(vs, "DEVICE_LOGS_DIR", tmp_path / "device_logs")
     r = client.post("/heartbeat", json={
