@@ -23,6 +23,9 @@ CoreS3 (MicroPython)  ──HTTP──▶  voice_server.py (Flask :5000)  ──
 | `voice_assistant.py` | 本地 CLI 模式（ffmpeg 录音 + edge-tts），与服务端独立 |
 | `quick_commands.py` | 短路规则：时间/日期/星期 `match`、音量 `match_volume`、提醒解析 `match_reminder` |
 | `reminders.py` | 提醒调度：`schedule`/`fire_due`，落盘 `reminders.json`，线程 `init(send_fn)` |
+| `photo_schedules.py` | 每日定时拍照：`add`/`update`/`fire_due`，落盘 `photo_schedules.json`，`init(run_fn)` |
+| `stream_server.py` | 直播流接收（TCP :5002）。`_Reader` 带缓冲，`latest`/`stats`/`drop` 给路由用 |
+| `web/monitor.html` | Web 监控页（单文件，无外部依赖）。由 `/monitor` 路由 `send_file` 直出 |
 | `baidu_tokens.py` | 百度 token 缓存（`BaiduTokenCache`，线程安全） |
 | `oc_utils.py` | `_extract_json`（raw_decode 提取 CLI stdout 里的 JSON）、`strip_markdown` |
 | `config.py` | 不提交。`config.example.py` 为模板；`API_TOKEN` 可选（留空=开放） |
@@ -34,27 +37,74 @@ CoreS3 (MicroPython)  ──HTTP──▶  voice_server.py (Flask :5000)  ──
 - **TTS 缓存**：`synthesize()` 按 md5(文本+音色参数) 缓存于 `tts_cache/`；
   改音色参数必须同步改 cache key。
 - **响应头协议**（设备读取）：`X-Need-Photo`、`X-Volume: up/down`、
-  `X-User-Text`/`X-Reply-Text`（b64 UTF-8，屏显用）。请求头：`X-Device-Id`、
-  `X-Local-Time`、（可选）`X-Api-Token`。
-- **MQTT topic**：`kagura/push/{device_id}`（播报通知）、`kagura/cmd/{device_id}`（拍照命令）。
+  `X-User-Text`/`X-Reply-Text`（b64 UTF-8，屏显用；`/chat` 与 `/chat-vision`
+  都会带）。请求头：`X-Device-Id`、`X-Local-Time`、（可选）`X-Api-Token`。
+- **`/chat-vision` 三种入参形态**：`wav`+`image`（语音触发拍照）、仅 `image`
+  （取景模式手动拍照，服务端用 `_PHOTO_ONLY_PROMPT` 当提问）、`text`+`image`
+  （无 wav 时以 text 为提问）。`wav`/`image` 至少要有一个，否则 400。
+- **MQTT topic**：`kagura/push/{device_id}`（播报通知）、`kagura/cmd/{device_id}`
+  （`capture` / `stream_start` / `stream_stop`）。
+- **直播链路**：MQTT 下发 `stream_start` → 设备连 TCP :5002 → 每帧 `4 字节大端长度
+  + RGB565 裸字节`（0 长度=结束）→ 服务端只留最新一帧 → 网页长轮询
+  `/stream/<dev>/frame.jpg?after=<seq>`。三个别踩的点：
+  ① 握手行和第一帧会被 TCP 合并进同一个 segment，必须用 `_Reader` 的缓冲接着读，
+  丢掉剩余字节会让整条流错位；② 网页每 20s 续期、设备端 45s 超时收摊，
+  这是「关掉网页摄像头别一直开着」的唯一保障，改续期周期要同步改 `_STREAM_RENEW_SECS`；
+  ③ 直播中按快门默认走 `_capture_from_stream`（取服务端最新帧，瞬时但只有
+  160×120）；带 `hires=true` 才发 MQTT capture，由 `_stream_hires_capture`
+  在推流循环里临时切回 QVGA 拍一张（画面停几秒）。**capture 命令必须在
+  `_stream_drain_cmds` 里就地消费**——压回队列就要等直播结束才执行，
+  用户按下快门就成了「没反应」。插拍耗时要补回 `_stream_deadline`，
+  且 `stream_server.SOCKET_TIMEOUT` 必须大于插拍总耗时（现 45s），
+  否则正常插拍会被当成掉线断开。
+- **推流必须复制帧**：`raw = bytes(raw)` 那行别删。发一帧 38KB 期间驱动可能往
+  同一块 framebuffer 写下一帧，取景模式定格处有同样的复制与注释。
+- **网页画面「频闪」查过一次，不在设备端**：实测 226 帧亮度 120.5±0.3、连续帧
+  无撕裂——设备送出的帧是干净的。真凶是 `setStage()` 把还没解码的 `<img>`
+  换上屏。**必须 `await next.decode()` 之后再换 src，并复用同一个 `<img>`**；
+  改回「新建 img → appendChild → 删旧 img」就会重现。
+- **直播分辨率**：`_cam_set_framesize` 切 QQVGA，退出时切回 QVGA。固件没有
+  `camera.deinit()` 就返回 False 照常推流（只是慢），别把这条回退路径删掉。
+- **WSL 端口转发**：设备走 Windows 侧进来，新开任何端口都必须同步加进
+  `openclaw-startup.ps1` 的 portproxy + 防火墙列表（现有 5000/1883/5001/5002），
+  否则表现是「其它功能都正常、唯独新功能连不上」。加端口时别忘了这一步。
+- **拍照两条路径**：HTTP 路由用 `_issue_capture` 下发后让调用方轮询 `/capture-result`；
+  后台线程（定时任务/试跑）用 `_capture_and_wait` 同步等，**别在 Flask 路由里调它**——
+  设备离线时会阻塞 45 秒。`/capture-result` 的 `image_path` 字段 cores3-camera skill
+  依赖，只能加字段不能改。
+- **定时拍照**（`_run_scheduled_capture`）：拍照 → `chat()` 识别 → 存 `snapshots/` →
+  `_send_push` 播报。发给 agent 的 prompt 必须带 `_SCHEDULE_SPEAK_HINT` 拦住
+  cores3-speak，否则服务端和 agent 各播一遍。当天去重靠 `last_fired`；
+  `MISS_WINDOW=900` 保证服务端晚启动时不补拍白天错过的计划。
 - **设备端状态**：跨子系统 flag 全在 `St` 类（busy/continuous/wake/sleeping/last_activity）；
   模式转移只走 `toggle_continuous/toggle_wake_mode/enter_sleep/wake_up`。
-- **push 去重 hack**：对话期间（`St.busy`）收到的 MQTT push 直接丢弃——OpenClaw
-  用 cores3-speak 回复时会同时触发 push，不丢会播两遍。改播放逻辑时务必保留。
+- **push 去重 hack**：对话期间（`St.busy` 且非 `St.streaming`）收到的 MQTT push
+  直接丢弃——OpenClaw 用 cores3-speak 回复时会同时触发 push，不丢会播两遍。
+  改播放逻辑时务必保留。**直播必须走 `St.streaming` 豁免**：推流整段都置 `busy`，
+  不豁免的话网页抓拍后的播报会被静默丢掉（症状：服务端日志有 `[push] →`，设备没声音），
+  推流循环里自己消费 `_pending_push` 并在播完切回 `draw_state("streaming")`。
 - **MQTT 回调只入队**：耗时操作（播放/拍照）在主循环 `process_mqtt_queue()` 消费，
   否则长播放阻塞心跳导致断连。
 - **看门狗**：`WATCHDOG_TIMEOUT_MS=120s` 必须大于最长合法阻塞（HTTP 30s+余量）；
   长循环里要 `_wdt_feed()`。ESP32 WDT 创建后无法关闭。
 - **openclaw 并发**：`chat()` 有全局 Semaphore(2) + 每 session 串行锁。
+- **摄像头固件差异**：抓帧走 `_cam_grab()`（优先 `camera.capture()`→bytes，
+  回退 `camera.snapshot()`→`image.Image`），预览走 `_cam_show()`（优先
+  `Lcd.drawRawBuf`，回退 `Lcd.show`，探测一次后固定）。帧是 raw RGB565，
+  分辨率靠字节数反查 `_CAM_SIZES`——改这张表要同步服务端 `RGB565_SIZES`。
 - **回退开关**（设备端顶部常量）：`WAKE_MIC_PERSISTENT`、`WATCHDOG_ENABLED`、
-  `SHOW_CHAT_TEXT`——真机出问题先关开关再排查。
+  `SHOW_CHAT_TEXT`、`CAMERA_MODE_ENABLED`、`CAMERA_QVGA`、`PREVIEW_SWAP`
+  、`STREAM_ENABLED`、`STREAM_QQVGA`——真机出问题先关开关再排查。
 
 ## 测试与验证
 
 ```bash
 pip install -r requirements.txt
-pytest tests/ -q                 # 82+ 例，外部依赖全打桩（conftest 注入 config/paho 桩）
+pytest tests/ -q                 # 155+ 例，外部依赖全打桩（conftest 注入 config/paho 桩）
 python -c "import ast; ast.parse(open('cores3_client.py').read())"   # 设备端语法检查
+# 监控页 JS 语法检查（node --check 只认真实文件，不能用进程替换）
+python -c "import re;open('/tmp/m.js','w').write(re.search(r'<script>(.*)</script>', \
+  open('web/monitor.html').read(), re.S).group(1))" && node --check /tmp/m.js
 ```
 
 - 服务端改动必须跑 pytest；`tests/conftest.py` 的 `vs` fixture 每测试重置 `ServerState`。
@@ -65,4 +115,5 @@ python -c "import ast; ast.parse(open('cores3_client.py').read())"   # 设备端
 
 - 提交信息中文，格式 `类型: 摘要`（feat/fix/perf/refactor/docs/chore）。
 - 注释中文为主；服务端有 type hints，设备端（MicroPython）没有。
-- 运行时产物（`push_audio/`、`tts_cache/`、`reminders.json`）已 gitignore，勿提交。
+- 运行时产物（`push_audio/`、`tts_cache/`、`snapshots/`、`reminders.json`、
+  `photo_schedules.json`）已 gitignore，勿提交。

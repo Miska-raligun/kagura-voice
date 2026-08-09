@@ -8,3 +8,5 @@ tts_cache/
 crash_reports/
 device_logs/
 reminders.json
+photo_schedules.json
+snapshots/

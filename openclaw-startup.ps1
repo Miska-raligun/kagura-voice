@@ -31,6 +31,7 @@ $GatewayPort      = 18789
 $VoicePort        = 5000
 $MqttPort         = 1883
 $DiscoveryPort    = 5001
+$StreamPort       = 5002   # CoreS3 camera live stream (raw TCP, stream_server.py)
 $DiscoveryScript  = "C:\code\kagura-voice\discovery_relay.ps1"
 $DiscoveryScript2 = "C:\code\kagura-voice\discovery_relay.ps1"
 $FirewallRuleName = "OpenClaw Services"
@@ -77,6 +78,7 @@ if ($Stop) {
     netsh interface portproxy delete v4tov4 listenport=$VoicePort listenaddress=0.0.0.0 2>$null
     netsh interface portproxy delete v4tov4 listenport=$CdpPort listenaddress=0.0.0.0 2>$null
     netsh interface portproxy delete v4tov4 listenport=$MqttPort listenaddress=0.0.0.0 2>$null
+    netsh interface portproxy delete v4tov4 listenport=$StreamPort listenaddress=0.0.0.0 2>$null
 
     Write-Host '[*] Stopping Chrome debug instance...' -ForegroundColor Yellow
     Get-Process chrome -ErrorAction SilentlyContinue | Where-Object { Test-ProcessCmd $_ 'ChromeDebug' } | Stop-Process -Force -ErrorAction SilentlyContinue
@@ -117,6 +119,7 @@ netsh interface portproxy delete v4tov4 listenport=$GatewayPort listenaddress=0.
 netsh interface portproxy delete v4tov4 listenport=$VoicePort listenaddress=0.0.0.0 2>$null
 netsh interface portproxy delete v4tov4 listenport=$CdpPort listenaddress=0.0.0.0 2>$null
 netsh interface portproxy delete v4tov4 listenport=$MqttPort listenaddress=0.0.0.0 2>$null
+netsh interface portproxy delete v4tov4 listenport=$StreamPort listenaddress=0.0.0.0 2>$null
 
 # Gateway: external -> WSL
 netsh interface portproxy add v4tov4 listenport=$GatewayPort listenaddress=0.0.0.0 connectport=$GatewayPort connectaddress=$WslIp
@@ -129,6 +132,10 @@ Write-Host "  Voice   : 0.0.0.0:$VoicePort -> ${WslIp}:$VoicePort" -ForegroundCo
 # MQTT Broker: CoreS3 -> WSL mosquitto
 netsh interface portproxy add v4tov4 listenport=$MqttPort listenaddress=0.0.0.0 connectport=$MqttPort connectaddress=$WslIp
 Write-Host "  MQTT    : 0.0.0.0:$MqttPort -> ${WslIp}:$MqttPort" -ForegroundColor Gray
+
+# Camera Live Stream: CoreS3 -> WSL (raw TCP, stream_server.py)
+netsh interface portproxy add v4tov4 listenport=$StreamPort listenaddress=0.0.0.0 connectport=$StreamPort connectaddress=$WslIp
+Write-Host "  Stream  : 0.0.0.0:$StreamPort -> ${WslIp}:$StreamPort" -ForegroundColor Gray
 
 # Chrome CDP: WSL -> Windows Chrome
 netsh interface portproxy add v4tov4 listenport=$CdpPort listenaddress=0.0.0.0 connectport=$CdpPort connectaddress=127.0.0.1
@@ -145,7 +152,7 @@ Write-Host '[2/4] Configuring firewall rules...' -ForegroundColor Yellow
 Remove-NetFirewallRule -DisplayName $FirewallRuleName -ErrorAction SilentlyContinue
 Remove-NetFirewallRule -DisplayName $FirewallRuleUdp -ErrorAction SilentlyContinue
 
-New-NetFirewallRule -DisplayName $FirewallRuleName -Direction Inbound -Action Allow -Protocol TCP -LocalPort $GatewayPort,$VoicePort,$MqttPort,$CdpPort -Profile Any -ErrorAction SilentlyContinue | Out-Null
+New-NetFirewallRule -DisplayName $FirewallRuleName -Direction Inbound -Action Allow -Protocol TCP -LocalPort $GatewayPort,$VoicePort,$MqttPort,$StreamPort,$CdpPort -Profile Any -ErrorAction SilentlyContinue | Out-Null
 New-NetFirewallRule -DisplayName $FirewallRuleUdp -Direction Inbound -Action Allow -Protocol UDP -LocalPort $DiscoveryPort -Profile Any -ErrorAction SilentlyContinue | Out-Null
 
 Write-Host '[OK] Firewall rules added.' -ForegroundColor Green

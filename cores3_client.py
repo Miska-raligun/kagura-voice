@@ -66,7 +66,12 @@ MQTT_BROKER   = "192.168.31.66"
 # 服务端处理包含 LLM 推理，时间较长；设备无线程，超时可避免永久挂起
 REQUEST_TIMEOUT_CHAT  = 30   # /chat、/chat-vision（含 LLM 推理）
 REQUEST_TIMEOUT_SHORT = 10   # /time、/shake、/presence 等短请求
-REQUEST_TIMEOUT_UPLOAD = 15  # /upload-photo
+REQUEST_TIMEOUT_UPLOAD = 30  # /upload-photo（QVGA 帧 base64 约 205KB，15s 太紧）
+
+# 直播推流：与服务端 stream_server.py 对接。留空 token = 不校验，
+# 与 /upload-photo 等其它设备→服务端接口的口径一致。
+STREAM_PORT   = 5002
+STREAM_TOKEN  = ""
 
 # ── 录音参数 ──────────────────────────────────────────────────
 
@@ -342,6 +347,10 @@ def heartbeat_tick():
 
 class St:
     busy          = False   # 正在录音/请求/播放（MQTT push 会看它跳过重复播放）
+    # 直播推流中。也置 busy，但 push 去重要放行：去重是为了挡住 OpenClaw
+    # 用 cores3-speak 回复时的重复推送，直播期间收到的推送是真要播的
+    # （比如你在网页抓拍后让它说一句），丢掉就变成"日志里回复了但没声音"。
+    streaming     = False
     continuous    = False   # 连续对话模式
     wake          = False   # 声控唤醒模式（与 continuous 互斥）
     sleeping      = False   # 息屏休眠中
@@ -441,6 +450,8 @@ STATE_UI = {
     "no_speech":      ("(-_-)",   "No speech",         0x888888),
     "broadcast":      ("(^o^)",   "Talking...",        0x00ccff),
     "camera":         ("(0o0)",   "Camera...",         0xaa00ff),
+    # 直播：状态文字故意留空（不在屏幕上写"直播中"），画面换成 img_streaming.jpg
+    "streaming":      ("(o_o)",   "",                  0xff0055),
     "continuous_on":  ("(^o^)",   "Continuous ON",     0x00ffff),
     "continuous_off": ("(^w^)",   "Continuous OFF",    0x888888),
     "wake_on":        ("(-_-)",   "Wake mode ON",      0x00ff88),
@@ -476,6 +487,9 @@ def draw_state(state):
         "processing": "img_processing",
         "playing":    "img_playing",
         "broadcast":  "img_playing",   # broadcast 复用 playing 图片
+        # 直播时屏幕不显示实时画面，换成这张。没上传这个文件也不要紧，
+        # 下面的 fallback 会退回 img_bg.jpg。
+        "streaming":  "img_streaming",
     }
     img_name = _IMG_MAP.get(state)
     img_shown = False
@@ -507,6 +521,10 @@ def draw_state(state):
     Lcd.drawString("CONT", 10, 6)
     Lcd.setTextColor(wm_color, wm_color)
     Lcd.drawString("WAKE", 90, 6)
+    # CAM：可点的键（命中区 _CAM_ENTRY），点它进取景模式
+    if CAMERA_MODE_ENABLED:
+        Lcd.setTextColor(0xaa66ff, 0xaa66ff)
+        Lcd.drawString("CAM", 145, 6)
     # 右侧：时间 + 电量
     time_str = get_rtc_time_str()
     try:
@@ -1335,50 +1353,604 @@ def record_and_send():
     St.busy = False
 
 
-# ── 摄像头对话 ────────────────────────────────────────────────
+# ── 摄像头 ────────────────────────────────────────────────────
+#
+# 帧格式是 raw RGB565（服务端 _decode_image_b64 按字节数反查分辨率再转 JPEG）。
+# 固件差异用运行时探测抹平：抓帧优先 camera.capture()（返回 bytes，本机验证过），
+# 回退 camera.snapshot()（新固件，返回 image.Image）；预览同理，见 _cam_show()。
+
+# 回退开关：True=按 QVGA(320×240) 初始化，取景铺满屏且识别更清楚；
+# 真机若初始化失败/画面异常，改 False 即回到固件默认分辨率（旧行为）。
+CAMERA_QVGA = True
+
+# drawRawBuf 的字节序开关。摄像头 RGB565 是高字节在前，M5GFX 的 raw buffer
+# 默认也按这个顺序读，所以不需要交换——swap 是留给小端来源（PC 生成的数组）的。
+# 真机验证过：True 会花屏（轮廓在、彩虹色、逐帧闪），False 才正常。
+PREVIEW_SWAP = False
+
+# drawRawBuf 的 len 参数按"像素个数"还是"字节数"算。底层是 LovyanGFX 的
+# pushPixels(data, len, swap)，len 按像素计——传字节数（=2 倍）会让显示窗口
+# 铺完一屏后绕回原点，再用越界读到的数据（多半是摄像头的另一块 framebuffer）
+# 盖一遍，症状就是错块 + 竖条纹 + 逐帧乱跳。
+# 真机若改成 True 后只画了上半屏，说明这版固件按字节算，改回 False。
+PREVIEW_LEN_IN_PIXELS = True
+
+# 字节数 → 分辨率。与服务端 voice_server.py 的 RGB565_SIZES 保持一致
+# （这里只列摄像头模块支持的档位）。
+_CAM_SIZES = {
+    160 * 120 * 2: (160, 120),
+    176 * 144 * 2: (176, 144),
+    240 * 176 * 2: (240, 176),
+    240 * 240 * 2: (240, 240),
+    320 * 240 * 2: (320, 240),
+}
 
 _camera_inited = False
+_cam_grab_fn   = None   # 探测到的抓帧函数
+_cam_draw_mode = None   # 'raw'=drawRawBuf / 'show'=Lcd.show / 'none'=不支持预览
 
-def capture_photo():
-    """
-    调用 CoreS3 摄像头拍一张 QQVGA raw RGB565 帧。
-    首次调用时初始化摄像头，之后保持常驻（不 deinit）。
-    返回 base64 字符串（无换行），失败返回 None。
-    """
+
+def _camera_ensure():
+    """幂等初始化摄像头。首次成功后常驻（不 deinit）。返回是否可用。"""
     global _camera_inited
+    if _camera_inited:
+        return True
     import camera
-
-    if not _camera_inited:
-        print("camera: initializing...")
-        try:
-            camera.init()
-            _camera_inited = True
-            print("camera: init OK")
-        except Exception as e:
-            print("camera init error:", e)
-            return None
-
-    time.sleep(0.3)   # 等待曝光稳定（替代 skip_frames）
-
-    print("camera: capturing...")
+    print("camera: initializing...")
     try:
-        img = camera.capture()
+        if CAMERA_QVGA and hasattr(camera, "QVGA") and hasattr(camera, "RGB565"):
+            camera.init(pixformat=camera.RGB565, framesize=camera.QVGA)
+            print("camera: init OK (QVGA)")
+        else:
+            camera.init()   # 老固件的无参形态，分辨率由固件决定
+            print("camera: init OK (firmware default)")
+        _camera_inited = True
+        return True
+    except Exception as e:
+        print("camera init error:", e)
+        return False
+
+
+def _cam_grab():
+    """抓一帧，返回帧对象（bytes 或 image.Image），失败返回 None。"""
+    global _cam_grab_fn
+    import camera
+    if _cam_grab_fn is None:
+        _cam_grab_fn = getattr(camera, "capture", None) or getattr(camera, "snapshot", None)
+        if _cam_grab_fn is None:
+            print("camera: no capture()/snapshot() in this firmware")
+            return None
+    try:
+        frame = _cam_grab_fn()
     except Exception as e:
         print("camera capture error:", e)
         return None
+    if frame is None or isinstance(frame, bool):
+        print("camera: capture returned", frame)
+        return None
+    return frame
 
-    if img is None or isinstance(img, bool):
-        print("camera: capture returned", img)
+
+def _cam_bytes(frame):
+    """取帧的原始字节。capture() 已经是 bytes；snapshot() 给 image.Image。"""
+    if isinstance(frame, (bytes, bytearray, memoryview)):
+        return frame
+    try:
+        return frame.bytearray()
+    except Exception as e:
+        print("camera: frame bytes err:", e)
         return None
 
-    print("camera: raw size =", len(img))
-    b64 = ubinascii.b2a_base64(img).decode("utf-8").replace("\n", "").replace("\r", "")
+
+def _cam_show(frame, max_h=240):
+    """把一帧居中画到屏幕。首帧探测绘制方式，之后固定。返回是否画上了。
+
+    max_h 限制绘制高度：取景时只画到按钮条上沿，按钮条就不会被每帧盖住、
+    也就不用每帧补画（否则底栏肉眼可见地闪）。帧是行优先连续存储，前
+    w*max_h 个像素正好是最上面 max_h 行，所以窗口和 len 一起缩小即可。
+    """
+    global _cam_draw_mode
+    if _cam_draw_mode == "none":
+        return False
+    raw = _cam_bytes(frame)
+    if raw is None:
+        return False
+    w, h = _CAM_SIZES.get(len(raw), (0, 0))
+    if not w:
+        print("camera: unknown frame size", len(raw), "— 预览关闭")
+        _cam_draw_mode = "none"
+        return False
+    h = min(h, max_h)
+    x = (320 - w) // 2
+    y = (max_h - h) // 2
+    # len 跟着窗口一起缩——之前裁剪失败就是因为这里还按整帧算，等于又传了 2 倍
+    n = w * h if PREVIEW_LEN_IN_PIXELS else w * h * 2
+    if _cam_draw_mode in (None, "raw"):
+        try:
+            Lcd.drawRawBuf(raw, x, y, w, h, n, PREVIEW_SWAP)
+            _cam_draw_mode = "raw"
+            return True
+        except Exception as e:
+            if _cam_draw_mode == "raw":
+                return False        # 已选定方式，单帧失败不重新探测
+            print("camera: drawRawBuf unavailable:", e)
+    try:
+        Lcd.show(frame, x, y, w, h)   # 新固件路径（配 snapshot() 的 image.Image）
+        _cam_draw_mode = "show"
+        return True
+    except Exception as e:
+        if _cam_draw_mode == "show":
+            return False              # 已选定方式，单帧失败不重新探测
+        print("camera: Lcd.show unavailable:", e, "— 预览关闭")
+        _cam_draw_mode = "none"
+        return False
+
+
+def capture_photo():
+    """
+    拍一张 raw RGB565 帧，返回 base64 字符串（无换行），失败返回 None。
+    语音触发拍照与 MQTT 远程拍照共用。
+    """
+    if not _camera_ensure():
+        return None
+    time.sleep(0.3)   # 等待曝光稳定（替代 skip_frames）
+    print("camera: capturing...")
+    frame = _cam_grab()
+    if frame is None:
+        return None
+    raw = _cam_bytes(frame)
+    if raw is None:
+        return None
+    print("camera: raw size =", len(raw))
+    b64 = ubinascii.b2a_base64(raw).decode("utf-8").replace("\n", "").replace("\r", "")
     gc.collect()
     return b64
 
 
-# 注：曾有触摸下半屏触发的 record_and_send_vision()，但主循环从未接线，
-# 已删除。拍照路径现有两条：语音关键词（服务端回 X-Need-Photo）和 MQTT 远程命令。
+# ── 直播推流 ──────────────────────────────────────────────────
+#
+# 网页要看实时画面。走 /upload-photo 那条路每帧都要新建 HTTP 连接 + base64
+# （体积 +33%），实测一张 5~8 秒，根本不成流。这里改成一条常驻 TCP 连到
+# 服务端 5002，每帧只发 4 字节大端长度 + RGB565 裸字节。
+#
+# 还要把分辨率降到 QQVGA(160×120)：单帧 38KB，是 QVGA 的四分之一。
+# 两项加起来才够 2~4 fps——这仍是"连拍流"，不是设备本地预览那种流畅画面。
+#
+# 切分辨率需要 deinit + 重新 init，固件不一定有 deinit；没有就按当前分辨率
+# 照传，只是慢一些，不至于整个功能不可用。
+
+STREAM_ENABLED  = True   # 回退开关：False 则忽略所有直播命令
+STREAM_MAX_SECS = 300    # 单次直播硬上限，服务端失联也不会让摄像头一直开着
+STREAM_QQVGA    = True   # 直播降到 160×120；False=保持当前分辨率（更清晰更慢）
+STREAM_SETTLE_FRAMES = 5 # 切完分辨率先丢几帧等曝光收敛，开头才不会忽明忽暗
+
+_stream_deadline = 0     # 直播截止时间戳，收到 stream_start 就往后推
+
+
+def _cam_set_framesize(qqvga):
+    """切换摄像头分辨率，成功返回 True。固件没有 deinit 就返回 False（照常推流）。"""
+    global _camera_inited, _cam_grab_fn
+    import camera
+    if not hasattr(camera, "deinit") or not hasattr(camera, "RGB565"):
+        return False
+    want = getattr(camera, "QQVGA", None) if qqvga else getattr(camera, "QVGA", None)
+    if want is None:
+        return False
+    try:
+        camera.deinit()
+        _camera_inited = False
+        camera.init(pixformat=camera.RGB565, framesize=want)
+        _camera_inited = True
+        _cam_grab_fn = None          # 重新探测抓帧函数，保守起见
+        print("camera: framesize ->", "QQVGA" if qqvga else "QVGA")
+        return True
+    except Exception as e:
+        print("camera: framesize switch failed:", e)
+        try:                          # 尽力恢复到能用的状态，别把拍照也弄坏
+            camera.init(pixformat=camera.RGB565, framesize=camera.QVGA)
+            _camera_inited = True
+            _cam_grab_fn = None
+        except Exception as e2:
+            print("camera: restore failed:", e2)
+            _camera_inited = False
+        return False
+
+
+def _sock_write_all(sock, data):
+    """把 data 全部写出去。write() 返回 None 的固件视为一次写完。"""
+    mv = memoryview(data)
+    total = 0
+    while total < len(mv):
+        try:
+            n = sock.write(mv[total:])
+        except OSError as e:
+            print("stream write err:", e)
+            return False
+        if n is None:
+            return True
+        if n <= 0:
+            return False
+        total += n
+    return True
+
+
+def _stream_drain_cmds():
+    """直播期间自己消费命令队列，返回 (是否停止, 待插拍的 capture 命令)。
+
+    capture 必须就地处理，不能留回队列——留回去要等直播结束才执行，
+    用户按下快门后就成了"没反应"。一轮只取一条，多的留到下一轮。
+    其余命令原样留回队列，等直播结束后由主循环处理。
+    """
+    global _stream_deadline
+    stop = False
+    capture = None
+    keep = []
+    while _pending_cmd:
+        c = _pending_cmd.pop(0)
+        action = c.get("action")
+        if action == "stream_start":
+            _stream_deadline = time.time() + c.get("secs", 45)
+        elif action == "stream_stop":
+            stop = True
+        elif action == "capture" and capture is None:
+            capture = c
+        else:
+            keep.append(c)
+    for c in keep:
+        _pending_cmd.append(c)
+    return stop, capture
+
+
+def _stream_hires_capture(cmd, switched):
+    """直播中插拍一张高清照：临时切回 QVGA 拍一张上传，再切回直播分辨率。
+
+    直播画面会停几秒（切分辨率 ×2 + 曝光收敛 + 205KB 上传）。用停顿换清晰度：
+    直播帧只有 160×120，给 AI 识别太糊。switched=False 说明本来就是全分辨率，
+    不用来回切，直接拍。
+    """
+    rid = cmd.get("request_id", "")
+    print("stream: hi-res capture", rid)
+    dbg("stream hires")
+    draw_state("camera")
+    try:
+        if switched:
+            _cam_set_framesize(False)          # 切回 QVGA
+            for _ in range(STREAM_SETTLE_FRAMES):
+                _cam_grab()
+                _wdt_feed()
+        image_b64 = capture_photo()
+        _wdt_feed()
+        draw_state("processing")
+        _upload_photo(rid, image_b64)
+        _wdt_feed()
+    except Exception as e:
+        print("stream hires capture err:", e)
+    finally:
+        if switched:
+            _cam_set_framesize(True)           # 回到直播分辨率
+            for _ in range(STREAM_SETTLE_FRAMES):
+                _cam_grab()
+                _wdt_feed()
+        gc.collect()
+        draw_state("streaming")
+
+
+def _run_stream_cmd(cmd):
+    """执行直播命令（主循环调用），一直推到超时/收到停止/出错为止。"""
+    global _stream_deadline
+    if not STREAM_ENABLED:
+        print("stream: disabled by switch")
+        return
+    if not _camera_ensure():
+        print("stream: camera unavailable")
+        return
+
+    if St.sleeping:
+        wake_up()
+    St.busy = True
+    St.streaming = True
+    St.last_activity = time.time()
+
+    now = time.time()
+    _stream_deadline = now + cmd.get("secs", 45)
+    hard_stop = now + STREAM_MAX_SECS
+    port = cmd.get("port", STREAM_PORT)
+
+    switched = _cam_set_framesize(True) if STREAM_QQVGA else False
+    if switched:
+        # 换完分辨率后自动曝光/白平衡要重新收敛，先丢几帧再开播，
+        # 否则开头几秒画面忽明忽暗。capture_photo() 里的 sleep(0.3) 同理。
+        for _ in range(STREAM_SETTLE_FRAMES):
+            _cam_grab()
+            _wdt_feed()
+    sock = None
+    frames = 0
+    try:
+        draw_state("streaming")
+        sock = usocket.socket(usocket.AF_INET, usocket.SOCK_STREAM)
+        sock.settimeout(10)
+        try:
+            # 发现流程里 MQTT_BROKER 就是服务端 IP
+            sock.connect((MQTT_BROKER, port))
+        except OSError as e:
+            # 单独捕获连接失败：这一步超时几乎都是"端口没通"，而不是流本身的问题。
+            # 服务端在 WSL 里时，Windows 侧要给这个端口加 portproxy + 防火墙，
+            # 见 openclaw-startup.ps1 的 $StreamPort。
+            print("stream: cannot connect to {}:{} ({}) —"
+                  " server not listening, or port not forwarded".format(
+                      MQTT_BROKER, port, e))
+            dbg("stream connect fail :{}".format(port))
+            return
+        hello = "KAGURA_STREAM v1 {} {}\n".format(DEVICE_ID, STREAM_TOKEN)
+        if not _sock_write_all(sock, hello.encode("utf-8")):
+            print("stream: handshake failed")
+            return
+        dbg("stream start")
+        print("stream: connected", MQTT_BROKER, port)
+
+        while True:
+            _wdt_feed()
+            now = time.time()
+            if now >= _stream_deadline or now >= hard_stop:
+                print("stream: deadline reached")
+                break
+
+            frame = _cam_grab()
+            if frame is None:
+                time.sleep(0.2)              # 抓帧失败别空转
+            else:
+                raw = _cam_bytes(frame)
+                if raw is not None:
+                    # 立刻复制一份再发：一帧 38KB 走 TCP 要上百毫秒，这期间驱动
+                    # 很可能已经在往同一块 framebuffer 里写下一帧了，直接发原缓冲
+                    # 会发出半新半旧的撕裂画面（看起来就是频闪）。取景模式定格那里
+                    # 也是出于同样原因复制的。
+                    raw = bytes(raw)
+                    n = len(raw)
+                    head = bytes([(n >> 24) & 0xFF, (n >> 16) & 0xFF,
+                                  (n >> 8) & 0xFF, n & 0xFF])
+                    if not _sock_write_all(sock, head) or not _sock_write_all(sock, raw):
+                        print("stream: send failed, stopping")
+                        break
+                    frames += 1
+                    if frames % CAM_GC_EVERY == 0:
+                        gc.collect()
+
+            # 直播可能持续几分钟，不喂 MQTT 会被 keepalive(60s) 判掉线
+            mqtt_check()
+            stop, cap = _stream_drain_cmds()
+            if stop:
+                print("stream: stopped by server")
+                break
+            if cap is not None:
+                # 插拍高清照，画面停几秒。把耗时补回截止时间，
+                # 免得拍完正好撞上超时、直播刚续上就断
+                t0 = time.time()
+                _stream_hires_capture(cap, switched)
+                _stream_deadline += time.time() - t0
+
+            # 直播期间收到的播报（如网页抓拍后让它说一句）就地播出来。
+            # 画面会停几秒再续上——比"日志里回复了但没声音"好得多。
+            if _pending_push:
+                _play_push(_pending_push.pop(0))
+                draw_state("streaming")   # _play_push 收尾会切 idle，切回来
+                _wdt_feed()
+
+            touch, _pos = check_touch()
+            if touch == 'long':
+                print("stream: stopped by touch")
+                break
+    except OSError as e:
+        print("stream error:", e)
+        dbg("stream err")
+    finally:
+        if sock is not None:
+            try:
+                _sock_write_all(sock, b"\x00\x00\x00\x00")   # 正常结束标记
+            except Exception:
+                pass
+            try:
+                sock.close()
+            except Exception:
+                pass
+        if switched:
+            _cam_set_framesize(False)        # 还原 QVGA，别影响之后的拍照识别
+        gc.collect()
+        St.streaming = False
+        St.busy = False
+        St.last_activity = time.time()
+        draw_state("idle")
+        drain_touch()
+        print("stream: ended, frames =", frames)
+
+
+# ── 取景模式（手动拍照） ──────────────────────────────────────
+#
+# 与语音触发拍照的唯一区别是"拍什么由眼睛决定"：实时预览 → 快门 → 确认，
+# 确认后走的仍是 /chat-vision，同一套识别链路（服务端无 wav 时用默认提问）。
+
+CAMERA_MODE_ENABLED = True      # 回退开关：False 则顶栏 CAM 键失效，短按一律录音
+CAM_IDLE_TIMEOUT    = 90        # 取景/确认界面无操作自动退出（秒）
+CAM_GC_EVERY        = 20        # 每 N 帧 gc 一次，压住抓帧的堆碎片
+
+CAM_BAR_Y  = 200                # 底部按钮条上沿
+# 预览只画到按钮条上沿，底栏就不用每帧补画（否则底部 40px 会轻微频闪）。
+# 代价：取景框看到的是画面上面 200 行，发出去的仍是完整 240 行。
+# 若裁剪后画面异常，改 False 即回到整帧铺满 + 每帧补画底栏的行为。
+CAM_PREVIEW_CLIP = True
+_CAM_PREVIEW_H = CAM_BAR_Y if CAM_PREVIEW_CLIP else 240
+_CAM_ENTRY = (136, 0, 200, 34)  # 待机顶栏 "CAM" 键的命中区
+_CAM_BTN_L = (0,   CAM_BAR_Y, 158, 239)
+_CAM_BTN_R = (161, CAM_BAR_Y, 319, 239)
+
+
+_cam_touch_evt = (None, (0, 0))
+
+
+def _cam_poll_touch():
+    """采样一次触摸并锁存首个事件。
+
+    取景循环一帧要 ~100ms（抓帧+刷屏），每帧只采一次会漏掉 100ms 级的
+    快速点按——按了没反应。故一帧内多采几次，事件锁存到被取走为止。
+    """
+    global _cam_touch_evt
+    t, p = check_touch()
+    if t is not None and _cam_touch_evt[0] is None:
+        _cam_touch_evt = (t, p)
+
+
+def _cam_take_touch():
+    """取走锁存的触摸事件（取走即清空）。"""
+    global _cam_touch_evt
+    evt = _cam_touch_evt
+    _cam_touch_evt = (None, (0, 0))
+    return evt
+
+
+def _cam_chrome(review):
+    """底部按钮条。review=False 取景中 [EXIT|SHOOT]，True 已拍待确认 [RETAKE|SEND]。"""
+    if review:
+        left, l_bg, right, r_bg = "RETAKE", 0x883311, "SEND", 0x117744
+    else:
+        left, l_bg, right, r_bg = "EXIT", 0x333333, "SHOOT", 0x8822aa
+    Lcd.setFont(_FONT_16)
+    Lcd.setTextSize(1)
+    for rect, label, bg in ((_CAM_BTN_L, left, l_bg), (_CAM_BTN_R, right, r_bg)):
+        _fill_rect(rect[0], rect[1], rect[2] - rect[0] + 1, rect[3] - rect[1] + 1, bg)
+        Lcd.setTextColor(0xffffff, bg)
+        tx = rect[0] + ((rect[2] - rect[0]) - len(label) * 10) // 2
+        Lcd.drawString(label, tx, rect[1] + 12)
+
+
+def _cam_send(raw):
+    """把确认后的帧交给神乐：POST /chat-vision（不带 wav，服务端用默认提问）。"""
+    draw_state("processing")
+    b64 = ubinascii.b2a_base64(raw).decode("utf-8").replace("\n", "").replace("\r", "")
+    gc.collect()
+    payload = ujson.dumps({"image": b64})
+    del b64
+    gc.collect()
+    try:
+        hdrs = {"X-Device-Id": DEVICE_ID, "Content-Type": "application/json"}
+        lt = get_local_time_header()
+        if lt:
+            hdrs["X-Local-Time"] = lt
+        resp = urequests.post(VISION_URL, data=payload.encode("utf-8"),
+                              headers=hdrs, timeout=REQUEST_TIMEOUT_CHAT)
+        if resp.status_code != 200:
+            print("cam send err:", resp.status_code)
+            resp.close()
+            draw_state("error")
+            time.sleep(2)
+            return
+        _update_chat_text(resp.headers.get("X-User-Text", ""),
+                          resp.headers.get("X-Reply-Text", ""))
+        data = resp.content
+        resp.close()
+        draw_state("playing")
+        play_wav(data)
+    except OSError as e:
+        print("cam send net err:", e)
+        draw_state("error")
+        time.sleep(2)
+    finally:
+        gc.collect()
+
+
+def camera_mode():
+    """
+    取景模式主流程：实时预览 → 短按 SHOOT 定格 → RETAKE 重拍 / SEND 交给神乐。
+    长按屏幕任意处随时退出；CAM_IDLE_TIMEOUT 秒无操作自动退出。
+    """
+    St.busy = True
+    St.last_activity = time.time()
+    gc.collect()
+    if not _camera_ensure():
+        draw_state("error")
+        time.sleep(2)
+        draw_state("idle")
+        St.busy = False
+        return
+
+    Widgets.fillScreen(0x000000)   # 帧小于屏幕时四周留黑，只清一次
+    _cam_chrome(False)
+    _cam_take_touch()              # 丢掉进来那一下点按的残留
+    shot        = None             # 定格的帧（bytes 副本），None=取景中
+    last_action = time.time()
+    frames      = 0
+    try:
+        while True:
+            _wdt_feed()
+            if time.time() - last_action > CAM_IDLE_TIMEOUT:
+                dbg("cam idle exit")
+                break
+
+            if shot is None:
+                _cam_poll_touch()
+                frame = _cam_grab()
+                _cam_poll_touch()
+                if frame is None:
+                    time.sleep(0.2)        # 抓帧失败别空转
+                else:
+                    _cam_show(frame, _CAM_PREVIEW_H)
+                    if not CAM_PREVIEW_CLIP:
+                        _cam_chrome(False)  # 整帧会盖住按钮条，得补画回来
+                    frames += 1
+                    if frames % CAM_GC_EVERY == 0:
+                        gc.collect()
+            else:
+                time.sleep(0.05)           # 已定格，屏幕不用重画
+
+            # 取景可能停留几十秒，超过 MQTT keepalive(60s) 就会被判掉线
+            mqtt_check()
+            # 注：心跳不在这里发——heartbeat_tick() 见 St.busy 就跳过，
+            # 与录音/播放期间一样按"交互中不上报"处理，退出后自然补上。
+
+            _cam_poll_touch()
+            touch, pos = _cam_take_touch()
+            if touch == 'long':
+                break
+            if touch != 'short':
+                continue
+
+            last_action = time.time()
+            St.last_activity = last_action
+            x, y = pos
+            if shot is None:
+                if _hit(x, y, _CAM_BTN_R):            # SHOOT：定格
+                    frame = _cam_grab()
+                    raw = _cam_bytes(frame) if frame is not None else None
+                    if raw is None:
+                        draw_state("error")
+                        time.sleep(1)
+                        Widgets.fillScreen(0x000000)
+                        _cam_chrome(False)
+                        _cam_take_touch()
+                        continue
+                    # 复制一份再定格：驱动可能复用同一块 framebuffer。
+                    # 屏上画的是原帧对象（Lcd.show 路径只认 image.Image），
+                    # 定格后不再抓帧，这一帧就一直留在屏幕上。
+                    shot = bytes(raw)
+                    _cam_show(frame, _CAM_PREVIEW_H)
+                    _cam_chrome(True)
+                    _cam_take_touch()      # 手抖连点两下别直接发出去
+                elif _hit(x, y, _CAM_BTN_L):          # EXIT
+                    break
+            else:
+                if _hit(x, y, _CAM_BTN_R):            # SEND
+                    _cam_send(shot)
+                    break
+                elif _hit(x, y, _CAM_BTN_L):          # RETAKE：丢掉重来
+                    shot = None
+                    _cam_chrome(False)
+                    _cam_take_touch()      # 同上：别顺手连点成 EXIT
+    finally:
+        shot = None
+        gc.collect()
+        St.last_activity = time.time()
+        St.busy = False
+        draw_state("idle")
+        drain_touch()
 
 
 # ── MQTT 推送订阅 ─────────────────────────────────────────────
@@ -1397,8 +1969,9 @@ def _mqtt_callback(topic, msg):
     topic_str = topic.decode("utf-8") if isinstance(topic, bytes) else topic
 
     if "/push/" in topic_str:
-        if St.busy:
-            # 保留去重语义：对话期间 OpenClaw 触发的重复 push 直接丢弃
+        if St.busy and not St.streaming:
+            # 保留去重语义：对话期间 OpenClaw 触发的重复 push 直接丢弃。
+            # 直播期间不算"对话中"，照收——由推流循环负责播出来。
             print("push skipped: device busy")
             return
         try:
@@ -1437,6 +2010,27 @@ def _play_push(url):
     _set_led(0, 0, 0)
 
 
+def _upload_photo(request_id, image_b64):
+    """把拍到的图 POST 给服务端。远程拍照与直播插拍共用。"""
+    payload = ujson.dumps({
+        "request_id": request_id,
+        "image": image_b64 or "",
+        "device_id": DEVICE_ID,
+    })
+    try:
+        resp = urequests.post(
+            UPLOAD_URL,
+            data=payload.encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            timeout=REQUEST_TIMEOUT_UPLOAD,
+        )
+        resp.close()
+        return True
+    except OSError as e:
+        print("upload err:", e)
+        return False
+
+
 def _run_capture_cmd(cmd):
     """执行远程拍照命令（主循环调用）。"""
     if St.sleeping:
@@ -1447,21 +2041,7 @@ def _run_capture_cmd(cmd):
         draw_state("camera")
         image_b64 = capture_photo()
         draw_state("processing")
-        payload = ujson.dumps({
-            "request_id": cmd.get("request_id", ""),
-            "image": image_b64 or "",
-            "device_id": DEVICE_ID,
-        })
-        try:
-            resp = urequests.post(
-                UPLOAD_URL,
-                data=payload.encode("utf-8"),
-                headers={"Content-Type": "application/json"},
-                timeout=REQUEST_TIMEOUT_UPLOAD,
-            )
-            resp.close()
-        except OSError as e:
-            print("upload err:", e)
+        _upload_photo(cmd.get("request_id", ""), image_b64)
     finally:
         draw_state("idle")
         St.busy = False
@@ -1475,8 +2055,13 @@ def process_mqtt_queue():
         _play_push(_pending_push.pop(0))
     elif _pending_cmd:
         cmd = _pending_cmd.pop(0)
-        if cmd.get("action") == "capture":
+        action = cmd.get("action")
+        if action == "capture":
             _run_capture_cmd(cmd)
+        elif action == "stream_start":
+            _run_stream_cmd(cmd)
+        # stream_stop：不在直播中收到就没有意义，丢弃即可
+        #（直播中的续期/停止由 _stream_drain_cmds 自己消费）
 
 
 def _reconnect_mqtt():
@@ -2010,7 +2595,10 @@ def loop():
         if touch == 'long':
             toggle_wake_mode()           # 长按：切换声控唤醒模式
         elif touch == 'short':
-            record_and_send()            # 短按：直接录音
+            if CAMERA_MODE_ENABLED and _hit(pos[0], pos[1], _CAM_ENTRY):
+                camera_mode()            # 短按顶栏 CAM 键：手动取景拍照
+            else:
+                record_and_send()        # 短按其他位置：直接录音
         elif St.wake:
             # 简化的声控唤醒：连续 N×100ms 音量超阈值 → 触发录音
             now_ms = time.ticks_ms()

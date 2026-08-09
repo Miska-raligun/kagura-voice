@@ -27,8 +27,10 @@ from flask import Flask, request, send_file, jsonify, Response, after_this_reque
 import paho.mqtt.client as mqtt
 
 from baidu_tokens import BaiduTokenCache
+import photo_schedules
 import quick_commands
 import reminders
+import stream_server
 
 # ── 路径配置 ──────────────────────────────────────────────────────────────────
 
@@ -54,6 +56,13 @@ TTS_CACHE_MAX_FILES = 200
 VISION_TMP_DIR = OPENCLAW_DIR / "workspace" / "tmp"
 VISION_TMP_DIR.mkdir(parents=True, exist_ok=True)
 
+# 定时拍照的留档：photo_results 5 分钟就清，这里长期保留供网页回看
+SNAPSHOT_DIR = Path(__file__).parent / "snapshots"
+SNAPSHOT_DIR.mkdir(exist_ok=True)
+SNAPSHOT_MAX = 60
+
+WEB_DIR = Path(__file__).parent / "web"
+
 SAMPLE_RATE = 16000
 
 # ── 百度语音识别 ──────────────────────────────────────────────────────────────
@@ -67,6 +76,13 @@ try:
     from config import API_TOKEN
 except ImportError:
     API_TOKEN = ""
+
+# 直播流（TCP :5002）的握手密钥。默认留空 = 不校验，与 /upload-photo 等
+# 其它「设备 → 服务端」接口口径一致。要启用得同时改设备端的 STREAM_TOKEN。
+try:
+    from config import STREAM_TOKEN
+except ImportError:
+    STREAM_TOKEN = ""
 
 _asr_tokens = BaiduTokenCache(BAIDU_API_KEY, BAIDU_SECRET_KEY, name="ASR")
 _tts_tokens = BaiduTokenCache(BAIDU_TTS_API_KEY, BAIDU_TTS_SECRET_KEY, name="TTS")
@@ -345,6 +361,32 @@ _MAX_IMAGE_B64_BYTES = 5 * 1024 * 1024   # 5 MB base64 上限（约 3.75 MB 解�
 _MAX_AUDIO_BYTES    = 5 * 1024 * 1024   # 5 MB WAV 上限
 
 
+def _rgb565_to_jpeg_bytes(raw: bytes, quality: int = 85) -> Optional[bytes]:
+    """RGB565 裸帧 → JPEG 字节。分辨率靠字节数反查，对不上返回 None。
+
+    拍照与直播共用。设备端 _CAM_SIZES 要与 RGB565_SIZES 保持一致。
+    """
+    W, H = RGB565_SIZES.get(len(raw), (None, None))
+    if W is None:
+        return None
+    import numpy as np
+    from PIL import Image as PILImage
+    import io as _io
+    pixels = np.frombuffer(raw, dtype=np.uint16).byteswap()
+    r = ((pixels >> 11) & 0x1F) * 255 // 31
+    g = ((pixels >> 5)  & 0x3F) * 255 // 63
+    b = (pixels         & 0x1F) * 255 // 31
+    rgb = np.stack([r, g, b], axis=-1).astype(np.uint8).reshape(H, W, 3)
+    buf = _io.BytesIO()
+    PILImage.fromarray(rgb).save(buf, format="JPEG", quality=quality)
+    return buf.getvalue()
+
+
+def _stream_frame_to_jpeg(raw: bytes) -> Optional[bytes]:
+    """直播帧转换：质量压到 70，单帧小一半，肉眼几乎看不出差别。"""
+    return _rgb565_to_jpeg_bytes(raw, quality=70)
+
+
 def _decode_image_b64(image_b64: str, device_id: str = "unknown", tag: str = "") -> Optional[str]:
     """解码 base64 图片（RGB565 或 JPEG），保存为 JPEG，返回路径。失败返回 None。"""
     if len(image_b64) > _MAX_IMAGE_B64_BYTES:
@@ -362,21 +404,11 @@ def _decode_image_b64(image_b64: str, device_id: str = "unknown", tag: str = "")
     n = len(decoded_bytes)
     image_path = str(VISION_TMP_DIR / f"oc_vision_{uuid.uuid4().hex[:8]}.jpg")
 
-    W, H = RGB565_SIZES.get(n, (None, None))
-    if W is not None:
-        import numpy as np
-        from PIL import Image as PILImage
-        import io as _io
-        pixels = np.frombuffer(decoded_bytes, dtype=np.uint16).byteswap()
-        r = ((pixels >> 11) & 0x1F) * 255 // 31
-        g = ((pixels >> 5)  & 0x3F) * 255 // 63
-        b = (pixels         & 0x1F) * 255 // 31
-        rgb = np.stack([r, g, b], axis=-1).astype(np.uint8).reshape(H, W, 3)
-        buf = _io.BytesIO()
-        PILImage.fromarray(rgb).save(buf, format="JPEG", quality=85)
+    jpeg = _rgb565_to_jpeg_bytes(decoded_bytes)
+    if jpeg is not None:
         with open(image_path, "wb") as f:
-            f.write(buf.getvalue())
-        print(f"[{tag}] {device_id} RGB565→JPEG: {buf.tell()} bytes")
+            f.write(jpeg)
+        print(f"[{tag}] {device_id} RGB565→JPEG: {len(jpeg)} bytes")
         return image_path
     elif n >= 4 and decoded_bytes[0] == 0xFF and decoded_bytes[1] == 0xD8:
         with open(image_path, "wb") as f:
@@ -602,15 +634,14 @@ def _photo_cleanup_loop() -> None:
             _cleanup_photo_results()
 
 
-@app.route("/capture-request", methods=["POST"])
-def capture_request():
-    """OpenClaw skill 调用：通过 MQTT 发送拍照命令给设备，返回 request_id。"""
-    if not _token_ok():
-        return jsonify({"error": "invalid or missing X-Api-Token"}), 401
-    data = request.get_json() or {}
-    device_id = _validate_device_id(data.get("device_id", "cores3"))
-    if _mqtt_client is None:
-        return jsonify({"error": "MQTT 不可用"}), 503
+_CAPTURE_RATE_MAX = 30   # 拍照命令每设备每分钟上限：网页自动刷新最快 5s 一张也够用
+
+
+def _issue_capture(device_id: str) -> str:
+    """登记一条 pending 记录并通过 MQTT 下发拍照命令，返回 request_id。
+
+    调用方需先确认 _mqtt_client 不为 None。
+    """
     request_id = str(uuid.uuid4())[:8]
     cmd = {"action": "capture", "request_id": request_id}
     with state.photos_lock:
@@ -618,7 +649,72 @@ def capture_request():
         state.photo_results[request_id] = {"status": "pending", "_ts": time.time()}
     _mqtt_client.publish(f"kagura/cmd/{device_id}", json.dumps(cmd), qos=1)
     print(f"[capture] 📷  MQTT 拍照命令 {request_id} → {device_id}")
-    return jsonify({"request_id": request_id, "status": "queued"})
+    return request_id
+
+
+def _capture_from_stream(device_id: str) -> Optional[str]:
+    """直播中抓拍：把手上最新一帧存成照片，返回 request_id；没有活跃直播返回 None。
+
+    不能走 MQTT 让设备拍——设备正忙着推流，_stream_drain_cmds 会把拍照命令
+    压回队列，要等直播结束才执行。而且直播时服务端本来就有画面，直接用就是
+    所见即所得。代价：分辨率是直播的 QQVGA(160×120)，比正常拍照糊。
+    """
+    rec = stream_server.latest(device_id)
+    if not rec or not rec.get("jpeg"):
+        return None
+    if time.time() - rec["ts"] > stream_server.STALE_AFTER:
+        return None          # 直播已经停了，最新一帧是陈的，交给正常拍照流程
+    image_path = str(VISION_TMP_DIR / f"oc_vision_{uuid.uuid4().hex[:8]}.jpg")
+    try:
+        with open(image_path, "wb") as f:
+            f.write(rec["jpeg"])
+    except OSError as e:
+        print(f"[capture] ⚠️  直播抓拍写盘失败: {e}")
+        return None
+    request_id = str(uuid.uuid4())[:8]
+    with state.photos_lock:
+        _cleanup_photo_results()
+        state.photo_results[request_id] = {
+            "status": "done", "image_path": image_path, "_ts": time.time()}
+    print(f"[capture] 📸  {device_id} 直播抓拍 {request_id}（第 {rec['seq']} 帧）")
+    return request_id
+
+
+def _capture_and_wait(device_id: str, timeout: float = 45.0) -> tuple[Optional[str], Optional[str]]:
+    """下发拍照命令并同步等设备上传，返回 (image_path, error)。
+
+    只在后台线程里用（定时任务 / 网页试跑），HTTP 路由请走 _issue_capture + 轮询。
+    设备离线时会一直等到超时——上层要把这个错误如实报出来。
+    """
+    if _mqtt_client is None:
+        return None, "MQTT 不可用，无法下发拍照命令"
+    request_id = _issue_capture(device_id)
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        time.sleep(0.5)
+        with state.photos_lock:
+            rec = state.photo_results.get(request_id)
+        if rec is None:
+            return None, "拍照记录已被清理"
+        if rec["status"] == "done":
+            return rec.get("image_path"), None
+        if rec["status"] == "error":
+            return None, rec.get("error", "设备拍照失败")
+    return None, f"等待设备上传超时（{int(timeout)}s），设备可能离线或摄像头不可用"
+
+
+@app.route("/capture-request", methods=["POST"])
+def capture_request():
+    """OpenClaw skill 调用：通过 MQTT 发送拍照命令给设备，返回 request_id。"""
+    if not _token_ok():
+        return jsonify({"error": "invalid or missing X-Api-Token"}), 401
+    data = request.get_json(silent=True) or {}
+    device_id = _validate_device_id(data.get("device_id", "cores3"))
+    if not state.check_rate(device_id, bucket="capture", limit=_CAPTURE_RATE_MAX):
+        return jsonify({"error": "拍照过于频繁，请稍后再试"}), 429
+    if _mqtt_client is None:
+        return jsonify({"error": "MQTT 不可用"}), 503
+    return jsonify({"request_id": _issue_capture(device_id), "status": "queued"})
 
 
 @app.route("/upload-photo", methods=["POST"])
@@ -654,7 +750,11 @@ def upload_photo():
 
 @app.route("/capture-result/<request_id>", methods=["GET"])
 def capture_result(request_id: str):
-    """Skill 轮询拍照结果。pending→202, done→200, 未知→404。"""
+    """Skill 轮询拍照结果。pending→202, done→200, 未知→404。
+
+    done 时同时给出 image_path（本机路径，OpenClaw skill 直接读文件）和
+    image_url（HTTP 路径，网页用）——skill 依赖 image_path，勿删。
+    """
     with state.photos_lock:
         result = state.photo_results.get(request_id)
     if result is None:
@@ -663,15 +763,39 @@ def capture_result(request_id: str):
         return jsonify({"status": "pending"}), 202
     if result["status"] == "error":
         return jsonify(result), 500
-    return jsonify(result), 200
+    return jsonify({**result, "image_url": f"/photo/{request_id}"}), 200
+
+
+@app.route("/photo/<request_id>", methods=["GET"])
+def serve_photo(request_id: str):
+    """网页读取一次拍照的 JPEG。照片 5 分钟后被清理线程删除，之后返回 404。"""
+    if not _token_ok():
+        return jsonify({"error": "invalid or missing X-Api-Token"}), 401
+    with state.photos_lock:
+        result = state.photo_results.get(request_id)
+    if not result or result.get("status") != "done":
+        return jsonify({"error": "no photo for this request_id"}), 404
+    path = result.get("image_path")
+    if not path or not os.path.exists(path):
+        return jsonify({"error": "photo file已过期"}), 404
+    return send_file(path, mimetype="image/jpeg")
+
+
+# 设备取景模式手动拍照时没有提问，用它当默认提问交给 OpenClaw
+_PHOTO_ONLY_PROMPT = "我用 CoreS3 摄像头拍了一张照片给你看，看看这是什么吧"
 
 
 @app.route("/chat-vision", methods=["POST"])
 def handle_chat_vision():
     """
-    接收 JSON: {"wav": "<base64 WAV>", "image": "<base64 JPEG>"}
-    图片可为空字符串（仅语音不含图片时）。
-    返回 WAV 音频。
+    接收 JSON: {"wav": "<base64 WAV>", "text": "<提问文本>", "image": "<base64 图片>"}
+    三个字段都可选，但 wav 与 image 至少要有一个：
+
+      - wav + image：语音触发拍照的第二段（ASR 出提问 + 照片一起给 OpenClaw）
+      - 仅 image   ：设备取景模式手动拍照，没有提问 → 用 _PHOTO_ONLY_PROMPT
+      - text       ：无 wav 时作为提问文本（有 wav 时以 ASR 结果为准）
+
+    返回 WAV 音频，响应头带 X-User-Text / X-Reply-Text（b64 UTF-8，供设备屏显）。
     """
     device_id  = _validate_device_id(request.headers.get("X-Device-Id"))
     if not state.check_rate(device_id) or not _ip_rate_ok():
@@ -679,26 +803,33 @@ def handle_chat_vision():
     local_time = request.headers.get("X-Local-Time", "")
     session_id = state.get_session(device_id)
 
-    data = request.get_json()
-    if not data or "wav" not in data:
-        return jsonify({"error": "missing wav"}), 400
+    data = request.get_json(silent=True)
+    if not data:
+        return jsonify({"error": "missing json body"}), 400
 
-    wav_b64 = data["wav"]
-    if len(wav_b64) > _MAX_AUDIO_BYTES:
-        return jsonify({"error": "WAV 数据过大"}), 413
-    try:
-        wav_bytes = base64.b64decode(wav_b64)
-    except Exception:
-        return jsonify({"error": "WAV base64 解码失败"}), 400
+    wav_b64   = data.get("wav", "")
     image_b64 = data.get("image", "")
+    if not wav_b64 and not image_b64:
+        return jsonify({"error": "wav or image is required"}), 400
 
     # Fix 2: 请求级临时文件
-    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-        wav_path = f.name
-        f.write(wav_bytes)
+    wav_path = None
+    if wav_b64:
+        if len(wav_b64) > _MAX_AUDIO_BYTES:
+            return jsonify({"error": "WAV 数据过大"}), 413
+        try:
+            wav_bytes = base64.b64decode(wav_b64)
+        except Exception:
+            return jsonify({"error": "WAV base64 解码失败"}), 400
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+            wav_path = f.name
+            f.write(wav_bytes)
 
     try:
-        user_text = transcribe(wav_path) or "请分析这张图片"
+        if wav_path:
+            user_text = transcribe(wav_path) or _PHOTO_ONLY_PROMPT
+        else:
+            user_text = (data.get("text") or "").strip() or _PHOTO_ONLY_PROMPT
         print(f"[{device_id}] 🗣️  {user_text}")
 
         image_path = _decode_image_b64(image_b64, device_id, tag="vision") if image_b64 else None
@@ -714,14 +845,18 @@ def handle_chat_vision():
         with open(wav_out, "rb") as f:
             wav_data = f.read()
         print(f"[{device_id}] 📤  WAV {len(wav_data)} bytes")
-        return Response(wav_data, mimetype="audio/wav",
-                        headers={"Content-Length": len(wav_data)})
+        return Response(wav_data, mimetype="audio/wav", headers={
+            "Content-Length": len(wav_data),
+            "X-User-Text":  _b64_header(user_text),
+            "X-Reply-Text": _b64_header(reply),
+        })
 
     except Exception as e:
         print(f"[{device_id}] ⚠️  vision 错误: {e}")
         return jsonify({"error": str(e)}), 500
     finally:
-        os.unlink(wav_path)
+        if wav_path:
+            os.unlink(wav_path)
 
 
 @app.route("/presence", methods=["POST"])
@@ -928,6 +1063,337 @@ def test_tone():
     return send_file(buf, mimetype="audio/wav", download_name="test.wav")
 
 
+# ── 监控网页 / 定时快照 ──────────────────────────────────────────────────────
+#
+# 两件事共用一条链路：_capture_and_wait 拿照片 → chat() 识别 → _send_push 播报。
+#   - 网页「拍一张」：只走 _issue_capture，前端轮询 /capture-result，不识别不播报
+#   - 定时计划到点  ：_run_scheduled_capture 走完整链路，照片与识别结果留档 snapshots/
+
+_SNAPSHOT_NAME_RE = re.compile(r"^[0-9]{8}_[0-9]{6}_[0-9a-f]{4}$")
+
+# 定时任务与网页抓拍共用的默认提问，只给个开口的由头，剩下交给 agent 自己的人设。
+# 「有照片、要识别」这层不用在这里重复——chat() 已经在消息里加了
+# 「用户通过CoreS3摄像头拍了一张照片，保存在 xxx，请识别这张图片来回答问题」。
+_DEFAULT_PHOTO_PROMPT = "看看这张照片，跟我说说吧。"
+
+# 播报由服务端负责，必须拦住 agent 自己再调 cores3-speak，否则设备会念两遍
+_SPEAK_HINT = (
+    "\n\n[你的文字回复会由服务端合成语音播报出来。请只回复要说的那句话本身，"
+    "不要调用 cores3-speak skill，不要加任何前后缀。]"
+)
+
+
+def _prune_snapshots() -> None:
+    """按文件名（前缀是时间戳）保留最新 SNAPSHOT_MAX 条，连同配对的 jpg 一起删。"""
+    metas = sorted(SNAPSHOT_DIR.glob("*.json"), reverse=True)
+    for stale in metas[SNAPSHOT_MAX:]:
+        for p in (stale, stale.with_suffix(".jpg")):
+            try:
+                p.unlink()
+            except OSError:
+                pass
+
+
+def _save_snapshot(image_path: Optional[str], meta: dict) -> Optional[str]:
+    """把定时拍照的图片+识别结果留档，返回快照名。image_path 为 None 时只存元信息。"""
+    ts = meta.get("ts", time.time())
+    name = f"{time.strftime('%Y%m%d_%H%M%S', time.localtime(ts))}_{uuid.uuid4().hex[:4]}"
+    try:
+        if image_path and os.path.exists(image_path):
+            shutil.copy(image_path, SNAPSHOT_DIR / f"{name}.jpg")
+        (SNAPSHOT_DIR / f"{name}.json").write_text(
+            json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+    except OSError as e:
+        print(f"[snapshot] 留档失败: {e}")
+        return None
+    _prune_snapshots()
+    return name
+
+
+def _list_snapshots(limit: int = 30) -> list[dict]:
+    """按时间倒序列出留档快照（新的在前）。"""
+    out = []
+    for meta_path in sorted(SNAPSHOT_DIR.glob("*.json"), reverse=True)[:limit]:
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        name = meta_path.stem
+        out.append({
+            **meta,
+            "name": name,
+            "has_image": (SNAPSHOT_DIR / f"{name}.jpg").exists(),
+            "image_url": f"/snapshot/{name}",
+        })
+    return out
+
+
+def _describe_and_speak(image_path: str, device_id: str, prompt: str,
+                        label: str = "", started: Optional[float] = None) -> dict:
+    """识别一张照片 → 留档 → 语音播报。定时计划与网页「拍完说一句」共用。
+
+    识别失败也照样留档：照片还在，至少能看见当时拍到了什么。
+    """
+    started = started if started is not None else time.time()
+    result: dict = {"ts": started, "ok": False, "error": None, "reply": "",
+                    "snapshot": None, "spoken": False, "device_id": device_id}
+    try:
+        session_id = state.get_session(device_id)
+        local_time = time.strftime("%Y-%m-%d %H:%M")
+        reply = chat(prompt + _SPEAK_HINT, session_id,
+                     image_path=image_path, local_time=local_time)
+        preview = reply[:80].replace("\n", " ")
+        print(f"[snapshot] 👁  {label or '手动'} 识别: {preview}"
+              f"{'...' if len(reply) > 80 else ''}")
+        result["reply"] = reply
+        result["ok"] = True
+    except Exception as e:
+        print(f"[snapshot] ⚠️  识别失败: {e}")
+        result["error"] = str(e)
+
+    result["snapshot"] = _save_snapshot(image_path, {
+        "ts": started, "device_id": device_id, "time": label,
+        "prompt": prompt, "reply": result["reply"], "error": result["error"],
+    })
+
+    if result["reply"]:
+        try:
+            result["spoken"] = _send_push(result["reply"], device_id)
+        except Exception as e:
+            print(f"[snapshot] ⚠️  播报失败: {e}")
+            result["error"] = result["error"] or f"播报失败: {e}"
+    return result
+
+
+def _run_scheduled_capture(sched: dict) -> dict:
+    """定时计划的执行体（photo_schedules 注入）：拍照 → 识别 → 留档 → 播报。"""
+    device_id = _validate_device_id(sched.get("device_id", "cores3"))
+    prompt = sched.get("prompt") or _DEFAULT_PHOTO_PROMPT
+    label = sched.get("time", "?")
+    started = time.time()
+
+    image_path, err = _capture_and_wait(device_id)
+    if err:
+        print(f"[snapshot] ⚠️  {label} 拍照失败: {err}")
+        return {
+            "ts": started, "ok": False, "error": err, "reply": "", "spoken": False,
+            "device_id": device_id,
+            "snapshot": _save_snapshot(None, {
+                "ts": started, "device_id": device_id, "time": label,
+                "prompt": prompt, "reply": "", "error": err,
+            }),
+        }
+    return _describe_and_speak(image_path, device_id, prompt, label=label, started=started)
+
+
+@app.route("/monitor", methods=["GET"])
+def monitor_page():
+    """远程监控网页。页面本身不校验 token，数据接口才校验（否则没地方填 token）。"""
+    page = WEB_DIR / "monitor.html"
+    if not page.exists():
+        return "monitor.html 缺失，请检查 web/ 目录", 500
+    return send_file(page, mimetype="text/html")
+
+
+@app.route("/snapshot/<name>", methods=["GET"])
+def serve_snapshot(name: str):
+    """读取一张留档快照的 JPEG。"""
+    if not _token_ok():
+        return jsonify({"error": "invalid or missing X-Api-Token"}), 401
+    if not _SNAPSHOT_NAME_RE.match(name):
+        return jsonify({"error": "bad snapshot name"}), 400
+    fpath = SNAPSHOT_DIR / f"{name}.jpg"
+    if not fpath.exists():
+        return jsonify({"error": "snapshot not found"}), 404
+    return send_file(fpath, mimetype="image/jpeg")
+
+
+@app.route("/api/monitor/state", methods=["GET"])
+def monitor_state():
+    """网页一次拉齐：设备在线状态 + 定时计划 + 快照留档。"""
+    if not _token_ok():
+        return jsonify({"error": "invalid or missing X-Api-Token"}), 401
+    now = time.time()
+    with _hb_lock:
+        snapshot = {k: dict(v) for k, v in _hb_devices.items()}
+    devices = {
+        device_id: {
+            "last_seen_secs_ago": int(now - rec["ts"]),
+            "online": (now - rec["ts"]) < _HB_SILENT_SECS,
+            **{k: rec["data"].get(k) for k in ("heap", "rssi", "mqtt", "bat", "chg")},
+        }
+        for device_id, rec in snapshot.items()
+    }
+    want = _validate_device_id(request.args.get("device_id", "cores3"))
+    return jsonify({
+        "server_time": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "mqtt": _mqtt_client is not None,
+        "auth_required": bool(API_TOKEN),
+        "devices": devices,
+        "schedules": photo_schedules.list_all(),
+        "snapshots": _list_snapshots(),
+        "stream": stream_server.stats(want),
+    })
+
+
+_STREAM_RENEW_SECS = 45   # 每次续期给设备的直播时长：网页关掉后设备最多再撑这么久
+_STREAM_POLL_WAIT = 3.0   # 取帧接口的长轮询上限，避免前端空转刷请求
+
+
+@app.route("/api/monitor/stream", methods=["POST"])
+def monitor_stream():
+    """开/续/停直播。网页需按 _STREAM_RENEW_SECS 的一半周期反复调 start 续期——
+    这样页面被关掉或断网时，设备会自己超时收摊，不会把摄像头一直开着。"""
+    if not _token_ok():
+        return jsonify({"error": "invalid or missing X-Api-Token"}), 401
+    data = request.get_json(silent=True) or {}
+    device_id = _validate_device_id(data.get("device_id", "cores3"))
+    action = data.get("action", "start")
+    if action not in ("start", "stop"):
+        return jsonify({"error": "action must be 'start' or 'stop'"}), 400
+    if _mqtt_client is None:
+        return jsonify({"error": "MQTT 不可用，无法下发直播命令"}), 503
+
+    if action == "start":
+        cmd = {"action": "stream_start", "secs": _STREAM_RENEW_SECS,
+               "port": stream_server.PORT}
+    else:
+        cmd = {"action": "stream_stop"}
+        stream_server.drop(device_id)
+    _mqtt_client.publish(f"kagura/cmd/{device_id}", json.dumps(cmd), qos=1)
+    return jsonify({"status": "ok", "action": action,
+                    "stream": stream_server.stats(device_id)})
+
+
+@app.route("/stream/<device_id>/frame.jpg", methods=["GET"])
+def stream_frame(device_id: str):
+    """取直播的最新一帧。带 ?after=<seq> 时长轮询：没有更新就挂住，直到有新帧或超时。
+
+    用长轮询而不是 MJPEG，是因为 <img src> 没法带 X-Api-Token 头，
+    把 token 塞进 URL 会被 access log 记下来。
+    """
+    if not _token_ok():
+        return jsonify({"error": "invalid or missing X-Api-Token"}), 401
+    device_id = _validate_device_id(device_id)
+    try:
+        after = int(request.args.get("after", -1))
+    except ValueError:
+        after = -1
+
+    deadline = time.time() + _STREAM_POLL_WAIT
+    while True:
+        rec = stream_server.latest(device_id)
+        if rec and rec.get("jpeg") and rec["seq"] != after:
+            return Response(rec["jpeg"], mimetype="image/jpeg", headers={
+                "X-Frame-Seq": str(rec["seq"]),
+                "Cache-Control": "no-store",
+            })
+        if time.time() >= deadline:
+            return ("", 204)          # 无新帧：前端据此决定继续等还是提示未开播
+        time.sleep(0.05)
+
+
+@app.route("/api/monitor/describe", methods=["POST"])
+def monitor_describe():
+    """网页「拍完让它说一句」：对已拍到的照片做识别 + 播报，后台跑。
+
+    请求体: {"request_id": "<拍照的 request_id>", "prompt": "可选提问"}
+    结果不在这里返回——识别要几十秒，完成后会出现在 /api/monitor/state 的快照留档里。
+    """
+    if not _token_ok():
+        return jsonify({"error": "invalid or missing X-Api-Token"}), 401
+    data = request.get_json(silent=True) or {}
+    request_id = data.get("request_id", "")
+    with state.photos_lock:
+        rec = state.photo_results.get(request_id)
+    if not rec or rec.get("status") != "done":
+        return jsonify({"error": "没有这张照片，或它还没拍好"}), 404
+    image_path = rec.get("image_path")
+    if not image_path or not os.path.exists(image_path):
+        return jsonify({"error": "照片文件已过期"}), 404
+
+    device_id = _validate_device_id(data.get("device_id", "cores3"))
+    prompt = (data.get("prompt") or "").strip() or _DEFAULT_PHOTO_PROMPT
+    threading.Thread(
+        target=_describe_and_speak, args=(image_path, device_id, prompt),
+        kwargs={"label": "手动"}, daemon=True, name="describe").start()
+    return jsonify({"status": "started"}), 202
+
+
+@app.route("/api/monitor/capture", methods=["POST"])
+def monitor_capture():
+    """网页「拍一张」：下发命令即返回，前端自行轮询 /capture-result/<id>。"""
+    if not _token_ok():
+        return jsonify({"error": "invalid or missing X-Api-Token"}), 401
+    data = request.get_json(silent=True) or {}
+    device_id = _validate_device_id(data.get("device_id", "cores3"))
+    if not state.check_rate(device_id, bucket="capture", limit=_CAPTURE_RATE_MAX):
+        return jsonify({"error": "拍照过于频繁，请稍后再试"}), 429
+
+    # 直播中默认抓当前帧：所见即所得、瞬时完成，也不打扰正在推流的设备。
+    # hires=true 则跳过这条快路径，照常下发拍照命令——设备会在推流循环里
+    # 临时切回 QVGA 拍一张（画面停几秒），换 4 倍像素给 AI 看。
+    if not data.get("hires"):
+        request_id = _capture_from_stream(device_id)
+        if request_id:
+            return jsonify({"request_id": request_id, "status": "done", "source": "stream"})
+
+    if _mqtt_client is None:
+        return jsonify({"error": "MQTT 不可用，无法下发拍照命令"}), 503
+    return jsonify({"request_id": _issue_capture(device_id),
+                    "status": "queued", "source": "device"})
+
+
+@app.route("/api/monitor/schedules", methods=["POST"])
+def monitor_add_schedule():
+    """新增每日定时拍照计划。请求体: {"time": "08:00", "device_id", "prompt"}"""
+    if not _token_ok():
+        return jsonify({"error": "invalid or missing X-Api-Token"}), 401
+    data = request.get_json(silent=True) or {}
+    try:
+        item = photo_schedules.add(
+            data.get("time", ""),
+            device_id=_validate_device_id(data.get("device_id", "cores3")),
+            prompt=data.get("prompt", ""),
+        )
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    return jsonify(item), 201
+
+
+@app.route("/api/monitor/schedules/<sid>", methods=["PATCH", "DELETE"])
+def monitor_edit_schedule(sid: str):
+    """PATCH 改字段（time/prompt/enabled/device_id），DELETE 删除。"""
+    if not _token_ok():
+        return jsonify({"error": "invalid or missing X-Api-Token"}), 401
+    if request.method == "DELETE":
+        if not photo_schedules.remove(sid):
+            return jsonify({"error": "unknown schedule id"}), 404
+        return jsonify({"status": "ok"})
+    data = request.get_json(silent=True) or {}
+    fields = {k: v for k, v in data.items()
+              if k in ("time", "prompt", "enabled", "device_id")}
+    try:
+        item = photo_schedules.update(sid, **fields)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    if item is None:
+        return jsonify({"error": "unknown schedule id"}), 404
+    return jsonify(item)
+
+
+@app.route("/api/monitor/schedules/<sid>/run", methods=["POST"])
+def monitor_run_schedule(sid: str):
+    """立即试跑一条计划：后台执行（拍照+识别可能几十秒），结果去 state 里看。"""
+    if not _token_ok():
+        return jsonify({"error": "invalid or missing X-Api-Token"}), 401
+    if photo_schedules.get(sid) is None:
+        return jsonify({"error": "unknown schedule id"}), 404
+    threading.Thread(target=photo_schedules.run_now, args=(sid,),
+                     daemon=True, name=f"snapshot-run-{sid}").start()
+    return jsonify({"status": "started"}), 202
+
+
 # ── 启动 ──────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -941,6 +1407,9 @@ if __name__ == "__main__":
     threading.Thread(target=_photo_cleanup_loop, daemon=True, name="photo-cleanup").start()
     threading.Thread(target=_hb_watch_loop, daemon=True, name="hb-watch").start()
     reminders.init(_send_push)
+    photo_schedules.init(_run_scheduled_capture)
+    stream_server.init(_stream_frame_to_jpeg, token=STREAM_TOKEN)
     print(f"Agent : {AGENT_ID}  |  TTS : {TTS_VOICE}")
-    print("监听 0.0.0.0:5000，Ctrl+C 退出\n")
+    print("监听 0.0.0.0:5000，Ctrl+C 退出")
+    print("监控网页: http://<本机IP>:5000/monitor\n")
     app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)
