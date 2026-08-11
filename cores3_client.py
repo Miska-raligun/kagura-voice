@@ -465,67 +465,275 @@ STATE_UI = {
 }
 
 
-def draw_state(state):
+# ── 动态可视化：环形音频指示器 ─────────────────────────────────
+#
+# 24 段圆环，每帧在同一批矩形上原地重绘 —— 不需要擦除，也不关心背后
+# 是纯色还是照片。只依赖 fillRect（代码里已验证可用），不需要
+# fillCircle / canvas / pushImage 这些不确定的 API。
+#   idle              → 彗星追逐（呼吸感）
+#   recording         → 麦克风电平实时填充
+#   playing/broadcast → 语音包络填充
+#   其他（含 processing，HTTP 阻塞期主循环不转）→ 静态一帧
+#
+# 逐帧只重绘亮度变化的段（差分渲染），典型每帧仅几个 fillRect。
+
+VISUAL_ENABLED   = True    # 观感出问题先关这个，退回纯静态
+USE_STATE_IMAGES = False   # True=沿用每状态背景图；False=统一背景 + 矢量环
+VIS_FRAME_MS     = 50      # 动画帧间隔（20fps）
+
+RING_N  = 24
+RING_CX = 160
+RING_CY = 90
+RING_R  = 56
+RING_W  = 9                # 每段方块边长
+
+CHROME_BG = 0x101010       # 顶栏底色（实心条带才能做局部重绘）
+BAND_BG   = 0x0d0d0d       # 文字条带底色
+PLATE_BG  = 0x0a0a0a       # 环心表情面板底色
+
+_ring_rects = []
+for _i in range(RING_N):
+    _a = 2 * math.pi * (_i / RING_N) - math.pi / 2
+    _ring_rects.append((
+        int(RING_CX + RING_R * math.cos(_a)) - RING_W // 2,
+        int(RING_CY + RING_R * math.sin(_a)) - RING_W // 2,
+        RING_W, RING_W,
+    ))
+
+_vis_mode    = "static"
+_vis_theme   = None
+_vis_shades  = None
+_vis_level   = 0.0
+_vis_ref     = 2000.0      # 自动增益参考值
+_vis_phase   = 0.0
+_vis_last    = None        # 上一帧各段亮度档位，用于差分重绘
+_vis_last_ms = 0
+
+
+def _shade(color, k):
+    """按比例调暗颜色。"""
+    return ((int(((color >> 16) & 0xff) * k) << 16)
+            | (int(((color >> 8) & 0xff) * k) << 8)
+            | int((color & 0xff) * k))
+
+
+def _vis_invalidate():
+    """标记整环失效，下一帧全量重绘。"""
+    global _vis_last
+    _vis_last = None
+
+
+def _vis_set_state(state, color):
+    """状态切换：换模式 + 调色板，并立即渲染一帧。"""
+    global _vis_mode, _vis_theme, _vis_shades, _vis_level
+    if state == "recording":
+        _vis_mode = "level"
+    elif state in ("playing", "broadcast"):
+        _vis_mode = "level"
+    elif state == "idle":
+        _vis_mode = "comet"
+    else:
+        _vis_mode = "static"
+    if color != _vis_theme:
+        _vis_theme = color
+        _vis_shades = [_shade(color, 0.10 + 0.90 * (i / 7.0)) for i in range(8)]
+    _vis_level = 0.0
+    _vis_invalidate()
+    visual_tick(force=True)
+
+
+def _vis_set_level(rms_val):
+    """录音路径：传入原始 RMS，自动增益归一化到 0..1。"""
+    global _vis_level, _vis_ref
+    if rms_val > _vis_ref:
+        _vis_ref = float(rms_val)
+    else:
+        _vis_ref = max(800.0, _vis_ref * 0.97)   # 缓慢回落，适应环境
+    _vis_level = min(1.0, rms_val / _vis_ref) if _vis_ref > 0 else 0.0
+
+
+def _vis_set_level_norm(v):
+    """播放路径：包络已归一化，直接设置。"""
+    global _vis_level
+    _vis_level = 0.0 if v < 0 else (1.0 if v > 1 else v)
+
+
+def visual_tick(force=False):
+    """推进并渲染一帧环形动画。主循环与各轮询循环调用，自带限帧。"""
+    global _vis_last, _vis_last_ms, _vis_phase
+    if not VISUAL_ENABLED or St.sleeping or _vis_shades is None:
+        return
+    now = time.ticks_ms()
+    if not force and time.ticks_diff(now, _vis_last_ms) < VIS_FRAME_MS:
+        return
+    _vis_last_ms = now
+
+    if _vis_mode == "comet":
+        _vis_phase = (_vis_phase + 0.035) % 1.0
+    elif _vis_mode == "level":
+        _vis_phase = (_vis_phase + 0.02) % 1.0
+
+    lit = _vis_level * RING_N
+    lit_i = int(lit)
+    cur = []
+    for i in range(RING_N):
+        if _vis_mode == "level":
+            if i < lit_i:
+                k = 7
+            elif i == lit_i:
+                k = 2 + int(5 * (lit - lit_i))
+            else:
+                k = 1
+        elif _vis_mode == "comet":
+            d = ((i / RING_N) - _vis_phase) % 1.0
+            k = 7 - int(d * 22)
+            if k < 1:
+                k = 1
+        else:
+            k = 4 if (i % 3 == 0) else 1
+        cur.append(k)
+
+    prev = _vis_last
+    for i in range(RING_N):
+        if prev is not None and prev[i] == cur[i]:
+            continue          # 差分：亮度没变的段不重绘
+        x, y, w, h = _ring_rects[i]
+        Lcd.fillRect(x, y, w, h, _vis_shades[cur[i]])
+    _vis_last = cur
+
+
+def _vis_wait(duration, levels):
+    """等待 duration 秒，其间按 levels（子片 RMS 序列）推进电平动画。"""
+    if not VISUAL_ENABLED or not levels:
+        time.sleep(duration)
+        return
+    step = duration / len(levels)
+    for lv in levels:
+        _vis_set_level(lv)
+        visual_tick()
+        time.sleep(step)
+
+
+def _wav_envelope(data, bucket_ms=100):
+    """从 WAV 字节流稀疏采样出电平包络（0..1）。
+
+    不用 array 整体转换（长回复可达 300KB，会撑爆堆），
+    改为按桶稀疏 unpack，几毫秒即可完成。
     """
-    更新屏幕和 LED 到指定状态。
+    off = 44                      # 服务端固定 44 字节标准 WAV 头
+    total = len(data) - off
+    if total <= 0:
+        return []
+    samples = total // 2
+    n = max(1, (samples * 1000 // SAMPLE_RATE) // bucket_ms)
+    per = max(1, samples // n)
+    step = max(1, per // 24)      # 每桶取约 24 个采样点
+    out = []
+    peak = 1
+    for b in range(n):
+        base = off + b * per * 2
+        acc = 0
+        cnt = 0
+        for k in range(0, per, step):
+            pos = base + k * 2
+            if pos + 2 > len(data):
+                break
+            v = struct.unpack_from('<h', data, pos)[0]
+            acc += v * v
+            cnt += 1
+        r = int(math.sqrt(acc / cnt)) if cnt else 0
+        out.append(r)
+        if r > peak:
+            peak = r
+    return [v / peak for v in out]
+
+
+# ── 分层重绘 ──────────────────────────────────────────────────
+#
+# 旧实现每次 draw_state 都全屏重解码 JPEG（约 100ms+），一轮对话调用
+# 6~8 次 → 肉眼可见的连续闪烁。现在拆成独立图层，各自只在内容真正
+# 变化时重绘；顶栏/文字用实心条带打底，才能局部擦除而不破坏背景。
+
+_IMG_MAP = {
+    "recording":  "img_recording",
+    "processing": "img_processing",
+    "playing":    "img_playing",
+    "broadcast":  "img_playing",   # broadcast 复用 playing 图片
+}
+
+# 无视 USE_STATE_IMAGES 的强制背景。直播时屏幕不显示实时画面、也不写文字提示，
+# 全靠换这张图告知摄像头正开着——属于功能，不是装饰，所以不跟随那个开关。
+# 没上传 /flash/img_streaming.jpg 也不要紧，下面读文件失败会退回纯色。
+_FORCED_IMG = {
+    "streaming": "img_streaming",
+}
+
+_drawn_bg     = None
+_drawn_chrome = None
+_drawn_face   = None
+_drawn_status = None
+_drawn_chat   = None
+
+
+def _ui_invalidate():
+    """整屏被 draw_state 之外的代码接管过之后必须调用。
+
+    分层重绘的前提是"屏幕内容 == 缓存键描述的内容"。取景预览、摇晃彩蛋、
+    WiFi 配网界面都会直接 fillScreen/drawJpg 铺满屏幕，此时缓存仍以为
+    屏幕是它上次画的样子，下一次 draw_state 会判定"无变化"而跳过重绘，
+    结果就是上一屏画面残留。谁盖了屏幕谁在盖之前调这个。
+    """
+    global _drawn_bg, _drawn_chrome, _drawn_face, _drawn_status, _drawn_chat
+    _drawn_bg     = None
+    _drawn_chrome = None
+    _drawn_face   = None
+    _drawn_status = None
+    _drawn_chat   = None
+    _vis_invalidate()
+
+
+def draw_state(state, force=False):
+    """
+    更新屏幕和 LED 到指定状态（分层增量重绘）。
 
     屏幕布局（320×240，横屏）:
-      y=0-2   : 3px 彩色顶部状态条
-      y=3-25  : 顶部信息行（左:CONT  中:WAKE  右:电量%）
-      y=26    : 分割线
-      y=27-240: 主内容区（大号 kaomoji + 小号状态文字）
+      y=0-2    : 彩色主题条
+      y=3-25   : 顶栏（CONT / WAKE / 时间 + 电量）
+      y=26-150 : 环形动画区（环心为表情面板）
+      y=152-205: 最近一轮对话文本（仅 idle）
+      y=208-240: 状态文字
     """
+    global _drawn_bg, _drawn_chrome, _drawn_face, _drawn_status, _drawn_chat
     face, status, color = STATE_UI.get(state, STATE_UI["idle"])
     r = (color >> 16) & 0xff
     g = (color >> 8)  & 0xff
     b = color & 0xff
     _set_led(r // 4, g // 4, b // 4)
 
-    # ── 步骤 1：背景层（图片优先，全屏 320×240 从 0,0 开始）────────
-    _IMG_MAP = {
-        "recording":  "img_recording",
-        "processing": "img_processing",
-        "playing":    "img_playing",
-        "broadcast":  "img_playing",   # broadcast 复用 playing 图片
-        # 直播时屏幕不显示实时画面，换成这张。没上传这个文件也不要紧，
-        # 下面的 fallback 会退回 img_bg.jpg。
-        "streaming":  "img_streaming",
-    }
-    img_name = _IMG_MAP.get(state)
-    img_shown = False
-    if img_name:
+    # ── 层 1：背景（只在目标背景真正变化时重绘）──────────────
+    # _FORCED_IMG 不看 USE_STATE_IMAGES：直播态换图是功能需求（屏幕上不写
+    # "直播中"，靠画面本身告知摄像头开着），不是装饰性的每状态配图。
+    want_bg = (_FORCED_IMG.get(state)
+               or (_IMG_MAP.get(state) if USE_STATE_IMAGES else None)
+               or "img_bg")
+    if force or want_bg != _drawn_bg:
         try:
-            with open("/flash/{}.jpg".format(img_name), "rb") as _f:
+            with open("/flash/{}.jpg".format(want_bg), "rb") as _f:
                 Lcd.drawJpg(_f.read(), 0, 0)
-            img_shown = True
         except Exception as e:
-            print("img err:", e)
-    if not img_shown:
-        try:
-            with open("/flash/img_bg.jpg", "rb") as _f:
-                Lcd.drawJpg(_f.read(), 0, 0)
-            img_shown = True
-        except Exception as e:
-            print("[ui] bg fallback to solid color:", e)
-            Widgets.fillScreen(0x1a1a1a)
+            print("[ui] bg fallback to solid:", e)
+            Widgets.fillScreen(0x0a0a0a)
+        _drawn_bg = want_bg
+        # 背景重画后所有叠加层失效
+        _drawn_chrome = None
+        _drawn_face   = None
+        _drawn_status = None
+        _drawn_chat   = None
+        _vis_invalidate()
 
-    # ── 步骤 2：彩色状态条 + 标签（透明背景，悬浮在图片上）──────
-    Widgets.Line(0, 0, 320, 0, color)
-    Widgets.Line(0, 1, 320, 1, color)
-    Widgets.Line(0, 2, 320, 2, color)
+    # ── 层 2：顶栏（值变化才重绘该条带）──────────────────────
     cm_color = 0x00ffcc if St.continuous else 0x3a3a3a
     wm_color = 0xffcc00 if St.wake       else 0x3a3a3a
-    Lcd.setFont(_FONT_16)
-    Lcd.setTextSize(1)
-    Lcd.setTextColor(cm_color, cm_color)
-    Lcd.drawString("CONT", 10, 6)
-    Lcd.setTextColor(wm_color, wm_color)
-    Lcd.drawString("WAKE", 90, 6)
-    # CAM：可点的键（命中区 _CAM_ENTRY），点它进取景模式
-    if CAMERA_MODE_ENABLED:
-        Lcd.setTextColor(0xaa66ff, 0xaa66ff)
-        Lcd.drawString("CAM", 145, 6)
-    # 右侧：时间 + 电量
     time_str = get_rtc_time_str()
     try:
         v = M5.Power.getBatteryVoltage()   # mV，3000-4200
@@ -534,35 +742,65 @@ def draw_state(state):
     except Exception:
         bat_str = "--"
     right_str = "{} {}".format(time_str, bat_str) if time_str else bat_str
-    right_x = max(180, 310 - len(right_str) * 10)
-    Lcd.setTextColor(0x666666, 0x666666)
-    Lcd.drawString(right_str, right_x, 6)
-
-    # ── 步骤 3：非图片状态显示 kaomoji（透明背景，悬浮在背景图上）──
-    if not img_shown:
-        face_x = max(0, (320 - len(face) * 34) // 2)
+    chrome_key = (cm_color, wm_color, right_str, color)
+    if chrome_key != _drawn_chrome:
+        _fill_rect(0, 0, 320, 26, CHROME_BG)
+        Widgets.Line(0, 0, 320, 0, color)
+        Widgets.Line(0, 1, 320, 1, color)
+        Widgets.Line(0, 2, 320, 2, color)
         Lcd.setFont(_FONT_16)
-        Lcd.setTextSize(3)
-        Lcd.setTextColor(color, color)
-        Lcd.drawString(face, face_x, 90)
-
-    # ── 步骤 4：状态文字（透明背景，悬浮在图片上）────────────────
-    status_x = max(0, (320 - len(status) * 11) // 2)
-    txt_color = 0xffffff if img_shown else 0x999999
-    Lcd.setFont(_FONT_16)
-    Lcd.setTextSize(1)
-    Lcd.setTextColor(txt_color, txt_color)
-    Lcd.drawString(status, status_x, 216)
-
-    # ── 步骤 5：待机界面显示最近一轮对话（需固件带中文字体）────────
-    if state == "idle" and SHOW_CHAT_TEXT and _FONT_CN and _last_reply_text:
-        Lcd.setFont(_FONT_CN)
         Lcd.setTextSize(1)
-        Lcd.setTextColor(0x88ccff, 0x88ccff)
-        Lcd.drawString("> " + _last_user_text[:18], 8, 160)
-        Lcd.setTextColor(0xcccccc, 0xcccccc)
-        Lcd.drawString(_last_reply_text[:19], 8, 184)
+        Lcd.setTextColor(cm_color, CHROME_BG)
+        Lcd.drawString("CONT", 10, 6)
+        Lcd.setTextColor(wm_color, CHROME_BG)
+        Lcd.drawString("WAKE", 90, 6)
+        # CAM：可点的键（命中区 _CAM_ENTRY），点它进取景模式。
+        # 顶栏重写基于取景模式之前的版本，合并时补回来——丢了就没有入口进取景。
+        if CAMERA_MODE_ENABLED:
+            Lcd.setTextColor(0xaa66ff, CHROME_BG)
+            Lcd.drawString("CAM", 145, 6)
+        Lcd.setTextColor(0x888888, CHROME_BG)
+        Lcd.drawString(right_str, max(180, 310 - len(right_str) * 10), 6)
+        _drawn_chrome = chrome_key
+
+    # ── 层 3：环心表情面板 ───────────────────────────────────
+    face_key = (face, color)
+    if face_key != _drawn_face:
+        _fill_rect(RING_CX - 48, RING_CY - 11, 96, 22, PLATE_BG)
         Lcd.setFont(_FONT_16)
+        Lcd.setTextSize(1)
+        Lcd.setTextColor(color, PLATE_BG)
+        Lcd.drawString(face, max(RING_CX - 46, RING_CX - len(face) * 6), RING_CY - 8)
+        _drawn_face = face_key
+
+    # ── 层 4：状态文字条带 ───────────────────────────────────
+    if status != _drawn_status:
+        _fill_rect(0, 208, 320, 32, BAND_BG)
+        Lcd.setFont(_FONT_16)
+        Lcd.setTextSize(1)
+        Lcd.setTextColor(0xdddddd, BAND_BG)
+        Lcd.drawString(status, max(0, (320 - len(status) * 11) // 2), 216)
+        _drawn_status = status
+
+    # ── 层 5：待机界面最近一轮对话（需固件带中文字体）────────
+    if SHOW_CHAT_TEXT and _FONT_CN:
+        chat_key = (state, _last_user_text, _last_reply_text)
+        if chat_key != _drawn_chat:
+            if state == "idle" and _last_reply_text:
+                _fill_rect(0, 152, 320, 54, BAND_BG)
+                Lcd.setFont(_FONT_CN)
+                Lcd.setTextSize(1)
+                Lcd.setTextColor(0x88ccff, BAND_BG)
+                Lcd.drawString("> " + _last_user_text[:18], 8, 156)
+                Lcd.setTextColor(0xbbbbbb, BAND_BG)
+                Lcd.drawString(_last_reply_text[:19], 8, 180)
+                Lcd.setFont(_FONT_16)
+            elif _drawn_chat is not None:
+                _fill_rect(0, 152, 320, 54, BAND_BG)   # 离开 idle：清掉
+            _drawn_chat = chat_key
+
+    # ── 层 6：环形动画切换到新状态 ───────────────────────────
+    _vis_set_state(state, color)
 
 
 # ── WAV 工具 ──────────────────────────────────────────────────
@@ -589,6 +827,32 @@ def rms(buf):
     for v in a:
         total += v * v
     return int(math.sqrt(total / n))
+
+
+def rms_slices(buf, n=5):
+    """单次遍历返回 (n 个子片 RMS, 整体 RMS)。
+
+    子片供电平动画用（0.25s 的块拆成 5 帧 → 20fps 音频响应），
+    整体值供 VAD 判定用。总运算量与调一次 rms() 相同，等于白送。
+    """
+    a = uarray.array('h', buf)
+    total_n = len(a)
+    if total_n == 0:
+        return [0] * n, 0
+    seg = total_n // n
+    out = []
+    grand = 0
+    for s in range(n):
+        start = s * seg
+        end = total_n if s == n - 1 else start + seg
+        acc = 0
+        for i in range(start, end):
+            v = a[i]
+            acc += v * v
+        cnt = end - start
+        out.append(int(math.sqrt(acc / cnt)) if cnt else 0)
+        grand += acc
+    return out, int(math.sqrt(grand / total_n))
 
 
 # ── 触摸检测 ──────────────────────────────────────────────────
@@ -796,6 +1060,7 @@ _PICKER_PAGE   = (212, 208, 314, 234)
 
 
 def _draw_picker(nets, page):
+    _ui_invalidate()   # 配网界面整屏接管
     Widgets.fillScreen(0x000000)
     # 顶部状态栏
     Widgets.Line(0, 0, 320, 0, 0x00aaff)
@@ -931,6 +1196,7 @@ def _kbd_key_rect(row, col):
 
 
 def _draw_kbd(title, buf, shift_mode, masked, reveal_until):
+    _ui_invalidate()   # 配网界面整屏接管
     Widgets.fillScreen(0x000000)
     Widgets.Line(0, 0, 320, 0, 0x00aaff)
     Widgets.Line(0, 1, 320, 1, 0x00aaff)
@@ -1168,17 +1434,19 @@ def _record_audio():
     """
     _mic_on()
     chunks, silent, started = [], 0, False
+    sub_levels = [0] * 5        # 上一块的子片电平，驱动等待期间的环形动画
     for _ in range(MAX_CHUNKS):
         _wdt_feed()   # 满长录音 10s，喂狗防误咬
         buf = bytearray(CHUNK_SIZE)
         Mic.record(buf, SAMPLE_RATE)
-        time.sleep(CHUNK_SEC + 0.05)
+        # Mic.record 是异步的：等待缓冲填满的这段时间正好拿来跑动画
+        _vis_wait(CHUNK_SEC + 0.05, sub_levels)
         # 长按优先检测：优先级高于录音，continuous/wake 模式均可退出
         t, _ = check_touch()
         if t == 'long':
             _mic_off()
             return None          # 哨兵：用户请求退出当前模式
-        level = rms(buf)
+        sub_levels, level = rms_slices(buf)
         if level > SILENCE_THRESHOLD:
             started = True
             silent  = 0
@@ -1197,11 +1465,14 @@ def _record_audio():
 def play_wav(data):
     """将 WAV 数据写入 flash 并播放。触摸屏幕可随时中断播放。"""
     _mic_off()   # Mic/Speaker 共享音频通路：播放前确保麦克风已释放
+    # 先算包络：播放时按 elapsed 索引，环随语音起伏（不占播放时间）
+    env = _wav_envelope(data) if VISUAL_ENABLED else []
     with open("/flash/response.wav", "wb") as f:
         f.write(data)
     Speaker.begin()
     Speaker.setVolumePercentage(_volume)
     Speaker.playWavFile("/flash/response.wav")
+    t0 = time.ticks_ms()
     while Speaker.isPlaying():
         _wdt_feed()   # 长音频播放可超过 WDT 窗口
         M5.update()
@@ -1210,8 +1481,15 @@ def play_wav(data):
             time.sleep(0.2)           # 让扬声器余音散去
             drain_touch()
             break
+        if env:
+            idx = time.ticks_diff(time.ticks_ms(), t0) // 100
+            _vis_set_level_norm(env[idx] if idx < len(env) else 0.0)
+            visual_tick()
+        _wdt_feed()
         mqtt_check()   # 长播放期间维持心跳（回调只入队，不会嵌套播放）
-        time.sleep(0.1)
+        time.sleep(0.05)
+    _vis_set_level_norm(0.0)
+    visual_tick(force=True)
     time.sleep(0.15)   # 让音频信号归零，避免 Speaker.end() 产生 pop 声
     Speaker.end()
 
@@ -1872,6 +2150,7 @@ def camera_mode():
         St.busy = False
         return
 
+    _ui_invalidate()               # 下面要整屏接管，作废分层缓存
     Widgets.fillScreen(0x000000)   # 帧小于屏幕时四周留黑，只清一次
     _cam_chrome(False)
     _cam_take_touch()              # 丢掉进来那一下点按的残留
@@ -2256,6 +2535,7 @@ def _show_shake_easter_egg():
     try:
         was_off = not St.continuous
         try:
+            _ui_invalidate()       # 彩蛋图整屏覆盖，之后必须整屏重建
             with open("/flash/img_shake.jpg", "rb") as f:
                 Lcd.drawJpg(f.read(), 0, 0)
         except Exception as e:
@@ -2436,7 +2716,7 @@ def wake_up():
     St.sleeping = False
     St.last_activity = time.time()
     M5.Lcd.setBrightness(64)
-    draw_state("idle")
+    draw_state("idle", force=True)   # 休眠期间跳过了动画，整屏重画一次
 
 
 def calibrate_noise():
@@ -2622,6 +2902,9 @@ def loop():
                         record_and_send()
                 else:
                     _wake_loud_count = 0
+
+    # 空闲呼吸动画（自带 20fps 限帧；休眠时自动跳过）
+    visual_tick()
 
     # MQTT 推送消息 + 命令（回调只入队，这里接收；下面统一消费）
     mqtt_check()
