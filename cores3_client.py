@@ -477,8 +477,13 @@ STATE_UI = {
 #
 # 逐帧只重绘亮度变化的段（差分渲染），典型每帧仅几个 fillRect。
 
-VISUAL_ENABLED   = True    # 观感出问题先关这个，退回纯静态
-USE_STATE_IMAGES = False   # True=沿用每状态背景图；False=统一背景 + 矢量环
+# 环形动画默认关闭：待机时一直转的圈观感上像"卡在加载中"。
+# 想要音频反馈（录音跟音量跳、播放跟包络跳）把它改回 True——环会画在
+# 背景图上，draw_state 整屏重画后由 visual_tick 补回。
+VISUAL_ENABLED   = False
+# True=每状态各自的背景图（img_recording/img_playing…），与 draw_state
+# 的整屏渲染配套；False=所有状态统一用 img_bg。
+USE_STATE_IMAGES = True
 VIS_FRAME_MS     = 50      # 动画帧间隔（20fps）
 
 RING_N  = 24
@@ -486,10 +491,6 @@ RING_CX = 160
 RING_CY = 90
 RING_R  = 56
 RING_W  = 9                # 每段方块边长
-
-CHROME_BG = 0x101010       # 顶栏底色（实心条带才能做局部重绘）
-BAND_BG   = 0x0d0d0d       # 文字条带底色
-PLATE_BG  = 0x0a0a0a       # 环心表情面板底色
 
 _ring_rects = []
 for _i in range(RING_N):
@@ -668,11 +669,9 @@ _FORCED_IMG = {
     "streaming": "img_streaming",
 }
 
-_drawn_bg     = None
-_drawn_chrome = None
-_drawn_face   = None
-_drawn_status = None
-_drawn_chat   = None
+# 上一次画上屏的内容键。draw_state 整屏一起重画，所以只需要一个键：
+# 键相同 = 这一屏跟屏幕上现有的完全一样 → 直接跳过，不重解码 JPEG。
+_drawn_key = None
 
 
 def _ui_invalidate():
@@ -683,55 +682,39 @@ def _ui_invalidate():
     屏幕是它上次画的样子，下一次 draw_state 会判定"无变化"而跳过重绘，
     结果就是上一屏画面残留。谁盖了屏幕谁在盖之前调这个。
     """
-    global _drawn_bg, _drawn_chrome, _drawn_face, _drawn_status, _drawn_chat
-    _drawn_bg     = None
-    _drawn_chrome = None
-    _drawn_face   = None
-    _drawn_status = None
-    _drawn_chat   = None
+    global _drawn_key
+    _drawn_key = None
     _vis_invalidate()
 
 
 def draw_state(state, force=False):
     """
-    更新屏幕和 LED 到指定状态（分层增量重绘）。
+    更新屏幕和 LED 到指定状态。
+
+    渲染方式：整屏背景图 + 透明文字直接压在图上（不铺实心条带）。
+    代价是擦不掉单独一处文字，任一处内容变化都得整屏重建；换来的是
+    照片能铺满，没有上下黑边和表情面板。
+
+    但保留了内容键比对：**内容没变就整个跳过**。旧实现是每次调用都无条件
+    全屏重解码 JPEG（单次约 100ms），一轮对话调用 6~8 次，肉眼可见连续闪烁；
+    现在同一状态被反复调用（心跳/轮询/连续模式）不会再重画。
 
     屏幕布局（320×240，横屏）:
-      y=0-2    : 彩色主题条
-      y=3-25   : 顶栏（CONT / WAKE / 时间 + 电量）
-      y=26-150 : 环形动画区（环心为表情面板）
+      y=0-2   : 彩色主题条
+      y=3-25  : 顶栏（CONT / WAKE / CAM / 时间 + 电量）
+      y=90    : kaomoji（仅在背景图缺失时显示）
       y=152-205: 最近一轮对话文本（仅 idle）
-      y=208-240: 状态文字
+      y=216   : 状态文字
     """
-    global _drawn_bg, _drawn_chrome, _drawn_face, _drawn_status, _drawn_chat
+    global _drawn_key
     face, status, color = STATE_UI.get(state, STATE_UI["idle"])
-    r = (color >> 16) & 0xff
-    g = (color >> 8)  & 0xff
-    b = color & 0xff
-    _set_led(r // 4, g // 4, b // 4)
 
-    # ── 层 1：背景（只在目标背景真正变化时重绘）──────────────
+    # ── 先算出这一屏的全部内容，再决定要不要重画 ──────────────
     # _FORCED_IMG 不看 USE_STATE_IMAGES：直播态换图是功能需求（屏幕上不写
     # "直播中"，靠画面本身告知摄像头开着），不是装饰性的每状态配图。
     want_bg = (_FORCED_IMG.get(state)
                or (_IMG_MAP.get(state) if USE_STATE_IMAGES else None)
                or "img_bg")
-    if force or want_bg != _drawn_bg:
-        try:
-            with open("/flash/{}.jpg".format(want_bg), "rb") as _f:
-                Lcd.drawJpg(_f.read(), 0, 0)
-        except Exception as e:
-            print("[ui] bg fallback to solid:", e)
-            Widgets.fillScreen(0x0a0a0a)
-        _drawn_bg = want_bg
-        # 背景重画后所有叠加层失效
-        _drawn_chrome = None
-        _drawn_face   = None
-        _drawn_status = None
-        _drawn_chat   = None
-        _vis_invalidate()
-
-    # ── 层 2：顶栏（值变化才重绘该条带）──────────────────────
     cm_color = 0x00ffcc if St.continuous else 0x3a3a3a
     wm_color = 0xffcc00 if St.wake       else 0x3a3a3a
     time_str = get_rtc_time_str()
@@ -742,64 +725,77 @@ def draw_state(state, force=False):
     except Exception:
         bat_str = "--"
     right_str = "{} {}".format(time_str, bat_str) if time_str else bat_str
-    chrome_key = (cm_color, wm_color, right_str, color)
-    if chrome_key != _drawn_chrome:
-        _fill_rect(0, 0, 320, 26, CHROME_BG)
-        Widgets.Line(0, 0, 320, 0, color)
-        Widgets.Line(0, 1, 320, 1, color)
-        Widgets.Line(0, 2, 320, 2, color)
-        Lcd.setFont(_FONT_16)
+    show_chat = (state == "idle" and SHOW_CHAT_TEXT and _FONT_CN
+                 and _last_reply_text)
+    chat_key = (_last_user_text[:18], _last_reply_text[:19]) if show_chat else None
+
+    key = (want_bg, cm_color, wm_color, right_str, color, face, status, chat_key)
+    if not force and key == _drawn_key:
+        return
+    _drawn_key = key
+
+    r = (color >> 16) & 0xff
+    g = (color >> 8)  & 0xff
+    b = color & 0xff
+    _set_led(r // 4, g // 4, b // 4)
+
+    # ── 1：背景层（整屏 320×240 从 0,0 开始）────────────────
+    img_shown = False
+    try:
+        with open("/flash/{}.jpg".format(want_bg), "rb") as _f:
+            Lcd.drawJpg(_f.read(), 0, 0)
+        img_shown = True
+    except Exception as e:
+        print("img err:", e)
+    if not img_shown and want_bg != "img_bg":
+        try:
+            with open("/flash/img_bg.jpg", "rb") as _f:
+                Lcd.drawJpg(_f.read(), 0, 0)
+            img_shown = True
+        except Exception as e:
+            print("[ui] bg fallback to solid color:", e)
+    if not img_shown:
+        Widgets.fillScreen(0x1a1a1a)
+
+    # ── 2：彩色状态条 + 顶栏（透明背景，悬浮在图片上）────────
+    Widgets.Line(0, 0, 320, 0, color)
+    Widgets.Line(0, 1, 320, 1, color)
+    Widgets.Line(0, 2, 320, 2, color)
+    Lcd.setFont(_FONT_16)
+    Lcd.setTextSize(1)
+    Lcd.setTextColor(cm_color, cm_color)
+    Lcd.drawString("CONT", 10, 6)
+    Lcd.setTextColor(wm_color, wm_color)
+    Lcd.drawString("WAKE", 90, 6)
+    # CAM：可点的键（命中区 _CAM_ENTRY），点它进取景模式
+    if CAMERA_MODE_ENABLED:
+        Lcd.setTextColor(0xaa66ff, 0xaa66ff)
+        Lcd.drawString("CAM", 145, 6)
+    Lcd.setTextColor(0x666666, 0x666666)
+    Lcd.drawString(right_str, max(180, 310 - len(right_str) * 10), 6)
+
+    # ── 3：kaomoji（只在背景图都没读到时兜底显示）────────────
+    if not img_shown:
+        Lcd.setTextSize(3)
+        Lcd.setTextColor(color, color)
+        Lcd.drawString(face, max(0, (320 - len(face) * 34) // 2), 90)
         Lcd.setTextSize(1)
-        Lcd.setTextColor(cm_color, CHROME_BG)
-        Lcd.drawString("CONT", 10, 6)
-        Lcd.setTextColor(wm_color, CHROME_BG)
-        Lcd.drawString("WAKE", 90, 6)
-        # CAM：可点的键（命中区 _CAM_ENTRY），点它进取景模式。
-        # 顶栏重写基于取景模式之前的版本，合并时补回来——丢了就没有入口进取景。
-        if CAMERA_MODE_ENABLED:
-            Lcd.setTextColor(0xaa66ff, CHROME_BG)
-            Lcd.drawString("CAM", 145, 6)
-        Lcd.setTextColor(0x888888, CHROME_BG)
-        Lcd.drawString(right_str, max(180, 310 - len(right_str) * 10), 6)
-        _drawn_chrome = chrome_key
 
-    # ── 层 3：环心表情面板 ───────────────────────────────────
-    face_key = (face, color)
-    if face_key != _drawn_face:
-        _fill_rect(RING_CX - 48, RING_CY - 11, 96, 22, PLATE_BG)
+    # ── 4：状态文字 ─────────────────────────────────────────
+    Lcd.setTextColor(0xffffff if img_shown else 0x999999,
+                     0xffffff if img_shown else 0x999999)
+    Lcd.drawString(status, max(0, (320 - len(status) * 11) // 2), 216)
+
+    # ── 5：待机界面显示最近一轮对话（需固件带中文字体）────────
+    if show_chat:
+        Lcd.setFont(_FONT_CN)
+        Lcd.setTextColor(0x88ccff, 0x88ccff)
+        Lcd.drawString("> " + _last_user_text[:18], 8, 160)
+        Lcd.setTextColor(0xcccccc, 0xcccccc)
+        Lcd.drawString(_last_reply_text[:19], 8, 184)
         Lcd.setFont(_FONT_16)
-        Lcd.setTextSize(1)
-        Lcd.setTextColor(color, PLATE_BG)
-        Lcd.drawString(face, max(RING_CX - 46, RING_CX - len(face) * 6), RING_CY - 8)
-        _drawn_face = face_key
 
-    # ── 层 4：状态文字条带 ───────────────────────────────────
-    if status != _drawn_status:
-        _fill_rect(0, 208, 320, 32, BAND_BG)
-        Lcd.setFont(_FONT_16)
-        Lcd.setTextSize(1)
-        Lcd.setTextColor(0xdddddd, BAND_BG)
-        Lcd.drawString(status, max(0, (320 - len(status) * 11) // 2), 216)
-        _drawn_status = status
-
-    # ── 层 5：待机界面最近一轮对话（需固件带中文字体）────────
-    if SHOW_CHAT_TEXT and _FONT_CN:
-        chat_key = (state, _last_user_text, _last_reply_text)
-        if chat_key != _drawn_chat:
-            if state == "idle" and _last_reply_text:
-                _fill_rect(0, 152, 320, 54, BAND_BG)
-                Lcd.setFont(_FONT_CN)
-                Lcd.setTextSize(1)
-                Lcd.setTextColor(0x88ccff, BAND_BG)
-                Lcd.drawString("> " + _last_user_text[:18], 8, 156)
-                Lcd.setTextColor(0xbbbbbb, BAND_BG)
-                Lcd.drawString(_last_reply_text[:19], 8, 180)
-                Lcd.setFont(_FONT_16)
-            elif _drawn_chat is not None:
-                _fill_rect(0, 152, 320, 54, BAND_BG)   # 离开 idle：清掉
-            _drawn_chat = chat_key
-
-    # ── 层 6：环形动画切换到新状态 ───────────────────────────
+    # ── 6：环形动画切换到新状态（VISUAL_ENABLED=False 时为空操作）──
     _vis_set_state(state, color)
 
 
