@@ -39,6 +39,20 @@ CoreS3 (MicroPython)  ──HTTP──▶  voice_server.py (Flask :5000)  ──
 - **MQTT topic**：`kagura/push/{device_id}`（播报通知）、`kagura/cmd/{device_id}`（拍照命令）。
 - **设备端状态**：跨子系统 flag 全在 `St` 类（busy/continuous/wake/sleeping/last_activity）；
   模式转移只走 `toggle_continuous/toggle_wake_mode/enter_sleep/wake_up`。
+- **屏幕分层重绘**：`draw_state(state, force=False)` 拆成 6 层（背景/顶栏/表情面板/
+  状态条/对话带/环形动画），各层用 `_drawn_*` 缓存键比对，只在内容真变时重绘。
+  **顶栏与文字条带必须是实心底色**（`CHROME_BG`/`BAND_BG`）——局部擦除的前提。
+  改动前提醒：别退回"每次全屏重绘 JPEG"，那是之前闪烁的根因（单次 ~100ms）。
+- **环形可视化**（`visual_tick`）：24 段圆环在**同一批预计算矩形上原地重绘**，
+  因此无需擦除、不关心背景是照片还是纯色，只用 `fillRect`（不依赖
+  `fillCircle`/canvas 等未验证 API）。差分渲染：只重画亮度档位变化的段
+  （实测 comet 模式平均 5.9/24 段每帧）。亮度档位恒在 `0..7`，否则
+  `_vis_shades[k]` 越界——改公式后务必重验边界。
+  - 驱动点：主循环（idle 彗星）、`_vis_wait`（录音电平）、`play_wav`（播放包络）
+  - `processing` 态是静态帧：HTTP 阻塞期间主循环不转，无法动画（除非上线程）
+- **音频响应**：`rms_slices()` 单次遍历同时给出 5 个子片电平（动画用）和整体
+  RMS（VAD 用），成本等同一次 `rms()`；`_wav_envelope()` 用稀疏 `unpack_from`
+  而非 `array()` 整体转换——长回复可达 300KB，整体转换会撑爆堆。
 - **push 去重 hack**：对话期间（`St.busy`）收到的 MQTT push 直接丢弃——OpenClaw
   用 cores3-speak 回复时会同时触发 push，不丢会播两遍。改播放逻辑时务必保留。
 - **MQTT 回调只入队**：耗时操作（播放/拍照）在主循环 `process_mqtt_queue()` 消费，
@@ -47,7 +61,7 @@ CoreS3 (MicroPython)  ──HTTP──▶  voice_server.py (Flask :5000)  ──
   长循环里要 `_wdt_feed()`。ESP32 WDT 创建后无法关闭。
 - **openclaw 并发**：`chat()` 有全局 Semaphore(2) + 每 session 串行锁。
 - **回退开关**（设备端顶部常量）：`WAKE_MIC_PERSISTENT`、`WATCHDOG_ENABLED`、
-  `SHOW_CHAT_TEXT`——真机出问题先关开关再排查。
+  `SHOW_CHAT_TEXT`、`VISUAL_ENABLED`、`USE_STATE_IMAGES`——真机出问题先关开关再排查。
 
 ## 测试与验证
 
