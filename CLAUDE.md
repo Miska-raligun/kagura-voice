@@ -49,10 +49,22 @@ CoreS3 (MicroPython)  ──HTTP──▶  voice_server.py (Flask :5000)  ──
   （实测 comet 模式平均 5.9/24 段每帧）。亮度档位恒在 `0..7`，否则
   `_vis_shades[k]` 越界——改公式后务必重验边界。
   - 驱动点：主循环（idle 彗星）、`_vis_wait`（录音电平）、`play_wav`（播放包络）
-  - `processing` 态是静态帧：HTTP 阻塞期间主循环不转，无法动画（除非上线程）
+  - `processing` 态是静态帧：单线程下 HTTP 阻塞期间主循环不转。**这是成本
+    取舍，不是能力限制**——设备支持线程，详见下条。
 - **音频响应**：`rms_slices()` 单次遍历同时给出 5 个子片电平（动画用）和整体
   RMS（VAD 用），成本等同一次 `rms()`；`_wav_envelope()` 用稀疏 `unpack_from`
   而非 `array()` 整体转换——长回复可达 300KB，整体转换会撑爆堆。
+- **设备线程能力**（结论备查，当前代码**有意不使用**）：CoreS3 支持多线程。
+  上游 MicroPython `ports/esp32/mpconfigport.h` 无条件 `MICROPY_PY_THREAD (1)`
+  + `MICROPY_PY_THREAD_GIL (1)`，栈 16KB/线程；`modsocket.c` 在每个阻塞 lwIP
+  调用外都有 `MP_THREAD_GIL_EXIT()`，**所以主线程等 socket 时后台线程能跑**。
+  （未直接验证 UIFlow2 是否自行关闭——板级配置在 `m5stack/boards/`，线程开关
+  在 port 层，设备上 `import _thread` 一行即可确认。）
+  - 因此"HTTP 阻塞期间做不了动画"的说法**不成立**；不做只是不值得为一个状态
+    引入线程复杂度。别把它当硬约束写进注释。
+  - 真要做的路径：复用一个长驻线程（`_thread` 退出不干净，见 micropython
+    issue #4303，切勿每次请求新建）；请求前后用"标志位 + 确认位"严格交接
+    LCD 所有权——请求期间主线程整个卡在 lwip 里不碰 SPI，交接干净就无需互斥锁。
 - **push 去重 hack**：对话期间（`St.busy`）收到的 MQTT push 直接丢弃——OpenClaw
   用 cores3-speak 回复时会同时触发 push，不丢会播两遍。改播放逻辑时务必保留。
 - **MQTT 回调只入队**：耗时操作（播放/拍照）在主循环 `process_mqtt_queue()` 消费，
