@@ -44,6 +44,15 @@ for n in ("Lcd", "Mic", "Rgb", "Speaker"):
 _M5.__all__ = ["Widgets", "Lcd", "Mic", "Rgb", "Speaker"]
 # 注意：不给 M5.Rtc，模拟 CoreS3 SE 无 RTC 硬件的分支
 
+# MicroPython 的 time 比 CPython 多几个 ticks_* ——diag 在模块级就调
+# time.ticks_ms() 记开机时刻，不补上会 import 不起来。直接给真 time 模块
+# 挂属性，比整个替换 sys.modules["time"] 安全（socket/json 等已持有引用）。
+import time as _time
+_time.ticks_ms   = lambda: int(_time.monotonic() * 1000)
+_time.ticks_diff = lambda a, b: a - b
+_time.ticks_add  = lambda a, b: a + b
+_time.sleep_ms   = lambda ms: _time.sleep(ms / 1000.0)
+
 stub("hardware")
 stub("network", WLAN=lambda *a: _Any("WLAN"), STA_IF=1)
 stub("machine", WDT=lambda **kw: _Any("WDT"), reset=lambda: None)
@@ -59,7 +68,8 @@ stub("uos", mkdir=lambda p: None, remove=lambda p: None, rename=lambda a, b: Non
 stub("requests", get=lambda *a, **kw: _Any("resp"), post=lambda *a, **kw: _Any("resp"))
 
 print("=== 按依赖顺序 import ===")
-order = ["cfg", "hw", "clock", "ui", "wifisetup", "audio", "netsvc", "chat", "app"]
+order = ["cfg", "hw", "clock", "ui", "wifisetup", "audio", "cam",
+         "feel", "diag", "netsvc", "stream", "chat", "app"]
 for name in order:
     __import__(name)
     print("  ✓ import %s" % name)

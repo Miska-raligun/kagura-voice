@@ -196,20 +196,28 @@ CoreS3 (MicroPython)  ──HTTP──▶  voice_server.py (Flask :5000)  ──
 依赖分层，**必须保持无环**（`tools/check_split.py` 会检查）：
 
 ```
-cfg → hw → clock → ui → {wifisetup, audio} → netsvc → chat → app
+cfg → hw → clock → ui → {wifisetup, audio} → cam → feel
+    → diag → netsvc → stream → chat → app
 ```
 
 | 模块 | 职责 |
 |---|---|
-| `cfg` | 常量、回退开关、路径、`St` 状态类。不 import 任何 kagura 模块 |
-| `hw` | LED/看门狗/麦克风/音量/摄像头/RMS/触摸/绘图原语 |
+| `cfg` | 常量、回退开关、目录助手、`St`/`Feel` 状态类。不 import 任何 kagura 模块 |
+| `hw` | LED/看门狗/麦克风/音量/RMS/触摸（含抚摸轨迹）/绘图原语 |
 | `clock` | RTC 同步与读取。单独成模块是为打断 ui ↔ netsvc 环 |
-| `ui` | 字体、环形可视化、分层重绘 `draw_state`、息屏唤醒 |
+| `ui` | 字体、环形可视化、离屏画布合成 `draw_state`、息屏唤醒 |
 | `wifisetup` | 屏上配网（SSID 选择 + 软键盘），最自洽的一块 |
 | `audio` | 录音 VAD、播放、包络、噪声校准 |
+| `cam` | 抓帧/预览/取景模式/拍照上传。**不能叫 camera**——MicroPython 的摄像头驱动就叫这名，同名会 import 到自己 |
+| `feel` | 触觉三层 + IMU 本体感觉 |
+| `diag` | 事件环形日志、崩溃上报、心跳遥测、网络分级自愈、画布探测 |
 | `netsvc` | MQTT、BLE 感知、UDP 发现 |
+| `stream` | 摄像头直播推流与直播中插拍 |
 | `chat` | 主对话、模式切换、IMU 摇晃彩蛋 |
-| `app` | `setup()` / `loop()` / `main()` |
+| `app` | `setup()` / `loop()` / `main()`（含崩溃守护循环） |
+
+设备端由 `tools/` 下的生成器从单文件版拆出，**注释逐行保留**（顶层语句之间的
+独立注释块会随下一条语句一起被抽走，否则段头和踩坑记录会全部丢失）。
 
 **三条铁律**：
 
@@ -223,8 +231,16 @@ cfg → hw → clock → ui → {wifisetup, audio} → netsvc → chat → app
 3. **别拿模块名当局部变量**。原代码 `ensure_wifi()` 里有个局部 `cfg = _wifi_load()`
    会遮蔽 cfg 模块，拆分时已改名为 `saved`。
 
-`audio ↔ netsvc` 的循环（`play_wav` 要 `mqtt_check` 维持心跳、push 又要回调
-`play_wav`）用回调注入打断：`app.setup()` 里 `audio.set_pump(netsvc.mqtt_check)`。
+**两处循环依赖用回调注入打断**，注入点都在 `app.setup()`：
+
+- `audio ↔ netsvc`（`play_wav` 要 `mqtt_check` 维持心跳、push 又要回调
+  `play_wav`）→ `audio.set_pump(netsvc.mqtt_check)`。取景循环也要泵 MQTT，
+  走同一个注入点（`audio._pump_safe()`），别再开第二个。
+- `netsvc ↔ stream`（MQTT 收到 `stream_start` 要跑推流、推流循环又要回来消费
+  命令队列）→ `netsvc.set_stream_runner(stream._run_stream_cmd)`。
+
+`_mqtt_ok` 放在 `diag` 而不是 `netsvc`：心跳要读它，netsvc 要写它，
+放 netsvc 就成环。netsvc 写 `diag._mqtt_ok = ...`，单向依赖。
 
 ## 测试与验证
 

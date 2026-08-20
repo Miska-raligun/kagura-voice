@@ -1,19 +1,17 @@
-"""硬件封装与底层工具：LED / 看门狗 / 麦克风 / 音量 / 摄像头 /
-音频计算 / 触摸 / 绘图原语。
+"""Kagura Voice 设备端 —— 硬件封装：LED / 看门狗 / 麦克风 / 音量 / RMS / 触摸 / 绘图原语。
 
-只依赖 cfg，不依赖任何上层模块。
+触摸检测带 feel 参数——主循环传 True 时才做抚摸轨迹判定，
+取景/配网这些地方要的是纯按钮，别让手滑变成抚摸把点击吞掉。
 """
 
 import M5
 from M5 import *
 from hardware import *
 import time
-import math
 import struct
-import array as uarray
-import gc
-import ubinascii
+import math
 import ujson
+import array as uarray
 
 import cfg
 
@@ -32,27 +30,71 @@ def _set_led(r, g, b):
             pass
 
 
-# ── 硬件看门狗 ────────────────────────────────────────────────
-# 未捕获异常/死循环时自动复位。ESP32 的 WDT 一旦创建无法关闭，
-# 因此在 app.setup() 完成后才 arm（配网等待用户输入不受超时限制）。
+# ── 音量（语音可调："小声一点/大声一点"，服务端回 X-Volume 头） ──
+_VOLUME_PATH = cfg.data("volume.json")
+
+
+_volume = 0.6
+
+
+def _volume_load():
+    global _volume
+    try:
+        with open(_VOLUME_PATH, "r") as f:
+            v = ujson.load(f).get("volume")
+        if isinstance(v, (int, float)) and 0.2 <= v <= 1.0:
+            _volume = v
+    except Exception:
+        pass   # 无存档用默认值
+
+
+def _volume_adjust(direction):
+    """direction: 'up'/'down'，步进 0.2，范围 [0.2, 1.0]，持久化到 flash。"""
+    global _volume
+    step = 0.2 if direction == "up" else -0.2
+    _volume = max(0.2, min(1.0, round(_volume + step, 1)))
+    try:
+        with open(_VOLUME_PATH, "w") as f:
+            ujson.dump({"volume": _volume}, f)
+    except Exception as e:
+        print("[vol] save err:", e)
+    print("[vol] volume =", _volume)
+
+
+_mic_active = False
+
+
+def _mic_on():
+    """幂等开麦。Mic 与 Speaker 共享音频通路，播放前必须 _mic_off()。"""
+    global _mic_active
+    if not _mic_active:
+        Mic.begin()
+        _mic_active = True
+
+
+def _mic_off():
+    global _mic_active
+    if _mic_active:
+        Mic.end()
+        _mic_active = False
+
 
 _wdt = None
 
 
-def wdt_arm():
-    """启动看门狗。失败（固件不支持）只打印，不影响运行。"""
+def _wdt_init():
+    """武装看门狗。在 setup() 末尾调用：配网 UI 等交互流程不受超时限制。"""
     global _wdt
-    if not cfg.WATCHDOG_ENABLED:
-        return
-    try:
-        from machine import WDT
-        _wdt = WDT(timeout=cfg.WATCHDOG_TIMEOUT_MS)
-        print("watchdog armed:", cfg.WATCHDOG_TIMEOUT_MS, "ms")
-    except Exception as e:
-        print("watchdog unavailable:", e)
+    if cfg.WATCHDOG_ENABLED and _wdt is None:
+        try:
+            from machine import WDT
+            _wdt = WDT(timeout=cfg.WATCHDOG_TIMEOUT_MS)
+            print("watchdog armed:", cfg.WATCHDOG_TIMEOUT_MS, "ms")
+        except Exception as e:
+            print("watchdog unavailable:", e)
 
 
-def wdt_feed():
+def _wdt_feed():
     if _wdt:
         try:
             _wdt.feed()
@@ -60,105 +102,26 @@ def wdt_feed():
             pass
 
 
-# ── 音量（语音可调："小声一点/大声一点"，服务端回 X-Volume 头）──
+# ── 触摸状态 ──────────────────────────────────────────────────
 
-_volume = 0.6
-
-
-def volume_get():
-    return _volume
+_touch_start = None
 
 
-def volume_load():
-    """从 flash 恢复音量设置，无存档则用默认值。"""
-    global _volume
-    try:
-        with open(cfg.data("volume.json"), "r") as f:
-            v = ujson.load(f).get("volume")
-        if isinstance(v, (int, float)) and 0.2 <= v <= 1.0:
-            _volume = v
-    except Exception:
-        pass
+_touch_pos   = (0, 0)
 
 
-def volume_adjust(direction):
-    """direction: 'up'/'down'，步进 0.2，范围 [0.2, 1.0]，持久化到 flash。"""
-    global _volume
-    step = 0.2 if direction == "up" else -0.2
-    _volume = max(0.2, min(1.0, round(_volume + step, 1)))
-    try:
-        with open(cfg.data("volume.json"), "w") as f:
-            ujson.dump({"volume": _volume}, f)
-    except Exception as e:
-        print("[vol] save err:", e)
-    print("[vol] volume =", _volume)
+_touch_maxd     = 0         # 本次按下期间离起点的最大位移（曼哈顿距离，px）
 
 
-# ── 麦克风开关 ────────────────────────────────────────────────
-# Mic 与 Speaker 共享音频通路，播放前必须 mic_off()。
-
-_mic_active = False
+_touch_gesture  = None      # 本次按下已判定的触觉手势：'stroke' / 'cradle' / None
 
 
-def mic_on():
-    """幂等开麦。"""
-    global _mic_active
-    if not _mic_active:
-        Mic.begin()
-        _mic_active = True
+_touch_last_ms  = 0         # 最近一次手势按住的时长（ms），供结算用
 
 
-def mic_off():
-    global _mic_active
-    if _mic_active:
-        Mic.end()
-        _mic_active = False
+_touch_seen_ms  = 0         # 最近一次"屏幕上有手"的时刻（ms）。反射层靠它判断
 
 
-# ── 摄像头 ────────────────────────────────────────────────────
-
-_camera_inited = False
-
-
-def capture_photo():
-    """
-    调用 CoreS3 摄像头拍一张 QQVGA raw RGB565 帧。
-    首次调用时初始化摄像头，之后保持常驻（不 deinit）。
-    返回 base64 字符串（无换行），失败返回 None。
-    """
-    global _camera_inited
-    import camera
-
-    if not _camera_inited:
-        print("camera: initializing...")
-        try:
-            camera.init()
-            _camera_inited = True
-            print("camera: init OK")
-        except Exception as e:
-            print("camera init error:", e)
-            return None
-
-    time.sleep(0.3)   # 等待曝光稳定（替代 skip_frames）
-
-    print("camera: capturing...")
-    try:
-        img = camera.capture()
-    except Exception as e:
-        print("camera capture error:", e)
-        return None
-
-    if img is None or isinstance(img, bool):
-        print("camera: capture returned", img)
-        return None
-
-    print("camera: raw size =", len(img))
-    b64 = ubinascii.b2a_base64(img).decode("utf-8").replace("\n", "").replace("\r", "")
-    gc.collect()
-    return b64
-
-
-# ── WAV 工具 ──────────────────────────────────────────────────
 def make_wav_header(data_len, sample_rate=16000, channels=1, bits=16):
     byte_rate   = sample_rate * channels * bits // 8
     block_align = channels * bits // 8
@@ -211,28 +174,61 @@ def rms_slices(buf, n=5):
 
 # ── 触摸检测 ──────────────────────────────────────────────────
 
-_touch_start = None
-_touch_pos   = (0, 0)
+_FEEL_ONGOING = {'stroke': 'stroking', 'cradle': 'cradling'}
 
-def check_touch():
+
+def check_touch(feel=False):
     """
     返回 (事件类型, 坐标)。
-    事件类型: 'short' / 'long' / None
+    事件类型: 'short' / 'long' / None；feel=True 时还可能是：
+      'stroking' / 'cradling' —— 手势进行中，按住期间每轮都返回（喂反射层）
+      'stroke'   / 'cradle'   —— 手势结束。此时**不再产生 short/long**
     坐标: (x, y) 为按下时的位置
+
+    feel 默认 False = 与加触觉之前逐字节等价的行为。取景模式、配网界面、
+    播放中断这些地方要的就是纯按钮，别让一次手滑变成抚摸把点击吞掉；
+    只有主循环 loop() 传 True。
+
+    位移用"离起点的最大曼哈顿距离"而不是累计路径长度：累计路径会把长按
+    期间的手指抖动一点点攒过阈值，把静止长按误判成抚摸；最大位移不会，
+    而来回摩挲在两端自然会超阈值，照样判得出来。
     """
-    global _touch_start, _touch_pos
+    global _touch_start, _touch_pos, _touch_maxd, _touch_gesture, _touch_last_ms
+    global _touch_seen_ms
     M5.update()
     count = M5.Touch.getCount()
     if count > 0:
+        _touch_seen_ms = time.ticks_ms()
+        x, y = M5.Touch.getX(), M5.Touch.getY()
         if _touch_start is None:
-            _touch_start = time.ticks_ms()
-            _touch_pos   = (M5.Touch.getX(), M5.Touch.getY())
+            _touch_start   = time.ticks_ms()
+            _touch_pos     = (x, y)
+            _touch_maxd    = 0
+            _touch_gesture = None
+        if feel and cfg.TOUCH_FEEL_ENABLED:
+            d = abs(x - _touch_pos[0]) + abs(y - _touch_pos[1])
+            if d > _touch_maxd:
+                _touch_maxd = d
+            held = time.ticks_diff(time.ticks_ms(), _touch_start)
+            if count > 1:
+                # 多指同时按住 =「被捧着」。UIFlow2 是否真的透传多点待真机确认，
+                # 不透传的话这条分支永远不进，其余功能不受影响。
+                _touch_gesture = 'cradle'
+            elif _touch_maxd >= cfg.STROKE_MIN_DIST and held >= cfg.STROKE_MIN_MS:
+                _touch_gesture = 'stroke'
+            if _touch_gesture is not None:
+                return (_FEEL_ONGOING[_touch_gesture], _touch_pos)
         return (None, (0, 0))
     else:
         if _touch_start is not None:
             duration = time.ticks_diff(time.ticks_ms(), _touch_start)
             pos      = _touch_pos
-            _touch_start = None
+            gesture  = _touch_gesture
+            _touch_start   = None
+            _touch_gesture = None
+            _touch_last_ms = duration
+            if gesture is not None:
+                return (gesture, pos)      # 判成触觉就吞掉 short/long，不录音
             if duration >= cfg.LONG_PRESS_MS:
                 return ('long', pos)
             elif duration > 0:
@@ -246,7 +242,20 @@ def drain_touch():
         M5.update()
         time.sleep(0.05)
 
-# ── 绘图辅助 ──────────────────────────────────────────────────
+
+def touch_reset():
+    """丢弃当前这一次按下：抬手后不再产生任何事件。
+
+    抚摸是**按住期间**就判定的（不像 short/long 要等抬手），所以拿它当触发器
+    的地方必须显式作废这次按下，否则抬手时还会再吐一个手势事件出来。
+    """
+    global _touch_start, _touch_gesture, _touch_maxd
+    _touch_start   = None
+    _touch_gesture = None
+    _touch_maxd    = 0
+
+
+# ── 绘图辅助 ────────────────────────────────────────────────
 
 def _fill_rect(x, y, w, h, color):
     """填充矩形，优先使用 Lcd.fillRect，回退为逐行 Line。"""
@@ -277,9 +286,3 @@ def _wait_tap():
         if t in ('short', 'long') and pos != (0, 0):
             return pos
         time.sleep(0.01)
-
-
-def reset_touch():
-    """清掉进行中的触摸判定（彩蛋/模式切换后避免误判为长按）。"""
-    global _touch_start
-    _touch_start = None

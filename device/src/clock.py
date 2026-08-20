@@ -1,21 +1,26 @@
-"""RTC 时间同步与读取。
-
-单独成模块是为了打断依赖环：ui.draw_state 需要读时间（顶栏时钟），
-而 netsvc 需要 ui.draw_state。若把 RTC 放进 netsvc 就会形成
-ui ↔ netsvc 循环 import。这里只依赖 cfg，谁都能安全 import。
+"""Kagura Voice 设备端 —— RTC 同步与读取。单独成模块是为了打断 ui ↔ netsvc 的环。
 """
 
 import M5
+from M5 import *
+from hardware import *
 import time
 import ujson
 import requests as urequests
 
 import cfg
 
-_rtc_synced = False            # RTC 是否已同步
-_has_rtc = hasattr(M5, 'Rtc')  # CoreS3 SE 无 RTC 硬件
-_soft_time_offset = 0          # 软件时间偏移（秒），用于无 RTC 时
+# ── RTC 时间 ─────────────────────────────────────────────────
+_rtc_synced = False          # RTC 是否已同步
 
+
+_has_rtc = hasattr(M5, 'Rtc')  # CoreS3 SE 无 RTC 硬件
+
+
+_soft_time_offset = 0        # 软件时间偏移（秒），用于无 RTC 时
+
+
+# ── RTC 时间同步 ─────────────────────────────────────────────
 
 def sync_rtc():
     """从服务端获取时间并设置 RTC（无 RTC 硬件时用软件偏移代替）。"""

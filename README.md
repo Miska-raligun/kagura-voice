@@ -135,7 +135,7 @@ netsh interface portproxy add v4tov4 listenport=5000 listenaddress=0.0.0.0 conne
 
 1. 用 M5Burner 烧录 UIFlow2 固件（WiFi 可不配，见下文"在设备上配置 WiFi"）
 2. 打开 uiflow2.m5stack.com 连接设备，点左侧 **webterminal → File** 打开文件管理
-3. 建目录 `/flash/kagura/src`，把 `device/src/` 下 9 个 `.py` 全部上传进去
+3. 建目录 `/flash/kagura/src`，把 `device/src/` 下 13 个 `.py` 全部上传进去
 4. 把 `device/main.py` 上传为 `/flash/main.py`（开机自动运行）
 5. 可选：建 `/flash/kagura/resource` 并上传背景图
 6. 服务端 IP 由 UDP 广播自动发现，无需改 `cfg.SERVER_BASE`
@@ -180,7 +180,7 @@ netsh interface portproxy add v4tov4 listenport=5000 listenaddress=0.0.0.0 conne
 
 长按屏幕任意处随时退出；90 秒无操作自动退出回待机。
 
-设备端相关开关（`cores3_client.py` 顶部）：
+设备端相关开关（`device/src/cfg.py`）：
 
 | 常量 | 说明 |
 |---|---|
@@ -254,12 +254,12 @@ curl -X POST http://localhost:5000/push \
 安全兜底：网页每 20 秒续期一次，设备端拿到的截止时间是 45 秒——**关掉网页或断网后，
 设备最多再传 45 秒就自己收摊**，不会把摄像头一直开着。另有 `STREAM_MAX_SECS=300` 的硬上限。
 
-直播期间设备屏幕显示 `/flash/img_streaming.jpg`，不显示实时画面也不写「直播中」字样，
+直播期间设备屏幕显示 `img_streaming`，不显示实时画面也不写「直播中」字样，
 LED 转红。长按屏幕可以在设备侧强行中断直播。
 
-> 没上传 `img_streaming.jpg` 也能用：设备会打印一行 `img err: [Errno 2] ENOENT`
-> 然后自动退回 `img_bg.jpg`。想要专属画面的话，把一张 320×240 的 JPG 传到
-> 设备 `/flash/img_streaming.jpg` 即可。
+> 没上传也能用：设备会打印一行 `img err: [Errno 2] ENOENT` 然后自动退回
+> `img_bg`。想要专属画面就把一张 320×240 的图传到
+> `/flash/kagura/resource/img_streaming.jpg`。
 
 **直播连不上时**先看设备串口日志：
 

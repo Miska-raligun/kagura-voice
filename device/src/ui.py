@@ -1,12 +1,15 @@
-"""屏幕显示：字体、环形音频可视化、分层增量重绘、息屏唤醒。
+"""Kagura Voice 设备端 —— 屏幕显示：字体、环形可视化、离屏画布合成、息屏唤醒。
 
-依赖 cfg / hw / clock（都在下层，无环）。
+draw_state 整屏背景图 + 透明文字，**不要再加实心条带**——
+分层重绘垫黑底那版被否过（照片被上下黑边夹住）。
 """
 
 import M5
 from M5 import *
+from hardware import *
 import time
 import math
+import gc
 import ubinascii
 
 import cfg
@@ -15,16 +18,20 @@ import clock
 
 # ── 字体 ───────────────────────────────────────────────────────
 _FONT_16 = Widgets.FONTS.DejaVu18
-# 中文字体：UIFlow2 固件带 EFontCN 系列则用于屏显对话文本，否则跳过
+
+
+# 中文字体：UIFlow2 固件带 EFontCN 系列则用于屏显对话文本，否则跳过文本显示
 _FONT_CN = (getattr(Widgets.FONTS, "EFontCN16", None)
             or getattr(Widgets.FONTS, "EFontCN14", None))
 
-# ── 屏显对话文本（服务端 X-User-Text / X-Reply-Text 头，b64 UTF-8）──
+
 _last_user_text  = ""
+
+
 _last_reply_text = ""
 
 
-def update_chat_text(user_b64, reply_b64):
+def _update_chat_text(user_b64, reply_b64):
     """解码响应头里的对话文本，供待机界面显示。解码失败静默跳过。"""
     global _last_user_text, _last_reply_text
     if not cfg.SHOW_CHAT_TEXT:
@@ -38,20 +45,9 @@ def update_chat_text(user_b64, reply_b64):
         print("[ui] chat text decode err:", e)
 
 
-# ── 动态可视化：环形音频指示器 ─────────────────────────────────
-#
-# 24 段圆环，每帧在同一批矩形上原地重绘 —— 不需要擦除，也不关心背后
-# 是纯色还是照片。只依赖 fillRect（代码里已验证可用），不需要
-# fillCircle / canvas / pushImage 这些不确定的 API。
-#   idle              → 彗星追逐（呼吸感）
-#   recording         → 麦克风电平实时填充
-#   playing/broadcast → 语音包络填充
-#   其他（含 processing，HTTP 阻塞期主循环不转）→ 静态一帧
-#
-# 逐帧只重绘亮度变化的段（差分渲染），典型每帧仅几个 fillRect。
-
-
 _ring_rects = []
+
+
 for _i in range(cfg.RING_N):
     _a = 2 * math.pi * (_i / cfg.RING_N) - math.pi / 2
     _ring_rects.append((
@@ -60,13 +56,28 @@ for _i in range(cfg.RING_N):
         cfg.RING_W, cfg.RING_W,
     ))
 
+
 _vis_mode    = "static"
+
+
 _vis_theme   = None
+
+
 _vis_shades  = None
+
+
 _vis_level   = 0.0
+
+
 _vis_ref     = 2000.0      # 自动增益参考值
+
+
 _vis_phase   = 0.0
+
+
 _vis_last    = None        # 上一帧各段亮度档位，用于差分重绘
+
+
 _vis_last_ms = 0
 
 
@@ -173,86 +184,127 @@ def _vis_wait(duration, levels):
         visual_tick()
         time.sleep(step)
 
+
 # ── 分层重绘 ──────────────────────────────────────────────────
 #
 # 旧实现每次 draw_state 都全屏重解码 JPEG（约 100ms+），一轮对话调用
 # 6~8 次 → 肉眼可见的连续闪烁。现在拆成独立图层，各自只在内容真正
 # 变化时重绘；顶栏/文字用实心条带打底，才能局部擦除而不破坏背景。
 
-
-# ── 图片加载（自动适配 jpg / png / bmp）──────────────────────
-#
-# 固件是否提供 drawPng / drawBmp 因版本而异，这里做能力探测：
-# 只把真实存在的绘制方法登记进 _IMG_FORMATS，缺失的格式直接跳过。
-# 资源文件不带扩展名调用，例如 draw_image("img_bg")。
-
-_IMG_FORMATS = []
-for _ext, _fname in ((".jpg", "drawJpg"), (".jpeg", "drawJpg"),
-                     (".png", "drawPng"), (".bmp", "drawBmp")):
-    _f = getattr(Lcd, _fname, None)
-    if _f is not None:
-        _IMG_FORMATS.append((_ext, _f))
+_IMG_MAP = {
+    "recording":  "img_recording",
+    "processing": "img_processing",
+    "playing":    "img_playing",
+    "broadcast":  "img_playing",   # broadcast 复用 playing 图片
+    # 触觉三态先复用 processing 的图，不必额外准备素材。想各配一张就把值改成
+    # img_petted / img_poked / img_held 再传图；缺图会退回 img_bg（见 _img_missing）。
+    "petted":     "img_processing",   # 被抚摸（屏幕上有手指在滑）
+    "poked":      "img_processing",   # 机身被轻拍
+    "held":       "img_processing",   # 被从桌上拿起来
+}
 
 
-def draw_image(basename, x=0, y=0):
-    """在 resource 目录下按 jpg→png→bmp 顺序找图并绘制。
+# 试过但确实不存在的背景图。没有这个缓存的话，缺图状态每次重绘都要白开一次
+# 文件、打一行 img err、再解一次 img_bg——等于每次被摸都多花 100ms 在必然
+# 失败的尝试上，而反射层是全设备最吃延迟的一条路径。
+# 代价：传了新图必须重启设备才认（缓存只在开机时清空）。
+_img_missing = set()
 
-    画出返回 True；文件不存在或固件不支持该格式返回 False（调用方降级）。
+
+# 无视 USE_STATE_IMAGES 的强制背景。直播时屏幕不显示实时画面、也不写文字提示，
+# 全靠换这张图告知摄像头正开着——属于功能，不是装饰，所以不跟随那个开关。
+# 没上传 /flash/img_streaming.jpg 也不要紧，下面读文件失败会退回纯色。
+_FORCED_IMG = {
+    "streaming": "img_streaming",
+}
+
+
+# 上一次画上屏的内容键。draw_state 整屏一起重画，所以只需要一个键：
+# 键相同 = 这一屏跟屏幕上现有的完全一样 → 直接跳过，不重解码 JPEG。
+_drawn_key = None
+
+
+_canvas = None          # 全屏离屏画布（懒分配，失败则永久退回直接画屏）
+
+
+_canvas_tried = False
+
+
+def _get_canvas():
+    """取全屏离屏画布；不可用返回 None，调用方直接画屏。"""
+    global _canvas, _canvas_tried
+    if _canvas is not None or _canvas_tried:
+        return _canvas
+    _canvas_tried = True                 # 只试一次，失败别每帧白试
+    if not cfg.USE_CANVAS or not hasattr(Lcd, "newCanvas"):
+        return None
+    try:
+        _canvas = Lcd.newCanvas(w=320, h=240, bpp=16, psram=True)
+        print("[ui] offscreen canvas ready")
+    except Exception as e:
+        print("[ui] canvas unavailable, direct draw:", e)
+        _canvas = None
+    return _canvas
+
+
+def _canvas_disable():
+    """画布出问题时永久退回直接画屏，并把这块内存还回去。"""
+    global _canvas
+    cv, _canvas = _canvas, None
+    if cv is None:
+        return
+    try:
+        cv.delete()          # binding 暴露的是 delete，没有 deleteSprite
+    except Exception:
+        pass
+    gc.collect()
+
+
+def _ui_invalidate():
+    """整屏被 draw_state 之外的代码接管过之后必须调用。
+
+    分层重绘的前提是"屏幕内容 == 缓存键描述的内容"。取景预览、摇晃彩蛋、
+    WiFi 配网界面都会直接 fillScreen/drawJpg 铺满屏幕，此时缓存仍以为
+    屏幕是它上次画的样子，下一次 draw_state 会判定"无变化"而跳过重绘，
+    结果就是上一屏画面残留。谁盖了屏幕谁在盖之前调这个。
     """
-    for ext, fn in _IMG_FORMATS:
-        path = cfg.res(basename + ext)
-        try:
-            with open(path, "rb") as f:
-                data = f.read()
-        except OSError:
-            continue                  # 换下一个扩展名
-        try:
-            fn(data, x, y)
-            return True
-        except Exception as e:
-            print("[ui] draw", path, "failed:", e)
-    return False
-
-
-_drawn_bg     = None
-_drawn_chrome = None
-_drawn_face   = None
-_drawn_status = None
-_drawn_chat   = None
+    global _drawn_key
+    _drawn_key = None
+    _vis_invalidate()
 
 
 def draw_state(state, force=False):
     """
-    更新屏幕和 LED 到指定状态（分层增量重绘）。
+    更新屏幕和 LED 到指定状态。
+
+    渲染方式：整屏背景图 + 透明文字直接压在图上（不铺实心条带）。
+    代价是擦不掉单独一处文字，任一处内容变化都得整屏重建；换来的是
+    照片能铺满，没有上下黑边和表情面板。
+
+    但保留了内容键比对：**内容没变就整个跳过**。旧实现是每次调用都无条件
+    全屏重解码 JPEG（单次约 100ms），一轮对话调用 6~8 次，肉眼可见连续闪烁；
+    现在同一状态被反复调用（心跳/轮询/连续模式）不会再重画。
 
     屏幕布局（320×240，横屏）:
-      y=0-2    : 彩色主题条
-      y=3-25   : 顶栏（CONT / WAKE / 时间 + 电量）
-      y=26-150 : 环形动画区（环心为表情面板）
+      y=0-2   : 彩色主题条
+      y=3-25  : 顶栏（CONT / WAKE / CAM / 时间 + 电量）
+      y=90    : kaomoji（仅在背景图缺失时显示）
       y=152-205: 最近一轮对话文本（仅 idle）
-      y=208-240: 状态文字
+      y=216   : 状态文字
     """
-    global _drawn_bg, _drawn_chrome, _drawn_face, _drawn_status, _drawn_chat
+    global _drawn_key
     face, status, color = cfg.STATE_UI.get(state, cfg.STATE_UI["idle"])
-    r = (color >> 16) & 0xff
-    g = (color >> 8)  & 0xff
-    b = color & 0xff
-    hw._set_led(r // 4, g // 4, b // 4)
 
-    # ── 层 1：背景（只在目标背景真正变化时重绘）──────────────
-    want_bg = (cfg.IMG_MAP.get(state) if cfg.USE_STATE_IMAGES else None) or "img_bg"
-    if force or want_bg != _drawn_bg:
-        if not draw_image(want_bg):
-            Widgets.fillScreen(0x0a0a0a)   # 无图片资源：纯色背景
-        _drawn_bg = want_bg
-        # 背景重画后所有叠加层失效
-        _drawn_chrome = None
-        _drawn_face   = None
-        _drawn_status = None
-        _drawn_chat   = None
-        _vis_invalidate()
-
-    # ── 层 2：顶栏（值变化才重绘该条带）──────────────────────
+    # ── 先算出这一屏的全部内容，再决定要不要重画 ──────────────
+    # _FORCED_IMG 不看 USE_STATE_IMAGES：直播态换图是功能需求（屏幕上不写
+    # "直播中"，靠画面本身告知摄像头开着），不是装饰性的每状态配图。
+    want_bg = (_FORCED_IMG.get(state)
+               or (_IMG_MAP.get(state) if cfg.USE_STATE_IMAGES else None)
+               or "img_bg")
+    # 已知缺图的直接改成 img_bg：要赶在算 key 之前，否则 key 记的是"想画的图"、
+    # 屏幕上是"实际画的图"，两者不一致会让缓存判断失去意义。
+    if want_bg in _img_missing:
+        want_bg = "img_bg"
     cm_color = 0x00ffcc if cfg.St.continuous else 0x3a3a3a
     wm_color = 0xffcc00 if cfg.St.wake       else 0x3a3a3a
     time_str = clock.get_rtc_time_str()
@@ -263,69 +315,133 @@ def draw_state(state, force=False):
     except Exception:
         bat_str = "--"
     right_str = "{} {}".format(time_str, bat_str) if time_str else bat_str
-    chrome_key = (cm_color, wm_color, right_str, color)
-    if chrome_key != _drawn_chrome:
-        hw._fill_rect(0, 0, 320, 26, cfg.CHROME_BG)
-        Widgets.Line(0, 0, 320, 0, color)
-        Widgets.Line(0, 1, 320, 1, color)
-        Widgets.Line(0, 2, 320, 2, color)
-        Lcd.setFont(_FONT_16)
-        Lcd.setTextSize(1)
-        Lcd.setTextColor(cm_color, cfg.CHROME_BG)
-        Lcd.drawString("CONT", 10, 6)
-        Lcd.setTextColor(wm_color, cfg.CHROME_BG)
-        Lcd.drawString("WAKE", 90, 6)
-        Lcd.setTextColor(0x888888, cfg.CHROME_BG)
-        Lcd.drawString(right_str, max(180, 310 - len(right_str) * 10), 6)
-        _drawn_chrome = chrome_key
+    show_chat = (state == "idle" and cfg.SHOW_CHAT_TEXT and _FONT_CN
+                 and _last_reply_text)
+    chat_key = (_last_user_text[:18], _last_reply_text[:19]) if show_chat else None
 
-    # ── 层 3：环心表情面板 ───────────────────────────────────
-    face_key = (face, color)
-    if face_key != _drawn_face:
-        hw._fill_rect(cfg.RING_CX - 48, cfg.RING_CY - 11, 96, 22, cfg.PLATE_BG)
-        Lcd.setFont(_FONT_16)
-        Lcd.setTextSize(1)
-        Lcd.setTextColor(color, cfg.PLATE_BG)
-        Lcd.drawString(face, max(cfg.RING_CX - 46, cfg.RING_CX - len(face) * 6), cfg.RING_CY - 8)
-        _drawn_face = face_key
+    key = (want_bg, cm_color, wm_color, right_str, color, face, status, chat_key)
+    if not force and key == _drawn_key:
+        return
+    _drawn_key = key
 
-    # ── 层 4：状态文字条带 ───────────────────────────────────
-    if status != _drawn_status:
-        hw._fill_rect(0, 208, 320, 32, cfg.BAND_BG)
-        Lcd.setFont(_FONT_16)
-        Lcd.setTextSize(1)
-        Lcd.setTextColor(0xdddddd, cfg.BAND_BG)
-        Lcd.drawString(status, max(0, (320 - len(status) * 11) // 2), 216)
-        _drawn_status = status
+    r = (color >> 16) & 0xff
+    g = (color >> 8)  & 0xff
+    b = color & 0xff
+    hw._set_led(r // 4, g // 4, b // 4)
 
-    # ── 层 5：待机界面最近一轮对话（需固件带中文字体）────────
-    if cfg.SHOW_CHAT_TEXT and _FONT_CN:
-        chat_key = (state, _last_user_text, _last_reply_text)
-        if chat_key != _drawn_chat:
-            if state == "idle" and _last_reply_text:
-                hw._fill_rect(0, 152, 320, 54, cfg.BAND_BG)
-                Lcd.setFont(_FONT_CN)
-                Lcd.setTextSize(1)
-                Lcd.setTextColor(0x88ccff, cfg.BAND_BG)
-                Lcd.drawString("> " + _last_user_text[:18], 8, 156)
-                Lcd.setTextColor(0xbbbbbb, cfg.BAND_BG)
-                Lcd.drawString(_last_reply_text[:19], 8, 180)
-                Lcd.setFont(_FONT_16)
-            elif _drawn_chat is not None:
-                hw._fill_rect(0, 152, 320, 54, cfg.BAND_BG)   # 离开 idle：清掉
-            _drawn_chat = chat_key
+    # 画到离屏画布还是直接画屏。tgt 拿到什么，下面所有绘制就都往那儿去——
+    # 画布暴露的方法名跟 Lcd 一致（drawJpg/drawString/setFont/fillRect…），
+    # 所以这里只换目标，不分叉两套绘制代码。
+    tgt = _get_canvas() or Lcd
 
-    # ── 层 6：环形动画切换到新状态 ───────────────────────────
+    # ── 1：背景层（整屏 320×240 从 0,0 开始）────────────────
+    img_shown = False
+    try:
+        with open(cfg.res("{}.jpg".format(want_bg)), "rb") as _f:
+            tgt.drawJpg(_f.read(), 0, 0)
+        img_shown = True
+    except Exception as e:
+        print("img err:", e)
+        if want_bg != "img_bg":
+            _img_missing.add(want_bg)   # 记下来，下次别再白试
+    if not img_shown and want_bg != "img_bg":
+        try:
+            with open(cfg.res("img_bg.jpg"), "rb") as _f:
+                tgt.drawJpg(_f.read(), 0, 0)
+            img_shown = True
+        except Exception as e:
+            print("[ui] bg fallback to solid color:", e)
+    if not img_shown:
+        # 用 fillRect 而不是 fillScreen：fillRect 在 Lcd 和画布上都验证过，
+        # 少一个"应该有吧"的 API 赌注
+        tgt.fillRect(0, 0, 320, 240, 0x1a1a1a)
+
+    # ── 2：彩色状态条 + 顶栏（透明背景，悬浮在图片上）────────
+    tgt.fillRect(0, 0, 320, 3, color)     # 原先是三条 Widgets.Line，等价
+    tgt.setFont(_FONT_16)
+    tgt.setTextSize(1)
+    tgt.setTextColor(cm_color, cm_color)
+    tgt.drawString("CONT", 10, 6)
+    tgt.setTextColor(wm_color, wm_color)
+    tgt.drawString("WAKE", 90, 6)
+    # CAM：可点的键（命中区 _CAM_ENTRY），点它进取景模式
+    if cfg.CAMERA_MODE_ENABLED:
+        tgt.setTextColor(0xaa66ff, 0xaa66ff)
+        tgt.drawString("CAM", 145, 6)
+    tgt.setTextColor(0x666666, 0x666666)
+    tgt.drawString(right_str, max(180, 310 - len(right_str) * 10), 6)
+
+    # ── 3：kaomoji（只在背景图都没读到时兜底显示）────────────
+    if not img_shown:
+        tgt.setTextSize(3)
+        tgt.setTextColor(color, color)
+        tgt.drawString(face, max(0, (320 - len(face) * 34) // 2), 90)
+        tgt.setTextSize(1)
+
+    # ── 4：状态文字 ─────────────────────────────────────────
+    tgt.setTextColor(0xffffff if img_shown else 0x999999,
+                     0xffffff if img_shown else 0x999999)
+    tgt.drawString(status, max(0, (320 - len(status) * 11) // 2), 216)
+
+    # ── 5：待机界面显示最近一轮对话（需固件带中文字体）────────
+    if show_chat:
+        tgt.setFont(_FONT_CN)
+        tgt.setTextColor(0x88ccff, 0x88ccff)
+        tgt.drawString("> " + _last_user_text[:18], 8, 160)
+        tgt.setTextColor(0xcccccc, 0xcccccc)
+        tgt.drawString(_last_reply_text[:19], 8, 184)
+        tgt.setFont(_FONT_16)
+
+    # ── 6：一次性推屏。到这里为止屏幕一个像素都没变过，push 完整屏同时更新 ──
+    if tgt is not Lcd:
+        try:
+            tgt.push(0, 0)
+        except Exception as e:
+            # 推屏失败等于这一帧白画了，屏幕还停在上一屏。作废画布退回直接画屏，
+            # 并清掉 _drawn_key，让下一次 draw_state 无条件重画一遍。
+            print("[ui] canvas push failed, falling back to direct draw:", e)
+            _canvas_disable()
+            _drawn_key = None
+
+    # ── 7：环形动画切换到新状态（VISUAL_ENABLED=False 时为空操作）──
+    # 必须在 push 之后：它直接往屏幕上画，画在画布合成期间会被 push 盖掉
     _vis_set_state(state, color)
 
 
-# ── 息屏 / 唤醒 ───────────────────────────────────────────────
+def _mk_canvas(w, h, psram):
+    """挨个试 newCanvas 的调用形式，返回 (画布, 用的第几种)。
+
+    别因为签名对不上就误判成"固件不支持"——文档写的是关键字参数，但 binding
+    到底是关键字还是位置、psram 参数在不在，都是猜的。一次烧录机会别浪费在
+    TypeError 上。返回的形式编号很重要：3/4 号忽略 psram，那两种情况下
+    psram=True/False 的对比数据没有意义。
+    """
+    forms = (
+        lambda: Lcd.newCanvas(w=w, h=h, bpp=16, psram=psram),
+        lambda: Lcd.newCanvas(w, h, 16, psram),
+        lambda: Lcd.newCanvas(w, h, 16),
+        lambda: Lcd.newCanvas(w, h),
+    )
+    last = None
+    for i in range(len(forms)):
+        try:
+            cv = forms[i]()
+            if cv is not None:
+                return cv, i + 1
+        except Exception as e:
+            last = e
+    if last:
+        raise last
+    raise OSError("newCanvas returned None")
+
+
+# ── 主循环 ────────────────────────────────────────────────────
 
 def enter_sleep():
     """息屏休眠：关闭背光和 LED，释放麦克风。"""
     cfg.St.sleeping = True
     hw._set_led(0, 0, 0)
-    hw.mic_off()
+    hw._mic_off()
     M5.Lcd.setBrightness(0)
 
 
