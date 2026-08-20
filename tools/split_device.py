@@ -12,7 +12,7 @@ OUT = "device/src"
 # ── 依赖分层（必须无环，check_split.py 会验）────────────────────
 #   cfg → hw → clock → ui → {wifisetup, audio} → cam → feel
 #       → diag → netsvc → stream → chat → app
-LAYER = ["cfg", "hw", "clock", "ui", "wifisetup", "audio", "cam",
+LAYER = ["cfg", "hw", "clock", "ui", "wifisetup", "snd", "cam",
          "feel", "diag", "netsvc", "stream", "chat", "app"]
 
 # ── 归属表：名字 → 模块 ────────────────────────────────────────
@@ -89,7 +89,7 @@ own("wifisetup",
     "_KBD_KEY_H", "_KBD_X0", "_KBD_Y0", "_KBD_SHIFT", "_KBD_SPACE",
     "_KBD_BKSP", "_KBD_OK", "_KBD_CX", "_draw_kbd", "_kbd_input")
 
-own("audio",
+own("snd",
     "calibrate_noise", "_record_audio", "play_wav", "_wav_envelope")
 
 own("cam",
@@ -143,7 +143,7 @@ own("app", "setup", "loop", "main",
 # ── 跨模块可变量的赋值改写（上游铁律 #2：global X 会在本模块另建一个同名
 #    全局，原模块纹丝不动且不报错。这几处必须写成 mod.X = ...）──────────
 FIXUPS = [
- ('app', 'def setup():\n    M5.begin()\n    Widgets.setRotation(1)\n    hw._set_led(0, 0, 0)', 'def setup():\n    M5.begin()\n    Widgets.setRotation(1)\n\n    # ── 拆分后的接线：目录 + 打断依赖环的回调注入 ──────────────\n    # 单文件时代这些都是直接调用；拆成模块后 audio→netsvc、netsvc→stream\n    # 会成环（tools/check_split.py 直接拦），所以改成在这里注入。\n    cfg.ensure_dirs()\n    audio.set_pump(netsvc.mqtt_check)              # 播放/取景期间维持 MQTT\n    netsvc.set_stream_runner(stream._run_stream_cmd)   # MQTT 收到直播命令时回调\n\n    hw._set_led(0, 0, 0)'),
+ ('app', 'def setup():\n    M5.begin()\n    Widgets.setRotation(1)\n    hw._set_led(0, 0, 0)', 'def setup():\n    M5.begin()\n    Widgets.setRotation(1)\n\n    # ── 拆分后的接线：目录 + 打断依赖环的回调注入 ──────────────\n    # 单文件时代这些都是直接调用；拆成模块后 snd→netsvc、netsvc→stream\n    # 会成环（tools/check_split.py 直接拦），所以改成在这里注入。\n    cfg.ensure_dirs()\n    snd.set_pump(netsvc.mqtt_check)              # 播放/取景期间维持 MQTT\n    netsvc.set_stream_runner(stream._run_stream_cmd)   # MQTT 收到直播命令时回调\n\n    hw._set_led(0, 0, 0)'),
  ('hw', '"/flash/volume.json"', 'cfg.data("volume.json")'),
  ('diag', '"/flash/crash.log"', 'cfg.data("crash.log")'),
  ('app', '"/flash/crash.log"', 'cfg.data("crash.log")'),
@@ -154,10 +154,10 @@ FIXUPS = [
  ('ui', '"/flash/img_bg.jpg"', 'cfg.res("img_bg.jpg")'),
  ('chat', '"/flash/img_shake.jpg"', 'cfg.res("img_shake.jpg")'),
  ('diag', '"/flash/img_bg.jpg"', 'cfg.res("img_bg.jpg")'),
- ("audio",
+ ("snd",
   "    global SILENCE_THRESHOLD, WAKE_THRESHOLD\n",
   "    # 阈值属于 cfg，必须写 cfg.X = ...；用 global 会在本模块另建同名全局\n"),
- ("audio",
+ ("snd",
   '    SILENCE_THRESHOLD = max(200, noise_floor * 3)\n'
   '    WAKE_THRESHOLD    = max(300, noise_floor * 4)\n'
   '    print(f"校准完成：底噪={noise_floor}，说话阈值={SILENCE_THRESHOLD}，唤醒阈值={WAKE_THRESHOLD}")',
@@ -196,12 +196,12 @@ FIXUPS = [
   '        print("discovery failed, fallback:", SERVER_BASE)',
   '        print("discovery failed, fallback:", cfg.SERVER_BASE)'),
  ("netsvc", "    global _mqtt, _mqtt_ok\n", "    global _mqtt\n"),
- # ── 打断 audio ↔ netsvc 的环（play_wav 要维持心跳，netsvc 又要回调播放）──
- ("audio",
+ # ── 打断 snd ↔ netsvc 的环（play_wav 要维持心跳，netsvc 又要回调播放）──
+ ("snd",
   "        netsvc.mqtt_check()   # 长播放期间维持心跳（回调只入队，不会嵌套播放）",
   "        _pump_safe()          # 长播放期间维持心跳（回调只入队，不会嵌套播放）"),
- # 取景循环同样要泵 MQTT——复用 audio 的注入点，不必再开一个
- ("cam", "            netsvc.mqtt_check()", "            audio._pump_safe()"),
+ # 取景循环同样要泵 MQTT——复用 snd 的注入点，不必再开一个
+ ("cam", "            netsvc.mqtt_check()", "            snd._pump_safe()"),
  # ── 打断 netsvc ↔ stream 的环（推流循环要回来消费 MQTT 命令队列）────────
  ("netsvc",
   "            stream._run_stream_cmd(cmd)",
@@ -252,11 +252,11 @@ MAIN = '\n\ndef main():\n    """入口：装配 + 带崩溃守护的主循环。
 
 EXTRA = {
  "cfg": '\n# ── 设备上的目录布局（与上游一致）──────────────────────────────\n# /flash/main.py              三行引导，把 SRC_DIR 加进 sys.path\n# /flash/kagura/src/*.py      本模块及其他代码\n# /flash/kagura/resource/*    图片等只读资源（用户上传）\n# /flash/kagura/data/*        运行时可写状态（wifi/音量/崩溃日志，自动创建）\n\nBASE_DIR = "/flash/kagura"\nSRC_DIR  = BASE_DIR + "/src"\nRES_DIR  = BASE_DIR + "/resource"\nDATA_DIR = BASE_DIR + "/data"\n\n\ndef res(name):\n    """资源文件绝对路径。新增资源一律走这里，别硬编码 /flash。"""\n    return RES_DIR + "/" + name\n\n\ndef data(name):\n    """可写状态文件绝对路径。"""\n    return DATA_DIR + "/" + name\n\n\ndef ensure_dirs():\n    """确保可写目录存在（资源目录由用户上传时创建）。"""\n    import uos\n    for d in (BASE_DIR, DATA_DIR):\n        try:\n            uos.mkdir(d)\n        except OSError:\n            pass          # 已存在\n\n',
- "audio": '''
-# ── 回调注入：打断 audio ↔ netsvc 的环 ────────────────────────
+ "snd": '''
+# ── 回调注入：打断 snd ↔ netsvc 的环 ────────────────────────
 # play_wav 长播放期间要泵一下 MQTT 维持心跳，而 netsvc 收到推送又要回调
 # play_wav——直接 import 就成环（tools/check_split.py 会拦下）。
-# 由 app.setup() 注入：audio.set_pump(netsvc.mqtt_check)
+# 由 app.setup() 注入：snd.set_pump(netsvc.mqtt_check)
 _pump = None
 
 
@@ -395,7 +395,7 @@ DOC = {
  "clock": "RTC 同步与读取。单独成模块是为了打断 ui ↔ netsvc 的环。",
  "ui": "屏幕显示：字体、环形可视化、离屏画布合成、息屏唤醒。\n\ndraw_state 整屏背景图 + 透明文字，**不要再加实心条带**——\n分层重绘垫黑底那版被否过（照片被上下黑边夹住）。",
  "wifisetup": "屏上 WiFi 配网：SSID 扫描选择 + 软键盘输入 + 凭据落盘。",
- "audio": "音频：录音 VAD、播放、包络计算、开机噪声校准。",
+ "snd": "音频：录音 VAD、播放、包络计算、开机噪声校准。",
  "cam": "摄像头：抓帧、预览、取景模式、拍照上传。\n\n模块名是 cam 不是 camera——MicroPython 的摄像头驱动就叫 camera，\n同名会让本模块 import 到自己。",
  "feel": "触觉三层：反射（本地即时换表情）/ 体感（聚合成 X-Touch 随对话捎走）/\n惊动（显著接触才让 agent 主动开口，带冷却）。",
  "diag": "远程诊断与网络自愈：事件环形日志、崩溃上报、心跳遥测、分级自救。\n\nmqtt_ok 由 netsvc 写入（netsvc → diag 单向依赖，避免成环）。",

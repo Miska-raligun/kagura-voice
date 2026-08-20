@@ -14,7 +14,7 @@ import cfg
 import hw
 import clock
 import ui
-import audio
+import snd
 import cam
 import feel
 import netsvc
@@ -67,7 +67,7 @@ def record_and_send():
     while True:
         hw._wdt_feed()
         ui.draw_state("recording")
-        chunks = audio._record_audio()
+        chunks = snd._record_audio()
 
         if chunks is None:         # 用户长按中断录音 → 退出当前模式
             if cfg.St.continuous:
@@ -123,7 +123,7 @@ def record_and_send():
 
         print("WAV size:", len(data))
         ui.draw_state("playing")
-        audio.play_wav(data)
+        snd.play_wav(data)
         gc.collect()
 
         # ── 语音触发拍照：播完简短应答后立即拍照并发送 /chat-vision ──
@@ -154,7 +154,7 @@ def record_and_send():
                     data2 = resp2.content
                     resp2.close()
                     ui.draw_state("playing")
-                    audio.play_wav(data2)
+                    snd.play_wav(data2)
                     gc.collect()
                 else:
                     resp2.close()

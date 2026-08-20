@@ -15,7 +15,7 @@ import cfg
 import hw
 import clock
 import ui
-import audio
+import snd
 import diag
 
 # 字节数 → 分辨率。与服务端 voice_server.py 的 RGB565_SIZES 保持一致
@@ -260,7 +260,7 @@ def _cam_send(raw):
         data = resp.content
         resp.close()
         ui.draw_state("playing")
-        audio.play_wav(data)
+        snd.play_wav(data)
     except OSError as e:
         print("cam send net err:", e)
         ui.draw_state("error")
@@ -315,7 +315,7 @@ def camera_mode():
                 time.sleep(0.05)           # 已定格，屏幕不用重画
 
             # 取景可能停留几十秒，超过 MQTT keepalive(60s) 就会被判掉线
-            audio._pump_safe()
+            snd._pump_safe()
             # 注：心跳不在这里发——heartbeat_tick() 见 St.busy 就跳过，
             # 与录音/播放期间一样按"交互中不上报"处理，退出后自然补上。
 

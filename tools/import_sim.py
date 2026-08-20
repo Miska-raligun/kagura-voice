@@ -68,13 +68,13 @@ stub("uos", mkdir=lambda p: None, remove=lambda p: None, rename=lambda a, b: Non
 stub("requests", get=lambda *a, **kw: _Any("resp"), post=lambda *a, **kw: _Any("resp"))
 
 print("=== 按依赖顺序 import ===")
-order = ["cfg", "hw", "clock", "ui", "wifisetup", "audio", "cam",
+order = ["cfg", "hw", "clock", "ui", "wifisetup", "snd", "cam",
          "feel", "diag", "netsvc", "stream", "chat", "app"]
 for name in order:
     __import__(name)
     print("  ✓ import %s" % name)
 
-import cfg, hw, ui, audio, clock
+import cfg, hw, ui, snd, clock
 
 print("\n=== 模块级代码执行结果抽查 ===")
 print("  cfg.res('img_bg.jpg')      =", cfg.res("img_bg.jpg"))
@@ -102,13 +102,13 @@ hdr = hw.make_wav_header(1000)
 assert len(hdr) == 44 and hdr[:4] == b'RIFF' and hdr[8:12] == b'WAVE'
 print("  hw.make_wav_header(1000)   = 44 字节 RIFF/WAVE ✓")
 
-# 包络（audio._wav_envelope 依赖 44 字节头约定）
+# 包络（snd._wav_envelope 依赖 44 字节头约定）
 pcm = bytearray()
 for i in range(16000):
     amp = 12000 if i < 8000 else 1200
     pcm += _struct.pack('<h', int(amp * math.sin(2 * math.pi * 440 * i / 16000)))
-env = audio._wav_envelope(b'R' * 44 + bytes(pcm))
-print("  audio._wav_envelope 桶数    =", len(env), "响段均值 %.2f 轻段均值 %.2f"
+env = snd._wav_envelope(b'R' * 44 + bytes(pcm))
+print("  snd._wav_envelope 桶数      =", len(env), "响段均值 %.2f 轻段均值 %.2f"
       % (sum(env[:5]) / 5, sum(env[-5:]) / 5))
 assert all(0.0 <= v <= 1.0 for v in env)
 assert sum(env[:5]) / 5 > sum(env[-5:]) / 5 * 2

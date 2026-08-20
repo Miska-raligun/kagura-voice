@@ -12,7 +12,7 @@ import hw
 import clock
 import ui
 import wifisetup
-import audio
+import snd
 import cam
 import feel
 import diag
@@ -36,10 +36,10 @@ def setup():
     Widgets.setRotation(1)
 
     # ── 拆分后的接线：目录 + 打断依赖环的回调注入 ──────────────
-    # 单文件时代这些都是直接调用；拆成模块后 audio→netsvc、netsvc→stream
+    # 单文件时代这些都是直接调用；拆成模块后 snd→netsvc、netsvc→stream
     # 会成环（tools/check_split.py 直接拦），所以改成在这里注入。
     cfg.ensure_dirs()
-    audio.set_pump(netsvc.mqtt_check)              # 播放/取景期间维持 MQTT
+    snd.set_pump(netsvc.mqtt_check)              # 播放/取景期间维持 MQTT
     netsvc.set_stream_runner(stream._run_stream_cmd)   # MQTT 收到直播命令时回调
 
     hw._set_led(0, 0, 0)
@@ -72,7 +72,7 @@ def setup():
     hw._volume_load()
     diag.canvas_probe()           # 一次性诊断；CANVAS_PROBE=False 即整段跳过
     ui.draw_state("idle")       # 发现完成后恢复空闲界面
-    audio.calibrate_noise()
+    snd.calibrate_noise()
     cfg.St.last_activity = time.time()
     hw._wdt_init()   # 最后再武装看门狗：WiFi 配置 UI 等交互流程不受 2 分钟窗口限制
 

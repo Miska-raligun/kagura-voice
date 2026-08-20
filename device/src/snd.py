@@ -12,10 +12,10 @@ import cfg
 import hw
 import ui
 
-# ── 回调注入：打断 audio ↔ netsvc 的环 ────────────────────────
+# ── 回调注入：打断 snd ↔ netsvc 的环 ────────────────────────
 # play_wav 长播放期间要泵一下 MQTT 维持心跳，而 netsvc 收到推送又要回调
 # play_wav——直接 import 就成环（tools/check_split.py 会拦下）。
-# 由 app.setup() 注入：audio.set_pump(netsvc.mqtt_check)
+# 由 app.setup() 注入：snd.set_pump(netsvc.mqtt_check)
 _pump = None
 
 
@@ -106,11 +106,11 @@ def play_wav(data):
     hw._mic_off()   # Mic/Speaker 共享音频通路：播放前确保麦克风已释放
     # 先算包络：播放时按 elapsed 索引，环随语音起伏（不占播放时间）
     env = _wav_envelope(data) if cfg.VISUAL_ENABLED else []
-    with open(cfg.data("response.wav"), "wb") as f:
+    with open("/flash/response.wav", "wb") as f:
         f.write(data)
     Speaker.begin()
     Speaker.setVolumePercentage(hw._volume)
-    Speaker.playWavFile(cfg.data("response.wav"))
+    Speaker.playWavFile("/flash/response.wav")
     t0 = time.ticks_ms()
     while Speaker.isPlaying():
         hw._wdt_feed()   # 长音频播放可超过 WDT 窗口

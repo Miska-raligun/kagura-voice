@@ -10,7 +10,7 @@ import requests as urequests
 import cfg
 import hw
 import ui
-import audio
+import snd
 import cam
 import diag
 
@@ -104,7 +104,7 @@ def _play_push(url):
     try:
         resp = urequests.get(cfg.SERVER_BASE + url, timeout=cfg.REQUEST_TIMEOUT_SHORT)
         if resp.status_code == 200:
-            audio.play_wav(resp.content)
+            snd.play_wav(resp.content)
         resp.close()
     except OSError as e:
         print("push download err:", e)

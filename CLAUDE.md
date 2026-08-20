@@ -196,7 +196,7 @@ CoreS3 (MicroPython)  ──HTTP──▶  voice_server.py (Flask :5000)  ──
 依赖分层，**必须保持无环**（`tools/check_split.py` 会检查）：
 
 ```
-cfg → hw → clock → ui → {wifisetup, audio} → cam → feel
+cfg → hw → clock → ui → {wifisetup, snd} → cam → feel
     → diag → netsvc → stream → chat → app
 ```
 
@@ -207,7 +207,7 @@ cfg → hw → clock → ui → {wifisetup, audio} → cam → feel
 | `clock` | RTC 同步与读取。单独成模块是为打断 ui ↔ netsvc 环 |
 | `ui` | 字体、环形可视化、离屏画布合成 `draw_state`、息屏唤醒 |
 | `wifisetup` | 屏上配网（SSID 选择 + 软键盘），最自洽的一块 |
-| `audio` | 录音 VAD、播放、包络、噪声校准 |
+| `snd` | 录音 VAD、播放、包络、噪声校准。**不能叫 audio**——UIFlow2 固件里有同名冻结模块，冻结模块优先级在 sys.path 之前，我们的文件根本加载不到 |
 | `cam` | 抓帧/预览/取景模式/拍照上传。**不能叫 camera**——MicroPython 的摄像头驱动就叫这名，同名会 import 到自己 |
 | `feel` | 触觉三层 + IMU 本体感觉 |
 | `diag` | 事件环形日志、崩溃上报、心跳遥测、网络分级自愈、画布探测 |
@@ -215,6 +215,12 @@ cfg → hw → clock → ui → {wifisetup, audio} → cam → feel
 | `stream` | 摄像头直播推流与直播中插拍 |
 | `chat` | 主对话、模式切换、IMU 摇晃彩蛋 |
 | `app` | `setup()` / `loop()` / `main()`（含崩溃守护循环） |
+
+> **模块命名踩过两次**（`camera` 撞驱动、`audio` 撞固件冻结模块），症状一模一样：
+> **代码明明改了、也确实传上去了，设备行为却还是旧的**——因为固件里的冻结模块
+> 优先级在 `sys.path` 之前，磁盘上那份根本没被加载，而且不报任何错。
+> 新增模块取名前先在 REPL 验一句：
+> `import 名字 as m; print(getattr(m, "__file__", "FROZEN——换个名字"))`
 
 设备端由 `tools/` 下的生成器从单文件版拆出，**注释逐行保留**（顶层语句之间的
 独立注释块会随下一条语句一起被抽走，否则段头和踩坑记录会全部丢失）。
@@ -233,9 +239,9 @@ cfg → hw → clock → ui → {wifisetup, audio} → cam → feel
 
 **两处循环依赖用回调注入打断**，注入点都在 `app.setup()`：
 
-- `audio ↔ netsvc`（`play_wav` 要 `mqtt_check` 维持心跳、push 又要回调
-  `play_wav`）→ `audio.set_pump(netsvc.mqtt_check)`。取景循环也要泵 MQTT，
-  走同一个注入点（`audio._pump_safe()`），别再开第二个。
+- `snd ↔ netsvc`（`play_wav` 要 `mqtt_check` 维持心跳、push 又要回调
+  `play_wav`）→ `snd.set_pump(netsvc.mqtt_check)`。取景循环也要泵 MQTT，
+  走同一个注入点（`snd._pump_safe()`），别再开第二个。
 - `netsvc ↔ stream`（MQTT 收到 `stream_start` 要跑推流、推流循环又要回来消费
   命令队列）→ `netsvc.set_stream_runner(stream._run_stream_cmd)`。
 
