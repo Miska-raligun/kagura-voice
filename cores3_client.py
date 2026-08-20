@@ -746,14 +746,15 @@ def _wav_envelope(data, bucket_ms=100):
 
 _IMG_MAP = {
     "recording":  "img_recording",
-    "processing": "img_processing",
     "playing":    "img_playing",
-    "broadcast":  "img_playing",   # broadcast 复用 playing 图片
-    # 触觉三态先复用 processing 的图，不必额外准备素材。想各配一张就把值改成
-    # img_petted / img_poked / img_held 再传图；缺图会退回 img_bg（见 _img_missing）。
-    "petted":     "img_processing",   # 被抚摸（屏幕上有手指在滑）
-    "poked":      "img_processing",   # 机身被轻拍
-    "held":       "img_processing",   # 被从桌上拿起来
+    "broadcast":  "img_playing",      # broadcast 复用 playing 图片
+    # thinking + 触觉三态共用 img_streaming，不必额外准备素材。
+    # 想各配一张就把值改成 img_petted / img_poked / img_held 再传图；
+    # 缺图会退回 img_bg，且只退一次（见 _img_missing）。
+    "processing": "img_streaming",
+    "petted":     "img_streaming",    # 被抚摸（屏幕上有手指在滑）
+    "poked":      "img_streaming",    # 机身被轻拍
+    "held":       "img_streaming",    # 被从桌上拿起来
 }
 
 # 试过但确实不存在的背景图。没有这个缓存的话，缺图状态每次重绘都要白开一次
