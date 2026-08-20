@@ -432,6 +432,65 @@ def _b64_header(text: str, max_chars: int = 60) -> str:
     return base64.b64encode(text[:max_chars].encode("utf-8")).decode("ascii")
 
 
+# ── 触觉：X-Touch 体感摘要 ────────────────────────────────────
+#
+# 设备端把"上次对话之后被怎么碰过"聚合成 k=v,k=v 的紧凑摘要（见
+# cores3_client.feel_header），这里翻译成一句中文背景注入 prompt。
+# 走请求头而不是单独的路由，是为了不额外占一次 LLM 调用——体感是背景，
+# 不是事件；真正值得让她开口的事件走 /touch。
+
+_TOUCH_MAX_HEADER = 200          # 头长上限，超过视为异常直接忽略
+
+
+def _touch_phrases(raw: str) -> list[str]:
+    """解析 X-Touch 摘要为中文短句列表。无法解析的键值静默跳过。"""
+    if not raw or len(raw) > _TOUCH_MAX_HEADER:
+        return []
+    vals: dict[str, int] = {}
+    for item in raw.split(","):
+        k, _, v = item.partition("=")
+        k = k.strip()
+        try:
+            vals[k] = int(v)
+        except ValueError:
+            continue
+
+    out: list[str] = []
+    secs = vals.get("stroke", 0)
+    if secs > 0:
+        n = vals.get("strokes", 1)
+        if n > 1:
+            out.append(f"刚才用户摸了你 {n} 次，一共约 {secs} 秒")
+        else:
+            out.append(f"刚才用户摸了你大约 {secs} 秒")
+    if vals.get("cradles", 0) > 0:
+        out.append("用户把手掌整个覆在你身上，像捧着你")
+    if vals.get("taps", 0) > 0:
+        out.append(f"用户轻拍了你的机身 {vals['taps']} 下")
+    if vals.get("pickups", 0) > 0:
+        out.append("用户把你从桌上拿起来过")
+    if vals.get("carry", 0) >= 5:
+        out.append(f"你被端在手上移动了约 {vals['carry']} 秒")
+    quiet = vals.get("quiet", 0)
+    if quiet > 0:
+        out.append(f"在此之前已经 {quiet // 60} 分钟没有人碰过你")
+    return out
+
+
+def _touch_background(raw: str) -> str:
+    """X-Touch → 注入 prompt 的背景行。没有可报的体感返回空串。"""
+    phrases = _touch_phrases(raw)
+    if not phrases:
+        return ""
+    return "[身体感觉：" + "；".join(phrases) + "]"
+
+
+def _with_touch(text: str, raw: str) -> str:
+    """把体感背景拼到用户发言前面。"""
+    bg = _touch_background(raw)
+    return f"{bg}\n{text}" if bg else text
+
+
 def _token_ok() -> bool:
     """API_TOKEN 未设置时永远放行（默认开放）；设置后校验 X-Api-Token 头。"""
     if not API_TOKEN:
@@ -514,6 +573,8 @@ def handle_chat():
             if prev:
                 llm_text = (f"[背景：用户刚才问「{prev[0]}」，快捷指令已回复「{prev[1]}」]\n"
                             f"{user_text}")
+            # 体感背景：上次对话之后被怎么碰过（X-Touch，设备端聚合）
+            llm_text = _with_touch(llm_text, request.headers.get("X-Touch", ""))
             reply = chat(llm_text, session_id, local_time=local_time)
 
             if reply.startswith("[PHOTO]"):
@@ -834,7 +895,8 @@ def handle_chat_vision():
 
         image_path = _decode_image_b64(image_b64, device_id, tag="vision") if image_b64 else None
 
-        reply = chat(user_text, session_id, image_path=image_path, local_time=local_time)
+        llm_text = _with_touch(user_text, request.headers.get("X-Touch", ""))
+        reply = chat(llm_text, session_id, image_path=image_path, local_time=local_time)
         preview = reply[:80].replace("\n", " ")
         print(f"[{device_id}] 💬  {preview}{'...' if len(reply) > 80 else ''}")
 
@@ -1029,6 +1091,61 @@ def handle_shake():
                 return
             except Exception as e:
                 print(f"[{device_id}] ⚠️  shake 错误(第{attempt}次): {e}")
+                if attempt == 1:
+                    time.sleep(3)
+
+    threading.Thread(target=_bg, daemon=True).start()
+    return jsonify({"status": "ok"})
+
+
+_TOUCH_KIND_DESC = {
+    "stroke": "用户正在摸你——手指贴着你的屏幕慢慢滑过",
+    "cradle": "用户把手整个覆在你身上，像是把你捧在手里",
+    "tap":    "用户轻轻拍了拍你的机身，像在叫你",
+    "pickup": "用户把你从桌上拿了起来，你现在在她手里",
+}
+
+
+@app.route("/touch", methods=["GET"])
+def handle_touch():
+    """
+    触觉惊动层：设备判定发生了值得开口的身体接触时调用。立即返回，后台发消息。
+
+    设备端已经做了冷却（FEEL_NOTIFY_COOLDOWN）和显著性筛选，能到这里的都是
+    "长时间抚摸结束 / 被拿起来 / 被拍打"这类明确信号——**不要在这里放宽**，
+    每次触摸都惊动 LLM 会让她变成一个话痨玩具，而且很贵。
+
+    请求头：X-Touch-Kind（stroke/cradle/tap/pickup）、X-Touch-Detail（k=v 摘要）、
+           X-Touch（体感窗口，同 /chat）。链路与 /shake 相同。
+    """
+    device_id = _validate_device_id(request.headers.get("X-Device-Id"))
+    if not state.check_rate(device_id):
+        return jsonify({"error": "请求过于频繁，请稍后再试"}), 429
+    kind = request.headers.get("X-Touch-Kind", "")
+    desc = _TOUCH_KIND_DESC.get(kind)
+    if desc is None:
+        return jsonify({"error": "unknown touch kind"}), 400
+    local_time = request.headers.get("X-Local-Time", "")
+    detail = _touch_phrases(request.headers.get("X-Touch-Detail", ""))
+    extra = ("（" + "；".join(detail) + "）") if detail else ""
+    session_id = state.get_session(device_id)
+
+    def _bg():
+        prompt = (
+            f"{desc}{extra}。她现在就在你面前的 CoreS3 设备旁。"
+            "这是身体接触，不是提问——用一句话回应被碰到的感觉就好，别开启新话题，"
+            "也别追问她想干什么。"
+            "你必须用 cores3-speak skill 把话说出来，"
+            "这是硬性要求：纯文字她根本听不到。"
+        )
+        for attempt in (1, 2):
+            try:
+                reply = chat(prompt, session_id, local_time=local_time)
+                preview = reply[:80].replace("\n", " ")
+                print(f"[{device_id}] 🖐️  touch/{kind} → {preview}{'...' if len(reply) > 80 else ''}")
+                return
+            except Exception as e:
+                print(f"[{device_id}] ⚠️  touch 错误(第{attempt}次): {e}")
                 if attempt == 1:
                     time.sleep(3)
 
