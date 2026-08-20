@@ -1,7 +1,6 @@
 """Kagura Voice 设备端 —— 摄像头直播推流（TCP :5002）与直播中插拍。
 """
 
-from M5 import *
 import time
 import gc
 import usocket

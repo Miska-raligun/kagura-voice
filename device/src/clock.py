@@ -2,8 +2,6 @@
 """
 
 import M5
-from M5 import *
-from hardware import *
 import time
 import ujson
 import requests as urequests

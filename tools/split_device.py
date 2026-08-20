@@ -406,25 +406,45 @@ DOC = {
 }
 
 
+def _code_only(text):
+    """去掉注释和字符串字面量后再判断"用到了哪些符号"。
+
+    朴素子串匹配会被 STATE_UI 里的 "Touch to talk" 骗到，给 cfg 塞进一个
+    无谓的 from M5 import *——而 cfg 是开机第一个被 import 的叶子模块，
+    不该背任何硬件依赖。
+    """
+    import re
+    t = re.sub(r'"""[\s\S]*?"""', "", text)
+    t = re.sub(r"\'\'\'[\s\S]*?\'\'\'", "", t)
+    t = re.sub(r'"(?:[^"\\\n]|\\.)*"', '""', t)
+    t = re.sub(r"'(?:[^'\\\n]|\\.)*'", "''", t)
+    t = re.sub(r"#[^\n]*", "", t)
+    return t
+
+
 def header(mod, text):
     """按实际用到的符号生成模块头。"""
     out = ['"""Kagura Voice 设备端 —— {}\n"""'.format(DOC[mod]), ""]
-    if any(n + "." in text or "(" + n in text or n + "," in text
-           for n in ("M5",)) or "M5." in text:
+    code = _code_only(text)
+    if "M5." in code:
         out.append("import M5")
-    if any(n in text for n in M5NAMES):
+    # 用词边界而不是子串：BLE_PHONE_NAME 里的 BLE、TOUCH_FEEL 里的 TOUCH
+    # 都会让子串匹配误判，给叶子模块塞进无谓的硬件 import。
+    import re as _re
+    used = lambda names: any(_re.search(r"\b" + n + r"\b", code) for n in names)
+    if used(M5NAMES):
         out.append("from M5 import *")
-    if any(n in text for n in HWNAMES):
+    if used(HWNAMES):
         out.append("from hardware import *")
     for m in STDLIB:
-        if m + "." in text:
+        if m + "." in code:
             out.append("import " + ("array as uarray" if m == "uarray" else m))
-    if "uarray." in text:
+    if "uarray." in code:
         out.append("import array as uarray")
-    if "urequests." in text:
+    if "urequests." in code:
         out.append("import requests as urequests")
     deps = sorted({ASSIGN[n] for n in ASSIGN
-                   if ASSIGN[n] != mod and (ASSIGN[n] + "." + n) in text},
+                   if ASSIGN[n] != mod and (ASSIGN[n] + "." + n) in code},
                   key=LAYER.index)
     if deps:
         out.append("")

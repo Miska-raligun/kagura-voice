@@ -5,8 +5,6 @@
 写 `from cfg import X` 拿到的是值拷贝，改了看不到且不报错。
 """
 
-from M5 import *
-from hardware import *
 
 # ── 设备上的目录布局（与上游一致）──────────────────────────────
 # /flash/main.py              三行引导，把 SRC_DIR 加进 sys.path

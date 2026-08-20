@@ -2,7 +2,6 @@
 惊动（显著接触才让 agent 主动开口，带冷却）。
 """
 
-from M5 import *
 import time
 import requests as urequests
 
