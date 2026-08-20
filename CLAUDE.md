@@ -38,7 +38,8 @@ CoreS3 (MicroPython)  ──HTTP──▶  voice_server.py (Flask :5000)  ──
   改音色参数必须同步改 cache key。
 - **响应头协议**（设备读取）：`X-Need-Photo`、`X-Volume: up/down`、
   `X-User-Text`/`X-Reply-Text`（b64 UTF-8，屏显用；`/chat` 与 `/chat-vision`
-  都会带）。请求头：`X-Device-Id`、`X-Local-Time`、（可选）`X-Api-Token`。
+  都会带）。请求头：`X-Device-Id`、`X-Local-Time`、`X-Touch`（体感摘要）、
+  （可选）`X-Api-Token`。
 - **`/chat-vision` 三种入参形态**：`wav`+`image`（语音触发拍照）、仅 `image`
   （取景模式手动拍照，服务端用 `_PHOTO_ONLY_PROMPT` 当提问）、`text`+`image`
   （无 wav 时以 text 为提问）。`wav`/`image` 至少要有一个，否则 400。
@@ -78,12 +79,60 @@ CoreS3 (MicroPython)  ──HTTP──▶  voice_server.py (Flask :5000)  ──
   `MISS_WINDOW=900` 保证服务端晚启动时不补拍白天错过的计划。
 - **设备端状态**：跨子系统 flag 全在 `St` 类（busy/continuous/wake/sleeping/last_activity）；
   模式转移只走 `toggle_continuous/toggle_wake_mode/enter_sleep/wake_up`。
+  触觉的累积量在 `Feel` 类，同样只走 `feel_*` 函数改。
+- **触觉三层**（设备端 `TOUCH_FEEL_ENABLED`）：**别把三层混成一层**——
+  ① 反射层 `feel_reflex()` 设备端立刻换表情，**不过网、不阻塞**（走一趟
+  OpenClaw 是 3~10s，那不叫触觉叫事后转述）；② 体感层 `Feel` 聚合成
+  "被摸了多久 / 多久没人碰"，`feel_header()` 打包成 `X-Touch: k=v,k=v` 随
+  下次 `/chat` 捎走，服务端 `_touch_background()` 翻成中文注入 prompt，
+  **零额外 LLM 调用**；③ 惊动层 `feel_notify()` → `/touch`，链路同 `/shake`。
+  - **反射层的屏幕闪烁踩过两次，两条判据缺一不可**（症状都是「摸的时候
+    画面在表情图和背景图之间一直切」，每切一次都是整屏 JPEG 重解码约 100ms）：
+    ① `feel_reflex` **同一状态重复调用绝不重画**，自己挡，别指望 `draw_state`
+    的 `_drawn_key`——那个 key 里含电量百分比，`(v-3000)*100//1200` 里 12mV
+    就是 1%，ADC 抖动足以让它每轮都判定「内容变了」；
+    ② `feel_reflex_tick` **按「屏幕上还有没有手」(`_touch_seen_ms`) 收回，
+    不按倒计时**。抚摸是「划一下—停一下—再划一下」，倒计时会在停顿里掉回
+    idle、下一划再切回来；触摸驱动偶发漏报一帧也走同一条老路。
+    IMU 触发的 poked/held 屏幕上没有手，自然落到时间判据，两条路各走各的。
+  - 定位这类问题打开 `FEEL_DEBUG`：反射层每次真正重画都打一行，
+    正常一整段抚摸只该有两行（进 petted、回 idle），刷屏就是判据还有漏。
+  - `feel_header()` **取走即清空**，所以 `/touch` 故意不带 `X-Touch`——带上
+    等于把窗口白白清掉，下次真对话就没得注入了。
+  - 惊动层的冷却（`FEEL_NOTIFY_COOLDOWN=90s`）和显著性筛选是刚需，不是保守：
+    每次触摸都惊动 LLM 会让她变成话痨玩具，而且很贵。放宽前先想清楚。
+- **触摸屏的双重身份**：`check_touch(feel=False)` 默认行为与加触觉前逐字节等价，
+  **只有主循环 `loop()` 传 `feel=True`**——取景模式/配网/播放中断要的是纯按钮，
+  别让一次手滑变成抚摸把点击吞掉。分工定死：点按=录音、长按不动=切唤醒，
+  **只有手指位移 ≥ `STROKE_MIN_DIST` 才判抚摸**并吞掉这次 short/long。
+  位移用"离起点最大曼哈顿距离"而非累计路径：累计会把长按抖动攒过阈值。
+  抚摸在**按住期间**就判定（不等抬手），所以拿它当触发器的地方必须
+  `touch_reset()` 作废这次按下，否则抬手还会再吐一个事件（休眠唤醒踩过）。
+- **IMU 一次采样喂两个检测器**（`imu_tick`）：摇晃彩蛋和本体感觉必须看同一个
+  样本，分开读会出现"一次摇晃被同时算成三次轻拍"。轻拍靠延后
+  `IMU_TAP_CONFIRM_MS` 确认 + 尖峰计数与摇晃互斥；被端着时一律不算轻拍
+  （走动本身就在制造 1.5g 尖峰）。**IMU 阈值全是拍脑袋起点值，必须真机调。**
 - **屏幕渲染**：`draw_state(state, force=False)` 整屏背景图 + 透明文字直接压在
   图上。**别再加实心条带**——曾试过"分层增量重绘 + 顶栏/文字实心底"，
   局部擦除是省了，但照片被上下黑边夹住、表情压一块黑面板，观感被否掉了。
   现在靠 `_drawn_key`（全屏内容的元组键）比对：**内容没变就整个跳过**，
   一轮对话里 6~8 次调用只有真正变化的那几次会重画。这才是治闪烁的关键，
-  不是分层——旧实现是每次调用都无条件全屏重解码 JPEG（单次 ~100ms）。
+  不是分层——旧实现是每次调用都无条件全屏重解码 JPEG（实测 58ms）。
+- **离屏画布合成**（`USE_CANVAS`，`_get_canvas()`）：draw_state 的所有绘制
+  指向 `tgt`（画布或 Lcd），最后 `push(0,0)` 一次上屏，中间过程不可见。
+  真机实测（2026-08）：直接上屏 58ms ┊ 画进 PSRAM 画布 54ms ┊ 整屏 push 35ms
+  ——**总耗时 58→89ms，反而慢 50%**，买的是"瞬间完成"而非"看着它画"。
+  觉得不值就把开关改 False。两个必读结论：
+  ① PSRAM 带宽不是瓶颈（54 vs 58ms），JPEG 解码是 CPU 密集，写哪块内存无所谓；
+  ② **整屏画布必须 `psram=True`**——内部 SRAM 凑不出 150KB 连续空间，分配会
+  "成功"但没有缓冲区，之后绘制全部静默 no-op（症状：drawJpg 耗时 0ms、
+  屏幕纹丝不动）。探测脚本留在 `canvas_probe()`，`CANVAS_PROBE=True` 可重测。
+  - 画布暴露的方法名与 Lcd 一致，所以只换 `tgt` 不分叉代码；释放用 `delete()`
+    （无 `deleteSprite`）。`_vis_set_state` 必须留在 push **之后**——它直接画屏。
+  - **分层局部更新目前做不了**：顶栏那条 320×26 的 push 只要 4ms（推屏是纯带宽
+    限制，4.4MB/s，严格按面积），但画布之间没有 blit 方法，要局部改字就得先把
+    背景恢复回来，而唯一途径是重解 JPEG（54ms），4ms 的优势当场吃光。
+    绕过去要 PC 端预生成背景块的 raw RGB565——留到做角色动画时一起搭。
   时钟只在 `draw_state` 被调用时刷新，主循环没有周期性调用（历来如此）。
 - **`_ui_invalidate()`**：取景预览 / 摇晃彩蛋 / WiFi 配网会直接 `fillScreen`
   或 `drawJpg` 铺满屏幕，绕过 `draw_state`。它们**在接管前**必须调这个作废
@@ -130,7 +179,9 @@ CoreS3 (MicroPython)  ──HTTP──▶  voice_server.py (Flask :5000)  ──
   分辨率靠字节数反查 `_CAM_SIZES`——改这张表要同步服务端 `RGB565_SIZES`。
 - **回退开关**（设备端顶部常量）：`WAKE_MIC_PERSISTENT`、`WATCHDOG_ENABLED`、
   `SHOW_CHAT_TEXT`、`VISUAL_ENABLED`、`USE_STATE_IMAGES`、`CAMERA_MODE_ENABLED`、
-  `CAMERA_QVGA`、`PREVIEW_SWAP`、`STREAM_ENABLED`、`STREAM_QQVGA`
+  `CAMERA_QVGA`、`PREVIEW_SWAP`、`STREAM_ENABLED`、`STREAM_QQVGA`、
+  `TOUCH_FEEL_ENABLED`（整个触觉）、`FEEL_NOTIFY_ENABLED`（只关"主动开口"，
+  保留反射层和体感层）、`FEEL_WAKE_ON_PICKUP`
   ——真机出问题先关开关再排查。
 
 ## 测试与验证

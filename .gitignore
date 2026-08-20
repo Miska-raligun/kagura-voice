@@ -10,3 +10,4 @@ device_logs/
 reminders.json
 photo_schedules.json
 snapshots/
+*.log.*

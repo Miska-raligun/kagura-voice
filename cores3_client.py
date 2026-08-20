@@ -398,6 +398,61 @@ _touch_start = None
 _touch_pos   = (0, 0)
 LONG_PRESS_MS = 800         # 长按阈值（ms）
 
+_touch_maxd     = 0         # 本次按下期间离起点的最大位移（曼哈顿距离，px）
+_touch_gesture  = None      # 本次按下已判定的触觉手势：'stroke' / 'cradle' / None
+_touch_last_ms  = 0         # 最近一次手势按住的时长（ms），供结算用
+_touch_seen_ms  = 0         # 最近一次"屏幕上有手"的时刻（ms）。反射层靠它判断
+                            # 人还在不在，而不是靠倒计时——见 feel_reflex_tick
+
+# ── 触觉 ─────────────────────────────────────────────────────
+#
+# 三层结构，别混在一起：
+#   反射层：设备端立刻改表情，不过网。触觉的"手感"全靠这层——走一趟
+#           OpenClaw 是 3~10 秒，那不叫触觉，叫事后转述。
+#   体感层：把触摸聚合成"最近被摸了多久 / 多久没人碰"，随下次 /chat 用
+#           X-Touch 头捎给服务端注入 prompt。零额外请求，零额外延迟。
+#   惊动层：只有显著事件才打 /touch 让 agent 主动开口，带冷却。
+#
+# 与现有按钮语义的分工（定死了，改之前想清楚）：点按仍是录音、长按不动仍是
+# 切唤醒模式，**只有手指发生位移才判定为抚摸**并吞掉这一次 short/long。
+# 好处是肌肉记忆完全不用改；代价是"手贴着不动"这个手势让给了长按。
+TOUCH_FEEL_ENABLED   = True   # 回退开关：关掉则触摸行为与加触觉之前完全一致
+FEEL_NOTIFY_ENABLED  = True   # 回退开关：只关"主动开口"，保留反射层和体感层
+STROKE_MIN_DIST      = 24     # 判定抚摸的最小位移（px，约 4mm；点按抖动通常 <10px）
+STROKE_MIN_MS        = 250    # 抚摸至少持续这么久才判定（挡住手滑误触）
+FEEL_STROKE_NOTIFY   = 3.0    # 单轮抚摸累计超过这么久才值得让她开口（秒）
+# 手离开屏幕后表情还保持多久。**别调太短**：摸是个反复的动作，一次抚摸中间
+# 必然有短暂离手，收得太快就会 petted→idle→petted 来回切，每切一次都是一张
+# 整屏 JPEG 重解码（约 100ms），看起来就是画面在闪。这个值要盖过离手的间隙。
+FEEL_REFLEX_LINGER   = 2.5
+_FEEL_LINGER_MS      = int(FEEL_REFLEX_LINGER * 1000)
+FEEL_NOTIFY_COOLDOWN = 90     # 主动惊动的冷却（秒）。没有这个会非常聒噪
+FEEL_QUIET_SECS      = 1800   # 超过这么久没被碰过，算"被冷落"（秒）
+FEEL_WAKE_ON_PICKUP  = True   # 休眠中被拿起来自动醒
+# 打开后每次反射层真正重画屏幕都打一行。屏幕闪不闪的问题只能靠这个定位——
+# 正常抚摸一整段应该只有两行：进 petted、回 idle。刷屏就是判据还有漏。
+FEEL_DEBUG           = False
+
+
+class Feel:
+    """体感累积量。语义同 St：只通过下面几个 feel_* 函数改，别在业务里直接翻。
+
+    stroke_secs 等是"待上报窗口"——feel_header() 取走即清零，窗口边界就是
+    上一次对话。所以注入给 LLM 的永远是"上次说完话之后发生的事"。
+    """
+    last_touch  = 0     # 最近一次被碰的时间戳（0 = 开机以来还没被碰过）
+    stroke_secs = 0.0   # 窗口内被抚摸的累计秒数
+    strokes     = 0     # 窗口内抚摸次数
+    cradles     = 0     # 窗口内被"捧着"（多指同时按）次数
+    taps        = 0     # 窗口内机身被轻拍次数（IMU）
+    pickups     = 0     # 窗口内被拿起来次数（IMU）
+    carry_secs  = 0.0   # 窗口内被抱着走的累计秒数（IMU）
+    last_notify = 0     # 上次打 /touch 的时间（冷却用，不进窗口）
+
+
+_feel_reflex_state = None    # 反射层当前占用的屏幕状态
+_feel_reflex_until = 0       # 反射表情的收回时间
+
 # ── 唤醒词检测状态 ─────────────────────────────────────────────
 
 _wake_buf        = bytearray(WAKE_CHUNK_SIZE)
@@ -433,6 +488,28 @@ _imu_shake_times  = []       # 超阈值时间戳列表
 _imu_last_shake   = 0        # 上次触发彩蛋的时间
 _imu_available    = False    # IMU 是否可用
 
+# ── IMU 本体感觉（被拿起/被轻拍/被抱着走）─────────────────────
+# 阈值全是拍脑袋的起点值，**必须真机调**：桌面材质、放置姿态、机身重量
+# 都会影响。调的时候把 _imu_feel_detect 里的 print 打开看实测幅值。
+IMU_TAP_G          = 1.55    # 轻拍机身的加速度尖峰（要低于摇晃阈值）
+# 轻拍要等这么久才确认，**必须大于摇晃的 500ms 判定窗**：否则"第三下来得慢"
+# 的摇晃会先被确认成轻拍开一次口，紧接着彩蛋又触发一次。代价是轻拍的反射
+# 表情慢半拍——没有硬件 tap 中断的话，这个歧义只能用时间换。
+IMU_TAP_CONFIRM_MS = 600
+IMU_TAP_SPIKE_WIN  = 700     # 尖峰计数的保留窗（要大于 CONFIRM，否则数不满 3 下）
+IMU_MOTION_BAND    = 0.12    # |合加速度 - 1g| 超过这么多算"在动"
+IMU_PICKUP_STILL   = 20      # 静止这么久之后才动，才算"被拿起来"（秒）
+IMU_PICKUP_MOVE_MS = 300     # 持续运动这么久才确认拿起（挡桌面震动/关门震）
+IMU_CARRY_GAP      = 3.0     # 运动中断这么久算"放下了"（秒）
+
+_imu_tap_spikes    = []      # 近期尖峰时间戳（区分轻拍 vs 摇晃）
+_imu_tap_pending   = None    # 待确认的轻拍时间戳（ms）
+_imu_last_motion   = 0       # 最近一次"在动"的时间戳（秒）
+_imu_move_since    = None    # 本段连续运动的起点（ms）
+_imu_still_before  = 0       # 本段运动开始前静止了多久（秒）
+_imu_carried       = False   # 当前是否处于"被端着/拿在手上"
+_imu_carry_start   = 0       # 本次被端起来的时间戳（秒）
+
 # ── RTC 时间 ─────────────────────────────────────────────────
 _rtc_synced = False          # RTC 是否已同步
 _has_rtc = hasattr(M5, 'Rtc')  # CoreS3 SE 无 RTC 硬件
@@ -458,6 +535,13 @@ STATE_UI = {
     "wake_off":       ("(^w^)",   "Wake mode OFF",     0x888888),
     "discovering":    ("(o_o)",   "Searching...",      0xffaa00),
     "shake":          ("(*/ω＼*)", "!",                 0xff88cc),
+    # 触觉反射层。状态文字保持 ASCII——DejaVu18 里没有 ♡ 这类字符，画出来是方块。
+    # 背景图走 _IMG_MAP，目前三态都复用 img_processing。**换图不额外花钱**：
+    # draw_state 本来每次换状态就要整屏重解码一张 JPEG，换的是哪张不影响成本；
+    # 真正贵的是图不存在时那次白试 + 回退，所以有 _img_missing 兜底。
+    "petted":         ("(*^w^*)", "Being petted",      0xff88cc),
+    "poked":          ("(o_O)",   "Poked!",            0xffaa88),
+    "held":           ("(^o^)/",  "Picked up",         0xffcc44),
     "wifi_setup":     ("(o_o)",   "WiFi Setup",        0x00aaff),
     "wifi_connect":   ("(._.)",   "Connecting...",     0xffaa00),
     "wifi_ok":        ("(^_^)",   "WiFi OK",           0x44ff44),
@@ -660,7 +744,18 @@ _IMG_MAP = {
     "processing": "img_processing",
     "playing":    "img_playing",
     "broadcast":  "img_playing",   # broadcast 复用 playing 图片
+    # 触觉三态先复用 processing 的图，不必额外准备素材。想各配一张就把值改成
+    # img_petted / img_poked / img_held 再传图；缺图会退回 img_bg（见 _img_missing）。
+    "petted":     "img_processing",   # 被抚摸（屏幕上有手指在滑）
+    "poked":      "img_processing",   # 机身被轻拍
+    "held":       "img_processing",   # 被从桌上拿起来
 }
+
+# 试过但确实不存在的背景图。没有这个缓存的话，缺图状态每次重绘都要白开一次
+# 文件、打一行 img err、再解一次 img_bg——等于每次被摸都多花 100ms 在必然
+# 失败的尝试上，而反射层是全设备最吃延迟的一条路径。
+# 代价：传了新图必须重启设备才认（缓存只在开机时清空）。
+_img_missing = set()
 
 # 无视 USE_STATE_IMAGES 的强制背景。直播时屏幕不显示实时画面、也不写文字提示，
 # 全靠换这张图告知摄像头正开着——属于功能，不是装饰，所以不跟随那个开关。
@@ -672,6 +767,58 @@ _FORCED_IMG = {
 # 上一次画上屏的内容键。draw_state 整屏一起重画，所以只需要一个键：
 # 键相同 = 这一屏跟屏幕上现有的完全一样 → 直接跳过，不重解码 JPEG。
 _drawn_key = None
+
+# ── 离屏画布合成 ──────────────────────────────────────────────
+#
+# 原先 draw_state 是一层层往**屏幕**上画（背景 → 彩条 → 顶栏 → 状态文字），
+# 全过程约 58ms 而且用户全程看得见，观感就是"背景先刷上去、文字再一个个冒
+# 出来"。开这个开关后改成全部画进离屏画布、最后一次 push 上屏：屏幕在推屏
+# 那一刻整屏同时更新，中间过程不可见。
+#
+# 真机实测（2026-08，CoreS3）：
+#   直接上屏 58ms ┊ 画进 PSRAM 画布 54ms ┊ 整屏 push 35ms
+# 也就是总耗时 58 → 89ms，**反而慢 50%**，换的是"瞬间完成"而不是"看着它画"。
+# 觉得不值就把开关改 False，行为立刻回到逐层直画。
+#
+# 两个真机结论，改之前必读：
+#   ① PSRAM 带宽不是瓶颈（54 vs 58ms）——JPEG 解码是 CPU 密集，写哪块内存无所谓
+#   ② **整屏画布必须 psram=True**：内部 SRAM 凑不出 150KB 连续空间，
+#      分配会"成功"但没有缓冲区，之后所有绘制静默变成 no-op（实测表现为
+#      drawJpg 耗时 0ms、屏幕纹丝不动），排查起来极其费解
+USE_CANVAS = True
+
+_canvas = None          # 全屏离屏画布（懒分配，失败则永久退回直接画屏）
+_canvas_tried = False
+
+
+def _get_canvas():
+    """取全屏离屏画布；不可用返回 None，调用方直接画屏。"""
+    global _canvas, _canvas_tried
+    if _canvas is not None or _canvas_tried:
+        return _canvas
+    _canvas_tried = True                 # 只试一次，失败别每帧白试
+    if not USE_CANVAS or not hasattr(Lcd, "newCanvas"):
+        return None
+    try:
+        _canvas = Lcd.newCanvas(w=320, h=240, bpp=16, psram=True)
+        print("[ui] offscreen canvas ready")
+    except Exception as e:
+        print("[ui] canvas unavailable, direct draw:", e)
+        _canvas = None
+    return _canvas
+
+
+def _canvas_disable():
+    """画布出问题时永久退回直接画屏，并把这块内存还回去。"""
+    global _canvas
+    cv, _canvas = _canvas, None
+    if cv is None:
+        return
+    try:
+        cv.delete()          # binding 暴露的是 delete，没有 deleteSprite
+    except Exception:
+        pass
+    gc.collect()
 
 
 def _ui_invalidate():
@@ -715,6 +862,10 @@ def draw_state(state, force=False):
     want_bg = (_FORCED_IMG.get(state)
                or (_IMG_MAP.get(state) if USE_STATE_IMAGES else None)
                or "img_bg")
+    # 已知缺图的直接改成 img_bg：要赶在算 key 之前，否则 key 记的是"想画的图"、
+    # 屏幕上是"实际画的图"，两者不一致会让缓存判断失去意义。
+    if want_bg in _img_missing:
+        want_bg = "img_bg"
     cm_color = 0x00ffcc if St.continuous else 0x3a3a3a
     wm_color = 0xffcc00 if St.wake       else 0x3a3a3a
     time_str = get_rtc_time_str()
@@ -739,67 +890,229 @@ def draw_state(state, force=False):
     b = color & 0xff
     _set_led(r // 4, g // 4, b // 4)
 
+    # 画到离屏画布还是直接画屏。tgt 拿到什么，下面所有绘制就都往那儿去——
+    # 画布暴露的方法名跟 Lcd 一致（drawJpg/drawString/setFont/fillRect…），
+    # 所以这里只换目标，不分叉两套绘制代码。
+    tgt = _get_canvas() or Lcd
+
     # ── 1：背景层（整屏 320×240 从 0,0 开始）────────────────
     img_shown = False
     try:
         with open("/flash/{}.jpg".format(want_bg), "rb") as _f:
-            Lcd.drawJpg(_f.read(), 0, 0)
+            tgt.drawJpg(_f.read(), 0, 0)
         img_shown = True
     except Exception as e:
         print("img err:", e)
+        if want_bg != "img_bg":
+            _img_missing.add(want_bg)   # 记下来，下次别再白试
     if not img_shown and want_bg != "img_bg":
         try:
             with open("/flash/img_bg.jpg", "rb") as _f:
-                Lcd.drawJpg(_f.read(), 0, 0)
+                tgt.drawJpg(_f.read(), 0, 0)
             img_shown = True
         except Exception as e:
             print("[ui] bg fallback to solid color:", e)
     if not img_shown:
-        Widgets.fillScreen(0x1a1a1a)
+        # 用 fillRect 而不是 fillScreen：fillRect 在 Lcd 和画布上都验证过，
+        # 少一个"应该有吧"的 API 赌注
+        tgt.fillRect(0, 0, 320, 240, 0x1a1a1a)
 
     # ── 2：彩色状态条 + 顶栏（透明背景，悬浮在图片上）────────
-    Widgets.Line(0, 0, 320, 0, color)
-    Widgets.Line(0, 1, 320, 1, color)
-    Widgets.Line(0, 2, 320, 2, color)
-    Lcd.setFont(_FONT_16)
-    Lcd.setTextSize(1)
-    Lcd.setTextColor(cm_color, cm_color)
-    Lcd.drawString("CONT", 10, 6)
-    Lcd.setTextColor(wm_color, wm_color)
-    Lcd.drawString("WAKE", 90, 6)
+    tgt.fillRect(0, 0, 320, 3, color)     # 原先是三条 Widgets.Line，等价
+    tgt.setFont(_FONT_16)
+    tgt.setTextSize(1)
+    tgt.setTextColor(cm_color, cm_color)
+    tgt.drawString("CONT", 10, 6)
+    tgt.setTextColor(wm_color, wm_color)
+    tgt.drawString("WAKE", 90, 6)
     # CAM：可点的键（命中区 _CAM_ENTRY），点它进取景模式
     if CAMERA_MODE_ENABLED:
-        Lcd.setTextColor(0xaa66ff, 0xaa66ff)
-        Lcd.drawString("CAM", 145, 6)
-    Lcd.setTextColor(0x666666, 0x666666)
-    Lcd.drawString(right_str, max(180, 310 - len(right_str) * 10), 6)
+        tgt.setTextColor(0xaa66ff, 0xaa66ff)
+        tgt.drawString("CAM", 145, 6)
+    tgt.setTextColor(0x666666, 0x666666)
+    tgt.drawString(right_str, max(180, 310 - len(right_str) * 10), 6)
 
     # ── 3：kaomoji（只在背景图都没读到时兜底显示）────────────
     if not img_shown:
-        Lcd.setTextSize(3)
-        Lcd.setTextColor(color, color)
-        Lcd.drawString(face, max(0, (320 - len(face) * 34) // 2), 90)
-        Lcd.setTextSize(1)
+        tgt.setTextSize(3)
+        tgt.setTextColor(color, color)
+        tgt.drawString(face, max(0, (320 - len(face) * 34) // 2), 90)
+        tgt.setTextSize(1)
 
     # ── 4：状态文字 ─────────────────────────────────────────
-    Lcd.setTextColor(0xffffff if img_shown else 0x999999,
+    tgt.setTextColor(0xffffff if img_shown else 0x999999,
                      0xffffff if img_shown else 0x999999)
-    Lcd.drawString(status, max(0, (320 - len(status) * 11) // 2), 216)
+    tgt.drawString(status, max(0, (320 - len(status) * 11) // 2), 216)
 
     # ── 5：待机界面显示最近一轮对话（需固件带中文字体）────────
     if show_chat:
-        Lcd.setFont(_FONT_CN)
-        Lcd.setTextColor(0x88ccff, 0x88ccff)
-        Lcd.drawString("> " + _last_user_text[:18], 8, 160)
-        Lcd.setTextColor(0xcccccc, 0xcccccc)
-        Lcd.drawString(_last_reply_text[:19], 8, 184)
-        Lcd.setFont(_FONT_16)
+        tgt.setFont(_FONT_CN)
+        tgt.setTextColor(0x88ccff, 0x88ccff)
+        tgt.drawString("> " + _last_user_text[:18], 8, 160)
+        tgt.setTextColor(0xcccccc, 0xcccccc)
+        tgt.drawString(_last_reply_text[:19], 8, 184)
+        tgt.setFont(_FONT_16)
 
-    # ── 6：环形动画切换到新状态（VISUAL_ENABLED=False 时为空操作）──
+    # ── 6：一次性推屏。到这里为止屏幕一个像素都没变过，push 完整屏同时更新 ──
+    if tgt is not Lcd:
+        try:
+            tgt.push(0, 0)
+        except Exception as e:
+            # 推屏失败等于这一帧白画了，屏幕还停在上一屏。作废画布退回直接画屏，
+            # 并清掉 _drawn_key，让下一次 draw_state 无条件重画一遍。
+            print("[ui] canvas push failed, falling back to direct draw:", e)
+            _canvas_disable()
+            _drawn_key = None
+
+    # ── 7：环形动画切换到新状态（VISUAL_ENABLED=False 时为空操作）──
+    # 必须在 push 之后：它直接往屏幕上画，画在画布合成期间会被 push 盖掉
     _vis_set_state(state, color)
 
 
 # ── WAV 工具 ──────────────────────────────────────────────────
+
+# ── 离屏画布探测（一次性诊断，测完把 CANVAS_PROBE 改回 False）────
+#
+# 要判断的是：能不能把"整屏重绘"改成"离屏合成 + 一次推屏"。
+# 现在 draw_state 是一层层往屏幕上画（背景 → 彩条 → 顶栏 → 状态文字），
+# 全过程约 100ms 且**用户看得见**，所以换图像是"背景先上、文字再冒出来"。
+# 画布方案是全画进离屏缓冲再一次推屏，总耗时不变，但屏幕上是瞬间完成的。
+#
+# 更重要的是它能解开当初被否掉的分层重绘：CLAUDE.md 记着"分层增量重绘要垫
+# 实心底才能擦字，结果照片被黑边夹住"。有画布就不用垫底——擦除变成"从背景
+# 重新合成"，时钟/电量就能局部更新，不必整屏重解 JPEG。
+#
+# 四个数字决定方案生死：
+#   ① 画布暴露了哪些方法——没有 drawString/setFont 就画不了文字，方案作废
+#   ② 画进 PSRAM 画布 vs 直接画屏谁快——PSRAM 走 QSPI，逐像素写可能更慢
+#   ③ 整屏 push 多少毫秒——一帧到位的固定开销
+#   ④ 顶栏小画布 文字+push 多少毫秒——这是"时钟每秒刷新"的实际成本
+# 结果同时进串口和 dbg 环形缓冲，随心跳上报（voice_server.log 里的 📟 行）。
+#
+# 2026-08 已测完，结论写在 USE_CANVAS 那段注释里。代码保留：以后换固件版本
+# 或改画布尺寸想重测，改回 True 烧一次就行。
+CANVAS_PROBE = False
+
+
+def canvas_probe():
+    """开机跑一次画布能力探测。异常一律吞掉，绝不能拖累正常启动。"""
+    if not CANVAS_PROBE:
+        return
+    try:
+        _canvas_probe()
+    except Exception as e:
+        dbg("cv: probe crashed {}".format(e))
+    finally:
+        # 探测直接铺过屏，必须作废缓存键，否则下次 draw_state 判定"没变"跳过重绘
+        _ui_invalidate()
+
+
+def _mk_canvas(w, h, psram):
+    """挨个试 newCanvas 的调用形式，返回 (画布, 用的第几种)。
+
+    别因为签名对不上就误判成"固件不支持"——文档写的是关键字参数，但 binding
+    到底是关键字还是位置、psram 参数在不在，都是猜的。一次烧录机会别浪费在
+    TypeError 上。返回的形式编号很重要：3/4 号忽略 psram，那两种情况下
+    psram=True/False 的对比数据没有意义。
+    """
+    forms = (
+        lambda: Lcd.newCanvas(w=w, h=h, bpp=16, psram=psram),
+        lambda: Lcd.newCanvas(w, h, 16, psram),
+        lambda: Lcd.newCanvas(w, h, 16),
+        lambda: Lcd.newCanvas(w, h),
+    )
+    last = None
+    for i in range(len(forms)):
+        try:
+            cv = forms[i]()
+            if cv is not None:
+                return cv, i + 1
+        except Exception as e:
+            last = e
+    if last:
+        raise last
+    raise OSError("newCanvas returned None")
+
+
+def _canvas_probe():
+    has = hasattr(Lcd, "newCanvas")
+    dbg("cv: newCanvas={}".format(has))
+    if not has:
+        return
+    try:
+        img = open("/flash/img_bg.jpg", "rb").read()
+    except Exception as e:
+        dbg("cv: no img_bg {}".format(e))
+        return
+
+    # 基准线：现在 draw_state 的做法，直接解码上屏
+    t = time.ticks_ms()
+    Lcd.drawJpg(img, 0, 0)
+    dbg("cv: direct jpg {}ms".format(time.ticks_diff(time.ticks_ms(), t)))
+
+    for psram in (True, False):
+        gc.collect()
+        free0 = gc.mem_free()
+        try:
+            cv, form = _mk_canvas(320, 240, psram)
+        except Exception as e:
+            dbg("cv: alloc psram={} FAIL {}".format(psram, e))
+            continue
+        gc.collect()
+        # 堆掉得少 = 画布真的落在 PSRAM 而不是内部 RAM（整屏 16bpp 应为 153600 字节）
+        dbg("cv: alloc psram={} form{} heapdrop={}".format(
+            psram, form, free0 - gc.mem_free()))
+
+        if psram:
+            names = dir(cv)
+            want = ("drawJpg", "drawPng", "drawImage", "drawString", "setFont",
+                    "setTextColor", "setTextSize", "fillRect", "fillScreen",
+                    "push", "drawRawBuf", "deleteSprite", "delete")
+            dbg("cv: has " + ",".join([n for n in want if n in names]))
+            miss = [n for n in want if n not in names]
+            if miss:
+                dbg("cv: MISS " + ",".join(miss))
+
+        draw = getattr(cv, "drawJpg", None) or getattr(cv, "drawImage", None)
+        if draw:
+            t = time.ticks_ms()
+            draw(img, 0, 0)
+            dbg("cv: psram={} jpg {}ms".format(
+                psram, time.ticks_diff(time.ticks_ms(), t)))
+        try:
+            t = time.ticks_ms()
+            cv.push(0, 0)
+            dbg("cv: psram={} push {}ms".format(
+                psram, time.ticks_diff(time.ticks_ms(), t)))
+        except Exception as e:
+            dbg("cv: push FAIL {}".format(e))
+        del cv
+        gc.collect()
+
+    # 顶栏尺寸的小画布：分层局部更新的真实成本。这个数字最关键——
+    # 够小的话时钟就能每秒走，状态切换也不用再整屏重解 JPEG。
+    try:
+        bar, _form = _mk_canvas(320, 26, False)
+        if hasattr(bar, "drawString"):
+            for setter, arg in (("setFont", _FONT_16), ("setTextColor", 0xffffff)):
+                fn = getattr(bar, setter, None)
+                if fn:
+                    try:
+                        fn(arg)
+                    except Exception as e:
+                        dbg("cv: bar {} {}".format(setter, e))
+            t = time.ticks_ms()
+            bar.drawString("12:34 100%", 0, 4)
+            bar.push(0, 3)
+            dbg("cv: bar text+push {}ms".format(
+                time.ticks_diff(time.ticks_ms(), t)))
+        else:
+            dbg("cv: bar no drawString")
+        del bar
+        gc.collect()
+    except Exception as e:
+        dbg("cv: bar FAIL {}".format(e))
+
 
 def make_wav_header(data_len, sample_rate=16000, channels=1, bits=16):
     byte_rate   = sample_rate * channels * bits // 8
@@ -853,25 +1166,61 @@ def rms_slices(buf, n=5):
 
 # ── 触摸检测 ──────────────────────────────────────────────────
 
-def check_touch():
+_FEEL_ONGOING = {'stroke': 'stroking', 'cradle': 'cradling'}
+
+
+def check_touch(feel=False):
     """
     返回 (事件类型, 坐标)。
-    事件类型: 'short' / 'long' / None
+    事件类型: 'short' / 'long' / None；feel=True 时还可能是：
+      'stroking' / 'cradling' —— 手势进行中，按住期间每轮都返回（喂反射层）
+      'stroke'   / 'cradle'   —— 手势结束。此时**不再产生 short/long**
     坐标: (x, y) 为按下时的位置
+
+    feel 默认 False = 与加触觉之前逐字节等价的行为。取景模式、配网界面、
+    播放中断这些地方要的就是纯按钮，别让一次手滑变成抚摸把点击吞掉；
+    只有主循环 loop() 传 True。
+
+    位移用"离起点的最大曼哈顿距离"而不是累计路径长度：累计路径会把长按
+    期间的手指抖动一点点攒过阈值，把静止长按误判成抚摸；最大位移不会，
+    而来回摩挲在两端自然会超阈值，照样判得出来。
     """
-    global _touch_start, _touch_pos
+    global _touch_start, _touch_pos, _touch_maxd, _touch_gesture, _touch_last_ms
+    global _touch_seen_ms
     M5.update()
     count = M5.Touch.getCount()
     if count > 0:
+        _touch_seen_ms = time.ticks_ms()
+        x, y = M5.Touch.getX(), M5.Touch.getY()
         if _touch_start is None:
-            _touch_start = time.ticks_ms()
-            _touch_pos   = (M5.Touch.getX(), M5.Touch.getY())
+            _touch_start   = time.ticks_ms()
+            _touch_pos     = (x, y)
+            _touch_maxd    = 0
+            _touch_gesture = None
+        if feel and TOUCH_FEEL_ENABLED:
+            d = abs(x - _touch_pos[0]) + abs(y - _touch_pos[1])
+            if d > _touch_maxd:
+                _touch_maxd = d
+            held = time.ticks_diff(time.ticks_ms(), _touch_start)
+            if count > 1:
+                # 多指同时按住 =「被捧着」。UIFlow2 是否真的透传多点待真机确认，
+                # 不透传的话这条分支永远不进，其余功能不受影响。
+                _touch_gesture = 'cradle'
+            elif _touch_maxd >= STROKE_MIN_DIST and held >= STROKE_MIN_MS:
+                _touch_gesture = 'stroke'
+            if _touch_gesture is not None:
+                return (_FEEL_ONGOING[_touch_gesture], _touch_pos)
         return (None, (0, 0))
     else:
         if _touch_start is not None:
             duration = time.ticks_diff(time.ticks_ms(), _touch_start)
             pos      = _touch_pos
-            _touch_start = None
+            gesture  = _touch_gesture
+            _touch_start   = None
+            _touch_gesture = None
+            _touch_last_ms = duration
+            if gesture is not None:
+                return (gesture, pos)      # 判成触觉就吞掉 short/long，不录音
             if duration >= LONG_PRESS_MS:
                 return ('long', pos)
             elif duration > 0:
@@ -884,6 +1233,197 @@ def drain_touch():
     while M5.Touch.getCount() > 0:
         M5.update()
         time.sleep(0.05)
+
+
+def touch_reset():
+    """丢弃当前这一次按下：抬手后不再产生任何事件。
+
+    抚摸是**按住期间**就判定的（不像 short/long 要等抬手），所以拿它当触发器
+    的地方必须显式作废这次按下，否则抬手时还会再吐一个手势事件出来。
+    """
+    global _touch_start, _touch_gesture, _touch_maxd
+    _touch_start   = None
+    _touch_gesture = None
+    _touch_maxd    = 0
+
+
+# ── 触觉：反射层 ──────────────────────────────────────────────
+
+def feel_reflex(state, secs=FEEL_REFLEX_LINGER):
+    """立刻切表情，secs 后由 feel_reflex_tick 自动收回。**不阻塞**。
+
+    别在这里 sleep：主循环还要喂看门狗、收 MQTT。反射的全部意义就是
+    "被摸的当下就有反应"，一旦阻塞，后面的触摸采样就断了。
+
+    **同一个反射态重复调用绝不重画**，这条是治闪烁的关键，别去掉：
+    抚摸期间本函数每轮主循环都被调（几十次每秒），原先每次都往 draw_state
+    里送，指望它的 _drawn_key 比对挡住——但那个 key 里有电量百分比，
+    而 `(v-3000)*100//1200` 里 12mV 就是 1%，ADC 读数本来就在跳（WiFi 发包
+    时电压还会塌一下）。百分比一变 key 就变，于是整屏 JPEG 被反复重解码，
+    肉眼就是持续闪烁。这里自己挡住，不依赖 key 比对。
+    """
+    global _feel_reflex_state, _feel_reflex_until
+    if St.busy or St.sleeping:
+        return
+    _feel_reflex_until = time.time() + secs   # 续期总是要做的
+    if _feel_reflex_state == state:
+        return                                # 已经在这个表情上：一个像素都别动
+    if FEEL_DEBUG:
+        print("[feel] redraw ->", state, "(from", _feel_reflex_state, ")")
+    _feel_reflex_state = state
+    draw_state(state)
+
+
+def feel_reflex_clear():
+    """放弃当前反射表情（业务流程要接管屏幕时调）。"""
+    global _feel_reflex_state
+    _feel_reflex_state = None
+
+
+def feel_reflex_tick():
+    """主循环调用：确认人真的不碰了，才收回待机屏。
+
+    **收回的判据是"屏幕上还有没有手"，不是倒计时**，这是治来回闪的关键：
+    抚摸天然是"划一下—停一下—再划一下"，停顿里手指还在屏幕上，或者刚离手
+    半秒又落下。按倒计时收，停顿一超时就掉回 idle，下一划又切回表情图，
+    两张整屏 JPEG 来回解码，看起来就是画面一直在闪。
+    另外触摸驱动偶发漏报一帧（getCount 返回 0）也会走同一条老路。
+
+    IMU 触发的反射（poked/held）屏幕上本来就没有手，`_touch_seen_ms` 是旧值，
+    自然落到下面的时间判据上，两条路各走各的。
+    """
+    global _feel_reflex_state
+    if _feel_reflex_state is None:
+        return
+    if St.busy or St.sleeping:
+        _feel_reflex_state = None      # 屏幕已被别人接管，反射作废
+        return
+    if time.ticks_diff(time.ticks_ms(), _touch_seen_ms) < _FEEL_LINGER_MS:
+        return                         # 人还在摸（或刚离手），一个像素都别动
+    if time.time() >= _feel_reflex_until:
+        if FEEL_DEBUG:
+            print("[feel] redraw -> idle (from", _feel_reflex_state, ")")
+        _feel_reflex_state = None
+        draw_state("idle")
+
+
+# ── 触觉：体感层 ──────────────────────────────────────────────
+
+def feel_touched():
+    """记一次"被碰到"，返回**被碰之前**已经安静了多久（秒）。
+
+    返回值是"冷落时长"，惊动层用它判断这次触碰是不是久别重逢——
+    连着摸十次不该让她十次都很惊喜，隔了两小时的第一次才该。
+    """
+    now = time.time()
+    quiet = (now - Feel.last_touch) if Feel.last_touch else 0
+    Feel.last_touch = now
+    St.last_activity = now             # 被摸也算交互，顺延休眠计时
+    return quiet
+
+
+def feel_header():
+    """打包体感窗口成 X-Touch 头（k=v,k=v）。**取走即清空**，没内容返回 ""。
+
+    清空放在这里而不是等请求成功：请求失败就丢掉这一窗口的体感，是有意的——
+    宁可漏报也不要把过期的"刚被摸了"在几分钟后才注入进对话。
+    """
+    parts = []
+    if Feel.stroke_secs >= 1:
+        parts.append("stroke=%d" % int(Feel.stroke_secs))
+    if Feel.strokes:
+        parts.append("strokes=%d" % Feel.strokes)
+    if Feel.cradles:
+        parts.append("cradles=%d" % Feel.cradles)
+    if Feel.taps:
+        parts.append("taps=%d" % Feel.taps)
+    if Feel.pickups:
+        parts.append("pickups=%d" % Feel.pickups)
+    if Feel.carry_secs >= 1:
+        parts.append("carry=%d" % int(Feel.carry_secs))
+    if Feel.last_touch:
+        quiet = int(time.time() - Feel.last_touch)
+        if quiet >= FEEL_QUIET_SECS:
+            parts.append("quiet=%d" % quiet)
+    Feel.stroke_secs = 0.0
+    Feel.strokes     = 0
+    Feel.cradles     = 0
+    Feel.taps        = 0
+    Feel.pickups     = 0
+    Feel.carry_secs  = 0.0
+    return ",".join(parts)
+
+
+def _feel_headers(base):
+    """给已有请求头补上 X-Touch。没有体感可报就原样返回。"""
+    if not TOUCH_FEEL_ENABLED:
+        return base
+    try:
+        h = feel_header()
+        if h:
+            base["X-Touch"] = h
+    except Exception as e:
+        print("[feel] header err:", e)
+    return base
+
+
+# ── 触觉：惊动层 ──────────────────────────────────────────────
+
+def feel_notify(kind, detail=""):
+    """让 agent 主动开口。有冷却，且忙/休眠/直播时不打扰。返回是否真的发了。
+
+    走 /touch，链路与 /shake 相同：服务端立即返回、后台跑 OpenClaw，
+    回复经 cores3-speak → /push → MQTT 回到设备播放。
+    """
+    if not (TOUCH_FEEL_ENABLED and FEEL_NOTIFY_ENABLED):
+        return False
+    now = time.time()
+    if St.busy or St.sleeping or St.streaming:
+        return False
+    if now - Feel.last_notify < FEEL_NOTIFY_COOLDOWN:
+        return False
+    Feel.last_notify = now
+    feel_reflex_clear()
+    St.busy = True
+    try:
+        draw_state("processing")
+        hdrs = {"X-Device-Id": DEVICE_ID, "X-Touch-Kind": kind}
+        if detail:
+            hdrs["X-Touch-Detail"] = detail
+        lt = get_local_time_header()
+        if lt:
+            hdrs["X-Local-Time"] = lt
+        # 这里**故意不带 X-Touch**：feel_header() 取走即清空，而 /touch 只用
+        # X-Touch-Detail 造 prompt，带上等于把体感窗口白白清掉，
+        # 下次真正对话时就没得注入了。窗口只交给 /chat。
+        resp = urequests.get(SERVER_BASE + "/touch", headers=hdrs,
+                             timeout=REQUEST_TIMEOUT_SHORT)
+        resp.close()
+        print("[feel] notify:", kind, detail)
+    except OSError as e:
+        print("[feel] notify err:", e)
+    finally:
+        St.busy = False
+        draw_state("idle")
+    return True
+
+
+def feel_on_touch_end(kind):
+    """屏幕上的抚摸/捧着结束：结算体感，够显著就惊动 agent。"""
+    secs  = _touch_last_ms / 1000.0
+    quiet = feel_touched()
+    if kind == 'cradle':
+        Feel.cradles += 1
+    else:
+        Feel.strokes    += 1
+        Feel.stroke_secs += secs
+    # 先问要不要惊动：feel_notify 会自己接管屏幕（processing → idle），
+    # 反射表情画在它前面就是一次白扔的整屏 JPEG 解码（约 100ms）。
+    # 冷却没过 / 关了开关时 feel_notify 返回 False，这时才补上留一会儿的表情。
+    if ((secs >= FEEL_STROKE_NOTIFY or quiet >= FEEL_QUIET_SECS)
+            and feel_notify(kind, "secs=%d,quiet=%d" % (int(secs), int(quiet)))):
+        return
+    feel_reflex("petted")              # 抬手之后表情再留一会儿
 
 
 # ── WiFi 配置 ─────────────────────────────────────────────────
@@ -1533,6 +2073,7 @@ def record_and_send():
             lt = get_local_time_header()
             if lt:
                 hdrs["X-Local-Time"] = lt
+            _feel_headers(hdrs)      # 体感层：把"刚才被摸过"随对话一起捎过去
             resp = urequests.post(SERVER_URL, data=wav, headers=hdrs, timeout=REQUEST_TIMEOUT_CHAT)
             if resp.status_code != 200:
                 print("chat err:", resp.text)
@@ -1580,6 +2121,7 @@ def record_and_send():
                 lt2 = get_local_time_header()
                 if lt2:
                     v_hdrs["X-Local-Time"] = lt2
+                _feel_headers(v_hdrs)
                 resp2 = urequests.post(
                     VISION_URL,
                     data=payload.encode("utf-8"),
@@ -2489,43 +3031,137 @@ def init_imu():
         _imu_available = False
 
 
-def imu_shake_tick():
-    """主循环调用：检测摇晃手势，触发彩蛋图片显示。"""
-    global _imu_shake_times, _imu_last_shake
+def imu_tick():
+    """主循环调用：一次采样同时喂给摇晃彩蛋和触觉检测。
 
+    合并读取不是为了省那 1ms I2C，是为了两个检测器看到的是同一个样本——
+    分开读会出现"摇晃检测到尖峰、触觉那边读到的却是尖峰之间的谷值"，
+    于是一次摇晃被同时算成三次轻拍。
+    """
     if not _imu_available or St.busy:
         return
-
-    now = time.time()
-    if now - _imu_last_shake < IMU_SHAKE_COOLDOWN:
-        return
-
     try:
         acc = M5.Imu.getAccel()
         if acc is None:
             return
         ax, ay, az = acc
-        # 计算总加速度幅值（含重力约 1g）
+        # 总加速度幅值（静止时约等于重力 1g）
         magnitude = math.sqrt(ax * ax + ay * ay + az * az)
-        if magnitude > IMU_SHAKE_G:
-            now_ms = time.ticks_ms()
-            _imu_shake_times.append(now_ms)
-            _imu_shake_times[:] = [t for t in _imu_shake_times if time.ticks_diff(now_ms, t) < 500]
-            if len(_imu_shake_times) >= IMU_SHAKE_COUNT:
-                _imu_shake_times.clear()
-                _imu_last_shake = now
-                _show_shake_easter_egg()
-        else:
-            if _imu_shake_times:
-                now_ms = time.ticks_ms()
-                _imu_shake_times[:] = [t for t in _imu_shake_times if time.ticks_diff(now_ms, t) < 500]
     except Exception:
-        pass
+        return
+
+    if TOUCH_FEEL_ENABLED:
+        try:
+            _imu_feel_detect(magnitude)
+        except Exception as e:
+            print("[feel] imu err:", e)
+    _imu_shake_detect(magnitude)
+
+
+def _imu_shake_detect(magnitude):
+    """摇晃彩蛋：500ms 内 IMU_SHAKE_COUNT 次超阈值。"""
+    global _imu_shake_times, _imu_last_shake
+
+    now = time.time()
+    if now - _imu_last_shake < IMU_SHAKE_COOLDOWN:
+        return
+
+    if magnitude > IMU_SHAKE_G:
+        now_ms = time.ticks_ms()
+        _imu_shake_times.append(now_ms)
+        _imu_shake_times[:] = [t for t in _imu_shake_times if time.ticks_diff(now_ms, t) < 500]
+        if len(_imu_shake_times) >= IMU_SHAKE_COUNT:
+            _imu_shake_times.clear()
+            _imu_last_shake = now
+            _show_shake_easter_egg()
+    else:
+        if _imu_shake_times:
+            now_ms = time.ticks_ms()
+            _imu_shake_times[:] = [t for t in _imu_shake_times if time.ticks_diff(now_ms, t) < 500]
+
+
+def _imu_feel_detect(magnitude):
+    """本体感觉：被轻拍 / 被拿起来 / 被抱着走 / 放下。
+
+    与摇晃彩蛋共用同一个样本流，靠"尖峰个数"区分：孤立的一两下 = 轻拍，
+    500ms 内三下以上 = 摇晃，交给彩蛋，这里必须放手（否则摇一摇会先被
+    当成轻拍开一次口，再触发彩蛋又开一次）。
+    """
+    global _imu_tap_spikes, _imu_tap_pending
+    global _imu_last_motion, _imu_move_since, _imu_still_before
+    global _imu_carried, _imu_carry_start
+
+    now    = time.time()
+    now_ms = time.ticks_ms()
+    dev    = abs(magnitude - 1.0)
+
+    # ── 轻拍：孤立的中等尖峰，延后 IMU_TAP_CONFIRM_MS 确认 ──
+    if magnitude >= IMU_TAP_G:
+        _imu_tap_spikes.append(now_ms)
+        if _imu_tap_pending is None:
+            _imu_tap_pending = now_ms
+    # 尖峰列表用 IMU_TAP_G 收，是摇晃检测（IMU_SHAKE_G）的超集，
+    # 所以它数到 3 一定不晚于摇晃判定成立——摇晃永远能抢在确认前撤销轻拍。
+    _imu_tap_spikes[:] = [t for t in _imu_tap_spikes
+                          if time.ticks_diff(now_ms, t) < IMU_TAP_SPIKE_WIN]
+    if _imu_tap_pending is not None:
+        if len(_imu_tap_spikes) >= IMU_SHAKE_COUNT:
+            _imu_tap_pending = None            # 是摇晃，让给彩蛋
+        elif time.ticks_diff(now_ms, _imu_tap_pending) >= IMU_TAP_CONFIRM_MS:
+            _imu_tap_pending = None
+            _on_tapped()
+
+    # ── 运动/静止：被拿起来 = 长时间静止之后的一段持续运动 ──
+    if dev >= IMU_MOTION_BAND:
+        if _imu_move_since is None:
+            _imu_move_since   = now_ms
+            # 运动开始前静止了多久，要在这一刻捕获：_imu_last_motion 随后
+            # 每个采样都会被刷新，等确认拿起时再算就永远是 0。
+            _imu_still_before = (now - _imu_last_motion) if _imu_last_motion else 0
+        _imu_last_motion = now
+        if (not _imu_carried
+                and time.ticks_diff(now_ms, _imu_move_since) >= IMU_PICKUP_MOVE_MS):
+            _imu_carried     = True
+            _imu_carry_start = now
+            if _imu_still_before >= IMU_PICKUP_STILL:
+                _on_picked_up(_imu_still_before)
+    elif _imu_move_since is not None and (now - _imu_last_motion) >= IMU_CARRY_GAP:
+        # 走路时合加速度会反复穿过阈值，所以要静止满 IMU_CARRY_GAP 才算放下
+        _imu_move_since = None
+        if _imu_carried:
+            _imu_carried = False
+            Feel.carry_secs += now - _imu_carry_start
+
+
+def _on_tapped():
+    """机身被轻拍：反射 + 计数。轻拍意图明确（"喂，看这边"），值得开口。
+
+    被端在手上时一律不算轻拍：走动本身就会不停制造 1.5g 以上的尖峰，
+    不挡掉的话拿着她走两步就是几十次"被拍"，还会顶着冷却反复开口。
+    """
+    if _imu_carried:
+        return
+    quiet = feel_touched()
+    Feel.taps += 1
+    feel_reflex("poked")
+    feel_notify("tap", "quiet=%d" % int(quiet))
+
+
+def _on_picked_up(still_before):
+    """被从桌上拿起来：这是最明确的"我想跟你互动"信号。"""
+    quiet = feel_touched()
+    Feel.pickups += 1
+    if St.sleeping:
+        if FEEL_WAKE_ON_PICKUP:
+            wake_up()
+        return                     # 刚被叫醒就主动说话太吓人，这次不惊动
+    feel_reflex("held")
+    feel_notify("pickup", "quiet=%d,still=%d" % (int(quiet), int(still_before)))
 
 
 def _show_shake_easter_egg():
     """显示摇晃彩蛋图片 2 秒，然后切换连续对话模式。continuous off→on 时额外调用 /shake 让 AI 主动聊天。"""
-    global _imu_last_shake, _touch_start
+    global _imu_last_shake
     St.busy = True
     St.last_activity = time.time()
     try:
@@ -2551,7 +3187,7 @@ def _show_shake_easter_egg():
             except OSError as e:
                 print("shake network err:", e)
             draw_state("idle")
-        _touch_start = None
+        touch_reset()
         drain_touch()
         _imu_last_shake = time.time()
     finally:
@@ -2849,6 +3485,7 @@ def setup():
     init_ble()
     init_imu()
     _volume_load()
+    canvas_probe()           # 一次性诊断；CANVAS_PROBE=False 即整段跳过
     draw_state("idle")       # 发现完成后恢复空闲界面
     calibrate_noise()
     St.last_activity = time.time()
@@ -2858,17 +3495,25 @@ def setup():
 def loop():
     global _wake_last_ms, _wake_loud_count
 
-    touch, pos = check_touch()
+    # feel=True 只在这里传：主循环是唯一把屏幕当皮肤的地方
+    touch, pos = check_touch(feel=True)
 
     # ── 休眠中：触摸仅唤醒，不执行其他操作 ──
     if St.sleeping:
         if touch is not None:
             wake_up()
             drain_touch()
+            touch_reset()      # 抚摸在按住期间就唤醒了，别让抬手再触发一次结算
     elif not St.busy:
         if touch is not None:
             St.last_activity = time.time()
-        if touch == 'long':
+        if touch in ('stroking', 'cradling'):
+            # 反射层：摸到的当下就换表情，不过网。draw_state 的键比对保证
+            # 抚摸全程只重画第一帧
+            feel_reflex("petted")
+        elif touch in ('stroke', 'cradle'):
+            feel_on_touch_end(touch)     # 抬手：结算体感，够显著才惊动 agent
+        elif touch == 'long':
             toggle_wake_mode()           # 长按：切换声控唤醒模式
         elif touch == 'short':
             if CAMERA_MODE_ENABLED and _hit(pos[0], pos[1], _CAM_ENTRY):
@@ -2913,8 +3558,11 @@ def loop():
     # BLE 在家感知（非阻塞定期扫描）
     ble_scan_tick()
 
-    # IMU 摇晃彩蛋检测
-    imu_shake_tick()
+    # IMU：摇晃彩蛋 + 本体感觉（被拿起/被轻拍/被抱着走）
+    imu_tick()
+
+    # 触觉反射表情到期收回
+    feel_reflex_tick()
 
     # ── 自动休眠检查 ──
     now = time.time()
