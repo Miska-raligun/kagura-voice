@@ -241,11 +241,8 @@ def _show_shake_easter_egg():
     cfg.St.last_activity = time.time()
     try:
         was_off = not cfg.St.continuous
-        try:
-            with open(cfg.res("img_shake.jpg"), "rb") as f:
-                Lcd.drawJpg(f.read(), 0, 0)
-        except Exception as e:
-            print("[shake] img_shake.jpg unavailable, falling back to kaomoji:", e)
+        if not ui.draw_image("img_shake"):
+            print("[shake] 无 img_shake 图片资源，改用 kaomoji")
             ui.draw_state("shake")
         time.sleep(2)
         toggle_continuous()

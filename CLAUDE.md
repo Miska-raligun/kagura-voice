@@ -41,6 +41,11 @@ CoreS3 (MicroPython)  ──HTTP──▶  voice_server.py (Flask :5000)  ──
 - **MQTT topic**：`kagura/push/{device_id}`（播报通知）、`kagura/cmd/{device_id}`（拍照命令）。
 - **设备端状态**：跨子系统 flag 全在 `St` 类（busy/continuous/wake/sleeping/last_activity）；
   模式转移只走 `toggle_continuous/toggle_wake_mode/enter_sleep/wake_up`。
+- **图片资源**：`ui.draw_image(basename)` 不带扩展名调用，按
+  `.jpg/.jpeg/.png/.bmp` 顺序查找，并对 `drawPng`/`drawBmp` 做能力探测
+  （固件没有就跳过该格式）。缺图返回 False，调用方降级到纯色/kaomoji。
+  照片类资源建议转 JPG：File Manager 单文件上传上限约 100KB，320×240 照片
+  的 PNG 常达 150~250KB，且 PNG 解码峰值内存明显更高。
 - **屏幕分层重绘**：`draw_state(state, force=False)` 拆成 6 层（背景/顶栏/表情面板/
   状态条/对话带/环形动画），各层用 `_drawn_*` 缓存键比对，只在内容真变时重绘。
   **顶栏与文字条带必须是实心底色**（`CHROME_BG`/`BAND_BG`）——局部擦除的前提。

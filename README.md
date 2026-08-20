@@ -109,7 +109,7 @@ netsh interface portproxy add v4tov4 listenport=5000 listenaddress=0.0.0.0 conne
 ```
 /flash/main.py                  ← device/main.py（三行引导）
 /flash/kagura/src/*.py          ← device/src/ 全部文件
-/flash/kagura/resource/*.jpg    ← 图片资源（可选，见 device/resource/README.md）
+/flash/kagura/resource/*        ← 图片资源（jpg/png/bmp，见 device/resource/README.md）
 /flash/kagura/data/             ← 运行时状态，首次启动自动创建
 ```
 
@@ -278,13 +278,14 @@ USE_STATE_IMAGES = False   # 改 True 可恢复"每个状态一张背景图"的�
 - **连续对话 off → on**：显示彩蛋 → 开启连续对话 → AI 主动用语音跟你聊天
 - **连续对话 on → off**：显示彩蛋 → 关闭连续对话
 
-**配置方法**：将彩蛋图片放到设备上：
-
-```
-/flash/kagura/resource/img_shake.jpg
-```
+**配置方法**：将彩蛋图片放到 `/flash/kagura/resource/img_shake.jpg`
+（`.png` / `.bmp` 也可，代码会自动按扩展名查找）。
 
 若未放置图片，则显示 kaomoji 表情 `(*/ω＼*)`。
+
+> 图片格式与大小的注意事项见 `device/resource/README.md`——简单说：
+> PNG 能用，但照片类建议转 JPG，否则容易超过 File Manager 约 100KB 的
+> 单文件上传上限。
 
 ## 项目结构
 

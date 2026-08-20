@@ -180,6 +180,40 @@ def _vis_wait(duration, levels):
 # 变化时重绘；顶栏/文字用实心条带打底，才能局部擦除而不破坏背景。
 
 
+# ── 图片加载（自动适配 jpg / png / bmp）──────────────────────
+#
+# 固件是否提供 drawPng / drawBmp 因版本而异，这里做能力探测：
+# 只把真实存在的绘制方法登记进 _IMG_FORMATS，缺失的格式直接跳过。
+# 资源文件不带扩展名调用，例如 draw_image("img_bg")。
+
+_IMG_FORMATS = []
+for _ext, _fname in ((".jpg", "drawJpg"), (".jpeg", "drawJpg"),
+                     (".png", "drawPng"), (".bmp", "drawBmp")):
+    _f = getattr(Lcd, _fname, None)
+    if _f is not None:
+        _IMG_FORMATS.append((_ext, _f))
+
+
+def draw_image(basename, x=0, y=0):
+    """在 resource 目录下按 jpg→png→bmp 顺序找图并绘制。
+
+    画出返回 True；文件不存在或固件不支持该格式返回 False（调用方降级）。
+    """
+    for ext, fn in _IMG_FORMATS:
+        path = cfg.res(basename + ext)
+        try:
+            with open(path, "rb") as f:
+                data = f.read()
+        except OSError:
+            continue                  # 换下一个扩展名
+        try:
+            fn(data, x, y)
+            return True
+        except Exception as e:
+            print("[ui] draw", path, "failed:", e)
+    return False
+
+
 _drawn_bg     = None
 _drawn_chrome = None
 _drawn_face   = None
@@ -208,12 +242,8 @@ def draw_state(state, force=False):
     # ── 层 1：背景（只在目标背景真正变化时重绘）──────────────
     want_bg = (cfg.IMG_MAP.get(state) if cfg.USE_STATE_IMAGES else None) or "img_bg"
     if force or want_bg != _drawn_bg:
-        try:
-            with open(cfg.res(want_bg + ".jpg"), "rb") as _f:
-                Lcd.drawJpg(_f.read(), 0, 0)
-        except Exception as e:
-            print("[ui] bg fallback to solid:", e)
-            Widgets.fillScreen(0x0a0a0a)
+        if not draw_image(want_bg):
+            Widgets.fillScreen(0x0a0a0a)   # 无图片资源：纯色背景
         _drawn_bg = want_bg
         # 背景重画后所有叠加层失效
         _drawn_chrome = None
