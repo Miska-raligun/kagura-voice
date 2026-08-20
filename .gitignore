@@ -6,3 +6,4 @@ tts_cache/
 *.log
 .pytest_cache/
 reminders.json
+device/resource/*.jpg

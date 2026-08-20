@@ -104,20 +104,36 @@ netsh interface portproxy add v4tov4 listenport=5000 listenaddress=0.0.0.0 conne
 
 **CoreS3 端**：
 
+设备端代码在 `device/` 目录下，按模块拆分。上传后的设备目录结构：
+
+```
+/flash/main.py                  ← device/main.py（三行引导）
+/flash/kagura/src/*.py          ← device/src/ 全部文件
+/flash/kagura/resource/*.jpg    ← 图片资源（可选，见 device/resource/README.md）
+/flash/kagura/data/             ← 运行时状态，首次启动自动创建
+```
+
+步骤：
+
 1. 用 M5Burner 烧录 UIFlow2 固件（WiFi 可不配，见下文"在设备上配置 WiFi"）
-2. 打开 uiflow2.m5stack.com 连接设备
-3. 将 `cores3_client.py` 的内容粘贴到编辑器
-4. 点击下载按钮写入设备（开机自动运行）
-5. 服务端 IP 由 UDP 广播自动发现，无需修改 `SERVER_BASE`
+2. 打开 uiflow2.m5stack.com 连接设备，点左侧 **webterminal → File** 打开文件管理
+3. 建目录 `/flash/kagura/src`，把 `device/src/` 下 9 个 `.py` 全部上传进去
+4. 把 `device/main.py` 上传为 `/flash/main.py`（开机自动运行）
+5. 可选：建 `/flash/kagura/resource` 并上传背景图
+6. 服务端 IP 由 UDP 广播自动发现，无需改 `cfg.SERVER_BASE`
+
+> 之后改代码只需重传改动的那个模块，不必每次重贴整个文件。
+> 单文件版 `cores3_client.py` 仍保留作为回退，内容烧成 `/flash/main.py`
+> 并删掉 `/flash/kagura/` 即可退回旧行为。
 
 #### 在设备上配置 WiFi
 
-`cores3_client.py` 自带屏上 WiFi 配网流程，不需要再拿数据线连电脑：
+设备端自带屏上 WiFi 配网流程，不需要再拿数据线连电脑：
 
 - **首次开机**：如果没有可用 WiFi（未预设 / 存档缺失），自动弹出配网界面
 - **修改网络**：开机瞬间按住屏幕 2 秒内进入配网界面（即使已连上旧 WiFi）
 - **操作流程**：扫描附近网络 → 点选 SSID → 屏幕软键盘输入密码（支持大小写 / 符号切换）→ 自动连接
-- **凭据存储**：保存在设备 flash 上的 `/flash/wifi.json`，下次开机自动连接
+- **凭据存储**：保存在 `/flash/kagura/data/wifi.json`，下次开机自动连接
 - **隐藏网络**：在 picker 底栏点 "Manual" 手动输入 SSID 和密码
 - **开放网络**：选中无锁标记的 SSID，跳过密码直接连接
 
@@ -161,7 +177,7 @@ curl -X POST http://localhost:5000/push \
 
 CoreS3 通过蓝牙定期扫描附近设备，按手机蓝牙名称匹配，自动判断用户是否在家。
 
-**配置方法**：在 `cores3_client.py` 顶部设置手机蓝牙名称：
+**配置方法**：在 `device/src/cfg.py` 里设置手机蓝牙名称：
 
 ```python
 BLE_PHONE_NAME = "iPhone-xxx"   # 你的手机蓝牙名称（部分匹配）
@@ -243,7 +259,7 @@ CoreS3 启动时自动从服务端同步时间，待机界面显示当前时钟�
 GIL，后台线程完全能跑动画。只是为一个状态引入线程的复杂度和风险不划算，所以
 有意保持静态帧。
 
-**回退开关**（`cores3_client.py` 顶部）：
+**回退开关**（`device/src/cfg.py`）：
 
 ```python
 VISUAL_ENABLED   = True    # 关掉则退回纯静态显示
@@ -262,10 +278,10 @@ USE_STATE_IMAGES = False   # 改 True 可恢复"每个状态一张背景图"的�
 - **连续对话 off → on**：显示彩蛋 → 开启连续对话 → AI 主动用语音跟你聊天
 - **连续对话 on → off**：显示彩蛋 → 关闭连续对话
 
-**配置方法**：将彩蛋图片放到设备 flash 中：
+**配置方法**：将彩蛋图片放到设备上：
 
 ```
-/flash/img_shake.jpg
+/flash/kagura/resource/img_shake.jpg
 ```
 
 若未放置图片，则显示 kaomoji 表情 `(*/ω＼*)`。
@@ -275,7 +291,12 @@ USE_STATE_IMAGES = False   # 改 True 可恢复"每个状态一张背景图"的�
 ```
 ├── voice_assistant.py   # 本地语音对话（麦克风 + 扬声器）
 ├── voice_server.py      # CoreS3 服务端（ASR + OpenClaw + TTS）
-├── cores3_client.py     # CoreS3 设备端代码（MicroPython）
+├── device/              # CoreS3 设备端（MicroPython，按模块拆分）
+│   ├── main.py          #   引导：加 sys.path 后启动 app
+│   ├── src/             #   cfg/hw/clock/ui/wifisetup/audio/netsvc/chat/app
+│   └── resource/        #   图片资源说明
+├── tools/               # 设备端拆分的静态校验 + import 模拟
+├── cores3_client.py     # 旧单文件版（已弃用，仅作回退）
 ├── baidu_tokens.py      # 百度 access token 缓存（线程安全）
 ├── quick_commands.py    # 快捷指令规则（时间/日期/星期/音量/定时提醒解析）
 ├── reminders.py         # 定时提醒调度器（持久化 + MQTT 播报）

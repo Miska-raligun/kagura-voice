@@ -19,7 +19,9 @@ CoreS3 (MicroPython)  ──HTTP──▶  voice_server.py (Flask :5000)  ──
 | 文件 | 说明 |
 |---|---|
 | `voice_server.py` | Flask 服务端：路由、ASR/TTS、`ServerState`（会话/限流/拍照）、`_send_push` |
-| `cores3_client.py` | CoreS3 固件（**MicroPython**，不能用 CPython 特性/typing；改后需真机烧录验证） |
+| `device/src/*.py` | CoreS3 固件（**MicroPython**，不能用 CPython 特性/typing；改后需真机烧录验证） |
+| `device/main.py` | 烧成 `/flash/main.py` 的引导：把 `/flash/kagura/src` 加进 sys.path |
+| `cores3_client.py` | 旧单文件版，**已弃用勿改**，真机验证通过后删除 |
 | `voice_assistant.py` | 本地 CLI 模式（ffmpeg 录音 + edge-tts），与服务端独立 |
 | `quick_commands.py` | 短路规则：时间/日期/星期 `match`、音量 `match_volume`、提醒解析 `match_reminder` |
 | `reminders.py` | 提醒调度：`schedule`/`fire_due`，落盘 `reminders.json`，线程 `init(send_fn)` |
@@ -70,21 +72,62 @@ CoreS3 (MicroPython)  ──HTTP──▶  voice_server.py (Flask :5000)  ──
 - **MQTT 回调只入队**：耗时操作（播放/拍照）在主循环 `process_mqtt_queue()` 消费，
   否则长播放阻塞心跳导致断连。
 - **看门狗**：`WATCHDOG_TIMEOUT_MS=120s` 必须大于最长合法阻塞（HTTP 30s+余量）；
-  长循环里要 `_wdt_feed()`。ESP32 WDT 创建后无法关闭。
+  长循环里要 `hw.wdt_feed()`。ESP32 WDT 创建后无法关闭。
 - **openclaw 并发**：`chat()` 有全局 Semaphore(2) + 每 session 串行锁。
 - **回退开关**（设备端顶部常量）：`WAKE_MIC_PERSISTENT`、`WATCHDOG_ENABLED`、
   `SHOW_CHAT_TEXT`、`VISUAL_ENABLED`、`USE_STATE_IMAGES`——真机出问题先关开关再排查。
+
+## 设备端模块结构（device/src）
+
+依赖分层，**必须保持无环**（`tools/check_split.py` 会检查）：
+
+```
+cfg → hw → clock → ui → {wifisetup, audio} → netsvc → chat → app
+```
+
+| 模块 | 职责 |
+|---|---|
+| `cfg` | 常量、回退开关、路径、`St` 状态类。不 import 任何 kagura 模块 |
+| `hw` | LED/看门狗/麦克风/音量/摄像头/RMS/触摸/绘图原语 |
+| `clock` | RTC 同步与读取。单独成模块是为打断 ui ↔ netsvc 环 |
+| `ui` | 字体、环形可视化、分层重绘 `draw_state`、息屏唤醒 |
+| `wifisetup` | 屏上配网（SSID 选择 + 软键盘），最自洽的一块 |
+| `audio` | 录音 VAD、播放、包络、噪声校准 |
+| `netsvc` | MQTT、BLE 感知、UDP 发现 |
+| `chat` | 主对话、模式切换、IMU 摇晃彩蛋 |
+| `app` | `setup()` / `loop()` / `main()` |
+
+**三条铁律**：
+
+1. **可变全局必须用 `cfg.X` 访问，绝不能 `from cfg import X`。**
+   `SERVER_BASE`/`SERVER_URL`/`VISION_URL`/`UPLOAD_URL`/`MQTT_BROKER` 由
+   `netsvc.discover_server()` 改写，`SILENCE_THRESHOLD`/`WAKE_THRESHOLD` 由
+   `audio.calibrate_noise()` 改写。用 `from` 导入拿到的是值拷贝，改了看不到，
+   **且不报错**——设备会一直连 fallback IP。
+2. **改写 cfg 里的可变量要写 `cfg.X = ...`，不能用 `global X`**（那会在本模块
+   建一个同名局部全局，cfg 里的值纹丝不动）。
+3. **别拿模块名当局部变量**。原代码 `ensure_wifi()` 里有个局部 `cfg = _wifi_load()`
+   会遮蔽 cfg 模块，拆分时已改名为 `saved`。
+
+`audio ↔ netsvc` 的循环（`play_wav` 要 `mqtt_check` 维持心跳、push 又要回调
+`play_wav`）用回调注入打断：`app.setup()` 里 `audio.set_pump(netsvc.mqtt_check)`。
 
 ## 测试与验证
 
 ```bash
 pip install -r requirements.txt
 pytest tests/ -q                 # 82+ 例，外部依赖全打桩（conftest 注入 config/paho 桩）
-python -c "import ast; ast.parse(open('cores3_client.py').read())"   # 设备端语法检查
+python3 tools/check_split.py     # 设备端拆分静态校验（5 项）
+python3 tools/import_sim.py      # 桩件环境下真的 import 一遍设备模块
 ```
 
 - 服务端改动必须跑 pytest；`tests/conftest.py` 的 `vs` fixture 每测试重置 `ServerState`。
-- `cores3_client.py` 无法本地运行，只能 AST 检查 + uiflow2.m5stack.com 真机烧录验证。
+- 设备端无法本地运行，但有两层静态兜底（CI 也跑）：
+  - `tools/check_split.py`：名字解析、import 无环、可变全局导入方式、
+    跨模块 `mod.attr` 是否悬空、函数是否丢失
+  - `tools/import_sim.py`：用桩件模拟 M5/MicroPython 环境**真的 import 一遍**，
+    并验证 `rms`/`rms_slices` 一致性、WAV 头、包络等纯函数行为
+  - 最终仍需 uiflow2.m5stack.com 真机烧录确认
 - paho-mqtt 用 1.x API（`mqtt.Client()`），勿升 2.x。
 
 ## 惯例
@@ -92,3 +135,6 @@ python -c "import ast; ast.parse(open('cores3_client.py').read())"   # 设备端
 - 提交信息中文，格式 `类型: 摘要`（feat/fix/perf/refactor/docs/chore）。
 - 注释中文为主；服务端有 type hints，设备端（MicroPython）没有。
 - 运行时产物（`push_audio/`、`tts_cache/`、`reminders.json`）已 gitignore，勿提交。
+- 设备目录：`/flash/kagura/src`（代码）、`/flash/kagura/resource`（图片，
+  用 `cfg.res()` 取路径）、`/flash/kagura/data`（运行时状态，`cfg.data()`，
+  `cfg.ensure_dirs()` 自动创建）。新增文件路径一律走这两个助手，别硬编码。
