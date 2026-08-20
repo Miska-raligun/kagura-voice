@@ -1,3 +1,8 @@
+# ⚠ 已弃用：设备端代码已拆分到 device/ 目录（见 device/src/*.py）。
+# 本文件仅作为真机验证期间的回退副本保留，**不要再修改它**——
+# 改动请落在 device/src/ 下。真机验证通过后即可删除本文件。
+#   回退方法：把本文件内容烧成 /flash/main.py，删掉 /flash/kagura/ 即可。
+
 import M5
 from M5 import *
 from hardware import *

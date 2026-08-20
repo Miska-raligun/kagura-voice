@@ -4,10 +4,11 @@ __pycache__/
 push_audio/
 tts_cache/
 *.log
+*.log.*
 .pytest_cache/
 crash_reports/
 device_logs/
 reminders.json
 photo_schedules.json
 snapshots/
-*.log.*
+device/resource/*.jpg

@@ -17,5 +17,12 @@ jobs:
         run: pip install -r requirements.txt
       - name: Run tests
         run: pytest tests/ -q
-      - name: Syntax check (MicroPython client)
-        run: python -c "import ast; ast.parse(open('cores3_client.py').read())"
+      - name: Syntax check (device modules)
+        run: |
+          for f in device/main.py device/src/*.py; do
+            python -c "import ast,sys; ast.parse(open(sys.argv[1]).read())" "$f"
+          done
+      - name: Device module split checks
+        run: python tools/check_split.py
+      - name: Device import simulation
+        run: python tools/import_sim.py
