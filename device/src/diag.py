@@ -168,9 +168,16 @@ def net_watch_tick():
     # 失联 10 分钟：WiFi 栈整个关掉重建（active False→True），比裸 connect 更狠；
     # 失联 25 分钟：整机复位。uptime>1h 才允许复位 = 服务端长时间不在
     # （如 PC 关机）时最多每小时重启一次，不会无限快速重启。
+    #
+    # 判据只看 dead_for（多久没成功联系上服务端），**不看 wifi_ok / _mqtt_ok**。
+    # LRN 8/21：曾经加了 `(not wifi_ok or not _mqtt_ok)` 这道前置条件，结果
+    # 8/21 13:31 那次失联 79 分钟自愈一次都没触发——因为 WiFi 驱动 wedge 的
+    # 典型表现就是 isconnected() 仍返回 True、MQTT socket 对象也还在，
+    # 设备自认为健康，可包一个都出不去。**"看起来好不好"不可信，
+    # "服务端还认不认得我"才是唯一可信的判据。**
     global _net_fix_stage
     dead_for = now - _last_server_ok
-    if (not wifi_ok or not _mqtt_ok) and not cfg.St.busy:
+    if not cfg.St.busy:
         if _net_fix_stage == 0 and dead_for > cfg._NET_FIX1_SECS:
             _net_fix_stage = 1
             dbg("netfix1 wifi-stack-reinit dead={}s".format(int(dead_for)))

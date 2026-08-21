@@ -178,7 +178,14 @@ CoreS3 (MicroPython)  ──HTTP──▶  voice_server.py (Flask :5000)  ──
 - **MQTT 回调只入队**：耗时操作（播放/拍照）在主循环 `process_mqtt_queue()` 消费，
   否则长播放阻塞心跳导致断连。
 - **看门狗**：`WATCHDOG_TIMEOUT_MS=120s` 必须大于最长合法阻塞（HTTP 30s+余量）；
-  长循环里要 `hw.wdt_feed()`。ESP32 WDT 创建后无法关闭。
+  长循环里要 `hw._wdt_feed()`。ESP32 WDT 创建后无法关闭。
+- **网络自愈的判据只看 `dead_for`（多久没成功联系上服务端），绝不能加
+  `wifi_ok` / `_mqtt_ok` 前置条件**。曾经加过，结果 2026-08-21 那次失联
+  79 分钟自愈一次都没触发：WiFi 驱动 wedge 的典型表现就是 `isconnected()`
+  仍返回 True、MQTT socket 也还在，设备自认为健康，可包一个都出不去
+  （服务端记的正是 `mqtt=True`）。**"自己看起来好不好"不可信，
+  "服务端还认不认得我"才是唯一可信的判据。**
+  看门狗也救不了这种情况——主循环活得好好的，一直在喂狗。
 - **openclaw 并发**：`chat()` 有全局 Semaphore(2) + 每 session 串行锁。
 - **摄像头固件差异**：抓帧走 `_cam_grab()`（优先 `camera.capture()`→bytes，
   回退 `camera.snapshot()`→`image.Image`），预览走 `_cam_show()`（优先
