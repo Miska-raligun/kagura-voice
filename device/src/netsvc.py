@@ -104,12 +104,38 @@ def _play_push(url):
     try:
         resp = urequests.get(cfg.SERVER_BASE + url, timeout=cfg.REQUEST_TIMEOUT_SHORT)
         if resp.status_code == 200:
-            snd.play_wav(resp.content)
-        resp.close()
+            n = snd.save_stream(resp)   # 不用 resp.content：整段 WAV 进堆 + 全程不喂狗
+            resp.close()
+            if n > 0:
+                _play_saved(n)
+            else:
+                diag.dbg("push save failed")
+        else:
+            resp.close()
     except OSError as e:
         print("push download err:", e)
     ui.draw_state("idle")
     hw._set_led(0, 0, 0)
+
+
+def _play_saved(n):
+    """播放刚落盘的 WAV。长音频前后各留一条持久化面包屑。
+
+    这两条是给下一次「播到一半黑屏」准备的证据：重启后 crash.log 里
+    只有 `play` 没有 `played` = 死在播放中；`iters=0` = playWavFile 是
+    阻塞实现（整段播放期间主循环没转，喂狗全靠进函数前那一次）。
+    只给大音频写 flash，短播报不值得为它磨损闪存。
+    """
+    big = n >= cfg.PLAY_BIG_BYTES
+    if big:
+        diag.dbg("play {}KB".format(n >> 10))
+        diag._persist_dbg("play-big")
+    t0 = time.ticks_ms()
+    iters = snd.play_file()
+    if big:
+        diag.dbg("played {}s iters={}".format(
+            time.ticks_diff(time.ticks_ms(), t0) // 1000, iters))
+        diag._persist_dbg("play-big-done")
 
 
 def _run_capture_cmd(cmd):
@@ -211,8 +237,13 @@ def mqtt_check():
                 _mqtt.ping()
                 _mqtt_last_ping = now
         except OSError as e:
-            global _mqtt_ok
-            if _mqtt_ok:
+            # LRN 2026-08-25：这里原来写的是 `global _mqtt_ok` + `if _mqtt_ok`，
+            # 但本模块根本没有这个名字（状态在 diag 里，模块头注释也这么写的）。
+            # 于是**任何一次 MQTT 掉线都被翻译成 NameError 逃出 mqtt_check**，
+            # 主循环连吃 10 次 → loop-error-storm → machine.reset()。
+            # 症状就是「毫无征兆黑屏重启」，crash_reports 里 4 份日志全是它。
+            # 别再引入模块级 _mqtt_ok：一份状态只能有一个家。
+            if diag._mqtt_ok:
                 diag._mqtt_ok = False
                 diag.dbg("mqtt disconnected: {}".format(e))
             now = time.time()

@@ -64,7 +64,7 @@ stub("ujson", loads=json.loads, dumps=json.dumps, load=json.load, dump=json.dump
 stub("usocket", socket=socket.socket, AF_INET=socket.AF_INET,
      SOCK_DGRAM=socket.SOCK_DGRAM, SOL_SOCKET=socket.SOL_SOCKET,
      SO_BROADCAST=socket.SO_BROADCAST)
-stub("uos", mkdir=lambda p: None, remove=lambda p: None, rename=lambda a, b: None)
+stub("uos", mkdir=lambda p: None, remove=_os.remove, rename=lambda a, b: None)
 stub("requests", get=lambda *a, **kw: _Any("resp"), post=lambda *a, **kw: _Any("resp"))
 
 print("=== 按依赖顺序 import ===")
@@ -112,6 +112,97 @@ print("  snd._wav_envelope 桶数      =", len(env), "响段均值 %.2f 轻段�
       % (sum(env[:5]) / 5, sum(env[-5:]) / 5))
 assert all(0.0 <= v <= 1.0 for v in env)
 assert sum(env[:5]) / 5 > sum(env[-5:]) / 5 * 2
+
+# 落盘：分块写 + 短写（文件系统满）必须被发现，不能当成功
+class _FakeFile:
+    """write 只肯写 limit 字节的文件——模拟 flash 写满时的短写。"""
+    def __init__(self, limit=None):
+        self.data = bytearray()
+        self.limit = limit
+    def write(self, b):
+        room = len(b) if self.limit is None else max(0, self.limit - len(self.data))
+        n = min(len(b), room)
+        self.data += bytes(b[:n])
+        return n
+
+payload = bytes(range(256)) * 200        # 51200 字节，跨多个 PLAY_CHUNK
+f = _FakeFile()
+assert snd._write_chunked(f, payload) == len(payload) and f.data == payload
+short = _FakeFile(limit=10000)
+assert snd._write_chunked(short, payload) == 10000, "短写必须如实返回已写字节数"
+print("  snd._write_chunked         = 全写 %d ✓ / 写满时返回 %d（不静默成功）✓"
+      % (len(payload), 10000))
+
+class _FakeRaw:
+    """按块吐数据的 socket 桩：readinto 到 EOF 返回 0。"""
+    def __init__(self, data, step=1500):
+        self.data, self.step, self.off = data, step, 0
+    def readinto(self, buf):
+        n = min(len(buf), self.step, len(self.data) - self.off)
+        buf[:n] = self.data[self.off:self.off + n]
+        self.off += n
+        return n
+
+class _FakeResp:
+    def __init__(self, data, raw=True):
+        self.raw = _FakeRaw(data) if raw else None
+        self.content = data
+        self.headers = {"Content-Length": str(len(data))}
+
+_tmp = os.path.join(os.path.dirname(__file__), "..", "device", "_sim_play.wav")
+assert snd.save_stream(_FakeResp(payload), _tmp) == len(payload)
+assert open(_tmp, "rb").read() == payload, "分块搬运不能丢字节/错位"
+assert snd.save_stream(_FakeResp(payload, raw=False), _tmp) == len(payload), \
+    "固件不给 raw 时要能退回 resp.content"
+print("  snd.save_stream            = 分块落盘字节一致 ✓ / 无 raw 时回退 ✓")
+
+# 切段：超长音频才切，每段自带正确的 WAV 头，拼回去要和原音频逐字节相同
+_seg_max, _seg_bytes, _fade = cfg.PLAY_SEG_MAX, cfg.PLAY_SEG_BYTES, cfg.PLAY_FADE_BYTES
+cfg.PLAY_SEG_MAX, cfg.PLAY_SEG_BYTES, cfg.PLAY_FADE_BYTES = 8000, 4000, 0
+body = bytes(bytearray((i * 7) % 256 for i in range(10000)))   # 10000 = 2 整段 + 尾巴
+src = hw.make_wav_header(len(body)) + body
+assert snd.save_stream(_FakeResp(src), _tmp) == len(body), "返回值应是音频字节数（不含头）"
+assert len(snd._segs) == 3, "10000/4000 应切成 3 段"
+rebuilt = b""
+for _p, _n in snd._segs:
+    raw_seg = open(_p, "rb").read()
+    assert raw_seg[:44] == hw.make_wav_header(_n), "每段必须自带回填好的 WAV 头"
+    assert len(raw_seg) - 44 == _n
+    rebuilt += raw_seg[44:]
+assert rebuilt == body, "切段拼回去必须与原音频逐字节相同"
+print("  snd.save_stream 切段        = %d 段 %s ✓ 拼回逐字节相同 ✓"
+      % (len(snd._segs), [n for _p, n in snd._segs]))
+
+# 换一条短音频：不切段，且上一条留下的分段文件要被删掉
+_stale = [p for p, _n in snd._segs[1:]]
+assert snd.save_stream(_FakeResp(src[:2000]), _tmp) == 2000
+assert len(snd._segs) == 1 and snd._segs[0][0] == _tmp, "短音频必须一段到底（零缝隙）"
+assert not any(os.path.exists(p) for p in _stale), "上一条的分段文件必须清掉，否则占满 flash"
+print("  短音频                      = 不切段 ✓ 旧分段文件已清理 ✓")
+# 淡入淡出：接缝两头必须被拉到零，否则波形硬台阶就是那声"咔嚓"
+cfg.PLAY_FADE_BYTES = 160
+FLAT = 10000
+flat_body = _struct.pack('<h', FLAT) * 5000        # 恒定幅度，斜坡一眼可见
+assert snd.save_stream(_FakeResp(hw.make_wav_header(len(flat_body)) + flat_body),
+                       _tmp) == len(flat_body)
+assert len(snd._segs) == 3
+half = cfg.PLAY_FADE_BYTES // 2
+for si, (_p, _n) in enumerate(snd._segs):
+    body_seg = open(_p, "rb").read()[44:]
+    head = [_struct.unpack_from('<h', body_seg, 2 * i)[0] for i in range(half)]
+    assert head == [FLAT * i // half for i in range(half)], "段首必须是从 0 起的斜坡"
+    mid = _struct.unpack_from('<h', body_seg, 2 * half + 200)[0]
+    assert mid == FLAT, "斜坡以外的采样一个都不许动"
+    if si < len(snd._segs) - 1:       # 末段的结尾是音频真正的结尾，不淡出
+        tail = [_struct.unpack_from('<h', body_seg, len(body_seg) - 2 * (half - i))[0]
+                for i in range(half)]
+        assert tail == [FLAT * (half - i) // half for i in range(half)], "段尾必须淡到零"
+print("  snd._fade_edges            = 段首淡入/段尾淡出各 %d 采样 ✓ 区外零改动 ✓" % half)
+
+cfg.PLAY_SEG_MAX, cfg.PLAY_SEG_BYTES, cfg.PLAY_FADE_BYTES = _seg_max, _seg_bytes, _fade
+for _p, _n in snd._segs:      # 分段文件全清，别在仓库里留垃圾
+    if os.path.exists(_p):
+        os.remove(_p)
 
 # 可变全局：模拟 discover_server 改写后，其他模块能否看到
 print("\n=== 可变全局跨模块可见性（拆分最大的坑）===")
