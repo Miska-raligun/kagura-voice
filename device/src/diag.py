@@ -47,6 +47,9 @@ _net_dot     = None    # 屏幕右上角状态点当前色: 'g'/'y'/'r'
 _pwr_last    = None    # USB 供电状态（isCharging）上次采样值
 
 
+_pwr_persist_last = 0  # 上次把供电翻转写进 flash 的时间（满电涓流会一直翻）
+
+
 _boot_ticks  = time.ticks_ms()
 
 
@@ -153,13 +156,19 @@ def net_watch_tick():
     # ── 供电监视（LRN 7/30：夜间"关机"疑似断电/掉电，非软件）──
     # USB 供电状态翻转立即记录并持久化——如果设备靠电池残喘，哪怕只有
     # 几十秒，flash 里也会留下"断电时刻"的证据。
-    global _pwr_last
+    global _pwr_last, _pwr_persist_last
     try:
         chg = M5.Power.isCharging()
         if _pwr_last is not None and chg != _pwr_last:
-            dbg("power: charging {}->{} bat={}%".format(
-                _pwr_last, chg, M5.Power.getBatteryLevel()))
-            _persist_dbg("power-change")
+            bat = M5.Power.getBatteryLevel()
+            dbg("power: charging {}->{} bat={}%".format(_pwr_last, chg, bat))
+            # 满电后充电状态会自己每几十秒翻一次（涓流充电），条条都持久化
+            # 就是往 flash 上刷噪声：8/11 那份崩溃日志 8KB 全被它占满，
+            # 真正的死因一个字都没带回来。只有"掉电嫌疑"才值得写 flash——
+            # 电量没满却停了充电，且距上次持久化超过 10 分钟。
+            if (not chg) and bat < 95 and now - _pwr_persist_last > 600:
+                _pwr_persist_last = now
+                _persist_dbg("power-change")
         _pwr_last = chg
     except Exception:
         pass
@@ -352,7 +361,12 @@ def _boot_report():
     log = ""
     try:
         with open(cfg.data("crash.log"), "r") as f:
-            log = f.read(8192)   # 只取前 8KB，防大文件撑爆内存
+            log = f.read(65536)      # 上游两处写入各有 32KB/24KB 上限，读满即够
+        if len(log) > 8192:
+            # LRN 2026-08-25：原来取的是**前** 8KB。crash.log 是追加的，
+            # 死因在末尾，取头等于把最近一次崩溃现场丢掉——8/11 那份 8KB
+            # 崩溃日志里一行堆栈都没有，全是几天前的 power-change 噪声。
+            log = log[-8192:]
     except OSError:
         pass                     # 无崩溃记录，仅作开机通知
     try:

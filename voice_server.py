@@ -1046,6 +1046,18 @@ def crash_report():
     _RESET_CAUSES = {1: "上电/复位键", 2: "硬复位", 3: "看门狗复位⚠️", 4: "深睡唤醒", 5: "软复位"}
     cause = _RESET_CAUSES.get(data.get("reset_cause"), f"未知({data.get('reset_cause')})")
     ts = time.strftime("%Y-%m-%d %H:%M:%S")
+    # 重启原因必须落盘：服务端 stdout 通常挂在某个终端上，翻不到历史，
+    # 而"上次是怎么死的"恰恰是排查设备黑屏唯一的硬证据。写进设备日志，
+    # /device-status 的 recent_logs 直接就能看见。
+    # 注意 MicroPython 的口径：**brownout（掉电）会被归进 1「上电/复位键」，
+    # panic/guru meditation 会被归进 5「软复位」**——1 不等于"有人拔了电"，
+    # 5 也不等于"程序主动重启"，别照字面下结论。
+    try:
+        DEVICE_LOGS_DIR.mkdir(exist_ok=True)
+        with open(DEVICE_LOGS_DIR / f"{device_id}.log", "a", encoding="utf-8") as f:
+            f.write(f"[{ts}] BOOT reset_cause={cause} crashlog={len(log)}B\n")
+    except OSError as e:
+        print(f"[{device_id}] boot log 写入失败: {e}")
     if log:
         report_dir = Path("crash_reports")
         report_dir.mkdir(exist_ok=True)
