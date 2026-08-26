@@ -80,6 +80,8 @@ def setup():
 def loop():
     global _wake_last_ms, _wake_loud_count
 
+    cfg.St.stage = "loop"    # 死人开关的临终留言用；长循环各自改写它
+
     # feel=True 只在这里传：主循环是唯一把屏幕当皮肤的地方
     touch, pos = hw.check_touch(feel=True)
 

@@ -13,6 +13,7 @@ import uos
 import requests as urequests
 
 import cfg
+import hw
 import clock
 import ui
 import wifisetup
@@ -227,6 +228,9 @@ def heartbeat_tick():
         "heap": gc.mem_free(),
         "mqtt": _mqtt_ok,
         "sleeping": cfg.St.sleeping,
+        # 看门狗到底武装成功没有（0 = 没有）。8/26 那次僵死 4h51m 没复位、
+        # 自愈一次没触发，就是因为"有没有看门狗"这件事远程完全看不见。
+        "wdt": hw._wdt_ms,
     }
     try:
         payload["rssi"] = wifisetup._wlan.status("rssi")
@@ -252,6 +256,7 @@ def heartbeat_tick():
         if ok:
             _dbg_sent = len(_dbg_buf)
             globals()["_last_server_ok"] = now
+            cfg.St.last_ok_ms = time.ticks_ms()   # 死人开关的判据，见 hw._deadman_check
             globals()["_net_fix_stage"] = 0
             if not clock._rtc_synced:
                 clock.sync_rtc()   # 开机时网络未就绪的话，恢复后补同步时间

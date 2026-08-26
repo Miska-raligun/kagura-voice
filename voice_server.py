@@ -968,6 +968,19 @@ _hb_devices: dict = {}         # device_id → {"ts", "data", "alerted"}
 _hb_lock = threading.Lock()
 
 
+def _wdt_note(data: dict) -> str:
+    """把心跳里的看门狗状态翻成一眼能看懂的字样。
+
+    设备僵死却不复位时，第一个要问的就是"它到底有没有看门狗"——
+    8/26 那次查了半天才想到这一层，之后每条心跳都自己带着答案。
+    旧固件不上报这个字段，显示为"未知"。
+    """
+    ms = data.get("wdt")
+    if ms is None:
+        return "wdt=未知(旧固件)"
+    return f"wdt={ms // 1000}s" if ms else "wdt=⚠️未武装"
+
+
 @app.route("/heartbeat", methods=["POST"])
 def device_heartbeat():
     """设备心跳：{"device_id", "up", "heap", "mqtt", "rssi", "logs": [...]}"""
@@ -980,12 +993,12 @@ def device_heartbeat():
         _hb_devices[device_id] = {"ts": now, "data": data, "alerted": False}
     if prev is None:
         print(f"[{device_id}] 💓 心跳开始 heap={data.get('heap')} rssi={data.get('rssi')}"
-              f" bat={data.get('bat')}% chg={data.get('chg')}")
+              f" bat={data.get('bat')}% chg={data.get('chg')} {_wdt_note(data)}")
     elif now - prev["ts"] > _HB_SILENT_SECS:
         gap = int(now - prev["ts"])
         print(f"[{device_id}] 💓 心跳恢复（中断 {gap // 60}分{gap % 60}秒）"
               f" heap={data.get('heap')} rssi={data.get('rssi')} mqtt={data.get('mqtt')}"
-              f" bat={data.get('bat')}% chg={data.get('chg')}")
+              f" bat={data.get('bat')}% chg={data.get('chg')} {_wdt_note(data)}")
     if logs:
         DEVICE_LOGS_DIR.mkdir(exist_ok=True)
         stamp = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -1029,7 +1042,8 @@ def _hb_watch_loop() -> None:
                     rec["alerted"] = True
                     last = time.strftime("%H:%M:%S", time.localtime(rec["ts"]))
                     print(f"[{device_id}] 🔇 设备失联（最后心跳 {last}，"
-                          f"heap={rec['data'].get('heap')} mqtt={rec['data'].get('mqtt')}）")
+                          f"heap={rec['data'].get('heap')} mqtt={rec['data'].get('mqtt')} "
+                          f"{_wdt_note(rec['data'])}）")
 
 
 @app.route("/crash-report", methods=["POST"])
@@ -1349,7 +1363,7 @@ def monitor_state():
         device_id: {
             "last_seen_secs_ago": int(now - rec["ts"]),
             "online": (now - rec["ts"]) < _HB_SILENT_SECS,
-            **{k: rec["data"].get(k) for k in ("heap", "rssi", "mqtt", "bat", "chg")},
+            **{k: rec["data"].get(k) for k in ("heap", "rssi", "mqtt", "bat", "chg", "wdt")},
         }
         for device_id, rec in snapshot.items()
     }

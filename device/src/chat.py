@@ -61,6 +61,7 @@ def record_and_send():
     播放结束后有 1.5s 窗口，长按可退出连续模式。
     """
     cfg.St.busy = True
+    cfg.St.stage = "chat"
     cfg.St.last_activity = time.time()
     gc.collect()
 

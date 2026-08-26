@@ -107,6 +107,7 @@ def _run_stream_cmd(cmd):
     if cfg.St.sleeping:
         ui.wake_up()
     cfg.St.busy = True
+    cfg.St.stage = "stream"
     cfg.St.streaming = True
     cfg.St.last_activity = time.time()
 

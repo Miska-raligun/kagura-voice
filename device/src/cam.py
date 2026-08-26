@@ -280,6 +280,7 @@ def camera_mode():
     长按屏幕任意处随时退出；CAM_IDLE_TIMEOUT 秒无操作自动退出。
     """
     cfg.St.busy = True
+    cfg.St.stage = "cam"
     cfg.St.last_activity = time.time()
     gc.collect()
     if not _camera_ensure():

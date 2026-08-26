@@ -64,7 +64,8 @@ stub("ujson", loads=json.loads, dumps=json.dumps, load=json.load, dump=json.dump
 stub("usocket", socket=socket.socket, AF_INET=socket.AF_INET,
      SOCK_DGRAM=socket.SOCK_DGRAM, SOL_SOCKET=socket.SOL_SOCKET,
      SO_BROADCAST=socket.SO_BROADCAST)
-stub("uos", mkdir=lambda p: None, remove=_os.remove, rename=lambda a, b: None)
+stub("uos", mkdir=lambda p: None, remove=_os.remove, rename=lambda a, b: None,
+     stat=_os.stat)
 stub("requests", get=lambda *a, **kw: _Any("resp"), post=lambda *a, **kw: _Any("resp"))
 
 print("=== 按依赖顺序 import ===")
@@ -203,6 +204,74 @@ cfg.PLAY_SEG_MAX, cfg.PLAY_SEG_BYTES, cfg.PLAY_FADE_BYTES = _seg_max, _seg_bytes
 for _p, _n in snd._segs:      # 分段文件全清，别在仓库里留垃圾
     if os.path.exists(_p):
         os.remove(_p)
+
+# 看门狗武装：固件拒绝配置值时必须回退，并且结果要能被远程看见
+_wdt_calls = []
+def _picky_wdt(timeout=0):
+    """模拟一个只接受 <=120s 的固件。"""
+    _wdt_calls.append(timeout)
+    if timeout > 120000:
+        raise ValueError("WDT timeout too long")
+    return _Any("WDT")
+sys.modules["machine"].WDT = _picky_wdt
+_saved_to = cfg.WATCHDOG_TIMEOUT_MS
+cfg.WATCHDOG_TIMEOUT_MS = 180000
+hw._wdt, hw._wdt_ms = None, 0
+hw._wdt_init()
+assert _wdt_calls == [180000, 120000], "配置值失败后必须回退到 120000"
+assert hw._wdt is not None and hw._wdt_ms == 120000, "回退成功要如实记进 _wdt_ms"
+print("  hw._wdt_init 回退           = 180000 被拒 → 120000 武装成功，_wdt_ms=%d ✓" % hw._wdt_ms)
+
+sys.modules["machine"].WDT = lambda timeout=0: (_ for _ in ()).throw(OSError("no wdt"))
+hw._wdt, hw._wdt_ms = None, 0
+hw._wdt_init()
+assert hw._wdt is None and hw._wdt_ms == 0, "全失败必须留下 _wdt_ms=0，别假装有看门狗"
+print("  hw._wdt_init 全失败         = _wdt_ms=0（心跳会报⚠️未武装）✓")
+cfg.WATCHDOG_TIMEOUT_MS = _saved_to
+sys.modules["machine"].WDT = lambda **kw: _Any("WDT")
+hw._wdt, hw._wdt_ms = None, 0
+
+# drain_touch：触摸永远不抬起时必须超时退出，不能把主循环拖死
+class _StuckTouch:
+    getCount = staticmethod(lambda: 1)
+_saved_touch = _M5.Touch
+_M5.Touch = _StuckTouch
+_t0 = _time.monotonic()
+assert hw.drain_touch(timeout_ms=200) is False, "卡住的触摸必须超时返回 False"
+assert _time.monotonic() - _t0 < 2, "超时要按 timeout_ms 生效，不能傻等"
+_M5.Touch = _saved_touch
+print("  hw.drain_touch 卡死         = 200ms 超时退出 ✓（旧版在这里永远转下去）")
+
+# 死人开关：主循环停摆时，喂狗点是唯一还在转的地方
+_reset_calls = []
+sys.modules["machine"].reset = lambda: _reset_calls.append(True)
+_dm_log = os.path.join(os.path.dirname(__file__), "..", "device", "_sim_crash.log")
+_saved_data, cfg.data = cfg.data, (lambda name: _dm_log)
+_saved_dm = (cfg.DEADMAN_SECS, cfg.DEADMAN_MIN_UPTIME_MS)
+cfg.DEADMAN_SECS, cfg.DEADMAN_MIN_UPTIME_MS = 60, 0
+cfg.St.stage = "play"
+cfg.St.last_ok_ms = _time.ticks_ms() - 120000      # 装作 2 分钟没联系上服务端
+hw._deadman_last = _time.ticks_ms() - 999999       # 绕过 10s 节流
+hw._wdt_feed()
+assert _reset_calls == [True], "失联超过阈值必须复位"
+assert "stuck at play" in open(_dm_log).read(), "复位前必须留下卡在哪一步的临终留言"
+os.remove(_dm_log)
+print("  hw._deadman_check 触发      = 失联超阈值 → 复位 + 留言\"stuck at play\" ✓")
+
+_reset_calls.clear()
+cfg.St.last_ok_ms = _time.ticks_ms()               # 刚联系过
+hw._deadman_last = _time.ticks_ms() - 999999
+hw._wdt_feed()
+cfg.DEADMAN_MIN_UPTIME_MS = 3600000                # 开机不久
+hw._deadman_armed = False                          # 闩锁复位，重新走门槛判断
+cfg.St.last_ok_ms = _time.ticks_ms() - 120000
+hw._deadman_last = _time.ticks_ms() - 999999
+hw._wdt_feed()
+assert _reset_calls == [], "刚联系过 / 开机不久都不许复位"
+print("  hw._deadman_check 不误伤    = 刚联系过 ✓ 开机 1 小时内 ✓")
+cfg.DEADMAN_SECS, cfg.DEADMAN_MIN_UPTIME_MS = _saved_dm
+cfg.data = _saved_data
+cfg.St.last_ok_ms = _time.ticks_ms()
 
 # 可变全局：模拟 discover_server 改写后，其他模块能否看到
 print("\n=== 可变全局跨模块可见性（拆分最大的坑）===")

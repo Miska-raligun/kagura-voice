@@ -73,6 +73,7 @@ def _record_audio():
     无说话返回空列表 []。
     若用户在录音期间长按屏幕，立即停止录音并返回 None（哨兵，表示用户主动中断）。
     """
+    cfg.St.stage = "rec"
     hw._mic_on()
     chunks, silent, started = [], 0, False
     sub_levels = [0] * 5        # 上一块的子片电平，驱动等待期间的环形动画
@@ -230,6 +231,7 @@ def save_stream(resp, path=None):
     固件的 requests 万一不给 raw，退回老路（短音频照样能用）。
     """
     global _segs
+    cfg.St.stage = "dl"
     path = path or cfg.PLAY_PATH
     _segs = []
     raw = getattr(resp, "raw", None)
@@ -345,6 +347,7 @@ def play_file(path=None, env=None):
     **段与段之间不 end/begin 扬声器**：那会白搭上收尾的 150ms 消 pop 静音，
     缝隙从几十毫秒变成两百多毫秒，一耳朵就听得出来。
     """
+    cfg.St.stage = "play"
     segs = [(path, 0)] if path else (_segs or [(cfg.PLAY_PATH, 0)])
     hw._mic_off()   # Mic/Speaker 共享音频通路：播放前确保麦克风已释放
     env = env or []

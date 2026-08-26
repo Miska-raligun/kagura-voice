@@ -168,6 +168,9 @@ class St:
     wake          = False   # 声控唤醒模式（与 continuous 互斥）
     sleeping      = False   # 息屏休眠中
     last_activity = 0       # 最近一次交互时间戳（休眠计时）
+    # 下面两个是"死人开关"用的，见 hw._deadman_check：
+    stage         = "boot"  # 当前在哪个长循环里（主循环每轮复位成 "loop"）
+    last_ok_ms    = 0       # 上次成功联系上服务端的 ticks_ms（hw 在 import 时初始化）
 
 
 WAKE_THRESHOLD   = 600      # 高于环境底噪，低于正常说话音量
@@ -194,6 +197,19 @@ WATCHDOG_ENABLED = True
 # 2026-08-11 08:10 的 2.38MB 早报就是这么吃了一次看门狗复位。
 # 百度 TTS 单次上限约 100 秒音频，180s 能兜住「下载+写盘+整段播放」。
 WATCHDOG_TIMEOUT_MS = 180000
+
+
+# ── 死人开关：喂狗点上的最后一道自愈 ──────────────────────────
+# LRN 2026-08-26：设备僵死 4 小时 51 分，看门狗武装着 180 秒却一次没响——
+# 卡住的那个循环一边转一边喂狗。现有三道自愈**一道都够不着**：
+# netfix1/netfix2 要主循环跑到 net_watch_tick，看门狗被喂饱了。
+# 所以把判据挪进 _wdt_feed()——那是唯一一个在每个这种循环里都还在转的地方。
+# 判据仍是那条铁律：只认"服务端还认不认得我"。
+# 阈值要大于 _NET_FIX2_SECS，让主循环还活着时优先走正常的分级自愈。
+DEADMAN_SECS          = 1800      # 失联这么久就自己复位（0=关闭这道兜底）
+
+
+DEADMAN_MIN_UPTIME_MS = 3600000   # 开机 1 小时内不触发（同 netfix2：服务端没开机时别陷入重启循环）
 
 
 LONG_PRESS_MS = 800         # 长按阈值（ms）

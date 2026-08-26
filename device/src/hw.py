@@ -82,16 +82,47 @@ def _mic_off():
 _wdt = None
 
 
+_wdt_ms = 0        # 实际武装成功的超时（ms）。0 = 这台设备**没有**看门狗
+
+
 def _wdt_init():
-    """武装看门狗。在 setup() 末尾调用：配网 UI 等交互流程不受超时限制。"""
-    global _wdt
-    if cfg.WATCHDOG_ENABLED and _wdt is None:
+    """武装看门狗。在 setup() 末尾调用：配网 UI 等交互流程不受超时限制。
+
+    **必须兜底，而且必须能被远程看见**（LRN 2026-08-26）：
+    旧代码构造失败时只 print 一行就把 _wdt 留成 None——等于整台设备失去
+    硬件自愈能力，而这件事除了串口谁都不知道。8/26 那次主循环停摆 4 小时
+    51 分、没有任何复位，第一嫌疑就是它（前一天刚把超时从 120000 改成
+    180000，固件对上限有没有自己的限制无从得知）。
+    现在依次试配置值和 120000（8 月上旬真机产生过"看门狗复位"的已知可用值），
+    结果记进 _wdt_ms 随心跳上报，一分钟内就能确认它到底武装成功没有。
+    """
+    global _wdt, _wdt_ms
+    if not cfg.WATCHDOG_ENABLED or _wdt is not None:
+        return
+    for ms in (cfg.WATCHDOG_TIMEOUT_MS, 120000):
         try:
             from machine import WDT
-            _wdt = WDT(timeout=cfg.WATCHDOG_TIMEOUT_MS)
-            print("watchdog armed:", cfg.WATCHDOG_TIMEOUT_MS, "ms")
+            _wdt = WDT(timeout=ms)
+            _wdt_ms = ms
+            print("watchdog armed:", ms, "ms")
+            return
         except Exception as e:
-            print("watchdog unavailable:", e)
+            print("watchdog init failed at", ms, "ms:", e)
+    _wdt_ms = 0
+    print("watchdog UNAVAILABLE —— 本次运行没有硬件自愈能力")
+
+
+_boot_ms = time.ticks_ms()
+
+
+_deadman_last = 0        # 上次做过期检查的时刻（ticks_ms）
+
+
+_deadman_armed = False   # 开机门槛过了没。**一次性闩锁，不是每次比对开机时刻**——
+                         # ticks_diff 只在约 6.2 天内有效，连续跑一周后拿它算
+                         # uptime 会翻负，这道兜底就悄悄失效了
+
+cfg.St.last_ok_ms = _boot_ms   # cfg 不 import time，初值在这里给
 
 
 def _wdt_feed():
@@ -100,6 +131,65 @@ def _wdt_feed():
             _wdt.feed()
         except Exception:
             pass
+    _deadman_check()
+
+
+def _deadman_check():
+    """喂狗顺带做的"死人开关"。
+
+    **为什么判据在这里而不在主循环**（LRN 2026-08-26）：那次僵死 4h51m，
+    看门狗武装着 180 秒却一次没响——卡住的循环一边转一边喂狗，
+    netfix1/netfix2 又要主循环跑到 net_watch_tick 才有机会执行，三道自愈
+    全都够不着。而 _wdt_feed() 是**唯一一个在每个这种循环里都还在转**的
+    函数，把判据放进来，以后再冒出新的"喂狗死循环"也自动被兜住。
+
+    判据仍是 CLAUDE.md 那条铁律：只认"服务端还认不认得我"，
+    不看设备自己觉得健康不健康。
+
+    **必须用 ticks_ms 而不是 time.time()**：开机后 clock.sync_rtc() 会把
+    墙钟往前跳好几年，拿墙钟算年龄会一开机就判超时、直接进重启循环。
+    """
+    global _deadman_last, _deadman_armed
+    if not cfg.DEADMAN_SECS:
+        return
+    now = time.ticks_ms()
+    if time.ticks_diff(now, _deadman_last) < 10000:   # 10s 一次就够，别拖慢热循环
+        return
+    _deadman_last = now
+    if not _deadman_armed:
+        if time.ticks_diff(now, _boot_ms) < cfg.DEADMAN_MIN_UPTIME_MS:
+            return
+        _deadman_armed = True     # 闩上就不再回头看开机时刻，见上面的注释
+    dead = time.ticks_diff(now, cfg.St.last_ok_ms) // 1000
+    if dead >= cfg.DEADMAN_SECS:
+        _deadman_reset(dead)
+
+
+def _deadman_reset(dead):
+    """留下临终留言再复位：下次开机上报直接告诉你它卡在哪个循环里。
+
+    不走 diag._persist_dbg —— diag 在 hw 上层，这里只能自己写。
+    格式与 crash.log 其它段落一致，_boot_report 会照常带走。
+    """
+    try:
+        import uos
+        full = False
+        try:
+            full = uos.stat(cfg.data("crash.log"))[6] > 32768
+        except OSError:
+            pass                                    # 还没这个文件，当然没满
+        if not full:                                # 满了就别写，直接复位
+            with open(cfg.data("crash.log"), "a") as f:
+                f.write("=== deadman (stuck at {}, dead={}s) ===\n".format(
+                    cfg.St.stage, dead))
+    except Exception:
+        pass
+    print("deadman: stuck at", cfg.St.stage, "dead", dead, "s -> reset")
+    try:
+        import machine
+        machine.reset()
+    except Exception:
+        pass
 
 
 # ── 触摸状态 ──────────────────────────────────────────────────
@@ -236,11 +326,23 @@ def check_touch(feel=False):
     return (None, (0, 0))
 
 
-def drain_touch():
-    """等待屏幕所有触摸点抬起。"""
+def drain_touch(timeout_ms=3000):
+    """等待屏幕所有触摸点抬起。返回 True=已抬起，False=超时放弃。
+
+    **这个等待必须有上限**（LRN 2026-08-26）：条件完全由触摸硬件决定，
+    屏上压了东西、进水、驱动漏报一次抬手，它就永远转下去。而且原来这个
+    循环一次狗都不喂——"主循环停摆 + 看门狗饿不死它"正是设备僵死却不复位
+    的配方。现在既喂狗又有上限，卡住也只是丢掉这次去抖，不会拖垮整机。
+    """
+    t0 = time.ticks_ms()
     while M5.Touch.getCount() > 0:
+        _wdt_feed()
+        if time.ticks_diff(time.ticks_ms(), t0) > timeout_ms:
+            print("drain_touch: 触摸迟迟不抬起，超时放弃")
+            return False
         M5.update()
         time.sleep(0.05)
+    return True
 
 
 def touch_reset():
