@@ -316,21 +316,35 @@ _script = ([_tone(9000, _n)] +          # 开麦爆音：必须丢掉，不能�
            [_tone(50, _n)] * 6)         # 句尾静音 → 收尾
 snd.Mic = hw.Mic = _FakeMic(_script)
 hw._mic_active = False
-_chunks = snd._record_audio()
+snd._rec_buf = None                     # 按测试的块大小重新分配
+_wav = snd._record_audio()
+assert _wav is not None and bytes(_wav[:4]) == b"RIFF"
+assert _struct.unpack_from('<I', bytes(_wav[:44]), 40)[0] == len(_wav) - 44, "WAV 头长度要与数据一致"
+_pcm_rec = bytes(_wav[44:])
+_chunks = [_pcm_rec[i:i + 640] for i in range(0, len(_pcm_rec), 640)]
 _onset = _tone(300, _n, dc=2500)
-assert _chunks is not None and len(_chunks) == 2 + 4 + cfg.SILENCE_CHUNKS, len(_chunks)
+assert len(_chunks) == 2 + 4 + cfg.SILENCE_CHUNKS, len(_chunks)
 assert _chunks[1] == _onset, "起说前一块（字头）必须被预录带上"
+assert _chunks[2] == _tone(4000, _n), "块与块之间不能错位"
 assert _tone(9000, _n) not in _chunks, "开麦第一块（爆音）必须丢掉"
 assert snd.last_rec.get("late", 0) == 0 and snd.last_rec.get("tmo", 0) == 0
 print("  snd._record_audio           = 爆音丢弃 ✓ 字头预录 ✓ 共 %d 块 ✓" % len(_chunks))
 print("  " + snd.rec_summary())
 
-# 一直没人说话：等满 MAX_WAIT_CHUNKS 返回 []
+# 一直在说：录满缓冲上限就截断，标 CUT
+snd.Mic = hw.Mic = _FakeMic([_tone(50, _n)] + [_tone(4000, _n)] * 200)
+hw._mic_active = False
+_wav = snd._record_audio()
+assert len(_wav) == 44 + snd.rec_max_chunks * 640 and snd.last_rec.get("cut")
+assert "CUT" in snd.rec_summary()
+print("  snd._record_audio 说满上限  = %d 块截断，标 CUT ✓" % snd.rec_max_chunks)
+
+# 一直没人说话：等满 MAX_WAIT_CHUNKS 返回空
 snd.Mic = hw.Mic = _FakeMic([])
 hw._mic_active = False
 _saved_wait = cfg.MAX_WAIT_CHUNKS
 cfg.MAX_WAIT_CHUNKS = 5
-assert snd._record_audio() == []
+assert len(snd._record_audio()) == 0
 cfg.MAX_WAIT_CHUNKS = _saved_wait
 print("  snd._record_audio 无人说话  = 返回 [] ✓")
 
@@ -351,6 +365,7 @@ assert cfg.SILENCE_THRESHOLD == cfg.VAD_MAX_THRESHOLD
 print("  snd.calibrate_noise 很吵    = 门槛封顶 %d ✓" % cfg.SILENCE_THRESHOLD)
 
 (cfg.CHUNK_SEC, cfg.CHUNK_SIZE, cfg.SILENCE_THRESHOLD, snd.Mic, hw.Mic) = _saved_rec
+snd._rec_buf = None
 hw.check_touch = _saved_touch
 hw._mic_active = False
 

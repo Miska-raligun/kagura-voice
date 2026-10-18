@@ -55,6 +55,24 @@ def toggle_wake_mode():
 
 # ── 主对话（普通） ────────────────────────────────────────────
 
+_post_mv_ok = True    # 固件 requests 能直接发 memoryview（不能就退回 bytes 复制一份）
+
+
+def _post_wav(wav, hdrs):
+    """上传录音。wav 是共享录音缓冲的 memoryview：socket.write 认缓冲协议，
+    直接发就不用为 30 秒录音再复制近 1MB。固件的 requests 万一只认 bytes/str
+    （TypeError），退回 bytes() 并记住，本次开机不再试。"""
+    global _post_mv_ok
+    if _post_mv_ok:
+        try:
+            return urequests.post(cfg.SERVER_URL, data=wav, headers=hdrs,
+                                  timeout=cfg.REQUEST_TIMEOUT_CHAT)
+        except TypeError as e:
+            print("post memoryview unsupported:", e)
+            _post_mv_ok = False
+    return urequests.post(cfg.SERVER_URL, data=bytes(wav), headers=hdrs,
+                          timeout=cfg.REQUEST_TIMEOUT_CHAT)
+
 def record_and_send():
     """
     录音 → 发送服务端 → 播放回复。
@@ -70,20 +88,20 @@ def record_and_send():
         while True:
             hw._wdt_feed()
             ui.draw_state("recording")
-            chunks = snd._record_audio()
-            if chunks:
+            wav = snd._record_audio()     # 整段 WAV（指向共享录音缓冲，零复制）
+            if wav is not None and len(wav) > 44:
                 # 门槛/峰值/有没有缝：识别不灵时先看这行。空录音不记——
                 # 连续模式没人说话时每 10 秒一条，会把环形日志里的证据挤掉
                 diag.dbg(snd.rec_summary())
 
-            if chunks is None:         # 用户长按中断录音 → 退出当前模式
+            if wav is None:            # 用户长按中断录音 → 退出当前模式
                 if cfg.St.continuous:
                     toggle_continuous()
                 elif cfg.St.wake:
                     toggle_wake_mode()
                 return
 
-            if not chunks:
+            if len(wav) <= 44:
                 if cfg.St.continuous:
                     continue          # 连续模式：没人说话就接着听，别停 1 秒、别闪屏
                 ui.draw_state("no_speech")
@@ -91,9 +109,6 @@ def record_and_send():
                 break
 
             ui.draw_state("processing")
-            audio = b''.join(chunks)
-            wav   = hw.make_wav_header(len(audio)) + audio
-            del chunks, audio   # wav 已包含全部数据，释放 ~96KB
             gc.collect()
 
             try:
@@ -103,7 +118,7 @@ def record_and_send():
                     hdrs["X-Local-Time"] = lt
                 feel._feel_headers(hdrs)      # 体感层：把"刚才被摸过"随对话一起捎过去
                 netsvc.mqtt_ping()            # 下面最多阻塞 60 秒，先保活
-                resp = urequests.post(cfg.SERVER_URL, data=wav, headers=hdrs, timeout=cfg.REQUEST_TIMEOUT_CHAT)
+                resp = _post_wav(wav, hdrs)
                 if resp.status_code != 200:
                     print("chat err:", resp.text)
                     resp.close()
@@ -146,7 +161,7 @@ def record_and_send():
             if need_photo:
                 gc.collect()   # 回复 WAV 是直接落盘的，堆里本来就没有它
                 wav_b64 = ubinascii.b2a_base64(wav).decode("utf-8").strip()
-                del wav       # base64 字符串已持有数据，释放原始 bytes (~48KB)
+                del wav       # 只是放掉对共享录音缓冲的引用（缓冲本身常驻）
                 gc.collect()
                 ui.draw_state("camera")
                 image_b64 = cam.capture_photo()

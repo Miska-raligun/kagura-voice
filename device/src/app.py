@@ -72,9 +72,11 @@ def setup():
     hw._volume_load()
     diag.canvas_probe()           # 一次性诊断；CANVAS_PROBE=False 即整段跳过
     ui.draw_state("idle")       # 发现完成后恢复空闲界面
+    snd.alloc_rec_buf()           # 开机堆还没碎时一次性预留录音缓冲（约 960KB）
     snd.calibrate_noise()
-    diag.dbg("vad floor={} th={} wake={}".format(
-        cfg.NOISE_FLOOR, cfg.SILENCE_THRESHOLD, cfg.WAKE_THRESHOLD))
+    diag.dbg("vad floor={} th={} wake={} max={}s".format(
+        cfg.NOISE_FLOOR, cfg.SILENCE_THRESHOLD, cfg.WAKE_THRESHOLD,
+        snd.rec_max_chunks * cfg.CHUNK_SIZE // (cfg.SAMPLE_RATE * 2)))
     cfg.St.last_activity = time.time()
     hw._wdt_init()   # 最后再武装看门狗：WiFi 配置 UI 等交互流程不受 2 分钟窗口限制
 

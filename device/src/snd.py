@@ -7,6 +7,7 @@ from hardware import *
 import time
 import struct
 import math
+import gc
 
 import uos
 
@@ -144,26 +145,61 @@ def _mic_chunks(stats):
         k += 1
 
 
+_rec_buf = None      # 录音缓冲：44 字节 WAV 头 + rec_max_chunks 块 PCM，开机分配一次
+_rec_mv = None
+rec_max_chunks = 0
+
+
+def alloc_rec_buf():
+    """开机时（堆还没碎）一次性分配录音缓冲。分配不到就降级，返回实际块数。
+
+    逐块 bytes() 存列表、再 join、再拼 WAV 头，30 秒录音峰值要三份近 1MB；
+    整块预留后录音直接写进去，上传也直接传 memoryview，一份都不多复制。
+    """
+    global _rec_buf, _rec_mv, rec_max_chunks
+    if _rec_buf is not None:
+        return rec_max_chunks
+    for n in (cfg.MAX_CHUNKS, 80, 40):
+        if n > cfg.MAX_CHUNKS:
+            continue
+        try:
+            _rec_buf = bytearray(44 + n * cfg.CHUNK_SIZE)
+            _rec_mv = memoryview(_rec_buf)
+            rec_max_chunks = n
+            return n
+        except MemoryError:
+            gc.collect()
+    return 0
+
+
 def _record_audio():
     """
-    启动麦克风，用 VAD 检测说话，返回 PCM 数据块列表。
-    无说话返回空列表 []。
+    启动麦克风，用 VAD 检测说话，返回整段 WAV（memoryview，含 44 字节头）。
+    无说话返回 b""。
     若用户在录音期间长按屏幕，立即停止录音并返回 None（哨兵，表示用户主动中断）。
+
+    **返回值指向共享缓冲**：下一次录音会覆盖它，用完（上传/转 base64）再录下一段。
     """
     global last_rec
     cfg.St.stage = "rec"
+    if not alloc_rec_buf():
+        print("rec buffer alloc failed")
+        return b""
     warm = hw._mic_on()          # 刚开麦：第一块常带启动爆音，丢掉
     th = cfg.SILENCE_THRESHOLD
     th_end = int(th * cfg.VAD_END_RATIO)
     stats = {"th": th}
-    pre, chunks = [], []
+    pre = []
+    nchunks = 0
+    csz = cfg.CHUNK_SIZE
+    rmv = _rec_mv
     silent, waited, started, peak = 0, 0, False, 0
     t_start = time.ticks_ms()
     gen = _mic_chunks(stats)
     buf = next(gen)
     try:
         while True:
-            hw._wdt_feed()   # 满长录音 20s，喂狗防误咬
+            hw._wdt_feed()   # 等 10s + 录 30s，喂狗防误咬
             # 长按优先检测：优先级高于录音，continuous/wake 模式均可退出
             t, _ = hw.check_touch()
             if t == 'long':
@@ -180,9 +216,12 @@ def _record_audio():
                         loud += 1
                 if level > th or loud >= 2:
                     started = True
-                    chunks = pre
+                    for c in pre:
+                        rmv[44 + nchunks * csz:44 + (nchunks + 1) * csz] = c
+                        nchunks += 1
                     pre = []
-                    chunks.append(bytes(buf))
+                    rmv[44 + nchunks * csz:44 + (nchunks + 1) * csz] = buf
+                    nchunks += 1
                     peak = level
                 else:
                     pre.append(bytes(buf))
@@ -192,7 +231,8 @@ def _record_audio():
                     if waited >= cfg.MAX_WAIT_CHUNKS:
                         break
             else:
-                chunks.append(bytes(buf))
+                rmv[44 + nchunks * csz:44 + (nchunks + 1) * csz] = buf
+                nchunks += 1
                 if level > peak:
                     peak = level
                 if level > th_end or max(sub) > th:
@@ -201,16 +241,21 @@ def _record_audio():
                     silent += 1
                     if silent >= cfg.SILENCE_CHUNKS:
                         break
-                if len(chunks) >= cfg.MAX_CHUNKS:
+                if nchunks >= rec_max_chunks:
+                    stats["cut"] = 1        # 说满上限被截断（不是自然停顿结束）
                     break
             buf = gen.send(sub)
     finally:
         hw._mic_off()
-        stats["n"] = len(chunks)
+        stats["n"] = nchunks
         stats["peak"] = peak
         stats["ms"] = time.ticks_diff(time.ticks_ms(), t_start)
         last_rec = stats
-    return chunks
+    if not nchunks:
+        return b""
+    n = nchunks * csz
+    rmv[0:44] = hw.make_wav_header(n)
+    return rmv[:44 + n]
 
 
 def rec_summary():
@@ -218,9 +263,9 @@ def rec_summary():
     tmo=isRecording 没确认的次数（多 = 固件语义不符，退回按时间），
     late=处理跟不上产生的缝（应为 0）。"""
     r = last_rec
-    return "rec n={} peak={} th={} ms={} tmo={} late={}".format(
+    return "rec n={} peak={} th={} ms={} tmo={} late={}{}".format(
         r.get("n"), r.get("peak"), r.get("th"), r.get("ms"),
-        r.get("tmo", 0), r.get("late", 0))
+        r.get("tmo", 0), r.get("late", 0), " CUT" if r.get("cut") else "")
 
 
 # ── 播放 ──────────────────────────────────────────────────────

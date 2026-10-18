@@ -305,6 +305,12 @@ CoreS3 (MicroPython)  ──HTTP──▶  voice_server.py (Flask :5000)  ──
   `GET /debug-audio/<dev>`（设了 API_TOKEN 就带 `?token=`）直接在浏览器试听——
   **先听这条录音，糊 = 设备端问题，清楚却认不出 = ASR 问题。**
   识别为空时 `/chat` 直接回 `_ASR_EMPTY_REPLY`，不走 OpenClaw。
+  **录音上限 30 秒**（`MAX_CHUNKS=120`，原 10 秒说一半就被截断），停顿 1.5 秒收尾
+  （`SILENCE_CHUNKS=6`）。录音直接写进开机预留的整块缓冲 `snd._rec_buf`
+  （`alloc_rec_buf()`，分配不到降级 20/10 秒），`_record_audio` 返回指向它的
+  WAV memoryview，**下一次录音会覆盖**——上传/转 base64 之后才能再录。
+  别改回逐块 `bytes()` + `join` + 拼头：30 秒录音那样要三份近 1MB。上传直接传
+  memoryview（`chat._post_wav`，固件不认就退回 bytes）。说满上限时 rec 日志带 `CUT`。
 - **`/chat` 超时**（LRN 2026-10-18，症状「回答一长就不播，设备 `network err: ETIMEDOUT`，
   服务端却打印了 `📤 WAV`」）：设备 `REQUEST_TIMEOUT_CHAT` 原为 30s，而 OpenClaw
   允许 120s，长回答 LLM + TTS 轻松超 30s——服务端照常发、设备早已放弃。现为 60s，
