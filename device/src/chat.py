@@ -102,6 +102,7 @@ def record_and_send():
                 if lt:
                     hdrs["X-Local-Time"] = lt
                 feel._feel_headers(hdrs)      # 体感层：把"刚才被摸过"随对话一起捎过去
+                netsvc.mqtt_ping()            # 下面最多阻塞 60 秒，先保活
                 resp = urequests.post(cfg.SERVER_URL, data=wav, headers=hdrs, timeout=cfg.REQUEST_TIMEOUT_CHAT)
                 if resp.status_code != 200:
                     print("chat err:", resp.text)
@@ -158,6 +159,7 @@ def record_and_send():
                     if lt2:
                         v_hdrs["X-Local-Time"] = lt2
                     feel._feel_headers(v_hdrs)
+                    netsvc.mqtt_ping()
                     resp2 = urequests.post(
                         cfg.VISION_URL,
                         data=payload.encode("utf-8"),

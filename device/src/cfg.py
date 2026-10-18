@@ -65,7 +65,12 @@ MQTT_BROKER   = "192.168.31.66"
 
 # ── 网络超时 ──────────────────────────────────────────────────
 # 服务端处理包含 LLM 推理，时间较长；设备无线程，超时可避免永久挂起
-REQUEST_TIMEOUT_CHAT  = 30   # /chat、/chat-vision（含 LLM 推理）
+REQUEST_TIMEOUT_CHAT  = 60   # /chat、/chat-vision（含 LLM 推理 + TTS）。
+                             # 30 秒不够：回答一长，OpenClaw 生成 20 秒 + 百度合成
+                             # 好几秒就超了，服务端照常发出 WAV、设备早已 ETIMEDOUT
+                             # 放弃（LRN 2026-10-18）。上限受两条约束：WDT 180s，
+                             # 以及阻塞期间发不了 MQTT ping——broker 约 1.5×keepalive
+                             # =90s 收不到包就断，所以发请求前先 netsvc.mqtt_ping()
 
 
 REQUEST_TIMEOUT_SHORT = 10   # /time、/shake、/presence 等短请求

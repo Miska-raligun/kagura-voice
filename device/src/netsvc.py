@@ -253,6 +253,18 @@ def mqtt_check():
                 _mqtt_last_ping = time.time()
 
 
+def mqtt_ping():
+    """立刻补一次 MQTT ping。长阻塞（/chat 最多等 REQUEST_TIMEOUT_CHAT）前调用：
+    阻塞期间主循环不转、发不了保活包，先把计时清零，免得等回复时被 broker 踢掉。"""
+    global _mqtt_last_ping
+    if _mqtt:
+        try:
+            _mqtt.ping()
+            _mqtt_last_ping = time.time()
+        except OSError:
+            pass          # 掉线交给 mqtt_check 的重连逻辑，这里不抢
+
+
 # ── BLE 扫描 ─────────────────────────────────────────────────
 
 def _decode_ble_name(adv_data):

@@ -288,6 +288,12 @@ CoreS3 (MicroPython)  ──HTTP──▶  voice_server.py (Flask :5000)  ──
   `GET /debug-audio/<dev>`（设了 API_TOKEN 就带 `?token=`）直接在浏览器试听——
   **先听这条录音，糊 = 设备端问题，清楚却认不出 = ASR 问题。**
   识别为空时 `/chat` 直接回 `_ASR_EMPTY_REPLY`，不走 OpenClaw。
+- **`/chat` 超时**（LRN 2026-10-18，症状「回答一长就不播，设备 `network err: ETIMEDOUT`，
+  服务端却打印了 `📤 WAV`」）：设备 `REQUEST_TIMEOUT_CHAT` 原为 30s，而 OpenClaw
+  允许 120s，长回答 LLM + TTS 轻松超 30s——服务端照常发、设备早已放弃。现为 60s，
+  服务端 `_DEVICE_CHAT_TIMEOUT` 要同步改；每条回复打印 `⏱️ asr/llm/tts/总`，
+  超时会标 ⚠️。别随手再加大：阻塞期间发不了 MQTT ping（发请求前已
+  `netsvc.mqtt_ping()` 清零计时），broker 约 90s 收不到包就断。
 - **openclaw 并发**：`chat()` 有全局 Semaphore(2) + 每 session 串行锁。
 - **摄像头固件差异**：抓帧走 `_cam_grab()`（优先 `camera.capture()`→bytes，
   回退 `camera.snapshot()`→`image.Image`），预览走 `_cam_show()`（优先

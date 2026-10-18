@@ -560,6 +560,20 @@ def _ip_rate_ok() -> bool:
 
 _ASR_EMPTY_REPLY = "没听清，能再说一遍吗？"
 
+# 设备端 cfg.REQUEST_TIMEOUT_CHAT。超过它设备早已 ETIMEDOUT 放弃，
+# 这边照常把 WAV 发出去也没人收——日志里那行「📤 WAV」会让人误以为送达了
+_DEVICE_CHAT_TIMEOUT = 60
+
+
+def _log_timing(device_id: str, t0: float, t_asr: float, t_llm: float) -> None:
+    """一行分阶段耗时；超过设备超时就明确告警。"""
+    now = time.time()
+    total = now - t0
+    warn = f"  ⚠️ 超过设备超时 {_DEVICE_CHAT_TIMEOUT}s，设备收不到这条" \
+        if total > _DEVICE_CHAT_TIMEOUT else ""
+    print(f"[{device_id}] ⏱️  asr={t_asr - t0:.1f}s llm={t_llm - t_asr:.1f}s"
+          f" tts={now - t_llm:.1f}s 总={total:.1f}s{warn}")
+
 
 @app.route("/chat", methods=["POST"])
 def handle_chat():
@@ -590,9 +604,11 @@ def handle_chat():
 
     _keep_debug_audio(device_id, audio_data)
 
+    t0 = time.time()
     try:
         # 1. 语音识别
         user_text = transcribe(wav_path)
+        t_asr = time.time()
         print(f"[{device_id}] 🗣️  {user_text}")
 
         # 2. 本地短路链：没听清 → 定时提醒 → 音量控制 → 快捷指令，命中则跳过 OpenClaw
@@ -651,9 +667,11 @@ def handle_chat():
         print(f"[{device_id}] 💬  {preview}{'...' if len(reply) > 80 else ''}")
 
         # 4. TTS
+        t_llm = time.time()
         wav_out = synthesize(reply)
         if not wav_out:
             return jsonify({"error": "TTS 生成失败"}), 500
+        _log_timing(device_id, t0, t_asr, t_llm)
 
         with open(wav_out, "rb") as f:
             wav_data = f.read()
@@ -952,11 +970,13 @@ def handle_chat_vision():
             f.write(wav_bytes)
         _keep_debug_audio(device_id, wav_bytes)
 
+    t0 = time.time()
     try:
         if wav_path:
             user_text = transcribe(wav_path) or _PHOTO_ONLY_PROMPT
         else:
             user_text = (data.get("text") or "").strip() or _PHOTO_ONLY_PROMPT
+        t_asr = time.time()
         print(f"[{device_id}] 🗣️  {user_text}")
 
         image_path = _decode_image_b64(image_b64, device_id, tag="vision") if image_b64 else None
@@ -966,9 +986,11 @@ def handle_chat_vision():
         preview = reply[:80].replace("\n", " ")
         print(f"[{device_id}] 💬  {preview}{'...' if len(reply) > 80 else ''}")
 
+        t_llm = time.time()
         wav_out = synthesize(reply)
         if not wav_out:
             return jsonify({"error": "TTS 生成失败"}), 500
+        _log_timing(device_id, t0, t_asr, t_llm)
 
         with open(wav_out, "rb") as f:
             wav_data = f.read()
