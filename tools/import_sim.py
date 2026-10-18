@@ -354,6 +354,95 @@ print("  snd.calibrate_noise 很吵    = 门槛封顶 %d ✓" % cfg.SILENCE_THRE
 hw.check_touch = _saved_touch
 hw._mic_active = False
 
+# ── 边下边播：顺序完整、在播的缓冲不被覆盖、固件不支持时退回落盘 ─────
+print("\n=== 边下边播 ===")
+class _NoTouch:
+    @staticmethod
+    def getCount(): return 0
+
+class _QSpeaker:
+    """两槽队列的扬声器桩：挂进去的缓冲按时长依次"播完"。
+
+    播完那一刻才取缓冲内容，与挂入时的快照比对——真机上扬声器是播放时
+    才读缓冲的，挂进去之后被改写就会播出下一块的声音。
+    """
+    def __init__(self, depth_ok=True, silent=False):
+        self.q, self.out, self.overwritten = [], bytearray(), 0
+        self.depth_ok, self.silent = depth_ok, silent
+    def _tick(self):
+        now = _time.monotonic()
+        while self.q and self.q[0][2] <= now:
+            ref, snap, _ = self.q.pop(0)
+            if bytes(ref) != snap:
+                self.overwritten += 1
+            n = _struct.unpack_from('<I', snap, 40)[0]
+            self.out += snap[44:44 + n]
+            if self.q:   # 下一块从此刻开始播
+                r2, s2, _ = self.q[0]
+                self.q[0] = (r2, s2, now + self._dur(s2))
+    def _dur(self, snap):
+        return _struct.unpack_from('<I', snap, 40)[0] / 32000.0
+    def begin(self): pass
+    def end(self): pass
+    def stop(self): self.q = []
+    def setVolumePercentage(self, v): pass
+    def playWav(self, buf, repeat=1, ch=-1, stop=False):
+        if self.silent:
+            return False
+        self._tick()
+        assert len(self.q) < 2, "队列满了还往里塞：缓冲复用的前提被破坏"
+        snap = bytes(buf)
+        start = self.q[-1][2] if self.q else _time.monotonic()
+        self.q.append((buf, snap, start + self._dur(snap)))
+        return True
+    def isPlaying(self, ch=None):
+        self._tick()
+        if ch is not None and not self.depth_ok:
+            raise TypeError("no channel arg")
+        return len(self.q) if ch is not None else bool(self.q)
+    def playWavFile(self, p): pass
+
+_saved_play = (snd.Speaker, snd.M5.Touch, cfg.STREAM_BLOCK_BYTES, cfg.PLAY_PATH)
+snd.M5.Touch = _NoTouch
+cfg.STREAM_BLOCK_BYTES = 320            # 10ms 一块，测试跑得快
+_pcm = bytes((i * 7) & 0xff for i in range(320 * 23 + 100))   # 不整块的尾巴
+_wav = hw.make_wav_header(len(_pcm)) + _pcm
+for _depth_ok in (True, False):
+    snd.Speaker = _QSpeaker(depth_ok=_depth_ok)
+    snd._stream_bad = False
+    _n = snd.stream_play(_FakeResp(_wav))
+    assert _n == len(_wav), (_n, len(_wav))
+    assert bytes(snd.Speaker.out) == _pcm, "播出的 PCM 必须与源逐字节一致、顺序不乱"
+    assert snd.Speaker.overwritten == 0, "在播/排队中的缓冲被下一块覆盖了"
+    if _depth_ok:   # 按时间估时测试块只有 10ms，20ms 余量必然断粮；真机 1 秒一块无此问题
+        assert snd.last_play["gaps"] == 0, "能查队列深度时不该断粮"
+    print("  snd.stream_play %-12s = %d 块按序播完 ✓ 缓冲零覆盖 ✓  %s"
+          % ("(按通道查深度)" if _depth_ok else "(按时间估)", len(_pcm) // 320 + 1,
+             snd.stream_summary()))
+
+# 固件内存 playWav 不出声：自动退回落盘，文件要与源 WAV 一致，之后不再尝试
+cfg.PLAY_PATH = _tmp
+snd.Speaker = _QSpeaker(silent=True)
+snd._stream_bad = False
+assert snd.stream_play(_FakeResp(_wav)) == len(_wav)
+assert open(_tmp, "rb").read() == _wav, "退回落盘时已读出的那几块必须接回去"
+assert snd._stream_bad and snd.last_play["mode"] == "fallback"
+print("  snd.stream_play 不出声      = 退回落盘，文件逐字节一致 ✓ 本次开机不再尝试 ✓")
+# 签名不符直接抛 TypeError：同样退回，不能把异常甩给只接 OSError 的调用方
+class _BadSigSpeaker(_QSpeaker):
+    def playWav(self, buf, *a):
+        if a:
+            raise TypeError("function takes 2 positional arguments")
+snd.Speaker = _BadSigSpeaker()
+snd._stream_bad = False
+assert snd.stream_play(_FakeResp(_wav)) == len(_wav)
+assert open(_tmp, "rb").read() == _wav and snd.last_play["mode"] == "fallback"
+print("  snd.stream_play 签名不符    = 不抛异常，退回落盘 ✓")
+if os.path.exists(_tmp):
+    os.remove(_tmp)           # 别在仓库里留垃圾
+snd._stream_bad = False
+(snd.Speaker, snd.M5.Touch, cfg.STREAM_BLOCK_BYTES, cfg.PLAY_PATH) = _saved_play
+
 # 可变全局：模拟 discover_server 改写后，其他模块能否看到
 print("\n=== 可变全局跨模块可见性（拆分最大的坑）===")
 before = cfg.SERVER_BASE

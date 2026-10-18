@@ -116,12 +116,14 @@ def record_and_send():
                 vol_cmd = resp.headers.get("X-Volume", "")
                 ui._update_chat_text(resp.headers.get("X-User-Text", ""),
                                   resp.headers.get("X-Reply-Text", ""))
-                # 分块落盘，不用 resp.content：长回复整段进堆是几百 KB~MB 的
-                # 尖峰，而且读完之前一次狗都喂不上（见 snd.py 播放段口径）
-                n = snd.save_stream(resp)
-                resp.close()
                 if vol_cmd in ("up", "down"):
-                    hw._volume_adjust(vol_cmd)
+                    hw._volume_adjust(vol_cmd)    # 先调音量，这条回复就按新音量播
+                # 边下边播：收到 2 秒就出声，播放期间 MQTT 照常保活。
+                # 不用 resp.content（整段进堆 + 读完前喂不上狗，见 snd.py 播放段口径）
+                ui.draw_state("playing")
+                n = snd.stream_play(resp)
+                resp.close()
+                diag.dbg(snd.stream_summary())
             except OSError as e:
                 print("network err:", e)
                 ui.draw_state("error")
@@ -138,8 +140,6 @@ def record_and_send():
                     break
                 continue
             print("WAV size:", n)
-            ui.draw_state("playing")
-            snd.play_file()
             gc.collect()
 
             # ── 语音触发拍照：播完简短应答后立即拍照并发送 /chat-vision ──
@@ -167,12 +167,10 @@ def record_and_send():
                         timeout=cfg.REQUEST_TIMEOUT_CHAT,
                     )
                     if resp2.status_code == 200:
-                        n2 = snd.save_stream(resp2)
+                        ui.draw_state("playing")
+                        n2 = snd.stream_play(resp2)
                         resp2.close()
-                        if n2 > 0:
-                            ui.draw_state("playing")
-                            snd.play_file()
-                        else:
+                        if n2 <= 0:
                             ui.draw_state("error")
                             time.sleep(2)
                         gc.collect()

@@ -257,15 +257,14 @@ def _cam_send(raw):
             return
         ui._update_chat_text(resp.headers.get("X-User-Text", ""),
                           resp.headers.get("X-Reply-Text", ""))
-        n = snd.save_stream(resp)   # 分块落盘，不把整段 WAV 拉进堆（见 snd.py）
+        ui.draw_state("playing")
+        n = snd.stream_play(resp)   # 边下边播，不把整段 WAV 拉进堆（见 snd.py）
         resp.close()
         if n <= 0:
-            print("cam reply save failed")
+            print("cam reply play failed")
             ui.draw_state("error")
             time.sleep(2)
             return
-        ui.draw_state("playing")
-        snd.play_file()
     except OSError as e:
         print("cam send net err:", e)
         ui.draw_state("error")

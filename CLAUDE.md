@@ -222,6 +222,23 @@ CoreS3 (MicroPython)  ──HTTP──▶  voice_server.py (Flask :5000)  ──
   **只有 play 没有 played = 死在播放中**；**`iters=0` = `playWavFile` 是阻塞
   实现**（整段播放期间主循环没转，喂狗只靠进函数前那一次）——这一条没在
   真机上确认过，是留给下次的判据。
+- **边下边播**（`snd.stream_play`，`PLAY_STREAMING`，LRN 2026-10-18，症状「长回复
+  生成完还要等很久才出声，播完 MQTT/心跳断连重连」）。两个根因：
+  ① 旧链路先把整段 WAV 写进 flash 再播，60 秒回复约 1.9MB，光写盘就十几秒；
+  ② **本固件 `playWavFile` 是阻塞实现**（iters≈每段 1 轮），一段 25~60 秒播放
+  期间主循环不转，`play_file` 里那个泵 MQTT 的循环形同虚设。现在 `/chat`、
+  `/chat-vision`、取景拍照、push 四处都走 `stream_play`：每收 1 秒
+  （`STREAM_BLOCK_BYTES`）加迷你 WAV 头，`Speaker.playWav(内存)` 挂进固定通道
+  `STREAM_CH` 的两槽队列（非阻塞），三块缓冲轮转，收满 `STREAM_PREBUF` 块开播。
+  **别改坏的点**：往一块缓冲写数据前，它必须已播完——靠「队列有空位才挂下一块」
+  保证（在播的只剩上一块），`isPlaying(ch)` 查不了深度时按预计播完时刻估；
+  `import_sim` 用两槽队列桩专门验了「播出逐字节一致 + 在播缓冲零覆盖」。
+  第一块挂进去 100ms 内不在播（或 `playWav` 签名不符抛异常）就把已读字节接回
+  流前面、退回落盘 `save_stream + play_file`，本次开机不再尝试。
+  每次播放写一条 `play stream kb= first= ms= gaps=` 诊断日志：`first` 是从开始
+  下载到出声，`gaps>0` = 网络跟不上、扬声器断过粮，`mode=fallback` = 固件不支持。
+  服务端 `/chat` 也会刷新心跳时刻（`_hb_seen`）：设备对话期间不发心跳，
+  长对话会被误报「心跳中断」。
 - **`global` 声明必须有主**（LRN 2026-08-25）：`netsvc.mqtt_check` 里写过
   `global _mqtt_ok`，但本模块从来没有这个名字（状态在 `diag`）。后果是
   **任何一次 MQTT 掉线都变成 NameError 逃出 `mqtt_check`**，主循环连吃 10 次
@@ -301,7 +318,7 @@ CoreS3 (MicroPython)  ──HTTP──▶  voice_server.py (Flask :5000)  ──
   分辨率靠字节数反查 `_CAM_SIZES`——改这张表要同步服务端 `RGB565_SIZES`。
 - **回退开关**（设备端顶部常量）：`WAKE_MIC_PERSISTENT`、`WATCHDOG_ENABLED`、
   `SHOW_CHAT_TEXT`、`VISUAL_ENABLED`、`USE_STATE_IMAGES`、`CAMERA_MODE_ENABLED`、
-  `CAMERA_QVGA`、`PREVIEW_SWAP`、`MIC_GAPLESS`、`STREAM_ENABLED`、`STREAM_QQVGA`、
+  `CAMERA_QVGA`、`PREVIEW_SWAP`、`MIC_GAPLESS`、`PLAY_STREAMING`、`STREAM_ENABLED`、`STREAM_QQVGA`、
   `TOUCH_FEEL_ENABLED`（整个触觉）、`FEEL_NOTIFY_ENABLED`（只关"主动开口"，
   保留反射层和体感层）、`FEEL_WAKE_ON_PICKUP`
   ——真机出问题先关开关再排查。

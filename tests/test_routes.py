@@ -332,3 +332,16 @@ def test_audio_stats():
     assert st["peak"] == 32767
     assert st["clip_pct"] > 0
     assert v._audio_stats(b"fake-wav-bytes") is None
+
+
+def test_chat_refreshes_heartbeat(client, vs, fake_wav, monkeypatch):
+    """对话期间设备不发心跳，/chat 本身要算作"还活着"，免得报假的心跳中断。"""
+    monkeypatch.setattr(vs, "transcribe", lambda p: "现在几点")
+    client.post("/heartbeat", json={"device_id": "t1", "heap": 1})
+    vs._hb_devices["t1"]["ts"] -= 500
+    vs._hb_devices["t1"]["alerted"] = True
+    client.post("/chat", data=b"x", headers={"X-Device-Id": "t1"})
+    rec = vs._hb_devices["t1"]
+    assert vs.time.time() - rec["ts"] < 5 and rec["alerted"] is False
+    assert rec["data"]["heap"] == 1          # 只刷新时刻，不动遥测
+    vs._hb_devices.pop("t1", None)

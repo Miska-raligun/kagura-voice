@@ -603,6 +603,7 @@ def handle_chat():
         f.write(audio_data)
 
     _keep_debug_audio(device_id, audio_data)
+    _hb_seen(device_id)
 
     t0 = time.time()
     try:
@@ -672,6 +673,7 @@ def handle_chat():
         if not wav_out:
             return jsonify({"error": "TTS 生成失败"}), 500
         _log_timing(device_id, t0, t_asr, t_llm)
+        _hb_seen(device_id)
 
         with open(wav_out, "rb") as f:
             wav_data = f.read()
@@ -969,6 +971,7 @@ def handle_chat_vision():
             wav_path = f.name
             f.write(wav_bytes)
         _keep_debug_audio(device_id, wav_bytes)
+    _hb_seen(device_id)
 
     t0 = time.time()
     try:
@@ -991,6 +994,7 @@ def handle_chat_vision():
         if not wav_out:
             return jsonify({"error": "TTS 生成失败"}), 500
         _log_timing(device_id, t0, t_asr, t_llm)
+        _hb_seen(device_id)
 
         with open(wav_out, "rb") as f:
             wav_data = f.read()
@@ -1054,6 +1058,20 @@ _HB_SILENT_SECS = 200          # 超过此秒数无心跳视为失联（心跳�
 
 _hb_devices: dict = {}         # device_id → {"ts", "data", "alerted"}
 _hb_lock = threading.Lock()
+
+
+def _hb_seen(device_id: str) -> None:
+    """设备发来的任何业务请求都证明它活着，顺手刷新心跳时刻。
+
+    设备在对话期间（busy）不发心跳：LLM 40 秒 + 播放一分钟，再叠上前一次心跳
+    的间隔，就超过 _HB_SILENT_SECS，日志里冒出假的「心跳中断/恢复」。
+    只刷新已知设备的时刻，不动 data（遥测仍以真心跳为准）。
+    """
+    with _hb_lock:
+        rec = _hb_devices.get(device_id)
+        if rec is not None:
+            rec["ts"] = time.time()
+            rec["alerted"] = False
 
 
 def _vad_note(data: dict) -> str:

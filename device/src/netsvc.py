@@ -104,12 +104,8 @@ def _play_push(url):
     try:
         resp = urequests.get(cfg.SERVER_BASE + url, timeout=cfg.REQUEST_TIMEOUT_SHORT)
         if resp.status_code == 200:
-            n = snd.save_stream(resp)   # 不用 resp.content：整段 WAV 进堆 + 全程不喂狗
+            _play_streamed(resp)
             resp.close()
-            if n > 0:
-                _play_saved(n)
-            else:
-                diag.dbg("push save failed")
         else:
             resp.close()
     except OSError as e:
@@ -118,23 +114,27 @@ def _play_push(url):
     hw._set_led(0, 0, 0)
 
 
-def _play_saved(n):
-    """播放刚落盘的 WAV。长音频前后各留一条持久化面包屑。
+def _play_streamed(resp):
+    """边下边播一条 push 音频。长音频前后各留一条持久化面包屑。
 
     这两条是给下一次「播到一半黑屏」准备的证据：重启后 crash.log 里
-    只有 `play` 没有 `played` = 死在播放中；`iters=0` = playWavFile 是
-    阻塞实现（整段播放期间主循环没转，喂狗全靠进函数前那一次）。
-    只给大音频写 flash，短播报不值得为它磨损闪存。
+    只有 `play` 没有 `played` = 死在播放中。大小按 Content-Length 判断
+    （边下边播时没有"下载完的字节数"可看）；只给大音频写 flash，
+    短播报不值得为它磨损闪存。
     """
-    big = n >= cfg.PLAY_BIG_BYTES
+    try:
+        size = int(resp.headers.get("Content-Length", 0) or 0)
+    except (ValueError, TypeError, AttributeError):
+        size = 0
+    big = size >= cfg.PLAY_BIG_BYTES
     if big:
-        diag.dbg("play {}KB".format(n >> 10))
+        diag.dbg("play {}KB".format(size >> 10))
         diag._persist_dbg("play-big")
-    t0 = time.ticks_ms()
-    iters = snd.play_file()
+    n = snd.stream_play(resp)
+    diag.dbg(snd.stream_summary())
+    if n <= 0:
+        diag.dbg("push play failed")
     if big:
-        diag.dbg("played {}s iters={}".format(
-            time.ticks_diff(time.ticks_ms(), t0) // 1000, iters))
         diag._persist_dbg("play-big-done")
 
 

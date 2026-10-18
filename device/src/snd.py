@@ -512,6 +512,237 @@ def play_file(path=None, env=None):
     return iters
 
 
+# ── 边下边播 ──────────────────────────────────────────────────
+#
+# M5Unified 的扬声器每个通道有两个槽：一个在播、一个排队。内存里的
+# playWav/playRaw 只是把缓冲挂进槽就返回（非阻塞），所以三块缓冲轮转：
+# 一块在播、一块排队、一块在收网络数据。往第 k 块写数据之前，第 k-3 块
+# 必须已经播完——"队列有空位"时就保证了这一点（在播的只剩 k-1）。
+#
+# 每块前面留 44 字节写一个迷你 WAV 头，交给 playWav 解析：不依赖 playRaw
+# 在 MicroPython 绑定里把缓冲当 int8 还是 int16 的不确定性。
+
+last_play = {}      # 最近一次流式播放的统计，调用方写进诊断日志
+_stream_bad = False  # 本次开机已确认内存播放不出声 → 直接走落盘
+
+
+def _spk_depth():
+    """通道队列深度 0/1/2；固件不支持按通道查询时返回 None（退回按时间估）。"""
+    try:
+        v = Speaker.isPlaying(cfg.STREAM_CH)
+        if v is True or v is False:
+            return None
+        return int(v)
+    except Exception:
+        return None
+
+
+def _spk_any():
+    try:
+        return bool(Speaker.isPlaying())
+    except Exception:
+        return False
+
+
+def _touched():
+    M5.update()
+    return M5.Touch.getCount() > 0
+
+
+def _read_full(raw, mv):
+    """把 mv 读满或读到 EOF，返回读到的字节数。读的间隙喂狗、泵 MQTT。"""
+    got = 0
+    n = len(mv)
+    while got < n:
+        hw._wdt_feed()
+        r = raw.readinto(mv[got:])
+        if not r:
+            break
+        got += r
+        _pump_safe()
+    return got
+
+
+class _Prefixed:
+    """把已经读出来的字节"塞回"流的前面，供退回落盘路径时接着读。"""
+
+    def __init__(self, head, raw):
+        self._h = head
+        self._raw = raw
+
+    def readinto(self, buf):
+        if self._h:
+            n = len(self._h)
+            if n > len(buf):
+                n = len(buf)
+            buf[:n] = self._h[:n]
+            self._h = self._h[n:]
+            return n
+        return self._raw.readinto(buf)
+
+
+class _Resp:
+    def __init__(self, raw, size):
+        self.raw = raw
+        self.headers = {"Content-Length": str(size)}
+
+
+def _fallback(resp, raw, head):
+    """内存播放不可用：把已读出的字节接回流前面，走原来的落盘 + play_file。"""
+    try:
+        size = int(resp.headers.get("Content-Length", 0) or 0)
+    except (ValueError, TypeError, AttributeError):
+        size = 0
+    n = save_stream(_Resp(_Prefixed(head, raw), size))
+    if n > 0:
+        play_file()
+    return n
+
+
+def stream_play(resp):
+    """边下边播 HTTP 响应里的 WAV，返回收到的字节数（-1=失败）。触摸可中断。
+
+    固件不给 raw、或关了 PLAY_STREAMING、或之前探测过内存播放不出声，
+    就走老路 save_stream + play_file。
+    """
+    global last_play, _stream_bad
+    raw = getattr(resp, "raw", None)
+    if (not cfg.PLAY_STREAMING or _stream_bad
+            or raw is None or not hasattr(raw, "readinto")):
+        n = save_stream(resp)
+        if n > 0:
+            play_file()
+        last_play = {"mode": "file", "kb": n >> 10 if n > 0 else 0}
+        return n
+
+    cfg.St.stage = "play"
+    hw._mic_off()          # Mic/Speaker 共享音频通路
+    blk = cfg.STREAM_BLOCK_BYTES
+    bufs = [bytearray(44 + blk) for _ in range(3)]
+    mvs = [memoryview(b) for b in bufs]
+    t0 = time.ticks_ms()
+    stats = {"mode": "stream", "gaps": 0}
+    last_play = stats
+    try:
+        src_hdr = bytearray(44)
+        if _read_full(raw, memoryview(src_hdr)) < 44:
+            return -1
+        total = 44
+        Speaker.begin()
+        Speaker.setVolumePercentage(hw._volume)
+        lens = [0, 0, 0]       # 每块缓冲当前装的 PCM 字节数
+        k = 0                  # 已填满的块数
+        queued = 0             # 已交给扬声器的块数
+        ends = []              # 每块的预计播完时刻（isPlaying 不支持按通道时用）
+        stopped = False
+        while True:
+            i = k % 3
+            n = _read_full(raw, mvs[i][44:])
+            n &= ~1            # 16bit 采样边界
+            if n:
+                bufs[i][0:44] = hw.make_wav_header(n)
+                lens[i] = n
+                total += n
+                k += 1
+            eof = n < blk
+            # 攒够预缓冲（或已经到头）才开始往扬声器里送
+            while queued < k and (queued > 0 or k >= cfg.STREAM_PREBUF or eof):
+                if _wait_room(queued, ends):
+                    stopped = True
+                    break
+                j = queued % 3
+                if queued >= 2 and not _spk_any():
+                    stats["gaps"] += 1          # 网络跟不上，扬声器断过粮
+                try:
+                    Speaker.playWav(bufs[j], 1, cfg.STREAM_CH, False)
+                    ok = True
+                except Exception as e:      # 签名不符等：只在第一块容忍，退回落盘
+                    if queued:
+                        raise
+                    print("stream playWav unsupported:", e)
+                    ok = False
+                now = time.ticks_ms()
+                prev = ends[-1] if ends else now
+                start = prev if time.ticks_diff(prev, now) > 0 else now
+                dur = lens[j] * 1000 // (cfg.SAMPLE_RATE * 2)
+                ends.append(time.ticks_add(start, dur))
+                queued += 1
+                if queued == 1:
+                    stats["first_ms"] = time.ticks_diff(now, t0)
+                    # 探测：挂槽是同步的，挂完立刻查就该在播；给 100ms 宽限
+                    # 还不在播 = 本固件内存 playWav 不出声。别固定先睡再查——
+                    # 短回复睡醒时早播完了，会被误判
+                    t_p = time.ticks_ms()
+                    while ok and not _spk_any() and time.ticks_diff(time.ticks_ms(), t_p) < 100:
+                        time.sleep_ms(5)
+                    if not ok or not _spk_any():
+                        _stream_bad = True
+                        Speaker.stop()
+                        Speaker.end()
+                        # 此刻 k ≤ 2，还没有缓冲被复用：按顺序把已读的拼回去
+                        head = bytes(src_hdr)
+                        for q in range(k):
+                            head += bytes(mvs[q][44:44 + lens[q]])
+                        stats["mode"] = "fallback"
+                        return _fallback(resp, raw, head)
+            if stopped or eof:
+                break
+        # 等最后几块播完
+        while not stopped and _spk_any():
+            hw._wdt_feed()
+            if _touched():
+                stopped = True
+                break
+            _pump_safe()
+            time.sleep_ms(20)
+        if stopped:
+            Speaker.stop()
+            time.sleep(0.2)
+            hw.drain_touch()
+        stats["kb"] = total >> 10
+        stats["ms"] = time.ticks_diff(time.ticks_ms(), t0)
+        stats["stopped"] = stopped
+        return total
+    except OSError as e:
+        print("stream play err:", e)
+        stats["err"] = str(e)
+        return -1
+    finally:
+        time.sleep(0.15)   # 让音频信号归零，避免 Speaker.end() 产生 pop 声
+        Speaker.end()
+        hw._wdt_feed()
+
+
+def _wait_room(queued, ends):
+    """等扬声器通道腾出一个槽。返回 True = 用户触摸要求停止。
+
+    前两块直接进（一个在播一个排队）。之后：能按通道查深度就等到 <2；
+    查不了就按预计时刻等第 queued-2 块播完；扬声器已经闲了（断粮）立刻送。
+    """
+    if queued < 2:
+        return False
+    deadline = time.ticks_add(ends[queued - 2], 20)
+    while True:
+        hw._wdt_feed()
+        if _touched():
+            return True
+        d = _spk_depth()
+        if d is not None:
+            if d < 2:
+                return False
+        elif time.ticks_diff(time.ticks_ms(), deadline) >= 0 or not _spk_any():
+            return False
+        _pump_safe()
+        time.sleep_ms(10)
+
+
+def stream_summary():
+    p = last_play
+    return "play {} kb={} first={}ms ms={} gaps={}{}".format(
+        p.get("mode"), p.get("kb"), p.get("first_ms"), p.get("ms"), p.get("gaps", 0),
+        " stopped" if p.get("stopped") else (" err=" + p["err"] if p.get("err") else ""))
+
+
 def play_wav(data):
     """内存里的 WAV：落盘后播放。短音频与老调用方走这条。
 
