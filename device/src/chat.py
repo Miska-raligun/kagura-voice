@@ -17,6 +17,7 @@ import ui
 import snd
 import cam
 import feel
+import diag
 import netsvc
 
 _imu_shake_times  = []       # 超阈值时间戳列表
@@ -57,8 +58,8 @@ def toggle_wake_mode():
 def record_and_send():
     """
     录音 → 发送服务端 → 播放回复。
-    若 St.continuous 开启则自动进入下一轮；
-    播放结束后有 1.5s 窗口，长按可退出连续模式。
+    若 St.continuous 开启则播完立刻进入下一轮录音；
+    录音期间长按即可退出连续模式（_record_audio 返回 None）。
     """
     cfg.St.busy = True
     cfg.St.stage = "chat"
@@ -70,6 +71,10 @@ def record_and_send():
             hw._wdt_feed()
             ui.draw_state("recording")
             chunks = snd._record_audio()
+            if chunks:
+                # 门槛/峰值/有没有缝：识别不灵时先看这行。空录音不记——
+                # 连续模式没人说话时每 10 秒一条，会把环形日志里的证据挤掉
+                diag.dbg(snd.rec_summary())
 
             if chunks is None:         # 用户长按中断录音 → 退出当前模式
                 if cfg.St.continuous:
@@ -79,11 +84,11 @@ def record_and_send():
                 return
 
             if not chunks:
+                if cfg.St.continuous:
+                    continue          # 连续模式：没人说话就接着听，别停 1 秒、别闪屏
                 ui.draw_state("no_speech")
                 time.sleep(1)
-                if not cfg.St.continuous:
-                    break
-                continue
+                break
 
             ui.draw_state("processing")
             audio = b''.join(chunks)
@@ -185,17 +190,10 @@ def record_and_send():
             # ── 连续模式：轮间检查主动播报 ───────────────────────────
             netsvc.mqtt_check()
 
-            # ── 连续模式：1.5s 退出窗口（长按退出）──────────────────
-            ui.draw_state("idle")
-            t_start = time.ticks_ms()
-            while time.ticks_diff(time.ticks_ms(), t_start) < 1500:
-                touch, pos = hw.check_touch()
-                if touch == 'long':
-                    toggle_continuous()   # 关闭连续模式
-                    return
-                time.sleep(0.05)
+            # 旧版这里有个 1.5 秒的"长按退出"窗口，期间麦克风是关的——
+            # 人习惯回复一结束就接话，正好落进这个聋区。录音循环本身就认长按退出，
+            # 窗口是多余的，直接进下一轮
             hw.drain_touch()
-            # 继续下一轮
 
         ui.draw_state("idle")
         time.sleep(1)

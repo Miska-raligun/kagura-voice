@@ -287,3 +287,48 @@ def test_heartbeat_and_device_status(client, vs, tmp_path, monkeypatch):
 def test_heartbeat_missing_body_ok(client):
     # 设备端 payload 异常也不该 500——心跳链路必须皮实
     assert client.post("/heartbeat", json={}).status_code == 200
+
+
+# ── 识别为空 / 录音留档 ──────────────────────────────────────────────────────
+
+def _pcm_wav(samples):
+    import struct
+    body = struct.pack("<%dh" % len(samples), *samples)
+    hdr = struct.pack("<4sI4s4sIHHIIHH4sI", b"RIFF", 36 + len(body), b"WAVE", b"fmt ",
+                      16, 1, 1, 16000, 32000, 2, 16, b"data", len(body))
+    return hdr + body
+
+
+def test_chat_empty_asr_skips_openclaw(client, vs, fake_wav, monkeypatch):
+    monkeypatch.setattr(vs, "transcribe", lambda p: "")
+
+    def _boom(*a, **k):
+        raise AssertionError("识别为空时不应调用 openclaw")
+    monkeypatch.setattr(vs, "chat", _boom)
+    spoken = []
+    monkeypatch.setattr(vs, "synthesize", lambda t: spoken.append(t) or str(fake_wav))
+
+    resp = client.post("/chat", data=_pcm_wav([0] * 1600), headers={"X-Device-Id": "t1"})
+    assert resp.status_code == 200
+    assert spoken == [vs._ASR_EMPTY_REPLY]
+    assert vs.state.pop_last_quick(vs.state.get_session("t1")) is None
+
+
+def test_chat_keeps_last_audio_for_debug(client, vs, fake_wav, monkeypatch):
+    monkeypatch.setattr(vs, "transcribe", lambda p: "现在几点")
+    wav = _pcm_wav([1000, -1000] * 800)
+    client.post("/chat", data=wav, headers={"X-Device-Id": "t1"})
+    resp = client.get("/debug-audio/t1")
+    assert resp.status_code == 200
+    assert resp.data == wav
+    assert client.get("/debug-audio/nobody").status_code == 404
+
+
+def test_audio_stats():
+    import voice_server as v
+    st = v._audio_stats(_pcm_wav([1000, -1000] * 8000 + [32767] * 160))
+    assert st["dur"] == 1.01
+    assert st["rms"] > 990
+    assert st["peak"] == 32767
+    assert st["clip_pct"] > 0
+    assert v._audio_stats(b"fake-wav-bytes") is None

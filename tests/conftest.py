@@ -48,9 +48,10 @@ import voice_server  # noqa: E402
 
 
 @pytest.fixture()
-def vs():
+def vs(tmp_path):
     """每个测试独立的 ServerState，避免限流/会话状态串测。"""
     voice_server.state = voice_server.ServerState()
+    voice_server.DEBUG_AUDIO_DIR = tmp_path / "debug_audio"
     voice_server.app.config["TESTING"] = True
     return voice_server
 

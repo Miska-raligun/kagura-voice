@@ -231,6 +231,8 @@ def heartbeat_tick():
         # 看门狗到底武装成功没有（0 = 没有）。8/26 那次僵死 4h51m 没复位、
         # 自愈一次没触发，就是因为"有没有看门狗"这件事远程完全看不见。
         "wdt": hw._wdt_ms,
+        # 录音门槛：[底噪, 说话阈值, 唤醒阈值]。"说话不触发"先看这三个数
+        "vad": [cfg.NOISE_FLOOR, cfg.SILENCE_THRESHOLD, cfg.WAKE_THRESHOLD],
     }
     try:
         payload["rssi"] = wifisetup._wlan.status("rssi")

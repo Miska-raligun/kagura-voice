@@ -9,6 +9,7 @@ OpenClaw 语音服务端
 端口: 5000
 """
 
+import array
 import base64
 import hashlib
 import json
@@ -62,6 +63,10 @@ SNAPSHOT_DIR.mkdir(exist_ok=True)
 SNAPSHOT_MAX = 60
 
 WEB_DIR = Path(__file__).parent / "web"
+
+# 每台设备最近一次上传的录音（覆盖写，只留一条）：识别差时拿来试听，
+# 分辨是「录音本身就糊」还是「百度没认出来」。GET /debug-audio/<device_id>
+DEBUG_AUDIO_DIR = Path(__file__).parent / "debug_audio"
 
 SAMPLE_RATE = 16000
 
@@ -126,11 +131,57 @@ def transcribe(audio_path: str) -> str:
     )
     result = resp.json()
     if result.get("err_no") != 0:
+        # 别静默吞掉：3301=音质差/无有效语音、3302=鉴权、3308=音频过长……
+        # 这是区分「录音问题」和「API 问题」的第一手证据
+        print(f"[asr] ❌ err_no={result.get('err_no')} {result.get('err_msg', '')}")
         return ""
     results = result.get("result", [])
     if not results:
+        print("[asr] ❌ 返回成功但 result 为空")
         return ""
     return results[0].strip()
+
+
+def _audio_stats(wav: bytes) -> Optional[dict]:
+    """粗看一条 16bit 单声道 WAV 的电平：时长、去直流 RMS、峰值、削波比例、直流偏置。
+
+    用来判断录音本身好不好：rms 只有几百 = 增益太低/离太远；
+    clip 超过 1% = 增益太高、声音被削顶；dc 很大 = 麦克风有直流偏置。
+    """
+    if len(wav) < 44 + 2 or wav[:4] != b"RIFF":
+        return None
+    body = wav[44:]
+    a = array.array("h")
+    a.frombytes(body[: len(body) // 2 * 2])
+    n = len(a)
+    if n == 0:
+        return None
+    s = sum(a)
+    s2 = sum(v * v for v in a)
+    mean = s / n
+    var = max(0.0, s2 / n - mean * mean)
+    peak = max(abs(min(a)), abs(max(a)))
+    clip = sum(1 for v in a if v >= 32000 or v <= -32000)
+    return {
+        "dur": round(n / SAMPLE_RATE, 2),
+        "rms": int(var ** 0.5),
+        "peak": peak,
+        "clip_pct": round(clip * 100 / n, 2),
+        "dc": int(mean),
+    }
+
+
+def _keep_debug_audio(device_id: str, wav: bytes) -> None:
+    """留存最近一条录音并打印电平摘要。失败不影响对话。"""
+    try:
+        st = _audio_stats(wav)
+        if st:
+            print(f"[{device_id}] 🎙️  {st['dur']}s rms={st['rms']} peak={st['peak']}"
+                  f" clip={st['clip_pct']}% dc={st['dc']}")
+        DEBUG_AUDIO_DIR.mkdir(exist_ok=True)
+        (DEBUG_AUDIO_DIR / f"{device_id}_last.wav").write_bytes(wav)
+    except Exception as e:
+        print(f"[{device_id}] debug audio 保存失败: {e}")
 
 # ── 对话 ──────────────────────────────────────────────────────────────────────
 
@@ -507,6 +558,9 @@ def _ip_rate_ok() -> bool:
     return state.check_rate(ip, bucket="ip", limit=_IP_RATE_MAX)
 
 
+_ASR_EMPTY_REPLY = "没听清，能再说一遍吗？"
+
+
 @app.route("/chat", methods=["POST"])
 def handle_chat():
     """
@@ -534,19 +588,28 @@ def handle_chat():
         wav_path = f.name
         f.write(audio_data)
 
+    _keep_debug_audio(device_id, audio_data)
+
     try:
         # 1. 语音识别
         user_text = transcribe(wav_path)
         print(f"[{device_id}] 🗣️  {user_text}")
-        if not user_text:
-            user_text = "我没有听清楚，请重说一遍"
 
-        # 2. 本地短路链：定时提醒 → 音量控制 → 快捷指令，命中则跳过 OpenClaw
+        # 2. 本地短路链：没听清 → 定时提醒 → 音量控制 → 快捷指令，命中则跳过 OpenClaw
         need_photo = False
         extra_headers: dict = {}
         reply = None
 
-        rem = quick_commands.match_reminder(user_text, local_time=local_time)
+        if not user_text:
+            # 识别为空直接回固定句（TTS 有缓存，零成本）。旧做法是把
+            # "我没有听清楚，请重说一遍"当成用户的话发给 agent——多等 3~10 秒，
+            # 回答还常常驴唇不对马嘴；也不记 last_quick，免得污染下次对话
+            reply = _ASR_EMPTY_REPLY
+            user_text = "（没听清）"
+            print(f"[{device_id}] 🙉  [asr-empty] {reply}")
+
+        rem = None if reply is not None else \
+            quick_commands.match_reminder(user_text, local_time=local_time)
         if rem is not None:
             fire_ts, task, reply = rem
             reminders.schedule(fire_ts, task, device_id)
@@ -563,7 +626,9 @@ def handle_chat():
                 reply = quick
                 print(f"[{device_id}] ⚡  [quick] {reply}")
 
-        if reply is not None:
+        if reply is _ASR_EMPTY_REPLY:
+            pass
+        elif reply is not None:
             # 短路命中：记入 pending 上下文，下次走 LLM 时带给它
             state.set_last_quick(session_id, user_text, reply)
         else:
@@ -885,6 +950,7 @@ def handle_chat_vision():
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
             wav_path = f.name
             f.write(wav_bytes)
+        _keep_debug_audio(device_id, wav_bytes)
 
     try:
         if wav_path:
@@ -968,6 +1034,14 @@ _hb_devices: dict = {}         # device_id → {"ts", "data", "alerted"}
 _hb_lock = threading.Lock()
 
 
+def _vad_note(data: dict) -> str:
+    """心跳里的录音门槛：[底噪, 说话阈值, 唤醒阈值]。说话识别不灵先看这个。"""
+    v = data.get("vad")
+    if not v or len(v) < 3:
+        return ""
+    return f" vad=底噪{v[0]}/说话{v[1]}/唤醒{v[2]}"
+
+
 def _wdt_note(data: dict) -> str:
     """把心跳里的看门狗状态翻成一眼能看懂的字样。
 
@@ -993,7 +1067,7 @@ def device_heartbeat():
         _hb_devices[device_id] = {"ts": now, "data": data, "alerted": False}
     if prev is None:
         print(f"[{device_id}] 💓 心跳开始 heap={data.get('heap')} rssi={data.get('rssi')}"
-              f" bat={data.get('bat')}% chg={data.get('chg')} {_wdt_note(data)}")
+              f" bat={data.get('bat')}% chg={data.get('chg')} {_wdt_note(data)}{_vad_note(data)}")
     elif now - prev["ts"] > _HB_SILENT_SECS:
         gap = int(now - prev["ts"])
         print(f"[{device_id}] 💓 心跳恢复（中断 {gap // 60}分{gap % 60}秒）"
@@ -1336,6 +1410,18 @@ def monitor_page():
     if not page.exists():
         return "monitor.html 缺失，请检查 web/ 目录", 500
     return send_file(page, mimetype="text/html")
+
+
+@app.route("/debug-audio/<device_id>", methods=["GET"])
+def serve_debug_audio(device_id: str):
+    """试听设备最近一次上传的录音。浏览器直接打开没法带请求头，所以 token 也可以走 ?token=。"""
+    if API_TOKEN and request.args.get("token", "") != API_TOKEN and not _token_ok():
+        return jsonify({"error": "invalid or missing token"}), 401
+    device_id = _validate_device_id(device_id)
+    fpath = DEBUG_AUDIO_DIR / f"{device_id}_last.wav"
+    if not fpath.exists():
+        return jsonify({"error": "no audio yet"}), 404
+    return send_file(fpath, mimetype="audio/wav", max_age=0)
 
 
 @app.route("/snapshot/<name>", methods=["GET"])

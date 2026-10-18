@@ -12,3 +12,4 @@ reminders.json
 photo_schedules.json
 snapshots/
 device/resource/*.jpg
+debug_audio/

@@ -66,6 +66,83 @@ def _wav_envelope(data, bucket_ms=100):
 
 
 # ── 音频录制 ──────────────────────────────────────────────────
+#
+# **无缝录音（MIC_GAPLESS）**：Mic.record 是异步排队的（M5Unified 的 Mic 有
+# 一个等待位），所以始终让两块缓冲排着队：一块在录，另一块排在后面。
+# 队首录满就拿出来算电平，算完立刻重新排到队尾——硬件那边从没断过。
+# 旧做法是「排一块 → sleep(块长+50ms) → 算 RMS → 再排下一块」，块与块之间
+# 麦克风是停的，每 250ms 丢掉 80ms 左右，上传的语音是断断续续的。
+#
+# 什么时候算"录满"：先按时间算出这块理应结束的时刻（硬件不停，所以第 k 块
+# 必然在开录后 (k+1)×块长 结束），再用 isRecording() 确认（2=在录且队列满，
+# 降到 1 说明队首那块已经交卷）。isRecording 不可用或语义不符时退回纯按
+# 时间判，最多晚 150ms，不会读到半块。
+
+last_rec = {}     # 最近一次录音的统计，chat 写进诊断日志（snd 在 diag 之前，不能自己 import 它）
+
+
+def _is_recording():
+    try:
+        return Mic.isRecording()
+    except Exception:
+        return None
+
+
+def _wait_until(ready_ms, levels):
+    """等到 ready_ms 之后、且队首那块确实录完。期间推进电平动画。
+
+    返回 True = 靠 isRecording 确认的；False = 纯按时间兜底（计入统计）。
+    """
+    step = 0
+    while True:
+        now = time.ticks_ms()
+        late = time.ticks_diff(now, ready_ms)
+        if late >= -30:
+            ir = _is_recording()
+            if ir is not None and ir < 2:
+                return True
+            if late >= 150:
+                return False
+        if cfg.VISUAL_ENABLED and levels:
+            ui._vis_set_level(levels[step % len(levels)])
+            ui.visual_tick()
+            step += 1
+        time.sleep_ms(10)
+
+
+def _mic_chunks(stats):
+    """逐块产出录满的缓冲（bytearray，调用方要留就自己 bytes() 复制）。
+
+    产出的那块在调用方处理完、下一次 next() 时才重新排队，所以处理期间
+    它不会被硬件改写；另一块此刻正在录。
+    """
+    rate = cfg.SAMPLE_RATE
+    chunk_ms = int(cfg.CHUNK_SEC * 1000)
+    levels = [0] * 5
+    if not cfg.MIC_GAPLESS:
+        buf = bytearray(cfg.CHUNK_SIZE)
+        while True:
+            Mic.record(buf, rate)
+            # Mic.record 是异步的：等待缓冲填满的这段时间正好拿来跑动画
+            ui._vis_wait(cfg.CHUNK_SEC + 0.05, levels)
+            levels = yield buf
+    bufs = [bytearray(cfg.CHUNK_SIZE), bytearray(cfg.CHUNK_SIZE)]
+    Mic.record(bufs[0], rate)
+    t0 = time.ticks_ms()
+    Mic.record(bufs[1], rate)
+    k = 0
+    while True:
+        ready = time.ticks_add(t0, (k + 1) * chunk_ms)
+        if not _wait_until(ready, levels):
+            stats["tmo"] = stats.get("tmo", 0) + 1
+        if time.ticks_diff(time.ticks_ms(), ready) > chunk_ms:
+            # 处理太慢、两块都录完了还没排上：这里会有一个缝，记下来
+            stats["late"] = stats.get("late", 0) + 1
+        buf = bufs[k % 2]
+        levels = yield buf
+        Mic.record(buf, rate)
+        k += 1
+
 
 def _record_audio():
     """
@@ -73,33 +150,77 @@ def _record_audio():
     无说话返回空列表 []。
     若用户在录音期间长按屏幕，立即停止录音并返回 None（哨兵，表示用户主动中断）。
     """
+    global last_rec
     cfg.St.stage = "rec"
-    hw._mic_on()
-    chunks, silent, started = [], 0, False
-    sub_levels = [0] * 5        # 上一块的子片电平，驱动等待期间的环形动画
-    for _ in range(cfg.MAX_CHUNKS):
-        hw._wdt_feed()   # 满长录音 10s，喂狗防误咬
-        buf = bytearray(cfg.CHUNK_SIZE)
-        Mic.record(buf, cfg.SAMPLE_RATE)
-        # Mic.record 是异步的：等待缓冲填满的这段时间正好拿来跑动画
-        ui._vis_wait(cfg.CHUNK_SEC + 0.05, sub_levels)
-        # 长按优先检测：优先级高于录音，continuous/wake 模式均可退出
-        t, _ = hw.check_touch()
-        if t == 'long':
-            hw._mic_off()
-            return None          # 哨兵：用户请求退出当前模式
-        sub_levels, level = hw.rms_slices(buf)
-        if level > cfg.SILENCE_THRESHOLD:
-            started = True
-            silent  = 0
-            chunks.append(bytes(buf))
-        elif started:
-            chunks.append(bytes(buf))
-            silent += 1
-            if silent >= cfg.SILENCE_CHUNKS:
-                break
-    hw._mic_off()
+    warm = hw._mic_on()          # 刚开麦：第一块常带启动爆音，丢掉
+    th = cfg.SILENCE_THRESHOLD
+    th_end = int(th * cfg.VAD_END_RATIO)
+    stats = {"th": th}
+    pre, chunks = [], []
+    silent, waited, started, peak = 0, 0, False, 0
+    t_start = time.ticks_ms()
+    gen = _mic_chunks(stats)
+    buf = next(gen)
+    try:
+        while True:
+            hw._wdt_feed()   # 满长录音 20s，喂狗防误咬
+            # 长按优先检测：优先级高于录音，continuous/wake 模式均可退出
+            t, _ = hw.check_touch()
+            if t == 'long':
+                return None          # 哨兵：用户请求退出当前模式
+            sub, level = hw.rms_slices(buf)
+            if warm:
+                warm = False
+            elif not started:
+                # 起说：整块够响，或 5 个 50ms 子片里有 2 个够响（短促的字）。
+                # 只有 1 个子片冒尖多半是磕碰声，不算
+                loud = 0
+                for v in sub:
+                    if v > th:
+                        loud += 1
+                if level > th or loud >= 2:
+                    started = True
+                    chunks = pre
+                    pre = []
+                    chunks.append(bytes(buf))
+                    peak = level
+                else:
+                    pre.append(bytes(buf))
+                    if len(pre) > cfg.PREROLL_CHUNKS:
+                        pre.pop(0)
+                    waited += 1
+                    if waited >= cfg.MAX_WAIT_CHUNKS:
+                        break
+            else:
+                chunks.append(bytes(buf))
+                if level > peak:
+                    peak = level
+                if level > th_end or max(sub) > th:
+                    silent = 0
+                else:
+                    silent += 1
+                    if silent >= cfg.SILENCE_CHUNKS:
+                        break
+                if len(chunks) >= cfg.MAX_CHUNKS:
+                    break
+            buf = gen.send(sub)
+    finally:
+        hw._mic_off()
+        stats["n"] = len(chunks)
+        stats["peak"] = peak
+        stats["ms"] = time.ticks_diff(time.ticks_ms(), t_start)
+        last_rec = stats
     return chunks
+
+
+def rec_summary():
+    """最近一次录音的一行摘要：n=块数 peak=最高电平 th=门槛 ms=总耗时，
+    tmo=isRecording 没确认的次数（多 = 固件语义不符，退回按时间），
+    late=处理跟不上产生的缝（应为 0）。"""
+    r = last_rec
+    return "rec n={} peak={} th={} ms={} tmo={} late={}".format(
+        r.get("n"), r.get("peak"), r.get("th"), r.get("ms"),
+        r.get("tmo", 0), r.get("late", 0))
 
 
 # ── 播放 ──────────────────────────────────────────────────────
@@ -409,21 +530,30 @@ def play_wav(data):
 
 def calibrate_noise():
     """
-    Fix 8: 启动时采样 1s 环境底噪，自动设置说话和唤醒阈值。
-    阈值 = max(底噪峰值 × 倍数, 最低保障值)，避免安静环境误触发。
+    Fix 8: 启动时采样环境底噪，自动设置说话和唤醒阈值。
+
+    旧实现取 10 次采样的**最大值** ×3：开麦头一段的启动爆音、校准那一秒
+    旁边的一句话，都会被当成"底噪"，门槛跟着翻几倍，之后正常说话就再也
+    触发不了。现在：丢掉开麦后的前 3 段 → 取中位数 → 封顶 VAD_MAX_THRESHOLD。
     """
     # 阈值属于 cfg，必须写 cfg.X = ...；用 global 会在本模块另建同名全局
-    #Widgets.Label("Calibrating...", 40, 155, 1, 0x666666, 0x1a1a1a,_FONT_16)
     sample_buf = bytearray(int(16000 * 2 * 0.1))
     samples = []
     hw._mic_on()
-    for _ in range(10):   # 10 × 100ms = 1s
+    for i in range(13):   # 3 段预热 + 10 段采样，每段 100ms
+        hw._wdt_feed()
         Mic.record(sample_buf, 16000)
-        time.sleep(0.1)
-        samples.append(hw.rms(sample_buf))
+        t0 = time.ticks_ms()
+        time.sleep_ms(100)
+        while _is_recording() and time.ticks_diff(time.ticks_ms(), t0) < 300:
+            time.sleep_ms(5)
+        if i >= 3:
+            samples.append(hw.rms(sample_buf))
     hw._mic_off()
-    noise_floor = max(samples)
-    cfg.SILENCE_THRESHOLD = max(200, noise_floor * 3)
-    cfg.WAKE_THRESHOLD    = max(300, noise_floor * 4)
-    print("校准完成：底噪={}，说话阈值={}，唤醒阈值={}".format(
-        noise_floor, cfg.SILENCE_THRESHOLD, cfg.WAKE_THRESHOLD))
+    samples.sort()
+    noise_floor = samples[len(samples) // 2]
+    cfg.NOISE_FLOOR = noise_floor
+    cfg.SILENCE_THRESHOLD = min(cfg.VAD_MAX_THRESHOLD, max(200, noise_floor * 3))
+    cfg.WAKE_THRESHOLD    = max(300, cfg.SILENCE_THRESHOLD * 4 // 3)
+    print("校准完成：底噪={}（采样 {}），说话阈值={}，唤醒阈值={}".format(
+        noise_floor, samples, cfg.SILENCE_THRESHOLD, cfg.WAKE_THRESHOLD))

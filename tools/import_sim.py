@@ -273,6 +273,87 @@ cfg.DEADMAN_SECS, cfg.DEADMAN_MIN_UPTIME_MS = _saved_dm
 cfg.data = _saved_data
 cfg.St.last_ok_ms = _time.ticks_ms()
 
+# ── 录音 VAD：去直流 / 字头预录 / 无缝双缓冲 / 开机校准 ─────────────
+print("\n=== 录音 VAD ===")
+_dc = bytearray()
+for i in range(1000):
+    _dc += _struct.pack('<h', 3000 + int(100 * math.sin(i / 3.0)))
+assert hw.rms(_dc) < 120, "直流偏置不能算进电平（旧版这里是 ~3000）"
+_sub, _whole = hw.rms_slices(_dc)
+assert abs(_whole - hw.rms(_dc)) <= 1 and max(_sub) < 120
+print("  hw.rms 去直流               = 偏置 3000 + 抖动 100 → %d ✓" % hw.rms(_dc))
+
+def _tone(amp, n, dc=500):
+    b = bytearray()
+    for i in range(n):
+        b += _struct.pack('<h', dc + int(amp * math.sin(i / 2.0)))
+    return bytes(b)
+
+class _FakeMic:
+    """按 record() 的调用顺序依次填入脚本里的块（硬件也是按排队顺序录的）。"""
+    def __init__(self, script):
+        self.script = list(script); self.calls = 0
+    def begin(self): pass
+    def end(self): pass
+    def record(self, buf, rate):
+        self.calls += 1
+        seg = self.script.pop(0) if self.script else _tone(0, len(buf) // 2)
+        buf[:] = seg[:len(buf)]
+    def isRecording(self):
+        return 1
+
+_saved_rec = (cfg.CHUNK_SEC, cfg.CHUNK_SIZE, cfg.SILENCE_THRESHOLD, snd.Mic, hw.Mic)
+cfg.CHUNK_SEC = 0.02
+cfg.CHUNK_SIZE = 640                    # 320 采样 = 20ms，测试跑得快
+cfg.SILENCE_THRESHOLD = 500
+_saved_touch = hw.check_touch
+hw.check_touch = lambda *a, **k: (None, None)
+_n = 320
+_script = ([_tone(9000, _n)] +          # 开麦爆音：必须丢掉，不能触发起说
+           [_tone(50, _n)] * 6 +        # 安静
+           [_tone(300, _n, dc=2500)] +  # 字头：低于门槛但该被预录带上
+           [_tone(4000, _n)] * 4 +      # 说话
+           [_tone(50, _n)] * 6)         # 句尾静音 → 收尾
+snd.Mic = hw.Mic = _FakeMic(_script)
+hw._mic_active = False
+_chunks = snd._record_audio()
+_onset = _tone(300, _n, dc=2500)
+assert _chunks is not None and len(_chunks) == 2 + 4 + cfg.SILENCE_CHUNKS, len(_chunks)
+assert _chunks[1] == _onset, "起说前一块（字头）必须被预录带上"
+assert _tone(9000, _n) not in _chunks, "开麦第一块（爆音）必须丢掉"
+assert snd.last_rec.get("late", 0) == 0 and snd.last_rec.get("tmo", 0) == 0
+print("  snd._record_audio           = 爆音丢弃 ✓ 字头预录 ✓ 共 %d 块 ✓" % len(_chunks))
+print("  " + snd.rec_summary())
+
+# 一直没人说话：等满 MAX_WAIT_CHUNKS 返回 []
+snd.Mic = hw.Mic = _FakeMic([])
+hw._mic_active = False
+_saved_wait = cfg.MAX_WAIT_CHUNKS
+cfg.MAX_WAIT_CHUNKS = 5
+assert snd._record_audio() == []
+cfg.MAX_WAIT_CHUNKS = _saved_wait
+print("  snd._record_audio 无人说话  = 返回 [] ✓")
+
+# 校准：前 3 段（含开麦爆音）丢掉、取中位数，不再被一段尖峰带飞
+_cal = [_tone(20000, 1600)] * 3 + [_tone(80, 1600)] * 9 + [_tone(15000, 1600)]
+snd.Mic = hw.Mic = _FakeMic(_cal)
+hw._mic_active = False
+snd.calibrate_noise()
+assert cfg.NOISE_FLOOR < 120 and cfg.SILENCE_THRESHOLD == 200, (cfg.NOISE_FLOOR, cfg.SILENCE_THRESHOLD)
+assert cfg.WAKE_THRESHOLD > cfg.SILENCE_THRESHOLD
+print("  snd.calibrate_noise         = 底噪 %d 说话 %d 唤醒 %d（爆音/偶发尖峰不抬门槛）✓"
+      % (cfg.NOISE_FLOOR, cfg.SILENCE_THRESHOLD, cfg.WAKE_THRESHOLD))
+# 一直很吵也要封顶，免得门槛高到说话够不着
+snd.Mic = hw.Mic = _FakeMic([_tone(3000, 1600)] * 13)
+hw._mic_active = False
+snd.calibrate_noise()
+assert cfg.SILENCE_THRESHOLD == cfg.VAD_MAX_THRESHOLD
+print("  snd.calibrate_noise 很吵    = 门槛封顶 %d ✓" % cfg.SILENCE_THRESHOLD)
+
+(cfg.CHUNK_SEC, cfg.CHUNK_SIZE, cfg.SILENCE_THRESHOLD, snd.Mic, hw.Mic) = _saved_rec
+hw.check_touch = _saved_touch
+hw._mic_active = False
+
 # 可变全局：模拟 discover_server 改写后，其他模块能否看到
 print("\n=== 可变全局跨模块可见性（拆分最大的坑）===")
 before = cfg.SERVER_BASE

@@ -271,6 +271,23 @@ CoreS3 (MicroPython)  ──HTTP──▶  voice_server.py (Flask :5000)  ──
   （服务端记的正是 `mqtt=True`）。**"自己看起来好不好"不可信，
   "服务端还认不认得我"才是唯一可信的判据。**
   看门狗也救不了这种情况——主循环活得好好的，一直在喂狗。
+- **录音 VAD**（`snd._record_audio`，LRN 2026-10-18，症状「连续模式说话几乎不触发、
+  单次对话识别也差」）。四条别改回去：
+  ① **无缝双缓冲**（`MIC_GAPLESS`）：两块缓冲始终排在 `Mic.record` 队列里，
+  队首录满（按时间算 + `isRecording()<2` 确认）才取出处理并重新排队。旧版
+  「录一块 → sleep(块长+50ms) → 算 RMS → 再录」每 250ms 丢约 80ms，上传的
+  语音断断续续；② **字头预录** `PREROLL_CHUNKS`：只从过门槛那块开始存会把
+  "你好"的"你"切掉；③ **开机校准取中位数**、丢开麦前 3 段、封顶
+  `VAD_MAX_THRESHOLD`，`rms()` 去直流——旧版取最大值×3，一段开麦爆音就能
+  把门槛抬到说话够不着；④ 连续模式播完**直接进下一轮录音**，旧版 1.5 秒
+  长按退出窗口期间麦克风是关的（录音循环本身就认长按退出）。
+  排查口径：心跳带 `vad=[底噪,说话,唤醒]`；每次录音写一条 `rec n=… peak=… th=…
+  tmo=… late=…` 诊断日志（`late>0` = 处理跟不上出了缝，`tmo` 多 = 固件
+  `isRecording` 语义不符、退回按时间判）；服务端每条录音打印 `🎙️ rms/peak/clip/dc`，
+  百度报错打印 `err_no`，最近一条录音存 `debug_audio/<dev>_last.wav`，
+  `GET /debug-audio/<dev>`（设了 API_TOKEN 就带 `?token=`）直接在浏览器试听——
+  **先听这条录音，糊 = 设备端问题，清楚却认不出 = ASR 问题。**
+  识别为空时 `/chat` 直接回 `_ASR_EMPTY_REPLY`，不走 OpenClaw。
 - **openclaw 并发**：`chat()` 有全局 Semaphore(2) + 每 session 串行锁。
 - **摄像头固件差异**：抓帧走 `_cam_grab()`（优先 `camera.capture()`→bytes，
   回退 `camera.snapshot()`→`image.Image`），预览走 `_cam_show()`（优先
@@ -278,7 +295,7 @@ CoreS3 (MicroPython)  ──HTTP──▶  voice_server.py (Flask :5000)  ──
   分辨率靠字节数反查 `_CAM_SIZES`——改这张表要同步服务端 `RGB565_SIZES`。
 - **回退开关**（设备端顶部常量）：`WAKE_MIC_PERSISTENT`、`WATCHDOG_ENABLED`、
   `SHOW_CHAT_TEXT`、`VISUAL_ENABLED`、`USE_STATE_IMAGES`、`CAMERA_MODE_ENABLED`、
-  `CAMERA_QVGA`、`PREVIEW_SWAP`、`STREAM_ENABLED`、`STREAM_QQVGA`、
+  `CAMERA_QVGA`、`PREVIEW_SWAP`、`MIC_GAPLESS`、`STREAM_ENABLED`、`STREAM_QQVGA`、
   `TOUCH_FEEL_ENABLED`（整个触觉）、`FEEL_NOTIFY_ENABLED`（只关"主动开口"，
   保留反射层和体感层）、`FEEL_WAKE_ON_PICKUP`
   ——真机出问题先关开关再排查。
@@ -365,7 +382,7 @@ python3 -c "import re;open('/tmp/m.js','w').write(re.search(r'<script>(.*)</scri
 
 - 提交信息中文，格式 `类型: 摘要`（feat/fix/perf/refactor/docs/chore）。
 - 注释中文为主；服务端有 type hints，设备端（MicroPython）没有。
-- 运行时产物（`push_audio/`、`tts_cache/`、`snapshots/`、`reminders.json`、
+- 运行时产物（`push_audio/`、`tts_cache/`、`snapshots/`、`debug_audio/`、`reminders.json`、
   `photo_schedules.json`）已 gitignore，勿提交。
 - 设备目录：`/flash/kagura/src`（代码）、`/flash/kagura/resource`（图片，
   用 `cfg.res()` 取路径）、`/flash/kagura/data`（运行时状态，`cfg.data()`，

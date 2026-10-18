@@ -65,11 +65,17 @@ _mic_active = False
 
 
 def _mic_on():
-    """幂等开麦。Mic 与 Speaker 共享音频通路，播放前必须 _mic_off()。"""
+    """幂等开麦。Mic 与 Speaker 共享音频通路，播放前必须 _mic_off()。
+
+    返回 True 表示这次是**刚开**的：开麦后头一段录音常带启动爆音，
+    调用方据此丢掉第一块，别让它触发 VAD 或抬高底噪校准。
+    """
     global _mic_active
     if not _mic_active:
         Mic.begin()
         _mic_active = True
+        return True
+    return False
 
 
 def _mic_off():
@@ -226,40 +232,55 @@ def make_wav_header(data_len, sample_rate=16000, channels=1, bits=16):
 def rms(buf):
     # array('h') 直接迭代比逐样本 struct.unpack_from 快约一个数量级；
     # calibrate_noise() 与此同函数，阈值尺度自洽，无需重新校准。
+    # **去直流**：麦克风若带直流偏置，不去掉的话"安静"也有几百的 RMS，
+    # 开机校准 ×3 之后门槛就高过正常说话音量——说了也不触发。
     a = uarray.array('h', buf)
     n = len(a)
     if n == 0:
         return 0
-    total = 0
+    s1 = 0
+    s2 = 0
     for v in a:
-        total += v * v
-    return int(math.sqrt(total / n))
+        s1 += v
+        s2 += v * v
+    m = s1 / n
+    var = s2 / n - m * m
+    return int(math.sqrt(var)) if var > 0 else 0
 
 
 def rms_slices(buf, n=5):
-    """单次遍历返回 (n 个子片 RMS, 整体 RMS)。
+    """单次遍历返回 (n 个子片 RMS, 整体 RMS)，都按整块均值去直流。
 
-    子片供电平动画用（0.25s 的块拆成 5 帧 → 20fps 音频响应），
-    整体值供 VAD 判定用。总运算量与调一次 rms() 相同，等于白送。
+    子片供电平动画和 VAD 起说判定用（0.25s 的块拆成 5 个 50ms），
+    整体值与 rms() 一致。总运算量与调一次 rms() 相同。
     """
     a = uarray.array('h', buf)
     total_n = len(a)
     if total_n == 0:
         return [0] * n, 0
     seg = total_n // n
-    out = []
-    grand = 0
+    sums = []
+    S1 = 0
+    S2 = 0
     for s in range(n):
         start = s * seg
         end = total_n if s == n - 1 else start + seg
-        acc = 0
+        s1 = 0
+        s2 = 0
         for i in range(start, end):
             v = a[i]
-            acc += v * v
-        cnt = end - start
-        out.append(int(math.sqrt(acc / cnt)) if cnt else 0)
-        grand += acc
-    return out, int(math.sqrt(grand / total_n))
+            s1 += v
+            s2 += v * v
+        sums.append((s1, s2, end - start))
+        S1 += s1
+        S2 += s2
+    m = S1 / total_n
+    out = []
+    for s1, s2, cnt in sums:
+        var = (s2 - 2 * m * s1) / cnt + m * m if cnt else 0
+        out.append(int(math.sqrt(var)) if var > 0 else 0)
+    var = S2 / total_n - m * m
+    return out, (int(math.sqrt(var)) if var > 0 else 0)
 
 
 # ── 触摸检测 ──────────────────────────────────────────────────
