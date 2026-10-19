@@ -187,7 +187,7 @@ def _cam_set_framesize(qqvga):
 _CAM_PREVIEW_H = cfg.CAM_BAR_Y if cfg.CAM_PREVIEW_CLIP else 240
 
 
-_CAM_ENTRY = (136, 0, 200, 34)  # 待机顶栏 "CAM" 键的命中区
+_CAM_ENTRY = (106, 0, 152, 34)  # 待机顶栏 "CAM" 键的命中区（与 ui 顶栏坐标同步）
 
 
 _CAM_BTN_L = (0,   cfg.CAM_BAR_Y, 158, 239)

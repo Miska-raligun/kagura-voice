@@ -66,8 +66,12 @@ _pending_push = []   # 待播放的 push 音频 URL
 _pending_cmd  = []   # 待执行的远程命令 dict
 
 
+_role_redraw  = False  # MQTT 换了角色、还没重画
+
+
 def _mqtt_callback(topic, msg):
     """MQTT 消息回调：只入队，不做任何耗时操作。"""
+    global _role_redraw
     topic_str = topic.decode("utf-8") if isinstance(topic, bytes) else topic
 
     if "/push/" in topic_str:
@@ -90,6 +94,12 @@ def _mqtt_callback(topic, msg):
             cmd = ujson.loads(msg)
         except Exception as e:
             print("[mqtt] cmd parse error:", e)
+            return
+        if cmd.get("action") == "role":
+            # 就地换角色：只改一个变量、作废重绘缓存，不碰屏幕不碰网络，回调里做得起。
+            # 不入队——队列里 push 优先，网页切角色后紧跟的问候会先用旧图播出来
+            if ui.set_role(cmd.get("role", "")):
+                _role_redraw = True      # 空闲时由 process_mqtt_queue 重画（主循环不会自己画）
             return
         _pending_cmd.append(cmd)
 
@@ -156,8 +166,13 @@ def _run_capture_cmd(cmd):
 
 def process_mqtt_queue():
     """主循环调用：每 tick 最多消费一项，空闲时才执行。"""
+    global _role_redraw
     if cfg.St.busy:
         return
+    if _role_redraw:
+        _role_redraw = False
+        if not _pending_push:            # 有 push 的话它自己会画（broadcast 态）
+            ui.draw_state("idle")
     if _pending_push:
         _play_push(_pending_push.pop(0))
     elif _pending_cmd:
@@ -168,10 +183,6 @@ def process_mqtt_queue():
         elif action == "stream_start":
             if _stream_runner:
                 _stream_runner(cmd)
-        elif action == "role":
-            # 网页/agent 切了角色：空闲时换图（对话中的切换走 /chat 的 X-Role 头）
-            if ui.set_role(cmd.get("role", "")):
-                ui.draw_state("idle")
 
 
         # stream_stop：不在直播中收到就没有意义，丢弃即可
@@ -263,7 +274,9 @@ def fetch_role():
         resp = urequests.get(cfg.SERVER_BASE + "/role?device_id=" + cfg.DEVICE_ID,
                              timeout=cfg.REQUEST_TIMEOUT_SHORT)
         if resp.status_code == 200:
-            ui.set_role(resp.json().get("role", ""))
+            info = resp.json()
+            ui.role_count = len(info.get("roles", []))
+            ui.set_role(info.get("role", ""))
         resp.close()
     except Exception as e:
         print("fetch role err:", e)

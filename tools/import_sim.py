@@ -499,6 +499,9 @@ ui.set_role("")
 assert ui.img_path("img_playing") == cfg.res("img_playing.jpg")
 ui.uos.stat = _saved_stat
 print("  ui.img_path / set_role      = 专属图优先 ✓ 缺图回落默认 ✓ 同角色不重画 ✓")
+import cam as _cam
+assert _cam._CAM_ENTRY[2] < ui._ROLE_ENTRY[0], "顶栏 CAM 与 ROLE 命中区不能重叠"
+print("  顶栏命中区                  = CAM %s / ROLE %s 不重叠 ✓" % (_cam._CAM_ENTRY, ui._ROLE_ENTRY))
 
 # 可变全局：模拟 discover_server 改写后，其他模块能否看到
 print("\n=== 可变全局跨模块可见性（拆分最大的坑）===")

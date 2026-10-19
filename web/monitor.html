@@ -109,6 +109,7 @@
   <h1>神楽监控</h1>
   <input type="text" id="devInput" value="cores3" size="7" title="设备 ID">
   <span class="pill"><span class="dot" id="devDot"></span><span id="devText">加载中…</span></span>
+  <select id="roleSel" title="当前角色（切换后设备换图、用新角色的声音问好）" hidden></select>
   <span class="spacer"></span>
   <span class="small dim" id="clock"></span>
   <button class="mini" id="btnToken">密钥</button>
@@ -645,12 +646,48 @@ function renderDevices(devices, mqttOk) {
   text.textContent = bits.join(" · ");
 }
 
+// ── 角色 ────────────────────────────────────────────────────────────────────
+
+function renderRoles(roles, current) {
+  const sel = $("#roleSel");
+  if (!roles || roles.length < 2) { sel.hidden = true; return; }   // 单角色就不占地方
+  sel.hidden = false;
+  const fp = JSON.stringify(roles);
+  if (rendered.roles !== fp) {
+    rendered.roles = fp;
+    sel.innerHTML = roles.map(r =>
+      `<option value="${esc(r.id)}">🎭 ${esc(r.name)}</option>`).join("");
+  }
+  // 用户正在下拉里选的时候别把选择顶回去
+  if (document.activeElement !== sel) sel.value = current;
+}
+
+async function switchRole() {
+  const sel = $("#roleSel");
+  sel.disabled = true;
+  try {
+    const r = await apiJson("/role", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({device_id: currentDevice(), role: sel.value}),
+    });
+    toast("已切换到 " + r.name);
+  } catch (e) {
+    toast("切换失败：" + e.message);
+  } finally {
+    sel.disabled = false;
+    sel.blur();
+    refreshState();
+  }
+}
+
 async function refreshState() {
   try {
     const st = await apiJson(
       "/api/monitor/state?device_id=" + encodeURIComponent(currentDevice()));
     $("#clock").textContent = st.server_time;
     renderDevices(st.devices, st.mqtt);
+    renderRoles(st.roles, st.role);
     renderSchedules(st.schedules);
     renderSnapshots(st.snapshots);
   } catch (e) {
@@ -678,6 +715,7 @@ $("#btnAdd").onclick = addSchedule;
 $("#btnToken").onclick = () => askToken();
 $("#selAuto").onchange = (e) => setAuto(parseInt(e.target.value, 10));
 $("#devInput").onchange = refreshState;
+$("#roleSel").onchange = switchRole;
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") $("#lightbox").style.display = "none";
 });

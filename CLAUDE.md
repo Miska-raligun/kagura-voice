@@ -46,8 +46,15 @@ CoreS3 (MicroPython)  ──HTTP──▶  voice_server.py (Flask :5000)  ──
   角色 id 只许 ASCII（要进 `X-Role` 头、当设备目录名）。设备端 `cfg.St.role` 只经
   `ui.set_role()` 改（变了才作废 `_drawn_key`，同角色重复设置不能重画）；
   `ui.img_path(base)` 先找 `resource/<role>/<base>.jpg`、没有就用默认那张，
-  `_img_missing` 按路径记。来源三处：每次 `/chat`/`/chat-vision` 的 `X-Role` 头、
-  开机 `netsvc.fetch_role()`（`GET /role`）、网页/agent `POST /role` → MQTT `{"action":"role"}`。
+  `_img_missing` 按路径记。图片各角色分目录常驻 flash，切换只改读哪个目录，不用重传。
+  切换入口：语音（`/chat` 短路）、设备顶栏 **ROLE 键**（`chat.cycle_role` →
+  `POST /role/cycle`，设备上行不要 token，直接回新角色问候 WAV）、网页顶部下拉
+  （`POST /role`，要 token；先 MQTT `{"action":"role"}` 再推问候）。设备拿角色的三处：
+  `X-Role` 响应头、开机 `netsvc.fetch_role()`（`GET /role`，顺带填 `ui.role_count`，
+  ≥2 才画 ROLE 键）、MQTT role 命令——**这条在回调里就地 `set_role`、不入队**
+  （队列里 push 优先，入队的话紧跟的问候会先用旧图播），空闲时靠 `_role_redraw` 重画。
+  顶栏坐标 CONT 6 / WAKE 60 / CAM 114 / ROLE 158 / 时间 ≥206，改了要同步
+  `cam._CAM_ENTRY` 与 `ui._ROLE_ENTRY`（`import_sim` 查两者不重叠）。
 - **免手模式（连续对话/声控唤醒）防误触与退出**（LRN 2026-10-19，症状「一有点声音就
   触发，退不出去只能关机」）：设备起说门槛 ×`HANDS_FREE_TH_RATIO`；开口后够响的块
   不到 `MIN_VOICED_CHUNKS` 当噪声丢弃不上传；请求带 `X-Mode`，服务端在免手模式下把

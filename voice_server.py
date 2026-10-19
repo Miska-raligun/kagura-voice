@@ -674,7 +674,7 @@ def handle_chat():
                 else:
                     roles.set_role(device_id, target["id"])
                     role = target                      # 下面的 TTS 用新角色的音色
-                    reply = f"我是{target['name']}，有什么事吗？"
+                    reply = roles.greeting(target)
                 print(f"[{device_id}] 🎭  [role] → {target['name']} ({target['agent']})")
 
         rem = None if reply is not None else \
@@ -1527,10 +1527,37 @@ def post_role():
     if target is None:
         return jsonify({"error": "unknown role"}), 400
     if _mqtt_client is not None:
+        # 先发换图命令再推问候：设备在 MQTT 回调里就地换角色，问候播出时已是新图
         _mqtt_client.publish(f"kagura/cmd/{device_id}",
                              json.dumps({"action": "role", "role": target["id"]}), qos=1)
+        if data.get("greet", True):
+            _send_push(roles.greeting(target), device_id)
     print(f"[{device_id}] 🎭  [role/api] → {target['name']} ({target['agent']})")
     return jsonify({"role": target["id"], "name": target["name"]})
+
+
+@app.route("/role/cycle", methods=["POST"])
+def cycle_role():
+    """设备顶栏 ROLE 键：切到下一个角色，直接回新角色的问候语音（同 /chat 的响应头）。
+
+    设备上行接口与 /chat 一致不要 token（设备端没有密钥），靠限流兜底。
+    """
+    device_id = _validate_device_id(request.headers.get("X-Device-Id"))
+    if not state.check_rate(device_id) or not _ip_rate_ok():
+        return jsonify({"error": "请求过于频繁，请稍后再试"}), 429
+    target = roles.set_role(device_id, roles.next_role(device_id)["id"])
+    text = roles.greeting(target)
+    wav_out = synthesize(text, per=target["per"])
+    if not wav_out:
+        return jsonify({"error": "TTS 生成失败"}), 500
+    with open(wav_out, "rb") as f:
+        wav_data = f.read()
+    print(f"[{device_id}] 🎭  [role/tap] → {target['name']} ({target['agent']})")
+    return Response(wav_data, mimetype="audio/wav", headers={
+        "Content-Length": len(wav_data),
+        "X-Role": target["id"],
+        "X-Reply-Text": _b64_header(text),
+    })
 
 
 @app.route("/debug-audio/<device_id>", methods=["GET"])
@@ -1583,6 +1610,8 @@ def monitor_state():
         "schedules": photo_schedules.list_all(),
         "snapshots": _list_snapshots(),
         "stream": stream_server.stats(want),
+        "role": roles.get(want)["id"],
+        "roles": [{"id": r["id"], "name": r["name"]} for r in roles.all_roles()],
     })
 
 

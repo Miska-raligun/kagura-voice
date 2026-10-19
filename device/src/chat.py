@@ -41,6 +41,36 @@ def toggle_continuous():
     ui.draw_state("idle")
 
 
+def cycle_role():
+    """顶栏 ROLE 键：切到下一个角色，播新角色的问候（用它自己的音色），背景图同时换掉。"""
+    cfg.St.busy = True
+    cfg.St.last_activity = time.time()
+    try:
+        ui.draw_state("processing")
+        netsvc.mqtt_ping()
+        resp = urequests.post(cfg.SERVER_BASE + "/role/cycle",
+                              headers={"X-Device-Id": cfg.DEVICE_ID},
+                              timeout=cfg.REQUEST_TIMEOUT_SHORT)
+        if resp.status_code != 200:
+            print("cycle role err:", resp.status_code)
+            resp.close()
+            ui.draw_state("error")
+            time.sleep(1)
+            return
+        ui.set_role(resp.headers.get("X-Role", ""))
+        ui._update_chat_text("", resp.headers.get("X-Reply-Text", ""))
+        ui.draw_state("playing")
+        snd.stream_play(resp)
+        resp.close()
+    except OSError as e:
+        print("cycle role net err:", e)
+        ui.draw_state("error")
+        time.sleep(1)
+    finally:
+        cfg.St.busy = False
+        ui.draw_state("idle")
+
+
 def toggle_wake_mode():
     """长按切换声控唤醒模式。开启时自动关闭连续对话（两者互斥）。"""
     cfg.St.wake = not cfg.St.wake

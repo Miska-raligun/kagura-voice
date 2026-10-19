@@ -99,6 +99,17 @@ def set_role(device_id: str, role_id: str) -> Optional[dict]:
     return role
 
 
+def next_role(device_id: str) -> dict:
+    """角色表里的下一个（转到头回到第一个）。设备顶栏 ROLE 键用。"""
+    cur = get(device_id)["id"]
+    ids = [r["id"] for r in _roles]
+    return _roles[(ids.index(cur) + 1) % len(_roles)]
+
+
+def greeting(role: dict) -> str:
+    return f"我是{role['name']}，有什么事吗？"
+
+
 def session_key(device_id: str, role: dict) -> str:
     """默认角色沿用 device_id（老会话不丢），其他角色各自一条会话。"""
     return device_id if role["id"] == default()["id"] else f"{device_id}~{role['id']}"

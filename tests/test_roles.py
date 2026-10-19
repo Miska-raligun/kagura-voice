@@ -115,3 +115,30 @@ def test_voice_exit(client, vs, fake_wav, monkeypatch, mode, exits):
     monkeypatch.setattr(vs, "chat", lambda *a, **k: "好吧")
     r = client.post("/chat", data=b"x", headers={"X-Device-Id": "d4", "X-Mode": mode})
     assert (r.headers.get("X-Cont-Exit") == "1") is exits
+
+
+# ── 非语音的切换入口：设备顶栏 ROLE 键、网页下拉 ─────────────────────────────────
+
+def test_role_cycle_from_device(client, vs, fake_wav, two_roles, monkeypatch):
+    voices = []
+    monkeypatch.setattr(vs, "synthesize", lambda t, per=111: voices.append((t, per)) or str(fake_wav))
+    r = client.post("/role/cycle", headers={"X-Device-Id": "d5"})
+    assert r.status_code == 200 and r.mimetype == "audio/wav"
+    assert r.headers["X-Role"] == "mio" and voices[-1] == (roles.greeting(roles.find("mio")), 4)
+    r = client.post("/role/cycle", headers={"X-Device-Id": "d5"})
+    assert r.headers["X-Role"] == "", "转到头回到第一个"
+
+
+def test_role_api_notifies_device_then_greets(client, vs, fake_wav, two_roles, mqtt):
+    client.post("/role", json={"device_id": "d6", "role": "mio"})
+    topics = [(t, p.get("action") or p.get("type")) for t, p, _ in mqtt.published]
+    assert topics == [("kagura/cmd/d6", "role"), ("kagura/push/d6", "push")], \
+        "先发换图命令再推问候，问候播出时才是新图"
+    client.post("/role", json={"device_id": "d6", "role": "", "greet": False})
+    assert len(mqtt.published) == 3
+
+
+def test_monitor_state_lists_roles(client, vs, two_roles):
+    roles.set_role("d7", "mio")
+    st = client.get("/api/monitor/state?device_id=d7").get_json()
+    assert st["role"] == "mio" and [r["name"] for r in st["roles"]] == ["神乐", "小澪"]

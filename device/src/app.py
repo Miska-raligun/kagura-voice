@@ -110,6 +110,8 @@ def loop():
         elif touch == 'short':
             if cfg.CAMERA_MODE_ENABLED and hw._hit(pos[0], pos[1], cam._CAM_ENTRY):
                 cam.camera_mode()            # 短按顶栏 CAM 键：手动取景拍照
+            elif ui.role_count >= 2 and hw._hit(pos[0], pos[1], ui._ROLE_ENTRY):
+                chat.cycle_role()            # 短按顶栏 ROLE 键：切到下一个角色
             else:
                 chat.record_and_send()        # 短按其他位置：直接录音
         elif cfg.St.wake:

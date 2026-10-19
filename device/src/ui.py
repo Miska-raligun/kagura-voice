@@ -265,6 +265,12 @@ def _canvas_disable():
 _role_hit = {}       # "角色/图名" → 该角色有没有这张图（只 stat 一次）
 
 
+role_count = 0       # 服务端配了几个角色（开机 fetch_role 填）。≥2 才在顶栏画 ROLE 键
+
+
+_ROLE_ENTRY = (153, 0, 204, 34)   # 待机顶栏 "ROLE" 键的命中区（紧挨 CAM 右边）
+
+
 def img_path(base):
     """背景图路径：当前角色有专属图（resource/<角色>/<图名>.jpg）就用它，
     没有就用默认那张。所以新角色只需要放想换的那几张，其余自动沿用默认。"""
@@ -397,16 +403,23 @@ def draw_state(state, force=False):
     tgt.fillRect(0, 0, 320, 3, color)     # 原先是三条 Widgets.Line，等价
     tgt.setFont(_FONT_16)
     tgt.setTextSize(1)
+    # 顶栏从左到右：CONT / WAKE / CAM / ROLE / 时间+电量。加 ROLE 时整体往左挤了：
+    # 每个字约 10px，ROLE 占 158~198，时间电量最长 "12:34 100%" 从 210 起，不打架。
+    # 改坐标要同步 cam._CAM_ENTRY 和 _ROLE_ENTRY 两个命中区
     tgt.setTextColor(cm_color, cm_color)
-    tgt.drawString("CONT", 10, 6)
+    tgt.drawString("CONT", 6, 6)
     tgt.setTextColor(wm_color, wm_color)
-    tgt.drawString("WAKE", 90, 6)
-    # CAM：可点的键（命中区 _CAM_ENTRY），点它进取景模式
+    tgt.drawString("WAKE", 60, 6)
+    # CAM：可点的键（命中区 cam._CAM_ENTRY），点它进取景模式
     if cfg.CAMERA_MODE_ENABLED:
         tgt.setTextColor(0xaa66ff, 0xaa66ff)
-        tgt.drawString("CAM", 145, 6)
+        tgt.drawString("CAM", 114, 6)
+    # ROLE：可点的键（命中区 _ROLE_ENTRY），点它切到下一个角色
+    if role_count >= 2:
+        tgt.setTextColor(0xff88cc, 0xff88cc)
+        tgt.drawString("ROLE", 158, 6)
     tgt.setTextColor(0x666666, 0x666666)
-    tgt.drawString(right_str, max(180, 310 - len(right_str) * 10), 6)
+    tgt.drawString(right_str, max(206, 310 - len(right_str) * 10), 6)
 
     # ── 3：kaomoji（只在背景图都没读到时兜底显示）────────────
     if not img_shown:
