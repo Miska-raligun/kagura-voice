@@ -125,6 +125,19 @@ VAD_END_RATIO    = 0.6    # 开口后的"静音"门槛 = SILENCE_THRESHOLD × �
                           # 句尾音量回落、句中换气时别急着收尾
 
 
+MIN_VOICED_CHUNKS = 2     # 开口后至少要有几块（×0.25s）够响才算说话，否则当噪声丢弃
+
+
+HANDS_FREE_TH_RATIO = 1.5  # 连续/唤醒模式的起说门槛 = SILENCE_THRESHOLD × 此倍数。
+                           # 免手模式下"一有点声音就触发"（LRN 2026-10-19）
+
+
+CONT_EMPTY_EXIT  = 3      # 连续模式下连续几次"识别为空"就自动退出
+
+
+CONT_IDLE_EXIT_SECS = 120  # 连续模式下这么久没有一轮有效对话就自动退出
+
+
 MIC_GAPLESS      = True   # 双缓冲无缝录音（回退开关）。旧版录完一块才排下一块，
                           # 中间等 50ms + 算 RMS，块与块之间丢 ~80ms，
                           # 相当于每秒挖掉三成音频——单次对话识别差的头号嫌疑。
@@ -223,6 +236,8 @@ class St:
     wake          = False   # 声控唤醒模式（与 continuous 互斥）
     sleeping      = False   # 息屏休眠中
     last_activity = 0       # 最近一次交互时间戳（休眠计时）
+    role          = ""      # 当前角色 id（""=默认）。服务端说了算：每次 /chat 回 X-Role，
+                            # 只能经 ui.set_role() 改（要作废重绘缓存）
     # 下面两个是"死人开关"用的，见 hw._deadman_check：
     stage         = "boot"  # 当前在哪个长循环里（主循环每轮复位成 "loop"）
     last_ok_ms    = 0       # 上次成功联系上服务端的 ticks_ms（hw 在 import 时初始化）

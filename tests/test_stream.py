@@ -319,7 +319,7 @@ def test_describe_runs_in_background(client, vs, tmp_path, monkeypatch, snap_dir
     done = threading.Event()
     seen = {}
 
-    def _chat(msg, session_id, image_path=None, local_time=None):
+    def _chat(msg, session_id, image_path=None, local_time=None, **kw):
         seen["image"] = image_path
         return "看到一只猫"
     monkeypatch.setattr(vs, "chat", _chat)

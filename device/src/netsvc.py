@@ -168,6 +168,10 @@ def process_mqtt_queue():
         elif action == "stream_start":
             if _stream_runner:
                 _stream_runner(cmd)
+        elif action == "role":
+            # 网页/agent 切了角色：空闲时换图（对话中的切换走 /chat 的 X-Role 头）
+            if ui.set_role(cmd.get("role", "")):
+                ui.draw_state("idle")
 
 
         # stream_stop：不在直播中收到就没有意义，丢弃即可
@@ -251,6 +255,18 @@ def mqtt_check():
                 _mqtt_last_reconnect = now
                 _reconnect_mqtt()
                 _mqtt_last_ping = time.time()
+
+
+def fetch_role():
+    """开机问服务端当前角色（角色状态落在服务端，设备重启不丢）。失败就用默认图。"""
+    try:
+        resp = urequests.get(cfg.SERVER_BASE + "/role?device_id=" + cfg.DEVICE_ID,
+                             timeout=cfg.REQUEST_TIMEOUT_SHORT)
+        if resp.status_code == 200:
+            ui.set_role(resp.json().get("role", ""))
+        resp.close()
+    except Exception as e:
+        print("fetch role err:", e)
 
 
 def mqtt_ping():

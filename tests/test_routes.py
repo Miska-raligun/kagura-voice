@@ -210,7 +210,7 @@ def _vision_stubs(vs, monkeypatch):
     seen = []
     monkeypatch.setattr(vs, "_decode_image_b64", lambda b64, dev, tag="": "/tmp/shot.jpg")
     monkeypatch.setattr(vs, "chat",
-                        lambda text, sid, image_path=None, local_time=None:
+                        lambda text, sid, image_path=None, local_time=None, **kw:
                         seen.append((text, image_path)) or "看起来是只猫")
     return seen
 
@@ -306,7 +306,7 @@ def test_chat_empty_asr_skips_openclaw(client, vs, fake_wav, monkeypatch):
         raise AssertionError("识别为空时不应调用 openclaw")
     monkeypatch.setattr(vs, "chat", _boom)
     spoken = []
-    monkeypatch.setattr(vs, "synthesize", lambda t: spoken.append(t) or str(fake_wav))
+    monkeypatch.setattr(vs, "synthesize", lambda t, **k: spoken.append(t) or str(fake_wav))
 
     resp = client.post("/chat", data=_pcm_wav([0] * 1600), headers={"X-Device-Id": "t1"})
     assert resp.status_code == 200

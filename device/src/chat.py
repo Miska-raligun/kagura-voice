@@ -77,16 +77,25 @@ def record_and_send():
     """
     录音 → 发送服务端 → 播放回复。
     若 St.continuous 开启则播完立刻进入下一轮录音；
-    录音期间长按即可退出连续模式（_record_audio 返回 None）。
+    退出连续模式的路子（LRN 2026-10-19，旧版只有"录音时长按"一条，
+    一有点声音就触发新一轮，用户掐不准时机，只能关机）：
+      ① 听的时候轻点或长按屏幕；② 说"退出/不聊了/再见"之类（服务端回 X-Cont-Exit）；
+      ③ 连续 CONT_EMPTY_EXIT 次识别为空；④ CONT_IDLE_EXIT_SECS 内没有一轮有效对话。
     """
     cfg.St.busy = True
     cfg.St.stage = "chat"
     cfg.St.last_activity = time.time()
     gc.collect()
+    empties = 0                 # 连续"识别为空"的次数
+    last_real = time.time()     # 最近一轮有效对话（或进入本函数）的时刻
 
     try:
         while True:
             hw._wdt_feed()
+            if cfg.St.continuous and time.time() - last_real > cfg.CONT_IDLE_EXIT_SECS:
+                diag.dbg("cont exit: idle")
+                toggle_continuous()
+                return
             ui.draw_state("recording")
             wav = snd._record_audio()     # 整段 WAV（指向共享录音缓冲，零复制）
             if wav is not None and len(wav) > 44:
@@ -112,7 +121,10 @@ def record_and_send():
             gc.collect()
 
             try:
-                hdrs = {"X-Device-Id": cfg.DEVICE_ID}
+                hdrs = {"X-Device-Id": cfg.DEVICE_ID,
+                        # 服务端据此决定是否过滤"嗯/啊"这类免手模式误触
+                        "X-Mode": "continuous" if cfg.St.continuous
+                                  else ("wake" if cfg.St.wake else "single")}
                 lt = clock.get_local_time_header()
                 if lt:
                     hdrs["X-Local-Time"] = lt
@@ -127,6 +139,20 @@ def record_and_send():
                     if not cfg.St.continuous:
                         break
                     continue
+                ui.set_role(resp.headers.get("X-Role", ""))   # 角色切换后这里换图
+                if resp.headers.get("X-Asr-Empty", "") == "1" and cfg.St.continuous:
+                    # 连续模式下没听清就别播"没听清"了——环境噪声能让它一直念叨。
+                    # 悄悄接着听，攒够次数自动退出
+                    resp.close()
+                    empties += 1
+                    if empties >= cfg.CONT_EMPTY_EXIT:
+                        diag.dbg("cont exit: {} empty".format(empties))
+                        toggle_continuous()
+                        return
+                    continue
+                empties = 0
+                last_real = time.time()
+                cont_exit = resp.headers.get("X-Cont-Exit", "") == "1"
                 need_photo = resp.headers.get("X-Need-Photo", "") == "1"
                 vol_cmd = resp.headers.get("X-Volume", "")
                 ui._update_chat_text(resp.headers.get("X-User-Text", ""),
@@ -156,6 +182,13 @@ def record_and_send():
                 continue
             print("WAV size:", n)
             gc.collect()
+            if cont_exit:
+                # 用户说了"退出/不聊了"：播完告别语就收（单次模式下这个头无害）
+                if cfg.St.continuous:
+                    toggle_continuous()
+                elif cfg.St.wake:
+                    toggle_wake_mode()
+                return
 
             # ── 语音触发拍照：播完简短应答后立即拍照并发送 /chat-vision ──
             if need_photo:
@@ -293,7 +326,7 @@ def _show_shake_easter_egg():
         was_off = not cfg.St.continuous
         try:
             ui._ui_invalidate()       # 彩蛋图整屏覆盖，之后必须整屏重建
-            with open(cfg.res("img_shake.jpg"), "rb") as f:
+            with open(ui.img_path("img_shake"), "rb") as f:
                 Lcd.drawJpg(f.read(), 0, 0)
         except Exception as e:
             print("[shake] img_shake.jpg unavailable, falling back to kaomoji:", e)

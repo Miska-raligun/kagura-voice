@@ -182,7 +182,7 @@ def test_scheduled_capture_happy_path(vs, snap_dir, tmp_path, monkeypatch):
     monkeypatch.setattr(vs, "_capture_and_wait", lambda dev, **kw: (str(img), None))
     seen = {}
 
-    def _chat(msg, session_id, image_path=None, local_time=None):
+    def _chat(msg, session_id, image_path=None, local_time=None, **kw):
         seen["msg"], seen["image"] = msg, image_path
         return "桌上有一杯没喝完的咖啡"
     monkeypatch.setattr(vs, "chat", _chat)

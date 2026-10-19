@@ -93,5 +93,5 @@ def fake_wav(tmp_path, monkeypatch, vs):
     """把 synthesize 替换为写一个假 WAV 文件，返回其路径。"""
     wav = tmp_path / "out.wav"
     wav.write_bytes(b"RIFF....WAVEfake-audio")
-    monkeypatch.setattr(vs, "synthesize", lambda text: str(wav))
+    monkeypatch.setattr(vs, "synthesize", lambda text, **k: str(wav))
     return wav

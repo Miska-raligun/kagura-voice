@@ -339,6 +339,28 @@ assert len(_wav) == 44 + snd.rec_max_chunks * 640 and snd.last_rec.get("cut")
 assert "CUT" in snd.rec_summary()
 print("  snd._record_audio 说满上限  = %d 块截断，标 CUT ✓" % snd.rec_max_chunks)
 
+# 只响一下（拍桌子/关门）：开口后够响的只有 1 块 → 当噪声丢掉，不上传
+snd.Mic = hw.Mic = _FakeMic([_tone(50, _n), _tone(6000, _n)] + [_tone(50, _n)] * 8)
+hw._mic_active = False
+assert len(snd._record_audio()) == 0 and snd.last_rec.get("noise")
+print("  snd._record_audio 单响噪声  = 丢弃不上传 ✓  " + snd.rec_summary())
+
+# 触摸：连续模式下轻点 = 退出（旧版只认长按）；单次模式下轻点 = 说完了立刻发
+_taps = iter([None, None, None, 'short'])
+hw.check_touch = lambda *a, **k: (next(_taps, None), (0, 0))
+snd.Mic = hw.Mic = _FakeMic([_tone(50, _n)] + [_tone(4000, _n)] * 20)
+hw._mic_active = False
+cfg.St.continuous = True
+assert snd._record_audio() is None, "连续模式下轻点必须退出"
+cfg.St.continuous = False
+_taps = iter([None, None, None, None, 'short'])
+snd.Mic = hw.Mic = _FakeMic([_tone(50, _n)] + [_tone(4000, _n)] * 20)
+hw._mic_active = False
+_wav = snd._record_audio()
+assert _wav is not None and len(_wav) == 44 + 3 * 640 and snd.last_rec.get("tap")
+hw.check_touch = lambda *a, **k: (None, None)
+print("  snd._record_audio 轻点      = 连续模式退出 ✓ 单次模式立刻发送（3 块）✓")
+
 # 一直没人说话：等满 MAX_WAIT_CHUNKS 返回空
 snd.Mic = hw.Mic = _FakeMic([])
 hw._mic_active = False
@@ -457,6 +479,26 @@ if os.path.exists(_tmp):
     os.remove(_tmp)           # 别在仓库里留垃圾
 snd._stream_bad = False
 (snd.Speaker, snd.M5.Touch, cfg.STREAM_BLOCK_BYTES, cfg.PLAY_PATH) = _saved_play
+
+# ── 角色图：有专属图用专属图，没有就沿用默认；换角色必须作废重绘缓存 ──────
+print("\n=== 角色背景图 ===")
+_saved_stat = ui.uos.stat
+_have = {cfg.res("mio/img_playing.jpg")}
+def _fake_stat(p):
+    if p in _have:
+        return (0,) * 10
+    raise OSError(2)
+ui.uos.stat = _fake_stat
+ui._role_hit.clear()
+assert ui.set_role("mio") is True and cfg.St.role == "mio" and ui._drawn_key is None
+assert ui.img_path("img_playing") == cfg.res("mio/img_playing.jpg")
+assert ui.img_path("img_bg") == cfg.res("img_bg.jpg"), "角色缺的图沿用默认"
+ui._drawn_key = ("x",)
+assert ui.set_role("mio") is False and ui._drawn_key == ("x",), "同一角色不许作废缓存（会闪屏）"
+ui.set_role("")
+assert ui.img_path("img_playing") == cfg.res("img_playing.jpg")
+ui.uos.stat = _saved_stat
+print("  ui.img_path / set_role      = 专属图优先 ✓ 缺图回落默认 ✓ 同角色不重画 ✓")
 
 # 可变全局：模拟 discover_server 改写后，其他模块能否看到
 print("\n=== 可变全局跨模块可见性（拆分最大的坑）===")

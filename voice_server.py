@@ -31,6 +31,7 @@ from baidu_tokens import BaiduTokenCache
 import photo_schedules
 import quick_commands
 import reminders
+import roles
 import stream_server
 
 # ── 路径配置 ──────────────────────────────────────────────────────────────────
@@ -81,6 +82,13 @@ try:
     from config import API_TOKEN
 except ImportError:
     API_TOKEN = ""
+
+# 可选：角色表（多 agent）。没配就只有一个默认角色，行为与加角色前一致。见 config.example.py
+try:
+    from config import ROLES
+except ImportError:
+    ROLES = None
+roles.init(ROLES)
 
 # 直播流（TCP :5002）的握手密钥。默认留空 = 不校验，与 /upload-photo 等
 # 其它「设备 → 服务端」接口口径一致。要启用得同时改设备端的 STREAM_TOKEN。
@@ -204,7 +212,8 @@ def _get_session_lock(session_id: str) -> threading.Lock:
         return lock
 
 
-def chat(user_text: str, session_id: str, image_path: Optional[str] = None, local_time: Optional[str] = None) -> str:
+def chat(user_text: str, session_id: str, image_path: Optional[str] = None,
+         local_time: Optional[str] = None, agent: Optional[str] = None) -> str:
     message = user_text
     if local_time:
         message = f"[当前时间: {local_time}] {message}"
@@ -212,7 +221,7 @@ def chat(user_text: str, session_id: str, image_path: Optional[str] = None, loca
         message = f"{message}\n\n[用户通过CoreS3摄像头拍了一张照片，保存在 {image_path}，请识别这张图片来回答问题]"
     cmd = [
         OPENCLAW_BIN, "agent",
-        "--agent", AGENT_ID,
+        "--agent", agent or AGENT_ID,
         "--message", message,
         "--session-id", session_id,
         "--json",
@@ -248,7 +257,7 @@ def _prune_dir(dirpath: Path, max_files: int) -> None:
             pass
 
 
-def synthesize(text: str) -> Optional[str]:
+def synthesize(text: str, per: int = 111) -> Optional[str]:
     """百度 TTS：文字 → PCM → 干净 WAV。
 
     结果按 md5(文本+音色参数) 缓存于 TTS_CACHE_DIR，命中直接返回，
@@ -258,7 +267,8 @@ def synthesize(text: str) -> Optional[str]:
     if not clean:
         return None
     # key 带上音色参数：以后改音色/语速，旧缓存自动失效
-    cache_key = hashlib.md5(f"{clean}|spd5|pit5|vol10|per111|aue4".encode("utf-8")).hexdigest()
+    # per 进 key 且格式与旧版一致：默认音色 111 的旧缓存照样命中
+    cache_key = hashlib.md5(f"{clean}|spd5|pit5|vol10|per{per}|aue4".encode("utf-8")).hexdigest()
     cache_path = TTS_CACHE_DIR / f"{cache_key}.wav"
     if cache_path.exists():
         cache_path.touch()  # 刷新 mtime，供 LRU 保留热门条目
@@ -276,7 +286,7 @@ def synthesize(text: str) -> Optional[str]:
             "spd": 5,
             "pit": 5,
             "vol": 10,
-            "per": 111,    # 111=度小萌(可爱女声)
+            "per": per,    # 111=度小萌(可爱女声)；角色可各配一个（roles.py）
             "aue": 4,       # 4=pcm-16k
         },
         timeout=15,
@@ -559,6 +569,14 @@ def _ip_rate_ok() -> bool:
 
 
 _ASR_EMPTY_REPLY = "没听清，能再说一遍吗？"
+_CONT_EXIT_REPLY = "好的，有事再叫我。"
+
+
+def _role_ctx(device_id: str):
+    """设备当前角色 + 该角色的会话。所有调 chat() 的地方都走这里，
+    否则切了角色之后定时拍照/摇一摇还在找原来那个 agent。"""
+    role = roles.get(device_id)
+    return role, state.get_session(roles.session_key(device_id, role))
 
 # 设备端 cfg.REQUEST_TIMEOUT_CHAT。超过它设备早已 ETIMEDOUT 放弃，
 # 这边照常把 WAV 发出去也没人收——日志里那行「📤 WAV」会让人误以为送达了
@@ -589,7 +607,7 @@ def handle_chat():
     if not state.check_rate(device_id) or not _ip_rate_ok():
         return jsonify({"error": "请求过于频繁，请稍后再试"}), 429
     local_time = request.headers.get("X-Local-Time", "")
-    session_id = state.get_session(device_id)
+    role, session_id = _role_ctx(device_id)
 
     audio_data = request.get_data()
     if not audio_data:
@@ -612,10 +630,19 @@ def handle_chat():
         t_asr = time.time()
         print(f"[{device_id}] 🗣️  {user_text}")
 
-        # 2. 本地短路链：没听清 → 定时提醒 → 音量控制 → 快捷指令，命中则跳过 OpenClaw
+        # 2. 本地短路链：没听清 → 免手退出 → 角色 → 定时提醒 → 音量 → 快捷指令，
+        #    命中则跳过 OpenClaw
         need_photo = False
         extra_headers: dict = {}
         reply = None
+        remember = True          # 短路问答要不要记进 last_quick（没听清/退出/切角色都不记）
+        hands_free = request.headers.get("X-Mode", "") in ("continuous", "wake")
+
+        if user_text and hands_free and quick_commands.is_filler(user_text):
+            # 免手模式下「嗯」「啊」多半是环境声被认成了字：当没听清处理，
+            # 设备端收到 X-Asr-Empty 会悄悄接着听、攒够次数自动退出
+            print(f"[{device_id}] 🙉  [filler] {user_text}")
+            user_text = ""
 
         if not user_text:
             # 识别为空直接回固定句（TTS 有缓存，零成本）。旧做法是把
@@ -623,7 +650,32 @@ def handle_chat():
             # 回答还常常驴唇不对马嘴；也不记 last_quick，免得污染下次对话
             reply = _ASR_EMPTY_REPLY
             user_text = "（没听清）"
+            remember = False
+            extra_headers["X-Asr-Empty"] = "1"
             print(f"[{device_id}] 🙉  [asr-empty] {reply}")
+
+        if reply is None and hands_free and quick_commands.match_cont_exit(user_text):
+            reply = _CONT_EXIT_REPLY
+            remember = False
+            extra_headers["X-Cont-Exit"] = "1"
+            print(f"[{device_id}] 👋  [cont-exit] {user_text}")
+
+        if reply is None:
+            listing = roles.match_list(user_text)
+            if listing:
+                reply = listing
+                print(f"[{device_id}] 🎭  [role-list]")
+        if reply is None:
+            target = roles.match_switch(user_text)
+            if target is not None:
+                remember = False
+                if target["id"] == role["id"]:
+                    reply = f"我就是{target['name']}呀。"
+                else:
+                    roles.set_role(device_id, target["id"])
+                    role = target                      # 下面的 TTS 用新角色的音色
+                    reply = f"我是{target['name']}，有什么事吗？"
+                print(f"[{device_id}] 🎭  [role] → {target['name']} ({target['agent']})")
 
         rem = None if reply is not None else \
             quick_commands.match_reminder(user_text, local_time=local_time)
@@ -643,7 +695,7 @@ def handle_chat():
                 reply = quick
                 print(f"[{device_id}] ⚡  [quick] {reply}")
 
-        if reply is _ASR_EMPTY_REPLY:
+        if reply is not None and not remember:
             pass
         elif reply is not None:
             # 短路命中：记入 pending 上下文，下次走 LLM 时带给它
@@ -657,7 +709,7 @@ def handle_chat():
                             f"{user_text}")
             # 体感背景：上次对话之后被怎么碰过（X-Touch，设备端聚合）
             llm_text = _with_touch(llm_text, request.headers.get("X-Touch", ""))
-            reply = chat(llm_text, session_id, local_time=local_time)
+            reply = chat(llm_text, session_id, local_time=local_time, agent=role["agent"])
 
             if reply.startswith("[PHOTO]"):
                 need_photo = True
@@ -669,7 +721,7 @@ def handle_chat():
 
         # 4. TTS
         t_llm = time.time()
-        wav_out = synthesize(reply)
+        wav_out = synthesize(reply, per=role["per"])
         if not wav_out:
             return jsonify({"error": "TTS 生成失败"}), 500
         _log_timing(device_id, t0, t_asr, t_llm)
@@ -684,6 +736,7 @@ def handle_chat():
         # 屏显文本（HTTP 头只能 ASCII，b64 编码 UTF-8）
         resp_headers["X-User-Text"] = _b64_header(user_text)
         resp_headers["X-Reply-Text"] = _b64_header(reply)
+        resp_headers["X-Role"] = role["id"]     # 设备据此换背景图（id 只许 ASCII，见 roles.py）
         return Response(wav_data, mimetype="audio/wav", headers=resp_headers)
 
     except Exception as e:
@@ -697,7 +750,7 @@ def _send_push(text: str, device_id: str) -> bool:
     """TTS 合成 → 存盘 → MQTT 通知设备下载播放。/push 路由与提醒调度共用。"""
     if _mqtt_client is None:
         return False
-    wav_path = synthesize(text)
+    wav_path = synthesize(text, per=roles.get(device_id)["per"])   # 用设备当前角色的音色
     if not wav_path:
         return False
     fname = f"{uuid.uuid4().hex[:8]}.wav"
@@ -947,7 +1000,7 @@ def handle_chat_vision():
     if not state.check_rate(device_id) or not _ip_rate_ok():
         return jsonify({"error": "请求过于频繁，请稍后再试"}), 429
     local_time = request.headers.get("X-Local-Time", "")
-    session_id = state.get_session(device_id)
+    role, session_id = _role_ctx(device_id)
 
     data = request.get_json(silent=True)
     if not data:
@@ -985,12 +1038,13 @@ def handle_chat_vision():
         image_path = _decode_image_b64(image_b64, device_id, tag="vision") if image_b64 else None
 
         llm_text = _with_touch(user_text, request.headers.get("X-Touch", ""))
-        reply = chat(llm_text, session_id, image_path=image_path, local_time=local_time)
+        reply = chat(llm_text, session_id, image_path=image_path,
+                     local_time=local_time, agent=role["agent"])
         preview = reply[:80].replace("\n", " ")
         print(f"[{device_id}] 💬  {preview}{'...' if len(reply) > 80 else ''}")
 
         t_llm = time.time()
-        wav_out = synthesize(reply)
+        wav_out = synthesize(reply, per=role["per"])
         if not wav_out:
             return jsonify({"error": "TTS 生成失败"}), 500
         _log_timing(device_id, t0, t_asr, t_llm)
@@ -1003,6 +1057,7 @@ def handle_chat_vision():
             "Content-Length": len(wav_data),
             "X-User-Text":  _b64_header(user_text),
             "X-Reply-Text": _b64_header(reply),
+            "X-Role":       role["id"],
         })
 
     except Exception as e:
@@ -1213,7 +1268,7 @@ def handle_shake():
     if not state.check_rate(device_id):
         return jsonify({"error": "请求过于频繁，请稍后再试"}), 429
     local_time = request.headers.get("X-Local-Time", "")
-    session_id = state.get_session(device_id)
+    role, session_id = _role_ctx(device_id)
 
     def _bg():
         prompt = (
@@ -1225,7 +1280,7 @@ def handle_shake():
         # openclaw CLI 偶发瞬态失败（升级迁移、gateway 忙等），重试一次
         for attempt in (1, 2):
             try:
-                reply = chat(prompt, session_id, local_time=local_time)
+                reply = chat(prompt, session_id, local_time=local_time, agent=role["agent"])
                 preview = reply[:80].replace("\n", " ")
                 print(f"[{device_id}] 🫨  shake → {preview}{'...' if len(reply) > 80 else ''}")
                 return
@@ -1268,7 +1323,7 @@ def handle_touch():
     local_time = request.headers.get("X-Local-Time", "")
     detail = _touch_phrases(request.headers.get("X-Touch-Detail", ""))
     extra = ("（" + "；".join(detail) + "）") if detail else ""
-    session_id = state.get_session(device_id)
+    role, session_id = _role_ctx(device_id)
 
     def _bg():
         prompt = (
@@ -1280,7 +1335,7 @@ def handle_touch():
         )
         for attempt in (1, 2):
             try:
-                reply = chat(prompt, session_id, local_time=local_time)
+                reply = chat(prompt, session_id, local_time=local_time, agent=role["agent"])
                 preview = reply[:80].replace("\n", " ")
                 print(f"[{device_id}] 🖐️  touch/{kind} → {preview}{'...' if len(reply) > 80 else ''}")
                 return
@@ -1395,10 +1450,10 @@ def _describe_and_speak(image_path: str, device_id: str, prompt: str,
     result: dict = {"ts": started, "ok": False, "error": None, "reply": "",
                     "snapshot": None, "spoken": False, "device_id": device_id}
     try:
-        session_id = state.get_session(device_id)
+        role, session_id = _role_ctx(device_id)
         local_time = time.strftime("%Y-%m-%d %H:%M")
         reply = chat(prompt + _SPEAK_HINT, session_id,
-                     image_path=image_path, local_time=local_time)
+                     image_path=image_path, local_time=local_time, agent=role["agent"])
         preview = reply[:80].replace("\n", " ")
         print(f"[snapshot] 👁  {label or '手动'} 识别: {preview}"
               f"{'...' if len(reply) > 80 else ''}")
@@ -1450,6 +1505,32 @@ def monitor_page():
     if not page.exists():
         return "monitor.html 缺失，请检查 web/ 目录", 500
     return send_file(page, mimetype="text/html")
+
+
+@app.route("/role", methods=["GET"])
+def get_role():
+    """设备开机取回当前角色；也给网页/agent 列角色表。"""
+    device_id = _validate_device_id(request.args.get("device_id"))
+    cur = roles.get(device_id)
+    return jsonify({"role": cur["id"], "name": cur["name"],
+                    "roles": [{"id": r["id"], "name": r["name"]} for r in roles.all_roles()]})
+
+
+@app.route("/role", methods=["POST"])
+def post_role():
+    """网页/agent 切换角色：{"device_id", "role"}。落盘后 MQTT 通知设备换图。"""
+    if not _token_ok():
+        return jsonify({"error": "invalid or missing X-Api-Token"}), 401
+    data = request.get_json(silent=True) or {}
+    device_id = _validate_device_id(data.get("device_id"))
+    target = roles.set_role(device_id, str(data.get("role", "")))
+    if target is None:
+        return jsonify({"error": "unknown role"}), 400
+    if _mqtt_client is not None:
+        _mqtt_client.publish(f"kagura/cmd/{device_id}",
+                             json.dumps({"action": "role", "role": target["id"]}), qos=1)
+    print(f"[{device_id}] 🎭  [role/api] → {target['name']} ({target['agent']})")
+    return jsonify({"role": target["id"], "name": target["name"]})
 
 
 @app.route("/debug-audio/<device_id>", methods=["GET"])

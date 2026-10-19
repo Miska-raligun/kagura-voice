@@ -11,6 +11,7 @@ import time
 import math
 import gc
 import ubinascii
+import uos
 
 import cfg
 import hw
@@ -261,6 +262,38 @@ def _canvas_disable():
     gc.collect()
 
 
+_role_hit = {}       # "角色/图名" → 该角色有没有这张图（只 stat 一次）
+
+
+def img_path(base):
+    """背景图路径：当前角色有专属图（resource/<角色>/<图名>.jpg）就用它，
+    没有就用默认那张。所以新角色只需要放想换的那几张，其余自动沿用默认。"""
+    role = cfg.St.role
+    if role:
+        k = role + "/" + base
+        hit = _role_hit.get(k)
+        if hit is None:
+            try:
+                uos.stat(cfg.res(k + ".jpg"))
+                hit = True
+            except OSError:
+                hit = False
+            _role_hit[k] = hit
+        if hit:
+            return cfg.res(k + ".jpg")
+    return cfg.res(base + ".jpg")
+
+
+def set_role(role):
+    """切换角色（服务端 X-Role 头 / 开机 /role 查询）。变了才作废重绘缓存。"""
+    role = role or ""
+    if role == cfg.St.role:
+        return False
+    cfg.St.role = role
+    _ui_invalidate()
+    return True
+
+
 def _ui_invalidate():
     """整屏被 draw_state 之外的代码接管过之后必须调用。
 
@@ -304,8 +337,11 @@ def draw_state(state, force=False):
                or "img_bg")
     # 已知缺图的直接改成 img_bg：要赶在算 key 之前，否则 key 记的是"想画的图"、
     # 屏幕上是"实际画的图"，两者不一致会让缓存判断失去意义。
-    if want_bg in _img_missing:
+    # 缺图按**路径**记：同名图在默认目录缺、在角色目录有，是两回事
+    bg_path = img_path(want_bg)
+    if bg_path in _img_missing:
         want_bg = "img_bg"
+        bg_path = img_path("img_bg")
     cm_color = 0x00ffcc if cfg.St.continuous else 0x3a3a3a
     wm_color = 0xffcc00 if cfg.St.wake       else 0x3a3a3a
     time_str = clock.get_rtc_time_str()
@@ -320,7 +356,7 @@ def draw_state(state, force=False):
                  and _last_reply_text)
     chat_key = (_last_user_text[:18], _last_reply_text[:19]) if show_chat else None
 
-    key = (want_bg, cm_color, wm_color, right_str, color, face, status, chat_key)
+    key = (bg_path, cm_color, wm_color, right_str, color, face, status, chat_key)
     if not force and key == _drawn_key:
         return
     _drawn_key = key
@@ -338,16 +374,16 @@ def draw_state(state, force=False):
     # ── 1：背景层（整屏 320×240 从 0,0 开始）────────────────
     img_shown = False
     try:
-        with open(cfg.res("{}.jpg".format(want_bg)), "rb") as _f:
+        with open(bg_path, "rb") as _f:
             tgt.drawJpg(_f.read(), 0, 0)
         img_shown = True
     except Exception as e:
         print("img err:", e)
         if want_bg != "img_bg":
-            _img_missing.add(want_bg)   # 记下来，下次别再白试
+            _img_missing.add(bg_path)   # 记下来，下次别再白试
     if not img_shown and want_bg != "img_bg":
         try:
-            with open(cfg.res("img_bg.jpg"), "rb") as _f:
+            with open(img_path("img_bg"), "rb") as _f:
                 tgt.drawJpg(_f.read(), 0, 0)
             img_shown = True
         except Exception as e:

@@ -28,14 +28,33 @@ CoreS3 (MicroPython)  ──HTTP──▶  voice_server.py (Flask :5000)  ──
 | `photo_schedules.py` | 每日定时拍照：`add`/`update`/`fire_due`，落盘 `photo_schedules.json`，`init(run_fn)` |
 | `stream_server.py` | 直播流接收（TCP :5002）。`_Reader` 带缓冲，`latest`/`stats`/`drop` 给路由用 |
 | `web/monitor.html` | Web 监控页（单文件，无外部依赖）。由 `/monitor` 路由 `send_file` 直出 |
+| `roles.py` | 角色（多 agent）：`get`/`set_role`/`session_key`/`match_switch`，落盘 `roles_state.json`，表来自 `config.ROLES` |
 | `baidu_tokens.py` | 百度 token 缓存（`BaiduTokenCache`，线程安全） |
 | `oc_utils.py` | `_extract_json`（raw_decode 提取 CLI stdout 里的 JSON）、`strip_markdown` |
 | `config.py` | 不提交。`config.example.py` 为模板；`API_TOKEN` 可选（留空=开放） |
 
 ## 关键机制（改动前必读）
 
-- **短路链**（`/chat` 内）：提醒 → 音量 → 快捷指令 → OpenClaw。短路命中存
-  `state.set_last_quick`，下次 LLM 对话作为背景注入（`pop_last_quick`）。
+- **短路链**（`/chat` 内）：没听清 → （免手模式）口头退出 → 角色列表/切换 → 提醒 →
+  音量 → 快捷指令 → OpenClaw。短路命中存 `state.set_last_quick`，下次 LLM 对话作为
+  背景注入（`pop_last_quick`）；没听清/退出/切角色不记（`remember=False`）。
+- **角色切换**（`roles.py`，LRN 2026-10-19）：角色 = OpenClaw agent + 百度音色 `per` +
+  设备上一套图。**所有调 `chat()` 的地方都必须走 `_role_ctx(device_id)`** 拿
+  `(role, session_id)` 并传 `agent=role["agent"]`——漏一处，切了角色之后摇一摇/定时
+  拍照还在找原来那个 agent。`synthesize(text, per=...)` 同理（推送走设备当前角色音色）。
+  第一个角色是默认：会话 key 就是 `device_id`（老会话不丢），其余是 `device_id~role_id`。
+  角色 id 只许 ASCII（要进 `X-Role` 头、当设备目录名）。设备端 `cfg.St.role` 只经
+  `ui.set_role()` 改（变了才作废 `_drawn_key`，同角色重复设置不能重画）；
+  `ui.img_path(base)` 先找 `resource/<role>/<base>.jpg`、没有就用默认那张，
+  `_img_missing` 按路径记。来源三处：每次 `/chat`/`/chat-vision` 的 `X-Role` 头、
+  开机 `netsvc.fetch_role()`（`GET /role`）、网页/agent `POST /role` → MQTT `{"action":"role"}`。
+- **免手模式（连续对话/声控唤醒）防误触与退出**（LRN 2026-10-19，症状「一有点声音就
+  触发，退不出去只能关机」）：设备起说门槛 ×`HANDS_FREE_TH_RATIO`；开口后够响的块
+  不到 `MIN_VOICED_CHUNKS` 当噪声丢弃不上传；请求带 `X-Mode`，服务端在免手模式下把
+  「嗯/啊」当没听清。退出四条路：听的时候**轻点**或长按（旧版只认长按，且只在"正在听"
+  那几秒有效）；说「不聊了/退出对话」（服务端回 `X-Cont-Exit`）；连续
+  `CONT_EMPTY_EXIT` 次 `X-Asr-Empty`（连续模式下没听清**不播**"没听清"，悄悄接着听）；
+  `CONT_IDLE_EXIT_SECS` 没有一轮有效对话。单次模式下录音中轻点 = 说完了立刻发送。
 - **TTS 缓存**：`synthesize()` 按 md5(文本+音色参数) 缓存于 `tts_cache/`；
   改音色参数必须同步改 cache key。
 - **响应头协议**（设备读取）：`X-Need-Photo`、`X-Volume: up/down`、
@@ -324,7 +343,8 @@ CoreS3 (MicroPython)  ──HTTP──▶  voice_server.py (Flask :5000)  ──
   分辨率靠字节数反查 `_CAM_SIZES`——改这张表要同步服务端 `RGB565_SIZES`。
 - **回退开关**（设备端顶部常量）：`WAKE_MIC_PERSISTENT`、`WATCHDOG_ENABLED`、
   `SHOW_CHAT_TEXT`、`VISUAL_ENABLED`、`USE_STATE_IMAGES`、`CAMERA_MODE_ENABLED`、
-  `CAMERA_QVGA`、`PREVIEW_SWAP`、`MIC_GAPLESS`、`PLAY_STREAMING`、`STREAM_ENABLED`、`STREAM_QQVGA`、
+  `CAMERA_QVGA`、`PREVIEW_SWAP`、`MIC_GAPLESS`、`PLAY_STREAMING`、
+  `HANDS_FREE_TH_RATIO`（改 1.0 = 免手模式不加门槛）、`STREAM_ENABLED`、`STREAM_QQVGA`、
   `TOUCH_FEEL_ENABLED`（整个触觉）、`FEEL_NOTIFY_ENABLED`（只关"主动开口"，
   保留反射层和体感层）、`FEEL_WAKE_ON_PICKUP`
   ——真机出问题先关开关再排查。
@@ -411,7 +431,7 @@ python3 -c "import re;open('/tmp/m.js','w').write(re.search(r'<script>(.*)</scri
 
 - 提交信息中文，格式 `类型: 摘要`（feat/fix/perf/refactor/docs/chore）。
 - 注释中文为主；服务端有 type hints，设备端（MicroPython）没有。
-- 运行时产物（`push_audio/`、`tts_cache/`、`snapshots/`、`debug_audio/`、`reminders.json`、
+- 运行时产物（`push_audio/`、`tts_cache/`、`snapshots/`、`debug_audio/`、`roles_state.json`、`reminders.json`、
   `photo_schedules.json`）已 gitignore，勿提交。
 - 设备目录：`/flash/kagura/src`（代码）、`/flash/kagura/resource`（图片，
   用 `cfg.res()` 取路径）、`/flash/kagura/data`（运行时状态，`cfg.data()`，

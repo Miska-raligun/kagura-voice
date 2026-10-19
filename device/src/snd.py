@@ -187,8 +187,14 @@ def _record_audio():
         return b""
     warm = hw._mic_on()          # 刚开麦：第一块常带启动爆音，丢掉
     th = cfg.SILENCE_THRESHOLD
+    hands_free = cfg.St.continuous or cfg.St.wake
+    if hands_free:
+        # 免手模式没有"按一下才听"这道闸，门槛抬高一点：对着设备说话的人
+        # 离得近、声音大，远处的电视声和隔壁说话大多够不着
+        th = int(th * cfg.HANDS_FREE_TH_RATIO)
     th_end = int(th * cfg.VAD_END_RATIO)
     stats = {"th": th}
+    voiced = 0                   # 开口后够响的块数：只响一下的磕碰声凑不够
     pre = []
     nchunks = 0
     csz = cfg.CHUNK_SIZE
@@ -200,10 +206,18 @@ def _record_audio():
     try:
         while True:
             hw._wdt_feed()   # 等 10s + 录 30s，喂狗防误咬
-            # 长按优先检测：优先级高于录音，continuous/wake 模式均可退出
+            # 触摸优先于录音：
+            #   长按 = 退出当前模式（任何模式）；
+            #   连续/唤醒模式下轻点也退出——旧版只认长按，而长按只在"正在听"
+            #   的那几秒里有效，播放中一碰就只是打断播放，下一轮又开始听，
+            #   用户很难掐准时机，表现就是"退不出去只能关机"；
+            #   单次模式下轻点 = 我说完了，立刻发送（没开口就是取消）。
             t, _ = hw.check_touch()
-            if t == 'long':
+            if t == 'long' or (t == 'short' and hands_free):
                 return None          # 哨兵：用户请求退出当前模式
+            if t == 'short':
+                stats["tap"] = 1
+                break
             sub, level = hw.rms_slices(buf)
             if warm:
                 warm = False
@@ -223,6 +237,7 @@ def _record_audio():
                     rmv[44 + nchunks * csz:44 + (nchunks + 1) * csz] = buf
                     nchunks += 1
                     peak = level
+                    voiced = 1
                 else:
                     pre.append(bytes(buf))
                     if len(pre) > cfg.PREROLL_CHUNKS:
@@ -235,6 +250,8 @@ def _record_audio():
                 nchunks += 1
                 if level > peak:
                     peak = level
+                if level > th:
+                    voiced += 1
                 if level > th_end or max(sub) > th:
                     silent = 0
                 else:
@@ -251,6 +268,11 @@ def _record_audio():
         stats["peak"] = peak
         stats["ms"] = time.ticks_diff(time.ticks_ms(), t_start)
         last_rec = stats
+    if nchunks and voiced < cfg.MIN_VOICED_CHUNKS and not stats.get("tap"):
+        # 开口后够响的只有一块：拍桌子、关门、咳一声。不上传——
+        # 上传了百度认不出，连续模式下就是一轮白白的"没听清"
+        stats["noise"] = 1
+        return b""
     if not nchunks:
         return b""
     n = nchunks * csz
@@ -263,9 +285,10 @@ def rec_summary():
     tmo=isRecording 没确认的次数（多 = 固件语义不符，退回按时间），
     late=处理跟不上产生的缝（应为 0）。"""
     r = last_rec
-    return "rec n={} peak={} th={} ms={} tmo={} late={}{}".format(
+    return "rec n={} peak={} th={} ms={} tmo={} late={}{}{}{}".format(
         r.get("n"), r.get("peak"), r.get("th"), r.get("ms"),
-        r.get("tmo", 0), r.get("late", 0), " CUT" if r.get("cut") else "")
+        r.get("tmo", 0), r.get("late", 0), " CUT" if r.get("cut") else "",
+        " NOISE" if r.get("noise") else "", " TAP" if r.get("tap") else "")
 
 
 # ── 播放 ──────────────────────────────────────────────────────

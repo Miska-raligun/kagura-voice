@@ -64,6 +64,7 @@ def setup():
         machine.reset()
 
     netsvc.discover_server()
+    netsvc.fetch_role()           # 角色专属背景图：要在第一次 draw_state 前定下来
     diag._boot_report()
     clock.sync_rtc()
     netsvc.init_mqtt()
