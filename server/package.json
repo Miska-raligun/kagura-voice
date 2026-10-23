@@ -17,6 +17,7 @@
   "dependencies": {
     "@earendil-works/pi-agent-core": "^1.4.0",
     "@earendil-works/pi-ai": "^1.4.0",
+    "@larksuiteoapi/node-sdk": "^1.76.0",
     "aedes": "^1.2.0",
     "jpeg-js": "^0.4.4"
   },

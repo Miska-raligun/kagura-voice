@@ -39,7 +39,10 @@ jobs:
             echo "::endgroup::"
           done
       - name: Bundle（esbuild → 单个 CJS）
-        run: node scripts/build.mjs spikes/sea-smoke.ts dist/sea-smoke.cjs
+        run: |
+          node scripts/build.mjs spikes/sea-smoke.ts dist/sea-smoke.cjs
+          node scripts/build.mjs spikes/feishu-bundle.ts dist/feishu.cjs
+          node --no-warnings dist/feishu.cjs
       - name: SEA（注入 node 可执行）
         run: node scripts/sea.mjs dist/sea-smoke.cjs dist/kagura-smoke
       - name: 运行单文件可执行

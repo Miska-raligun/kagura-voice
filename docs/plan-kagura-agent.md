@@ -1,6 +1,7 @@
 # Kagura 自研 Agent 系统与安装包 —— 开发计划
 
-> 状态：v3（2026-10-23），技术选型已确认，可以开始 M0。
+> 状态：v3（2026-10-23）。**M0 已完成**，结论见 [m0-report.md](m0-report.md)：路线全部可行，打包用 Node 24 LTS，
+> 记忆检索用 CJK 逐字切分，QQ 定为官方机器人 WebSocket。下一步 M1。
 > 目标读者：项目作者 + 之后接手开发的人（包括 Claude）。
 > v2 变更：按作者要求，本期范围定为**系统层核心**——定时任务、heartbeat、多 agent 隔离与
 > agent 间通信、memory、soul（人设文件体系）、管理 UI；通用 skill 后续再迁。新服务端放本仓库。
@@ -169,7 +170,7 @@ agents/<agentId>/
   可以在管理 UI 里直接改。
 - 工具：`memory_search(query)`、`memory_get(path, lines?)`、`memory_write(target, text)`
   （target = 今日笔记 / MEMORY.md）。
-- 检索：混合检索——SQLite FTS 关键词 + 向量相似度（向量用配置的嵌入接口，存进 `agent.sqlite`，
+- 检索：混合检索——SQLite FTS 关键词（CJK 逐字切分 + 短语查询；trigram 搜不到两字词，M0 实测）+ 向量相似度（向量用配置的嵌入接口，存进 `agent.sqlite`，
   余弦在 JS 里算；单机几千条笔记够用）。没配嵌入接口就退化为纯关键词。
 - 新会话或 `/reset` 时自动带上今天和昨天的笔记。
 - 压缩前自动「记忆冲刷」（§6.2）。
@@ -409,4 +410,4 @@ agent 配 `provider` + `model`（pi-ai 内置 DeepSeek、通义千问、任意 O
 - 管理 UI 本期只开放本机访问。
 - IM 渠道要支持，首批飞书、QQ。
 
-**还待定**：QQ 走官方机器人还是 OneBot——M0 核实官方机器人能否不用公网接入后再定。
+**M0 已定**：QQ 走官方机器人 WebSocket（不需要公网）；OneBot 保留为可选项。
