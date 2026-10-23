@@ -11,7 +11,12 @@ import type { RunScope } from "./scope.ts";
 import { resolveInside } from "./paths.ts";
 import { ok, fail } from "./tools/device.ts";
 
-export interface Skill { name: string; description: string; dir: string; scope: "global" | "agent" }
+export interface Skill { name: string; description: string; dir: string; scope: "global" | "agent"; folder?: string }
+
+/** 管理界面里技能的归属：全局用这个，其它是 agent id（agent id 里不会出现 ~） */
+export const GLOBAL_OWNER = "~global";
+const SKIP_DIRS = new Set([".git", "node_modules", "__pycache__", ".venv", "venv"]);
+const MAX_FILE = 2 * 1024 * 1024;
 
 const NAME_RE = /^[A-Za-z0-9_.-]{1,64}$/;
 const MAX_READ = 64 * 1024;
@@ -40,7 +45,7 @@ export class Skills {
       if (!fs.existsSync(f)) continue;
       const { meta } = parseFrontMatter(fs.readFileSync(f, "utf8"));
       const name = NAME_RE.test(meta.name ?? "") ? meta.name : d.name;
-      out.push({ name, description: (meta.description ?? "").slice(0, 300), dir: path.join(dir, d.name), scope });
+      out.push({ name, description: (meta.description ?? "").slice(0, 300), dir: path.join(dir, d.name), scope, folder: d.name });
     }
     return out;
   }
@@ -52,6 +57,111 @@ export class Skills {
     for (const s of this.scan(path.join(agent.workspace, "skills"), "agent")) map.set(s.name, s);
     const allow = agent.skills.includes("*") ? null : new Set(agent.skills);
     return [...map.values()].filter((s) => !allow || allow.has(s.name)).sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  // ── 管理（管理界面增删改）────────────────────────────────
+
+  /** 技能放在哪：~global → 全局目录，否则那个 agent 的 workspace/skills */
+  root(owner: string, agents: { get(id: string): AgentInfo | undefined }): string {
+    if (owner === GLOBAL_OWNER) return this.globalDir;
+    const a = agents.get(owner);
+    if (!a) throw Object.assign(new Error(`没有 agent ${owner}`), { status: 404 });
+    return path.join(a.workspace, "skills");
+  }
+
+  /** 全部技能（全局 + 每个 agent 自己的），不做白名单过滤 */
+  all(agents: { list(): AgentInfo[] }) {
+    const g = this.scan(this.globalDir, "global").map((s) => ({ ...s, owner: GLOBAL_OWNER }));
+    const own = agents.list().flatMap((a) => this.scan(path.join(a.workspace, "skills"), "agent").map((s) => ({ ...s, owner: a.id })));
+    return [...g, ...own];
+  }
+
+  dirOf(root: string, folder: string): string {
+    if (!NAME_RE.test(folder)) throw Object.assign(new Error(`技能名只能用字母、数字和 _ . -：${folder}`), { status: 400 });
+    const d = path.join(root, folder);
+    if (!fs.existsSync(path.join(d, "SKILL.md"))) throw Object.assign(new Error(`没有技能 ${folder}`), { status: 404 });
+    return d;
+  }
+
+  /** 技能目录里的文件（相对路径 + 大小），跳过 .git / node_modules 之类 */
+  files(dir: string): { path: string; size: number; text: boolean }[] {
+    const out: { path: string; size: number; text: boolean }[] = [];
+    const walk = (d: string, rel: string) => {
+      for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+        if (out.length >= 500) return;
+        const r = rel ? `${rel}/${e.name}` : e.name;
+        if (e.isDirectory()) { if (!SKIP_DIRS.has(e.name)) walk(path.join(d, e.name), r); continue; }
+        if (!e.isFile()) continue;
+        const st = fs.statSync(path.join(d, e.name));
+        let text = st.size <= MAX_READ;
+        if (text) { const b = fs.readFileSync(path.join(d, e.name)); text = !b.subarray(0, 8000).includes(0); }
+        out.push({ path: r, size: st.size, text });
+      }
+    };
+    walk(dir, "");
+    return out.sort((a, b) => (a.path === "SKILL.md" ? -1 : b.path === "SKILL.md" ? 1 : a.path.localeCompare(b.path)));
+  }
+
+  create(root: string, folder: string, description: string, body: string): string {
+    if (!NAME_RE.test(folder)) throw Object.assign(new Error("技能名只能用字母、数字和 _ . -（会当作文件夹名）"), { status: 400 });
+    const d = path.join(root, folder);
+    if (fs.existsSync(d)) throw Object.assign(new Error(`已经有技能 ${folder}`), { status: 409 });
+    fs.mkdirSync(d, { recursive: true });
+    const desc = description.replace(/\r?\n/g, " ").trim();
+    fs.writeFileSync(path.join(d, "SKILL.md"), `---\nname: ${folder}\ndescription: ${JSON.stringify(desc)}\n---\n\n${body.trim() || `# ${folder}\n\n（写下什么时候用这个技能、具体怎么做；要跑脚本就写清楚命令，agent 会用 exec 执行）`}\n`);
+    return d;
+  }
+
+  writeFile(dir: string, rel: string, data: Buffer) {
+    if (data.length > MAX_FILE) throw Object.assign(new Error(`文件太大（上限 ${MAX_FILE >> 20}MB）`), { status: 400 });
+    const f = resolveInside(dir, rel);
+    fs.mkdirSync(path.dirname(f), { recursive: true });
+    fs.writeFileSync(f, data);
+  }
+
+  deleteFile(dir: string, rel: string) {
+    if (rel === "SKILL.md") throw Object.assign(new Error("SKILL.md 不能删，要删就删整个技能"), { status: 400 });
+    const f = resolveInside(dir, rel);
+    if (!fs.existsSync(f)) throw Object.assign(new Error(`没有 ${rel}`), { status: 404 });
+    fs.rmSync(f, { recursive: true });
+  }
+
+  /** 删技能：挪进 <归属目录>/.trash/，防手滑 */
+  remove(root: string, folder: string) {
+    const d = this.dirOf(root, folder);
+    const trash = path.join(root, ".trash");
+    fs.mkdirSync(trash, { recursive: true });
+    fs.renameSync(d, path.join(trash, `${folder}-${Date.now()}`));
+  }
+
+  /**
+   * 装一个技能包（zip）：包里可以是「技能名/SKILL.md …」一层文件夹，也可以 SKILL.md 直接在根上。
+   * 技能名取 SKILL.md 里的 name，没有就用文件夹名 / zip 文件名。返回装好的技能名。
+   */
+  installZip(root: string, entries: { name: string; data: Buffer }[], fallbackName: string, overwrite = false): string {
+    const skillMd = entries.filter((e) => /(^|\/)SKILL\.md$/.test(e.name) && !e.name.includes("__MACOSX"))
+      .sort((a, b) => a.name.split("/").length - b.name.split("/").length)[0];
+    if (!skillMd) throw Object.assign(new Error("包里没有 SKILL.md"), { status: 400 });
+    const prefix = skillMd.name.slice(0, -"SKILL.md".length);
+    const { meta } = parseFrontMatter(skillMd.data.toString("utf8"));
+    const guess = [meta.name, prefix.replace(/\/$/, "").split("/").pop(), fallbackName.replace(/\.zip$/i, "")]
+      .map((x) => (x ?? "").trim()).find((x) => NAME_RE.test(x));
+    if (!guess) throw Object.assign(new Error("认不出技能名：在 SKILL.md 的 front-matter 里写 name（字母、数字、_ . -）"), { status: 400 });
+    const d = path.join(root, guess);
+    if (fs.existsSync(d)) {
+      if (!overwrite) throw Object.assign(new Error(`已经有技能 ${guess}（勾上「覆盖」再传）`), { status: 409 });
+      this.remove(root, guess);
+    }
+    fs.mkdirSync(d, { recursive: true });
+    for (const e of entries) {
+      if (!e.name.startsWith(prefix) || e.name.includes("__MACOSX/")) continue;
+      const rel = e.name.slice(prefix.length);
+      if (!rel || rel.split("/").some((seg) => SKIP_DIRS.has(seg))) continue;
+      const f = resolveInside(d, rel);
+      fs.mkdirSync(path.dirname(f), { recursive: true });
+      fs.writeFileSync(f, e.data);
+    }
+    return guess;
   }
 
   catalog(agent: AgentInfo) { return this.list(agent).map(({ name, description }) => ({ name, description })); }

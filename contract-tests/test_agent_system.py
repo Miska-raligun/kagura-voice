@@ -361,3 +361,18 @@ def test_tools_settings_hot_apply_and_test_exec(a):
     names = [t["name"] for t in a.get("/api/admin/meta").json()["tools"]]
     assert "exec" not in names and "web_search" in names
     a.request("PUT", "/api/admin/config", json={"tools": {"exec": {"enabled": True}, "web": {"enabled": True}}})
+
+
+def test_skills_admin_crud_and_skill_read(a):
+    """技能管理：新建 → 写脚本文件 → agent 用 skill_read 读到说明和技能目录 → 删除"""
+    assert a.post("/api/admin/skills", json={"owner": "~global", "name": "ctest-skill", "description": "契约测试用", "body": "运行 scripts/hi.py"}).status_code == 200
+    assert a.request("PUT", "/api/admin/skills/~global/ctest-skill/file?path=scripts/hi.py", json={"content": "print('hi')"}).status_code == 200
+    d = a.get("/api/admin/skills/~global/ctest-skill").json()
+    assert [f["path"] for f in d["files"]] == ["SKILL.md", "scripts/hi.py"]
+    assert any(s["name"] == "ctest-skill" for s in a.get("/api/admin/skills").json()["skills"])
+    a.fake_llm(tool("skill_read", _then="懂了", name="ctest-skill"))
+    a.post("/chat", data=wav(), headers={"X-Device-Id": "ag_skill"})
+    t = _transcript_text(a)
+    assert "技能目录" in t and "ctest-skill" in t
+    assert a.request("DELETE", "/api/admin/skills/~global/ctest-skill").status_code == 200
+    assert not any(s["name"] == "ctest-skill" for s in a.get("/api/admin/skills").json()["skills"])

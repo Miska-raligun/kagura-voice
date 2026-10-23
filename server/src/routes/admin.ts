@@ -13,6 +13,9 @@ import { importOpenClaw, findOpenClawDirs, describeImport } from "../agent/impor
 import { scheduleFrom } from "../agent/tools/cron.ts";
 import { Roles } from "../roles.ts";
 import { parseToolsConfig } from "../config.ts";
+import { GLOBAL_OWNER } from "../agent/skills.ts";
+import { unzip } from "../util/zip.ts";
+import { resolveInside } from "../agent/paths.ts";
 import { applyProxy, activeProxy } from "../util/proxy.ts";
 import { search } from "../agent/tools/web.ts";
 import { runShell, shellFor, clipOutput } from "../agent/tools/exec.ts";
@@ -155,6 +158,44 @@ export function registerAdmin(r: Router, ctx: Ctx, sys: AgentSystem) {
 
   // ── 用量 / 技能 ──
   get("/api/admin/agents/<id>/usage", (req) => { agentOr404(req.params.id); return json(runtime.store(req.params.id).usageByDay(Number(req.query.get("days") ?? 30))); });
+  // ── 技能管理：全局 + 每个 agent 自己的；owner = ~global 或 agent id，name = 技能文件夹名 ──
+  get("/api/admin/skills", () => json({
+    skills: skills.all(registry).map(({ name, description, scope, folder, owner, dir }) => ({ name, description, scope, folder, owner, dir })),
+    owners: [{ id: GLOBAL_OWNER, name: "全局（所有 agent）" }, ...registry.list().map((a) => ({ id: a.id, name: `只给 ${a.name}（${a.id}）` }))],
+    global_dir: skills.root(GLOBAL_OWNER, registry),
+  }));
+  post("/api/admin/skills", (req) => {
+    const d = req.json() ?? {};
+    const dir = skills.create(skills.root(String(d.owner || GLOBAL_OWNER), registry), String(d.name ?? ""), String(d.description ?? ""), String(d.body ?? ""));
+    return json({ dir });
+  });
+  post("/api/admin/skills/upload", (req) => {
+    const d = req.json() ?? {};
+    const entries = unzip(Buffer.from(String(d.b64 ?? ""), "base64"));
+    const name = skills.installZip(skills.root(String(d.owner || GLOBAL_OWNER), registry), entries, String(d.filename ?? "skill.zip"), !!d.overwrite);
+    return json({ name });
+  });
+  const skillDir = (req: Req) => skills.dirOf(skills.root(req.params.owner, registry), req.params.name);
+  get("/api/admin/skills/<owner>/<name>", (req) => {
+    const dir = skillDir(req);
+    return json({ dir, files: skills.files(dir) });
+  });
+  del("/api/admin/skills/<owner>/<name>", (req) => { skills.remove(skills.root(req.params.owner, registry), req.params.name); return json({ status: "ok" }); });
+  get("/api/admin/skills/<owner>/<name>/file", (req) => {
+    const f = resolveInside(skillDir(req), String(req.query.get("path") ?? ""));
+    if (!fs.existsSync(f)) return json({ error: "没有这个文件" }, 404);
+    const b = fs.readFileSync(f);
+    if (b.length > 256 * 1024 || b.subarray(0, 8000).includes(0)) return json({ error: "不是文本文件或太大，不能在这里编辑" }, 400);
+    return json({ content: b.toString("utf8") });
+  });
+  put("/api/admin/skills/<owner>/<name>/file", (req) => {
+    const d = req.json() ?? {};
+    const data = typeof d.b64 === "string" ? Buffer.from(d.b64, "base64") : Buffer.from(String(d.content ?? ""), "utf8");
+    skills.writeFile(skillDir(req), String(req.query.get("path") ?? ""), data);
+    return json({ status: "ok", size: data.length });
+  });
+  del("/api/admin/skills/<owner>/<name>/file", (req) => { skills.deleteFile(skillDir(req), String(req.query.get("path") ?? "")); return json({ status: "ok" }); });
+
   get("/api/admin/agents/<id>/skills", (req) => json(skills.list(agentOr404(req.params.id)).map(({ name, description, scope }) => ({ name, description, scope }))));
 
   // ── 定时任务 ──
@@ -182,7 +223,7 @@ export function registerAdmin(r: Router, ctx: Ctx, sys: AgentSystem) {
     const d = req.json() ?? {};
     const dir = String(d.dir || findOpenClawDirs(ctx.cfg.openclaw.dir, os.homedir())[0] || "");
     if (!dir) return json({ error: "没找到 OpenClaw 目录（本机 ~/.openclaw 和 WSL 里都找过了），请填写路径，例如 \\\\wsl.localhost\\Ubuntu\\home\\你\\.openclaw" }, 404);
-    const rep = importOpenClaw(dir, registry, sched(), { overwrite: !!d.overwrite });
+    const rep = importOpenClaw(dir, registry, sched(), { overwrite: !!d.overwrite, skillsDir: skills.root(GLOBAL_OWNER, registry) });
     for (const a of registry.list()) memories.forget(a.id);
     changed();      // 新建了 agent 的话：角色表、heartbeat 跟着变
     return json({ ...rep, lines: describeImport(rep) });

@@ -50,7 +50,8 @@ WSL 保持运行，在 Windows 命令行里（把 `Ubuntu`、`你` 换成你的�
 ```
 
 - `migrate`：百度 Key、API_TOKEN、角色表、提醒、定时拍照、快照、语音缓存（缓存规则两版一致，搬过来省钱）。
-- `import-openclaw`：不写路径会自动找（本机和各个 WSL 发行版里的 `~/.openclaw`）。读 OpenClaw 的 `openclaw.json`
+- `import-openclaw` 也会把 OpenClaw 装的技能（`~/.openclaw/skills/`、各 agent 工作目录下的 `skills/`）一起拷过来。
+  不写路径会自动找（本机和各个 WSL 发行版里的 `~/.openclaw`）。读 OpenClaw 的 `openclaw.json`
   找出全部 agent，Kagura 里还没有的会新建（新建的要重启服务端才加载）。每个 agent 的 SOUL / IDENTITY / USER / AGENTS / TOOLS / HEARTBEAT / MEMORY 与每日笔记，
   以及 OpenClaw 的定时任务（**导入后默认暂停**）。也可以在管理界面「定时任务 → 从 OpenClaw 导入」里做。
 

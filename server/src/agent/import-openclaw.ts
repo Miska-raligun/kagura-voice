@@ -22,6 +22,8 @@ export interface ImportReport {
   jobs: { imported: { id: string; name: string; agent: string }[]; skipped: { name: string; reason: string }[] };
   /** 一个 workspace 都没找到时，告诉用户查过哪些地方 */
   searched: string[];
+  /** 拷过来的技能：to = 全局 / agent id */
+  skills?: { name: string; to: string; skipped?: string }[];
   /** 定时任务从哪里读到的 / 查过哪些地方 */
   jobSources?: string[];
   jobsSearched?: string[];
@@ -188,7 +190,22 @@ export function convertSchedule(s: any): Schedule {
   throw new Error(`不认识的 schedule: ${JSON.stringify(s)}`);
 }
 
-export function importOpenClaw(dir: string, agents: AgentRegistry, sched: Scheduler | null, opts: { overwrite?: boolean } = {}): ImportReport {
+/** 拷技能文件夹（带 SKILL.md 的才算），跳过 .git / node_modules；已有同名的不覆盖（除非 overwrite） */
+function copySkills(from: string, to: string, label: string, overwrite: boolean, out: NonNullable<ImportReport["skills"]>) {
+  let names: string[] = [];
+  try { names = fs.readdirSync(from); } catch { return; }
+  for (const n of names) {
+    const src = path.join(from, n);
+    if (!/^[A-Za-z0-9_.-]{1,64}$/.test(n) || !fs.existsSync(path.join(src, "SKILL.md"))) continue;
+    const dst = path.join(to, n);
+    if (fs.existsSync(dst) && !overwrite) { out.push({ name: n, to: label, skipped: "已存在" }); continue; }
+    fs.mkdirSync(to, { recursive: true });
+    fs.cpSync(src, dst, { recursive: true, force: true, filter: (s) => !/[\\/](\.git|node_modules|__pycache__|\.venv)([\\/]|$)/.test(s.slice(src.length)) });
+    out.push({ name: n, to: label });
+  }
+}
+
+export function importOpenClaw(dir: string, agents: AgentRegistry, sched: Scheduler | null, opts: { overwrite?: boolean; skillsDir?: string } = {}): ImportReport {
   if (!fs.existsSync(dir)) throw new Error(`找不到 OpenClaw 目录 ${dir}`);
   const report: ImportReport = { dir, agents: [], files: [], jobs: { imported: [], skipped: [] }, searched: [] };
   const oc = discoverOcAgents(dir, report.searched);
@@ -242,6 +259,16 @@ export function importOpenClaw(dir: string, agents: AgentRegistry, sched: Schedu
       }
     }
     report.files.push({ agent: into, copied, from });
+  }
+  // 技能：OpenClaw 的 <目录>/skills → 全局；各 agent workspace/skills → 那个 agent 自己的
+  if (opts.skillsDir) {
+    const sk: NonNullable<ImportReport["skills"]> = [];
+    copySkills(path.join(dir, "skills"), opts.skillsDir, "全局", !!opts.overwrite, sk);
+    for (const a of oc) {
+      const into = idMap.get(a.id);
+      if (into && a.workspace) copySkills(path.join(a.workspace, "skills"), path.join(agents.get(into)!.workspace, "skills"), into, !!opts.overwrite, sk);
+    }
+    report.skills = sk;
   }
   if (sched) {
     const oj = readOcJobs(dir);
@@ -318,6 +345,11 @@ export function describeImport(rep: ImportReport): string[] {
     if (f) lines.push(`      ${f.copied.length ? f.copied.join("、") : "（目录里没有人设 / 记忆文件）"} ← ${f.from}`);
   }
   if (!rep.files.length && rep.searched.length) lines.push("  一个 workspace 都没找到，查过：", ...[...new Set(rep.searched)].map((p) => `      ${p}`));
+  if (rep.skills?.length) {
+    const ok = rep.skills.filter((s) => !s.skipped), skip = rep.skills.filter((s) => s.skipped);
+    if (ok.length) lines.push(`  技能：${ok.map((s) => `${s.name}（${s.to}）`).join("、")}`);
+    if (skip.length) lines.push(`  已有同名技能没覆盖：${skip.map((s) => s.name).join("、")}（要覆盖加 --force）`);
+  } else if (rep.skills) lines.push("  没找到 OpenClaw 自己装的技能（skills/ 目录）");
   if (rep.jobSources?.length) lines.push(`  定时任务来自：${rep.jobSources.join("；")}`);
   else if (rep.jobsSearched) lines.push("  没找到定时任务，查过：", ...rep.jobsSearched.map((p) => `      ${p}`));
   for (const j of rep.jobs.imported) lines.push(`  ✓ 任务 ${j.name}（${j.agent}，已暂停，到管理界面确认后启用）`);

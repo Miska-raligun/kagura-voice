@@ -168,7 +168,7 @@ function ToolsTab({ a, save }: { a: any; save: (p: any) => Promise<void> }) {
     <>
       <Card title="工具白名单"><AllowList all={meta?.tools ?? []} value={tools} onChange={setTools} /></Card>
       <Card title="技能白名单">
-        <p class="muted">技能放在 数据目录/skills/&lt;名字&gt;/SKILL.md（全局）或 agent 的 workspace/skills/（只给它）。本期只读说明，不执行脚本。</p>
+        <p class="muted">勾选这个 agent 能用的技能。新建、编辑、上传技能在 <a onClick={() => go("skills")}>「技能」页</a>；技能里的脚本由 agent 用「执行命令」工具运行。</p>
         {skills?.length ? <AllowList all={skills} value={sk} onChange={setSk} /> : <Empty>还没有技能</Empty>}
       </Card>
       <Btn kind="primary" onClick={() => save({ tools, skills: sk })}>保存</Btn>

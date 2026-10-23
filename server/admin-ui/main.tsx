@@ -6,6 +6,7 @@ import { Overview } from "./pages/overview.tsx";
 import { Agents } from "./pages/agents.tsx";
 import { Sessions } from "./pages/sessions.tsx";
 import { Memory } from "./pages/memory.tsx";
+import { Skills } from "./pages/skills.tsx";
 import { Jobs } from "./pages/jobs.tsx";
 import { A2A } from "./pages/a2a.tsx";
 import { Channels } from "./pages/channels.tsx";
@@ -19,6 +20,7 @@ const PAGES: [string, string, (p: { arg: string }) => any][] = [
   ["agents", "Agents", Agents],
   ["sessions", "会话", Sessions],
   ["memory", "记忆", Memory],
+  ["skills", "技能", Skills],
   ["jobs", "定时任务", Jobs],
   ["a2a", "Agent 通信", A2A],
   ["channels", "渠道", Channels],
