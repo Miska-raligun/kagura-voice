@@ -53,10 +53,10 @@ export function DeviceFiles() {
     try {
       const r = await api("/device-files/sync", { body: { scope } });
       const msgs: string[] = [];
-      if (r.sent.length) msgs.push(scope === "code" ? `已通知 ${r.sent.join("、")}：设备会先下载，再在屏幕上问你要不要更新` : `已通知 ${r.sent.join("、")} 同步图片`);
-      if (r.up_to_date.length) msgs.push(`${r.up_to_date.join("、")} 的代码已经是最新`);
+      if (r.sent.length) msgs.push(scope === "code" ? `已通知 ${r.sent.join("、")}，请在设备屏幕上确认更新` : `已通知 ${r.sent.join("、")} 同步图片`);
+      if (r.up_to_date.length) msgs.push(`${r.up_to_date.join("、")} 已是最新`);
       if (r.offline.length) msgs.push(`${r.offline.join("、")} 不在线`);
-      if (r.unsupported.length) msgs.push(`${r.unsupported.join("、")} 的固件太旧，还不认在线更新：先用 USB 把固件包里 src 的 .py 全部传一遍`);
+      if (r.unsupported.length) msgs.push(`${r.unsupported.join("、")} 固件不支持在线更新`);
       toast(msgs.join("；"), r.sent.length ? "ok" : "err");
       reload();
     } catch (e) { toastErr(e); }
@@ -80,11 +80,9 @@ export function DeviceFiles() {
               <td>{x.ota_capable ? <RevBadge dev={x.code_rev} want={d.code_rev} unknown="未知（手动烧录）" /> : <Badge s="error" text="先用 USB 刷一次" />}{x.fw_version && <small class="muted"> {x.fw_version}</small>}</td>
               <td>{x.last_sync ? <>{x.last_sync.ok ? <Badge s="ok" text="成功" /> : <Badge s="error" text="失败" />}{" "}
                 <small class="muted">{x.last_sync.ok ? `更新 ${x.last_sync.changed}、删除 ${x.last_sync.removed}` : x.last_sync.error} · {ago(Date.now() / 1000 - x.last_sync.ts)}</small></> : "—"}</td>
-            </tr>))}</tbody></table> : <Empty>还没收到设备心跳。</Empty>}
-        <p class="muted">图片传上去就会自动同步（设备离线的话下次开机补上）。代码更新要在设备屏幕上点「更新」，装完自动重启；
-          新代码起不来会自动换回旧的（需要设备上的 /flash/main.py 是新版，固件包里有）。</p>
-        {d.devices.some((x: any) => !x.ota_capable) && <p class="over">标「固件太旧」的设备还不认在线更新：用 USB 把固件包（0.1.0-beta.2 及以后）里
-          <code>flash/main.py</code> 和 <code>flash/kagura/src/</code> 下的全部 .py 传一遍，重启后就能在这里更新了。</p>}
+            </tr>))}</tbody></table> : <Empty>暂无设备</Empty>}
+        <p class="muted">图片上传后自动同步；代码更新需在设备屏幕上确认，启动失败会自动回滚。</p>
+        {d.devices.some((x: any) => !x.ota_capable) && <p class="over">部分设备固件不支持在线更新：请先通过 USB 上传固件包中的 <code>flash/main.py</code> 与 <code>flash/kagura/src/*.py</code>。</p>}
       </Card>
 
       <Card title="角色图片" actions={<Select value={role} onChange={setRole}
@@ -102,7 +100,7 @@ export function DeviceFiles() {
                 <Btn small onClick={async () => {
                   const [file] = await pick("image/*");
                   if (!file) return;
-                  try { await api("/device-files", { method: "PUT", body: { p, b64: await toDeviceJpeg(file) } }); toast("已上传，正在同步到设备"); refresh(); } catch (e) { toastErr(e); }
+                  try { await api("/device-files", { method: "PUT", body: { p, b64: await toDeviceJpeg(file) } }); toast("已上传"); refresh(); } catch (e) { toastErr(e); }
                 }}>{f ? "替换" : "上传"}</Btn>
                 {f && <Btn small kind="danger" onClick={confirmDo(`删除 ${p}？设备上也会删掉。`, async () => {
                   try { await api(`/device-files?p=${enc(p)}`, { method: "DELETE" }); refresh(); } catch (e) { toastErr(e); }
@@ -116,10 +114,10 @@ export function DeviceFiles() {
         const list = await pick(".py", true);
         try {
           for (const file of list) await api("/device-files", { method: "PUT", body: { p: `src/${file.name}`, b64: b64(await file.arrayBuffer()) } });
-          if (list.length) { toast(`已上传 ${list.length} 个文件，点「更新设备代码」装到设备上`); reload(); }
+          if (list.length) { toast(`已上传 ${list.length} 个文件`); reload(); }
         } catch (e) { toastErr(e); }
       }}>上传 .py 覆盖</Btn>}>
-        <p class="muted">服务端自带一份与它同版本的设备代码。自己改过的文件可以传上来覆盖同名内置文件，删掉覆盖就回到内置版本。</p>
+        <p class="muted">内置与服务端同版本的设备代码；上传的文件覆盖同名内置文件。</p>
         <table><thead><tr><th>文件</th><th>来源</th><th>大小</th><th /></tr></thead>
           <tbody>{code.map((f: any) => (
             <tr><td><code>{f.p.slice(4)}</code></td>

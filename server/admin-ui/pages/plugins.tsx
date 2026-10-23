@@ -22,9 +22,9 @@ function ExtView({ e }: { e: any }) {
     <>
       {e.error ? <div class="errbox"><b>加载失败</b><pre>{e.error}</pre></div>
         : <p>工具：{e.tools.length ? e.tools.map((t: any) => <><code style={t.shadowed ? "text-decoration:line-through" : ""} title={t.description}>{t.name}</code>
-          {t.shadowed ? <small class="muted">（和内置工具重名，用内置的）</small> : null}{t.allowUntrusted ? <small class="muted">（陌生人也能用）</small> : null} </>) : <span class="muted">（没有注册工具）</span>}
+          {t.shadowed ? <small class="muted">（与内置工具重名，已忽略）</small> : null}{t.allowUntrusted ? <small class="muted">（对不可信会话开放）</small> : null} </>) : <span class="muted">（无工具）</span>}
           {e.mcpServers.length ? <> · MCP：{e.mcpServers.map((m: string) => <code>{m}</code>)}</> : null}</p>}
-      {e.unsupported?.length ? <p class="muted">这些 pi API 这里不支持、已忽略：{e.unsupported.join("、")}</p> : null}
+      {e.unsupported?.length ? <p class="muted">未支持的 pi API（已忽略）：{e.unsupported.join("、")}</p> : null}
     </>
   );
 }
@@ -50,20 +50,14 @@ function Exts({ owner, name }: { owner: string; name: string }) {
               <small>{e.error ? e.error.split("\n")[0] : e.tools.map((t: any) => t.name).join("、") || "（没有工具）"}</small>
             </li>))}</ul></> : null;
       })}
-      {!d.extensions.filter((e: any) => !e.pkg).length && <Empty>还没有扩展。可以自己写，也可以在聊天里让 agent 给自己写一个工具。</Empty>}
+      {!d.extensions.filter((e: any) => !e.pkg).length && <Empty>暂无扩展</Empty>}
     </>}>
       {creating ? <NewExt owners={d.owners} template={d.template} done={(o, n) => { setCreating(false); reload(); go("plugins", `ext|${o}|${n}`); }} />
         : name ? <ExtDetail key={owner + name} owner={owner} name={name} info={d.extensions.find((e: any) => e.owner === owner && e.name === name)}
           onChanged={reload} onDeleted={() => { reload(); go("plugins", "ext"); }} />
-        : <Card title="扩展是什么">
-          <p>扩展 = 一个 TypeScript / JavaScript 文件，格式与 pi 的扩展一致：<code>export default function (pi) {"{"} pi.registerTool({"{"}…{"}"}) {"}"}</code>。
-            注册的工具 agent 直接就能调用，还可以用 <code>pi.registerMcpServer()</code> 带上 MCP 服务器。</p>
-          <p><b>agent 能自己给自己写工具</b>：在可信的对话里（网页聊天、设备、主人私聊）它有 <code>extension_write</code> 等工具，写完马上加载、有错看报错再改，下一轮就能用。
-            想要什么能力直接跟它说「给自己写个工具，用来……」。</p>
-          <p class="muted">扩展代码在这台电脑上运行，权限和服务端一样大。所以扩展里的工具默认只在可信对话里出现；
-            要让 IM 里的陌生人也能用，在工具定义里加 <code>allowUntrusted: true</code>。
-            全局扩展放在 <code>{d.global_dir}</code>，「只给某个 agent」的放在它工作目录的 extensions/ 下。
-            pi 的界面类 API（命令、快捷键、TUI）这里没有，会被忽略。</p>
+        : <Card title="扩展">
+          <p class="muted">pi 格式的 TypeScript / JavaScript 扩展：<code>export default (pi) =&gt; pi.registerTool(…)</code>。agent 可在可信会话中用 <code>extension_write</code> 自行编写。</p>
+          <dl class="kv"><dt>全局目录</dt><dd><code>{d.global_dir}</code></dd><dt>权限</dt><dd>仅可信会话可用；工具标记 <code>allowUntrusted</code> 后开放</dd></dl>
         </Card>}
     </Split>
   );
@@ -74,14 +68,14 @@ function NewExt({ owners, template, done }: { owners: any[]; template: string; d
   return (
     <Card title="新建扩展">
       <div class="form">
-        <Field label="名字" hint="字母、数字、_ -，当作文件名"><Input value={f.name} onInput={(v) => set({ ...f, name: v })} placeholder="my-tools" /></Field>
+        <Field label="名字" hint="字母、数字、_ -"><Input value={f.name} onInput={(v) => set({ ...f, name: v })} placeholder="my-tools" /></Field>
         <Field label="给谁用"><Select value={f.owner} onChange={(v) => set({ ...f, owner: v })} options={owners.map((o: any) => [o.id, o.name] as [string, string])} /></Field>
         <Field label="代码" wide><TextArea value={f.code} onInput={(v) => set({ ...f, code: v })} rows={20} mono /></Field>
       </div>
       <Btn kind="primary" onClick={async () => {
         try {
           const r = await api(`/extensions/${enc(f.owner)}/${enc(f.name)}`, { method: "PUT", body: { code: f.code } });
-          r.error ? toast("已保存，但加载失败，看右侧报错", "err") : toast("已保存并加载");
+          r.error ? toast("已保存，加载失败", "err") : toast("已保存并加载");
           done(f.owner, f.name);
         } catch (e) { toastErr(e); }
       }}>保存并加载</Btn>
@@ -113,7 +107,7 @@ function ExtDetail({ owner, name, info, onChanged, onDeleted }: { owner: string;
           try {
             const r = await api(url, { method: "PUT", body: { code } });
             setOrig(code); setCur(r);
-            r.error ? toast("已保存，但加载失败", "err") : toast("已保存并加载，下一轮对话生效");
+            r.error ? toast("已保存，但加载失败", "err") : toast("已保存并加载");
             onChanged();
           } catch (e) { toastErr(e); }
         }}>保存并加载</Btn></div>
@@ -146,7 +140,7 @@ function Mcp() {
         {d.servers.length ? <table><thead><tr><th>名字</th><th>状态</th><th>工具</th><th /></tr></thead><tbody>
           {d.servers.map((s: any) => (
             <tr>
-              <td><b>{s.name}</b>{s.allowUntrusted ? <small class="muted">（陌生人也能用）</small> : null}<br /><small class="muted">{s.transport} · {s.target}{s.source !== "mcp.json" ? ` · 来自${s.source}` : ""}</small>
+              <td><b>{s.name}</b>{s.allowUntrusted ? <small class="muted">（对不可信会话开放）</small> : null}<br /><small class="muted">{s.transport} · {s.target}{s.source !== "mcp.json" ? ` · 来自${s.source}` : ""}</small>
                 {s.description ? <><br /><small class="muted">{s.description}</small></> : null}</td>
               <td><Badge s={s.state === "connected" ? "ok" : s.state === "connecting" ? "connecting" : s.state === "disabled" ? "stopped" : "error"}
                 text={{ connected: "已连接", connecting: "连接中", disabled: "已停用", error: "出错" }[s.state as string] ?? s.state} />
@@ -155,8 +149,8 @@ function Mcp() {
                 <li><code>{t.tool}</code>{t.exposure === "hidden" ? <small class="muted">（已隐藏）</small> : null}<br /><small class="muted">{t.description.slice(0, 160)}</small></li>))}</ul></details> : "—"}</td>
               <td>{s.state !== "disabled" && s.transport ? <Btn small onClick={async () => { await api(`/mcp/${enc(s.name)}/reconnect`, { body: {} }); toast("已重连"); reload(); }}>重连</Btn> : null}</td>
             </tr>))}
-        </tbody></table> : <Empty>还没有 MCP 服务器。在下面的 mcp.json 里加，或从别的客户端导入。</Empty>}
-        <p class="muted">工具名是 <code>mcp__服务器__工具</code>。MCP 工具默认只在可信对话（网页、设备、主人私聊）里出现；服务器配置里加 <code>"allowUntrusted": true</code> 才给 IM 里的陌生人用。</p>
+        </tbody></table> : <Empty>暂无 MCP 服务器</Empty>}
+        <p class="muted">工具名为 <code>mcp__服务器__工具</code>，仅可信会话可用；服务器配置 <code>"allowUntrusted": true</code> 后开放。</p>
       </Card>
       <Card title="mcp.json" actions={<>
         {d.import_sources.map((s: any) => (
@@ -175,7 +169,7 @@ function Mcp() {
           {!text && <Btn small kind="ghost" onClick={() => setText(MCP_EXAMPLE)}>填入示例</Btn>}
           <span class="grow" />{dirty && <span class="muted">未保存</span>}
           <Btn kind="primary" disabled={!dirty} onClick={async () => {
-            try { await api("/mcp", { method: "PUT", body: { config: text } }); toast("已保存，正在连接"); reload(); } catch (e) { toastErr(e); }
+            try { await api("/mcp", { method: "PUT", body: { config: text } }); toast("已保存"); reload(); } catch (e) { toastErr(e); }
           }}>保存并连接</Btn>
         </div>
       </Card>
@@ -215,8 +209,7 @@ function Packages() {
   return (
     <>
       <Card title="安装扩展包">
-        <p class="muted">格式与 pi 一致（<code>pi install</code> 能装的这里都能装）：<code>npm:包名</code> 或直接写包名、<code>git:github.com/作者/仓库</code>、GitHub 网址、本机路径，也可以上传 .tgz / .zip / 单个 .ts 文件。
-          包里的扩展（工具）和技能装好就能用；pi 终端界面用的命令、快捷键、主题这里用不上。依赖自动装（不跑安装脚本）。</p>
+        <p class="muted">与 <code>pi install</code> 相同的来源格式：<code>npm:包名</code>、<code>git:github.com/作者/仓库</code>、GitHub 网址、本机路径，或上传 .tgz / .zip / .ts。</p>
         <div class="row">
           <span class="grow"><Input value={src} onInput={setSrc} placeholder="npm:pi-web-access  或  git:github.com/作者/仓库" /></span>
           <Btn kind="primary" disabled={!src.trim()} onClick={() => install(src.trim())}>安装</Btn>
@@ -238,7 +231,7 @@ function Packages() {
             } catch (e) { toastErr(e); }
           }}>从 pi 导入（{piLeft.length} 个）</Btn> : null}
         </div>
-        <p class="muted">⚠️ 扩展包是第三方代码，在这台电脑上以服务端的权限运行。只装你信得过的；里面的工具默认只在可信对话（网页、设备、主人私聊）里出现。</p>
+        <p class="muted">扩展包以服务端权限运行，请只安装可信来源。</p>
       </Card>
 
       <Card title="已安装" actions={<Btn small onClick={reload}>刷新</Btn>}>
@@ -259,16 +252,15 @@ function Packages() {
               {p.kind !== "upload" ? <Btn small onClick={async () => { await api(`/packages/${enc(p.id)}/update`, { body: {} }); toast(p.kind === "local" ? "已重新加载" : "已更新"); reload(); }}>{p.kind === "local" ? "重新加载" : "更新"}</Btn> : null}
               <Btn small kind="danger" onClick={confirmDo(`卸载 ${p.name}？`, async () => { try { await api(`/packages/${enc(p.id)}`, { method: "DELETE" }); toast("已卸载"); reload(); } catch (e) { toastErr(e); } })}>卸载</Btn>
             </div>
-          </details>)) : <Empty>还没装扩展包。在下面的 pi 扩展商店里挑一个，或者在上面填来源。</Empty>}
+          </details>)) : <Empty>暂无扩展包</Empty>}
       </Card>
 
       <Card title="pi 扩展商店" actions={<a href="https://pi.dev/packages" target="_blank">pi.dev/packages ↗</a>}>
         <div class="row">
-          <span class="grow"><Input value={q} onInput={setQ} placeholder="搜索（英文关键词效果更好，如 web、memory、github）" /></span>
+          <span class="grow"><Input value={q} onInput={setQ} placeholder="搜索，如 web、memory、github" /></span>
           <Btn onClick={() => search()}>搜索</Btn>
         </div>
-        <p class="muted">商店里大多数包是给写代码的终端助手用的；适合 Kagura 的是「加工具」「加技能」的那类（联网、查资料、记忆、各种 API）。</p>
-        {searchErr ? <Err msg={searchErr} /> : items === null ? <div class="muted">加载中…</div> : !items.length ? <Empty>没搜到</Empty> :
+                {searchErr ? <Err msg={searchErr} /> : items === null ? <div class="muted">加载中…</div> : !items.length ? <Empty>无结果</Empty> :
           <table><tbody>{items.map((x: any) => (
             <tr>
               <td><a href={x.npm} target="_blank"><b>{x.name}</b></a> <small class="muted">@{x.version} · 周下载 {x.weekly.toLocaleString()}</small><br /><small class="muted">{x.description}</small></td>

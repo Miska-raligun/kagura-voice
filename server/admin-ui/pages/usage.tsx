@@ -21,8 +21,8 @@ export function Usage() {
     <>
       <div class="row"><Select value={days} onChange={setDays} options={[["7", "最近 7 天"], ["30", "最近 30 天"], ["90", "最近 90 天"]]} /></div>
       <div class="grid">
-        <Card title="本月"><div class="big">{money(monthCost)}</div><div class="muted">按目前速度，整月约 {money(monthCost / dayOfMonth * daysInMonth)}</div></Card>
-        <Card title="费用说明"><p class="muted">费用按「设置」里每个模型填的单价（每百万 token）计算；没填单价的模型显示 ¥0。压缩、记忆冲刷、heartbeat 也算在内。</p></Card>
+        <Card title="本月"><div class="big">{money(monthCost)}</div><div class="muted">预计整月 {money(monthCost / dayOfMonth * daysInMonth)}</div></Card>
+        <Card title="说明"><p class="muted">按设置中的模型单价（每百万 token）计算。</p></Card>
       </div>
       <Card title="每天费用">
         {allDays.length ? <>
@@ -34,7 +34,7 @@ export function Usage() {
             })}
           </svg>
           <div class="legend">{d.map((a, k) => <span><i style={{ background: COLORS[k % COLORS.length] }} />{a.name}</span>)}</div>
-        </> : <Empty>这段时间没有调用</Empty>}
+        </> : <Empty>无调用</Empty>}
       </Card>
       <Card title="按 agent 汇总">
         <table><thead><tr><th>agent</th><th>调用</th><th>输入 token</th><th>输出 token</th><th>缓存命中</th><th>费用</th></tr></thead>

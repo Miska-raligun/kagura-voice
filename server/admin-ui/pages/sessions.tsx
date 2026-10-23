@@ -24,7 +24,7 @@ export function Sessions({ arg }: { arg: string }) {
           <li class={s.key === key ? "on" : ""} onClick={() => go("sessions", `${agent}|${s.key}`)}>
             <b>{s.title || s.key.slice(agent.length + 1)}</b>
             <small>{CHANNEL[s.channel] ?? s.channel} · {s.messages} 条 · {fmtTime(s.updated)}{s.busy ? " · 回复中" : ""}</small>
-          </li>))}</ul> : <Empty>还没有会话</Empty>}
+          </li>))}</ul> : <Empty>暂无会话</Empty>}
       </>}>
         {key ? <Conversation key={key} agent={agent} skey={key} onChange={reload} /> : <Inbox agent={agent} onNew={newChat} />}
       </Split>
@@ -39,10 +39,10 @@ function Inbox({ agent, onNew }: { agent: string; onNew: () => void }) {
   return (
     <>
       <Card title="会话">
-        <p>左边是她所有的会话：设备上的语音对话、网页聊天、定时任务、IM 聊天、和其它 agent 的通信。点开任意一个都能看完整记录（含工具调用），也能在里面接着聊。</p>
-        <Btn kind="primary" onClick={onNew}>＋ 开始新对话</Btn>
+        <p class="muted">设备、网页、IM、定时任务与 agent 间通信的全部会话。</p>
+        <Btn kind="primary" onClick={onNew}>＋ 新对话</Btn>
       </Card>
-      {inbox.length > 0 && <Card title="投递到网页聊天的定时任务">{inbox.map((r) => (
+      {inbox.length > 0 && <Card title="定时任务消息">{inbox.map((r) => (
         <div class="msg a"><div class="who">任务 {r.job} · {fmtTime(r.started)}</div><div class="md" dangerouslySetInnerHTML={{ __html: renderMarkdown(r.output) }} /></div>))}</Card>}
     </>
   );
@@ -102,14 +102,14 @@ function Conversation({ agent, skey, onChange }: { agent: string; skey: string; 
     <Card class="chat" title={s.fresh ? "新对话" : `${CHANNEL[s.channel] ?? s.channel ?? ""} · ${s.title || skey.slice(agent.length + 1)}`} actions={!s.fresh && <>
       <Btn small onClick={async () => { const r = await api(`${base}/compact`, { body: {} }); toast(r.compacted ? "已压缩" : "太短了，不用压缩"); reload(); }}>压缩</Btn>
       <Btn small onClick={() => download(`${skey.replace(/:/g, "_")}.json`, JSON.stringify(s, null, 2))}>导出</Btn>
-      <Btn small onClick={confirmDo("清空上下文后她就不记得这段对话了（记录还在，灰色显示）。确定？", async () => { await api(`${base}/reset`, { body: {} }); toast("已清空上下文"); reload(); })}>清空上下文</Btn>
-      <Btn small kind="danger" onClick={confirmDo("彻底删除这个会话的全部记录？删了找不回来。", async () => {
+      <Btn small onClick={confirmDo("清空上下文？历史记录保留。", async () => { await api(`${base}/reset`, { body: {} }); toast("已清空上下文"); reload(); })}>清空上下文</Btn>
+      <Btn small kind="danger" onClick={confirmDo("永久删除此会话的全部记录？", async () => {
         try { await api(base, { method: "DELETE" }); toast("已删除"); onChange(); go("sessions", agent); } catch (e) { toastErr(e); }
       })}>删除</Btn></>}>
       {s.summary && <details class="summary"><summary><b>较早对话的摘要</b></summary><div>{s.summary}</div></details>}
       <div class="msgs" ref={box}>
         {old > 0 && <a class="muted small" onClick={() => setShowOld(true)}>还有 {old} 条已清空 / 已压缩的记录</a>}
-        {!msgs.length && !live && <Empty>说点什么吧。可以发图片（粘贴或拖进来）和文件。</Empty>}
+        {!msgs.length && !live && <Empty>支持粘贴或拖入图片与文件</Empty>}
         {msgs.map((m: any) => <Message m={m} agent={agent} />)}
         {live && <>
           <Message m={{ msg: live.user }} agent={agent} />
@@ -189,7 +189,7 @@ function Composer({ busy, onSend }: { busy: boolean; onSend: (text: string, imag
         }} onKeyDown={(e: KeyboardEvent) => {
           if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); submit(); }
         }}>
-          <TextArea value={text} onInput={setText} rows={2} placeholder="Enter 发送，Shift+Enter 换行；可以粘贴或拖进图片、文件；/reset 清空上下文" />
+          <TextArea value={text} onInput={setText} rows={2} placeholder="Enter 发送 · Shift+Enter 换行 · /reset 清空上下文" />
         </div>
         <Btn kind="primary" onClick={submit} disabled={busy || (!text.trim() && !images.length && !files.length)}>{busy ? "回复中…" : "发送"}</Btn>
       </div>

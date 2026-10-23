@@ -34,7 +34,7 @@ export function Jobs({ arg }: { arg: string }) {
               <td onClick={(e) => e.stopPropagation()}><input type="checkbox" checked={j.enabled} onChange={async (e) => {
                 await api(`/jobs/${enc(j.id)}`, { method: "PATCH", body: { enabled: (e.target as HTMLInputElement).checked } }); reload();
               }} /></td>
-            </tr>))}</tbody></table> : <Empty>还没有定时任务。可以让 agent 自己建（「每天八点给我讲新闻」），或者点「新建任务」。</Empty>}
+            </tr>))}</tbody></table> : <Empty>暂无定时任务</Empty>}
       </Card>
     </>
   );
@@ -47,8 +47,8 @@ function ImportOpenClaw({ done }: { done: () => void }) {
   if (!open) return <Btn onClick={() => setOpen(true)}>从 OpenClaw 导入</Btn>;
   return (
     <Card title="从 OpenClaw 导入" actions={<Btn kind="ghost" onClick={() => setOpen(false)}>关闭</Btn>} class="wide">
-      <p class="muted">拷贝人设、记忆文件，并把定时任务转换过来（导入后默认暂停，逐条确认再启用）。已存在的每日笔记不覆盖。</p>
-      <div class="row"><Input value={dir} onInput={setDir} placeholder="OpenClaw 目录，留空 = 自动找（本机和 WSL 里的 ~/.openclaw）" />
+      <p class="muted">导入人设、记忆与定时任务；任务导入后为暂停状态。</p>
+      <div class="row"><Input value={dir} onInput={setDir} placeholder="OpenClaw 目录（留空自动查找）" />
         <Btn kind="primary" onClick={async () => { try { const r = await api("/import/openclaw", { body: { dir: dir || undefined } }); setRep(r); done(); } catch (e) { toastErr(e); } }}>导入</Btn></div>
       {rep && <pre class="log">{rep.lines.join("\n")}</pre>}
     </Card>
@@ -96,7 +96,7 @@ function JobForm({ j, done }: { j?: any; done: () => void }) {
   };
   return (
     <Card title={j ? `编辑：${j.name}` : "新建定时任务"} actions={<Btn kind="ghost" onClick={done}>取消</Btn>}>
-      {hb && <p class="muted">这是 heartbeat 任务，开关、间隔、投递在 agent 的 Heartbeat 页里改更方便。</p>}
+      {hb && <p class="muted">heartbeat 任务，可在 agent 的 Heartbeat 页设置。</p>}
       <div class="form">
         {!j && <Field label="agent"><Select value={f.agent || agents?.[0]?.id || ""} onChange={(v) => set({ ...f, agent: v })} options={(agents ?? []).map((a) => [a.id, a.name] as [string, string])} /></Field>}
         <Field label="名称"><Input value={f.name} onInput={(v) => set({ ...f, name: v })} /></Field>
@@ -105,14 +105,14 @@ function JobForm({ j, done }: { j?: any; done: () => void }) {
         </Field>
         {f.skind === "at" && <Field label="什么时候"><input type="datetime-local" value={f.at} onInput={(e) => set({ ...f, at: (e.target as HTMLInputElement).value })} /></Field>}
         {f.skind === "every" && <Field label="每隔（分钟）"><Input type="number" value={f.every} onInput={(v) => set({ ...f, every: v })} /></Field>}
-        {f.skind === "cron" && <Field label="cron（分 时 日 月 周）" hint="0 8 * * * = 每天 8 点；30 7 * * 1-5 = 工作日 7:30"><Input value={f.expr} onInput={(v) => set({ ...f, expr: v })} /></Field>}
-        {f.skind === "cron" && <Field label="时区" hint="留空 = 服务器时区"><Input value={f.tz} onInput={(v) => set({ ...f, tz: v })} placeholder="Asia/Shanghai" /></Field>}
-        {!hb && <Field label="类型"><Select value={f.kind} onChange={(v) => set({ ...f, kind: v })} options={[["agentTurn", "让 agent 干活（agentTurn）"], ["systemEvent", "注入一条系统事件（可以不回）"]]} /></Field>}
-        {!hb && <Field label="会话" hint="isolated：每次全新上下文，适合早报；main：带着日常聊天的上下文"><Select value={f.session} onChange={(v) => set({ ...f, session: v })} options={[["isolated", "isolated（独立）"], ["main", "main（主会话）"]]} /></Field>}
+        {f.skind === "cron" && <Field label="cron（分 时 日 月 周）" hint="如 0 8 * * *（每天 8 点）"><Input value={f.expr} onInput={(v) => set({ ...f, expr: v })} /></Field>}
+        {f.skind === "cron" && <Field label="时区" hint="留空为服务器时区"><Input value={f.tz} onInput={(v) => set({ ...f, tz: v })} placeholder="Asia/Shanghai" /></Field>}
+        {!hb && <Field label="类型"><Select value={f.kind} onChange={(v) => set({ ...f, kind: v })} options={[["agentTurn", "agentTurn"], ["systemEvent", "systemEvent"]]} /></Field>}
+        {!hb && <Field label="会话" hint="isolated 每次全新上下文；main 共享日常上下文"><Select value={f.session} onChange={(v) => set({ ...f, session: v })} options={[["isolated", "isolated（独立）"], ["main", "main（主会话）"]]} /></Field>}
         <Field label="投递到"><DeliveryPicker value={f.delivery} onChange={(v) => set({ ...f, delivery: v })} /></Field>
-        <Field label="活跃时段" hint="时段外跳过，如 08:00-23:00（可跨午夜）"><Input value={f.active_hours} onInput={(v) => set({ ...f, active_hours: v })} /></Field>
+        <Field label="活跃时段" hint="如 08:00-23:00"><Input value={f.active_hours} onInput={(v) => set({ ...f, active_hours: v })} /></Field>
         <Field label="失败重试次数"><Input type="number" value={f.max_retries} onInput={(v) => set({ ...f, max_retries: v })} /></Field>
-        <Field label="模型" hint="留空 = agent 的模型（heartbeat 默认便宜模型）"><Input value={f.model} onInput={(v) => set({ ...f, model: v })} placeholder="provider/model" /></Field>
+        <Field label="模型" hint="留空使用 agent 的模型"><Input value={f.model} onInput={(v) => set({ ...f, model: v })} placeholder="provider/model" /></Field>
         <Field label="其他" wide><Toggle checked={f.idle_only} onChange={(v) => set({ ...f, idle_only: v })} label="设备正在对话时延后执行" /></Field>
         <Field label={hb ? "提示词（留空用默认的 heartbeat 提示）" : "到点交给 agent 的指令"} wide><TextArea value={f.message} onInput={(v) => set({ ...f, message: v })} rows={5} placeholder="例：讲讲今天的天气和三条科技新闻，一分钟以内" /></Field>
       </div>
@@ -147,7 +147,7 @@ function JobDetail({ j, reload }: { j: any; reload: () => void }) {
           <tbody>{runs.map((r) => (
             <tr><td>{fmtTime(r.started)}</td><td><Badge s={r.status} /></td>
               <td class="pre clip">{r.error || r.output}</td><td>{r.tokens_in}/{r.tokens_out}</td><td>{money(r.cost)}</td><td><code>{r.delivered || "—"}</code></td></tr>))}</tbody></table>
-          : <Empty>还没运行过</Empty>}
+          : <Empty>暂无记录</Empty>}
       </Card>
     </>
   );

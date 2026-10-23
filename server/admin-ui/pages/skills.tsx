@@ -37,16 +37,14 @@ export function Skills({ arg }: { arg: string }) {
           <li class={s.owner === owner && s.folder === folder ? "on" : ""} onClick={() => { setMode(""); go("skills", `${s.owner}|${s.folder}`); }}>
             <b>{s.name}</b><small>{s.description || "（没写描述）"}</small>
           </li>))}</ul></> : null)}
-      {!d.skills.length && <Empty>还没有技能。新建一个，或上传技能包（.zip，比如从 ClawHub 下载的）。</Empty>}
+      {!d.skills.length && <Empty>暂无技能</Empty>}
     </>}>
       {mode === "new" && <NewSkill owners={d.owners} done={(o, n) => { setMode(""); reload(); go("skills", `${o}|${n}|SKILL.md`); }} />}
       {mode === "zip" && <UploadZip owners={d.owners} done={(o, n) => { setMode(""); reload(); go("skills", `${o}|${n}|SKILL.md`); }} />}
       {!mode && (folder ? <SkillDetail key={owner + folder} owner={owner} folder={folder} file={file || "SKILL.md"} onDeleted={() => { reload(); go("skills"); }} onChanged={reload} />
-        : <Card title="技能是什么">
-          <p>技能 = 一个文件夹，里面一份 <code>SKILL.md</code>（什么时候用、怎么做），可以带脚本和资料。格式与 OpenClaw / ClawHub 一致，拿来就能用。</p>
-          <p>agent 的系统提示里只放技能的名字和描述；用到时它会读 SKILL.md 全文，要跑的脚本用「执行命令」工具跑（只有主人能触发）。</p>
-          <p class="muted">全局技能所有 agent 都能用，放在 <code>{d.global_dir}</code>；「只给某个 agent」的放在它的工作目录 skills/ 下。
-            每个 agent 用哪些技能在「Agents → 工具与技能」里勾选。从 OpenClaw 导入时，它装的技能会一起搬过来。</p>
+        : <Card title="技能">
+          <p class="muted">一个技能是含 <code>SKILL.md</code> 的文件夹，可附带脚本与资料，兼容 OpenClaw / ClawHub 格式。</p>
+          <dl class="kv"><dt>全局目录</dt><dd><code>{d.global_dir}</code></dd><dt>启用</dt><dd>Agents → 工具与技能</dd></dl>
         </Card>)}
     </Split>
   );
@@ -61,10 +59,10 @@ function NewSkill({ owners, done }: { owners: any[]; done: (owner: string, name:
   return (
     <Card title="新建技能">
       <div class="form">
-        <Field label="名字" hint="英文字母、数字、_ . -，会当作文件夹名"><Input value={f.name} onInput={(v) => set({ ...f, name: v })} placeholder="weather-report" /></Field>
+        <Field label="名字" hint="字母、数字、_ . -"><Input value={f.name} onInput={(v) => set({ ...f, name: v })} placeholder="weather-report" /></Field>
         <Field label="给谁用"><OwnerSelect owners={owners} value={f.owner} onChange={(v) => set({ ...f, owner: v })} /></Field>
-        <Field label="描述" hint="agent 靠这一句判断什么时候用它，写清楚场景" wide><Input value={f.description} onInput={(v) => set({ ...f, description: v })} placeholder="主人问天气时，查询并播报今明两天的天气" /></Field>
-        <Field label="说明（SKILL.md 正文，可以先空着）" wide><TextArea value={f.body} onInput={(v) => set({ ...f, body: v })} rows={10} mono /></Field>
+        <Field label="描述" hint="agent 据此判断何时使用" wide><Input value={f.description} onInput={(v) => set({ ...f, description: v })} placeholder="主人问天气时，查询并播报今明两天的天气" /></Field>
+        <Field label="正文（SKILL.md）" wide><TextArea value={f.body} onInput={(v) => set({ ...f, body: v })} rows={10} mono /></Field>
       </div>
       <Btn kind="primary" onClick={async () => {
         try { await api("/skills", { body: f }); toast("已创建"); done(f.owner, f.name); } catch (e) { toastErr(e); }
@@ -78,10 +76,10 @@ function UploadZip({ owners, done }: { owners: any[]; done: (owner: string, name
   const [overwrite, setOverwrite] = useState(false);
   return (
     <Card title="上传技能包">
-      <p class="muted">.zip 里要有 SKILL.md（放在根上或者一层文件夹里都行）。技能名取 SKILL.md 里的 name。</p>
+      <p class="muted">.zip 内需包含 SKILL.md（根目录或一级子目录）。</p>
       <div class="form">
         <Field label="给谁用"><OwnerSelect owners={owners} value={owner} onChange={setOwner} /></Field>
-        <Field label="同名技能"><Toggle checked={overwrite} onChange={setOverwrite} label="覆盖（旧的挪进回收站）" /></Field>
+        <Field label="同名技能"><Toggle checked={overwrite} onChange={setOverwrite} label="覆盖" /></Field>
       </div>
       <Btn kind="primary" onClick={async () => {
         const [file] = await pick(".zip");
@@ -141,11 +139,11 @@ function SkillFile({ url, path, onSaved }: { url: string; path: string; onSaved:
   if (text === null) return <div class="muted">加载中…</div>;
   return (
     <Card title={path}>
-      {path === "SKILL.md" && <p class="muted">开头 --- 之间的 name / description 决定技能名和 agent 什么时候想起它；正文写具体步骤，要跑脚本就写清楚命令（相对路径以技能目录为准）。</p>}
+      {path === "SKILL.md" && <p class="muted">front matter 中的 name / description 决定技能名与触发场景；脚本路径相对技能目录。</p>}
       <TextArea value={text} onInput={setText} rows={22} mono />
       <div class="row"><span class="grow" />{text !== orig && <span class="muted">未保存</span>}
         <Btn kind="primary" disabled={text === orig} onClick={async () => {
-          try { await api(url, { method: "PUT", body: { content: text } }); setOrig(text); toast("已保存，下一轮对话生效"); onSaved(); } catch (e) { toastErr(e); }
+          try { await api(url, { method: "PUT", body: { content: text } }); setOrig(text); toast("已保存"); onSaved(); } catch (e) { toastErr(e); }
         }}>保存</Btn></div>
     </Card>
   );

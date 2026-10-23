@@ -40,7 +40,7 @@ function Search({ agent }: { agent: string }) {
     <Card title="检索测试" actions={<Btn small onClick={async () => { const r = await api(`/agents/${enc(agent)}/memory/reindex`, { body: {} }); toast(`已重建（${r.changed} 个文件）`); }}>重建索引</Btn>}>
       <div class="row"><Input value={q} onInput={setQ} placeholder="输入一句话，看 memory_search 会搜出什么" /><Btn kind="primary" onClick={run} disabled={!q}>搜索</Btn></div>
       {hits && (hits.length ? <ol class="hits">{hits.map((h) => (
-        <li><div class="muted">{h.path}#L{h.start}-{h.end} · {h.via} · {h.score}</div><div>{h.text}</div></li>))}</ol> : <Empty>没有找到</Empty>)}
+        <li><div class="muted">{h.path}#L{h.start}-{h.end} · {h.via} · {h.score}</div><div>{h.text}</div></li>))}</ol> : <Empty>无结果</Empty>)}
     </Card>
   );
 }

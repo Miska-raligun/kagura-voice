@@ -1,7 +1,8 @@
-// Kagura 管理界面（§7）：本机浏览器打开 http://127.0.0.1:5000/admin。所有数据走 /api/admin/*。
+// Kagura 管理界面：本机浏览器打开 http://127.0.0.1:5000/admin。所有数据走 /api/admin/*。
 import { render } from "preact";
 import { useEffect, useState } from "preact/hooks";
-import { Toasts } from "./ui.tsx";
+import { api } from "./api.ts";
+import { Icon, Toasts, type IconName } from "./ui.tsx";
 import { Overview } from "./pages/overview.tsx";
 import { Agents } from "./pages/agents.tsx";
 import { Sessions } from "./pages/sessions.tsx";
@@ -15,20 +16,30 @@ import { Devices } from "./pages/devices.tsx";
 import { Usage } from "./pages/usage.tsx";
 import { Settings } from "./pages/settings.tsx";
 
-const PAGES: [string, string, (p: { arg: string }) => any][] = [
-  ["overview", "总览", Overview],
-  ["agents", "Agents", Agents],
-  ["sessions", "会话 / 聊天", Sessions],
-  ["memory", "记忆", Memory],
-  ["skills", "技能", Skills],
-  ["plugins", "扩展 / MCP", Plugins],
-  ["jobs", "定时任务", Jobs],
-  ["a2a", "Agent 通信", A2A],
-  ["channels", "渠道", Channels],
-  ["devices", "设备", Devices],
-  ["usage", "用量", Usage],
-  ["settings", "设置", Settings],
+type Page = [id: string, label: string, icon: IconName, comp: (p: { arg: string }) => any];
+const GROUPS: [string, Page[]][] = [
+  ["概览", [
+    ["overview", "总览", "home", Overview],
+    ["sessions", "会话", "chat", Sessions],
+    ["usage", "用量", "chart", Usage],
+  ]],
+  ["Agent", [
+    ["agents", "Agents", "bot", Agents],
+    ["memory", "记忆", "brain", Memory],
+    ["skills", "技能", "book", Skills],
+    ["plugins", "扩展 / MCP", "puzzle", Plugins],
+    ["jobs", "定时任务", "clock", Jobs],
+    ["a2a", "Agent 通信", "link", A2A],
+  ]],
+  ["连接", [
+    ["channels", "渠道", "send", Channels],
+    ["devices", "设备", "cpu", Devices],
+  ]],
+  ["系统", [
+    ["settings", "设置", "gear", Settings],
+  ]],
 ];
+const PAGES = GROUPS.flatMap(([, p]) => p);
 
 /** #/agents/mio → ["agents", "mio"] */
 function useRoute(): [string, string] {
@@ -42,25 +53,49 @@ function useRoute(): [string, string] {
   return r;
 }
 
+type Theme = "dark" | "light" | "auto";
+const loadTheme = (): Theme => { try { return (localStorage.getItem("kagura-theme") as Theme) || "dark"; } catch { return "dark"; } };
+
+function ThemeSwitch() {
+  const [t, setT] = useState<Theme>(loadTheme());
+  useEffect(() => {
+    document.documentElement.dataset.theme = t;
+    try { localStorage.setItem("kagura-theme", t); } catch { /* 无痕窗口 */ }
+  }, [t]);
+  const opts: [Theme, IconName, string][] = [["dark", "moon", "深色"], ["light", "sun", "浅色"], ["auto", "monitor", "跟随系统"]];
+  return <div class="theme">{opts.map(([v, i, l]) => <button class={t === v ? "on" : ""} title={l} onClick={() => setT(v)}><Icon name={i} /></button>)}</div>;
+}
+
 function App() {
   const [page, arg] = useRoute();
   const [menu, setMenu] = useState(false);
+  const [ver, setVer] = useState("");
   const cur = PAGES.find((p) => p[0] === page) ?? PAGES[0];
-  const Page = cur[2];
+  const PageComp = cur[3];
   useEffect(() => { document.title = `${cur[1]} · Kagura`; setMenu(false); }, [page]);
+  useEffect(() => { api("/overview").then((d) => setVer(d.version ?? "")).catch(() => {}); }, []);
   return (
     <div class="app">
-      <nav class={`side ${menu ? "open" : ""}`}>
-        <div class="brand">Kagura<small>管理</small></div>
-        {PAGES.map(([id, label]) => <a class={id === cur[0] ? "on" : ""} href={`#/${id}`}>{label}</a>)}
-      </nav>
+      <aside class={`side ${menu ? "open" : ""}`}>
+        <div class="brand"><div class="logo">K</div><div><b>Kagura</b><small>{ver ? `v${ver}` : "admin"}</small></div></div>
+        <nav>
+          {GROUPS.map(([g, pages]) => (
+            <div class="nav-group"><span>{g}</span>
+              {pages.map(([id, label, icon]) => <a class={id === cur[0] ? "on" : ""} href={`#/${id}`}><Icon name={icon} />{label}</a>)}
+            </div>
+          ))}
+        </nav>
+        <div class="side-foot"><span><i class="dot" />运行中</span><ThemeSwitch /></div>
+      </aside>
+      {menu && <div class="scrim" onClick={() => setMenu(false)} />}
       <main>
-        <header class="top"><button class="menu" onClick={() => setMenu(!menu)}>☰</button><h2>{cur[1]}</h2></header>
-        <Page key={page} arg={arg} />
+        <header class="top"><button class="menu" onClick={() => setMenu(!menu)}><Icon name="menu" /></button><h2>{cur[1]}</h2></header>
+        <PageComp key={page} arg={arg} />
       </main>
       <Toasts />
     </div>
   );
 }
 
+document.documentElement.dataset.theme = loadTheme();
 render(<App />, document.getElementById("app")!);

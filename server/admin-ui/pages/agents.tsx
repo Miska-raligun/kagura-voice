@@ -19,7 +19,7 @@ export function Agents({ arg }: { arg: string }) {
       <Btn onClick={() => setCreating(true)}>＋ 新建 agent</Btn>
     </>}>
       {creating ? <NewAgent list={list ?? []} done={(id) => { setCreating(false); reload(); if (id) go("agents", id); }} />
-        : cur ? <AgentDetail key={cur} id={cur} onChange={reload} /> : <Empty>还没有 agent</Empty>}
+        : cur ? <AgentDetail key={cur} id={cur} onChange={reload} /> : <Empty>暂无 agent</Empty>}
     </Split>
   );
 }
@@ -34,10 +34,10 @@ function NewAgent({ list, done }: { list: any[]; done: (id?: string) => void }) 
   return (
     <Card title="新建 agent" actions={<Btn kind="ghost" onClick={() => done()}>取消</Btn>}>
       <div class="form">
-        <Field label="id" hint="字母/数字/_-，同时是设备上的图片目录名"><Input value={f.id} onInput={(v) => set({ ...f, id: v })} /></Field>
+        <Field label="id" hint="字母、数字、_-；也是设备图片目录名"><Input value={f.id} onInput={(v) => set({ ...f, id: v })} /></Field>
         <Field label="名字"><Input value={f.name} onInput={(v) => set({ ...f, name: v })} /></Field>
         <Field label="百度音色 per"><Input value={f.per} onInput={(v) => set({ ...f, per: v })} /></Field>
-        <Field label="复制人设自"><Select value={f.copy_from} onChange={(v) => set({ ...f, copy_from: v })} options={[["", "不复制（用模板）"], ...list.map((a) => [a.id, a.name] as [string, string])]} /></Field>
+        <Field label="复制人设自"><Select value={f.copy_from} onChange={(v) => set({ ...f, copy_from: v })} options={[["", "不复制（模板）"], ...list.map((a) => [a.id, a.name] as [string, string])]} /></Field>
       </div>
       <Btn kind="primary" onClick={create} disabled={!f.id}>创建</Btn>
     </Card>
@@ -54,9 +54,9 @@ function AgentDetail({ id, onChange }: { id: string; onChange: () => void }) {
       <div class="titlebar">
         <h3>{a.name} <small class="muted">{a.id}</small></h3>
         <div class="actions">
-          <Btn kind="ghost" onClick={() => go("sessions", `${id}|${id}:webchat:${Date.now().toString(36)}`)}>聊两句</Btn>
+          <Btn kind="ghost" onClick={() => go("sessions", `${id}|${id}:webchat:${Date.now().toString(36)}`)}>新对话</Btn>
           <Btn kind="ghost" onClick={() => go("sessions", id)}>会话</Btn>
-          <Btn kind="danger" onClick={confirmDo(`删除 ${a.name}？目录会移进 agents/.trash/，可以手动找回。`, async () => { await api(`/agents/${enc(id)}`, { method: "DELETE" }); toast("已删除"); onChange(); go("agents"); })}>删除</Btn>
+          <Btn kind="danger" onClick={confirmDo(`删除 ${a.name}？目录将移至 agents/.trash/。`, async () => { await api(`/agents/${enc(id)}`, { method: "DELETE" }); toast("已删除"); onChange(); go("agents"); })}>删除</Btn>
         </div>
       </div>
       <Tabs value={tab} onChange={setTab} tabs={[["basic", "基本"], ["soul", "人设文件"], ["tools", "工具与技能"], ["heartbeat", "Heartbeat"], ["a2a", "通信权限"]]} />
@@ -82,16 +82,16 @@ function Basic({ a, save }: { a: any; save: (p: any) => Promise<void> }) {
     <Card>
       <div class="form">
         <Field label="名字"><Input value={f.name} onInput={(v) => set({ ...f, name: v })} /></Field>
-        <Field label="别名" hint="语音里可能被认成的叫法，用逗号分隔（切换角色时识别用）"><Input value={f.aliases} onInput={(v) => set({ ...f, aliases: v })} /></Field>
+        <Field label="别名" hint="语音切换角色时识别的叫法，逗号分隔"><Input value={f.aliases} onInput={(v) => set({ ...f, aliases: v })} /></Field>
         <Field label="百度音色 per" hint={<a onClick={preview}>▶ 试听</a>}><Input value={f.per} onInput={(v) => set({ ...f, per: v })} /></Field>
-        <Field label="设备图片目录" hint={'设备上 resource/<目录>/ 那套图；默认 agent 留空 = 根目录'}><Input value={f.device_role} onInput={(v) => set({ ...f, device_role: v })} /></Field>
+        <Field label="设备图片目录" hint={'设备 resource/<目录>/；默认 agent 留空'}><Input value={f.device_role} onInput={(v) => set({ ...f, device_role: v })} /></Field>
         <Field label="模型"><Select value={f.model} onChange={(v) => set({ ...f, model: v })} options={opts} /></Field>
-        <Field label="便宜模型" hint="压缩、记忆冲刷、heartbeat 用"><Select value={f.cheap_model} onChange={(v) => set({ ...f, cheap_model: v })} options={cheapOpts} /></Field>
-        <Field label="排序" hint="角色切换顺序；最小的是默认 agent"><Input type="number" value={f.order} onInput={(v) => set({ ...f, order: v })} /></Field>
-        <Field label="语音回复字数" hint="设备语音里提示她别超过这么多字"><Input type="number" value={f.voice_max_chars} onInput={(v) => set({ ...f, voice_max_chars: v })} /></Field>
-        <Field label="压缩阈值（token）" hint="历史超过就压缩成摘要——成本的主要旋钮"><Input type="number" value={f.compaction.max_tokens} onInput={(v) => set({ ...f, compaction: { ...f.compaction, max_tokens: v } })} /></Field>
+        <Field label="便宜模型" hint="用于压缩、记忆整理、heartbeat"><Select value={f.cheap_model} onChange={(v) => set({ ...f, cheap_model: v })} options={cheapOpts} /></Field>
+        <Field label="排序" hint="角色切换顺序，最小者为默认"><Input type="number" value={f.order} onInput={(v) => set({ ...f, order: v })} /></Field>
+        <Field label="语音回复字数" hint="设备语音回复的字数上限"><Input type="number" value={f.voice_max_chars} onInput={(v) => set({ ...f, voice_max_chars: v })} /></Field>
+        <Field label="压缩阈值（token）" hint="历史超出后压缩为摘要"><Input type="number" value={f.compaction.max_tokens} onInput={(v) => set({ ...f, compaction: { ...f.compaction, max_tokens: v } })} /></Field>
         <Field label="压缩后保留条数"><Input type="number" value={f.compaction.keep_messages} onInput={(v) => set({ ...f, compaction: { ...f.compaction, keep_messages: v } })} /></Field>
-        <Field label="会话" wide><Toggle checked={f.device_in_main} onChange={(v) => set({ ...f, device_in_main: v })} label="设备对话并入 main 会话（与 heartbeat、主人私聊共享上下文）" /></Field>
+        <Field label="会话" wide><Toggle checked={f.device_in_main} onChange={(v) => set({ ...f, device_in_main: v })} label="设备对话并入 main 会话" /></Field>
       </div>
       <Btn kind="primary" onClick={() => save({
         name: f.name, aliases: String(f.aliases).split(/[,，\s]+/).filter(Boolean), per: Number(f.per), device_role: f.device_role,
@@ -105,7 +105,7 @@ function Basic({ a, save }: { a: any; save: (p: any) => Promise<void> }) {
 const SOUL_DESC: Record<string, string> = {
   "SOUL.md": "性格、语气、价值观（所有会话）", "IDENTITY.md": "名字、自我介绍、外形", "USER.md": "主人的稳定偏好（子任务不注入）",
   "AGENTS.md": "操作守则：何时用哪个工具、语音要短……", "TOOLS.md": "工具使用备注", "HEARTBEAT.md": "heartbeat 检查清单（只在 heartbeat 时注入）",
-  "MEMORY.md": "长期记忆（子任务不注入；也可以在「记忆」页编辑）",
+  "MEMORY.md": "长期记忆（子任务不注入）",
 };
 
 export function FileEditor({ id, path, budget, budgets, onBudget }: { id: string; path: string; budget?: number; budgets?: Record<string, number>; onBudget?: () => void }) {
@@ -118,9 +118,9 @@ export function FileEditor({ id, path, budget, budgets, onBudget }: { id: string
     <>
       <TextArea value={text} onInput={setText} rows={18} mono />
       <div class="row">
-        <span class={budget && n > budget ? "over" : "muted"}>{n} 字{budget ? ` / 注入上限 ${budget}（超出部分不会给模型看，文件本身不动）` : ""}</span>
+        <span class={budget && n > budget ? "over" : "muted"}>{n} 字{budget ? ` / 注入上限 ${budget}` : ""}</span>
         {budget && budgets && <Btn small kind="ghost" title="所有 agent 的同名文件共用这个上限" onClick={async () => {
-          const v = window.prompt(`${path} 最多注入多少字？（所有 agent 共用；越大越费 token）`, String(budget));
+          const v = window.prompt(`${path} 注入上限（字，所有 agent 共用）`, String(budget));
           const nb = Math.trunc(Number(v));
           if (!v || !(nb > 0)) return;
           try { await api("/config", { method: "PUT", body: { prompt_budgets: { ...budgets, [path]: nb } } }); toast(`注入上限改成 ${nb}，下一轮对话生效`); onBudget?.(); } catch (e) { toastErr(e); }
@@ -150,7 +150,7 @@ function AllowList({ all, value, onChange }: { all: { name: string; label?: stri
   const star = value.includes("*");
   return (
     <>
-      <Toggle checked={star} onChange={(v) => onChange(v ? ["*"] : all.map((t) => t.name))} label="全部允许（以后新增的也自动允许）" />
+      <Toggle checked={star} onChange={(v) => onChange(v ? ["*"] : all.map((t) => t.name))} label="全部允许（含之后新增）" />
       {!star && <div class="checks">{all.map((t) => (
         <label title={t.description}><input type="checkbox" checked={value.includes(t.name)}
           onChange={(e) => onChange((e.target as HTMLInputElement).checked ? [...value, t.name] : value.filter((x) => x !== t.name))} />
@@ -168,8 +168,8 @@ function ToolsTab({ a, save }: { a: any; save: (p: any) => Promise<void> }) {
     <>
       <Card title="工具白名单"><AllowList all={meta?.tools ?? []} value={tools} onChange={setTools} /></Card>
       <Card title="技能白名单">
-        <p class="muted">勾选这个 agent 能用的技能。新建、编辑、上传技能在 <a onClick={() => go("skills")}>「技能」页</a>；技能里的脚本由 agent 用「执行命令」工具运行。</p>
-        {skills?.length ? <AllowList all={skills} value={sk} onChange={setSk} /> : <Empty>还没有技能</Empty>}
+        <p class="muted">技能的管理见 <a onClick={() => go("skills")}>技能</a> 页。</p>
+        {skills?.length ? <AllowList all={skills} value={sk} onChange={setSk} /> : <Empty>暂无技能</Empty>}
       </Card>
       <Btn kind="primary" onClick={() => save({ tools, skills: sk })}>保存</Btn>
     </>
@@ -180,11 +180,11 @@ function HeartbeatTab({ a, save }: { a: any; save: (p: any) => Promise<void> }) 
   const [h, set] = useState({ ...a.heartbeat });
   return (
     <Card>
-      <p class="muted">每隔一段时间在 main 会话里按 HEARTBEAT.md 的清单检查一次；没事回 HEARTBEAT_OK 就不打扰，有事才投递。默认用便宜模型。</p>
+      <p class="muted">定期按 HEARTBEAT.md 在 main 会话中检查，有内容时才投递。使用便宜模型。</p>
       <div class="form">
-        <Field label="开关" wide><Toggle checked={h.enabled} onChange={(v) => set({ ...h, enabled: v })} label="开启 heartbeat" /></Field>
+        <Field label="开关" wide><Toggle checked={h.enabled} onChange={(v) => set({ ...h, enabled: v })} label="启用" /></Field>
         <Field label="间隔（分钟）"><Input type="number" value={h.every_minutes} onInput={(v) => set({ ...h, every_minutes: v })} /></Field>
-        <Field label="活跃时段" hint="时段外不跑，如 08:00-23:00；留空 = 全天"><Input value={h.active_hours} onInput={(v) => set({ ...h, active_hours: v })} /></Field>
+        <Field label="活跃时段" hint="如 08:00-23:00，留空为全天"><Input value={h.active_hours} onInput={(v) => set({ ...h, active_hours: v })} /></Field>
         <Field label="投递到" hint="device:<设备id> / feishu:<账号>:<聊天id> / none"><Input value={h.delivery} onInput={(v) => set({ ...h, delivery: v })} /></Field>
       </div>
       <div class="row"><Btn kind="primary" onClick={() => save({ heartbeat: { ...h, every_minutes: Number(h.every_minutes) } })}>保存</Btn>

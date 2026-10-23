@@ -1,4 +1,4 @@
-// 设置：模型服务商与 Key、默认/便宜模型、嵌入接口、百度 Key、端口、token、从 OpenClaw 导入。
+// 设置：模型服务商与 Key、默认/便宜模型、嵌入接口、语音推送、百度 Key、端口、token、更新、备份。
 // 不预设任何模型——首次向导只给常见服务商的接口地址做参考，模型名和 Key 由用户自己填。
 import { useEffect, useState } from "preact/hooks";
 import { api, go } from "../api.ts";
@@ -18,22 +18,24 @@ const URL_HINTS: [string, string, string][] = [
   ["本机 Ollama", "http://127.0.0.1:11434/v1", "openai-completions"],
 ];
 
+const TABS: [string, string][] = [["wizard", "快速开始"], ["models", "模型"], ["tools", "工具"], ["voice", "语音"], ["update", "更新"], ["backup", "备份"], ["misc", "系统"]];
+
 export function Settings({ arg }: { arg: string }) {
   const [d, reload, err] = useLoad(() => api("/config"));
-  const [tab, setTab] = useState(["wizard", "update", "backup"].includes(arg) ? arg : "models");
-  useEffect(() => { if (["wizard", "update", "backup"].includes(arg)) setTab(arg); }, [arg]);   // 总览页「去更新」跳过来
+  const [tab, setTab] = useState(TABS.some(([t]) => t === arg) ? arg : "models");
+  useEffect(() => { if (TABS.some(([t]) => t === arg)) setTab(arg); }, [arg]);   // #/settings/update 等直接打开对应标签
   if (!d) return <Err msg={err} />;
   const cfg = d.config;
   const save = async (patch: any) => {
     const r = await api("/config", { method: "PUT", body: patch });
-    toast(r.restart_needed.length ? `已保存；${r.restart_needed.join("、")} 要重启服务端才生效` : "已保存，已生效");
+    toast(r.restart_needed.length ? `已保存，${r.restart_needed.join("、")} 重启后生效` : "已保存");
     reload();
   };
   return (
     <>
-      {d.fake && <div class="errbox">当前是假服务商模式（测试用），模型设置不会生效。</div>}
-      {cfg.brain === "openclaw" || (!cfg.brain && !(cfg.models?.providers ?? []).length) ? <div class="errbox">现在的大脑是 OpenClaw。配好模型并把「大脑」切到内置 agent 后重启才会用这里的设置。</div> : null}
-      <Tabs value={tab} onChange={setTab} tabs={[["wizard", "首次设置"], ["models", "模型"], ["tools", "工具"], ["voice", "语音与设备"], ["update", "更新"], ["backup", "导出 / 导入"], ["misc", "其它"]]} />
+      {d.fake && <div class="notebox">测试模式：模型设置不生效。</div>}
+      {cfg.brain === "openclaw" || (!cfg.brain && !(cfg.models?.providers ?? []).length) ? <div class="notebox">当前大脑为 OpenClaw。切换到内置 agent 并重启后，以下设置才生效。</div> : null}
+      <Tabs value={tab} onChange={(t) => go("settings", t)} tabs={TABS} />
       {tab === "wizard" && <Wizard cfg={cfg} save={save} done={() => { setTab("models"); go("overview"); }} />}
       {tab === "models" && <Models cfg={cfg} save={save} />}
       {tab === "tools" && <Tools cfg={cfg} save={save} />}
@@ -55,21 +57,21 @@ function Wizard({ cfg, save, done }: { cfg: any; save: (p: any) => Promise<void>
     setTest(await api("/models/test", { body: { ref: `${f.id}/${f.model}` } }));
   };
   return (
-    <Card title="第一步：接一个模型">
-      <p class="muted">Kagura 不预设任何模型。选一个你有 Key 的服务商（下面只是接口地址参考），填模型名和 Key。</p>
+    <Card title="接入模型">
+      <p class="muted">选择服务商以填入接口地址，再填写模型名和 API Key。</p>
       <div class="chips">{URL_HINTS.map(([n, u, a]) => <a class="chip" onClick={() => set({ ...f, base_url: u, api: a })}>{n}</a>)}</div>
       <div class="form">
         <Field label="接口类型"><Select value={f.api} onChange={(v) => set({ ...f, api: v })} options={APIS} /></Field>
         <Field label="接口地址"><Input value={f.base_url} onInput={(v) => set({ ...f, base_url: v })} placeholder="https://…/v1" /></Field>
         <Field label="API Key"><Input type="password" value={f.api_key} onInput={(v) => set({ ...f, api_key: v })} /></Field>
-        <Field label="模型名" hint="服务商文档里的模型 id"><Input value={f.model} onInput={(v) => set({ ...f, model: v })} /></Field>
-        <Field label="服务商 id" hint="随便起，引用时写 id/模型名"><Input value={f.id} onInput={(v) => set({ ...f, id: v })} /></Field>
-        <Field label="看图"><Toggle checked={f.image} onChange={(v) => set({ ...f, image: v })} label="这个模型能看图（拍照问「这是什么」要用）" /></Field>
+        <Field label="模型名" hint="服务商提供的模型 ID"><Input value={f.model} onInput={(v) => set({ ...f, model: v })} /></Field>
+        <Field label="服务商 id" hint="引用格式：服务商 id/模型名"><Input value={f.id} onInput={(v) => set({ ...f, id: v })} /></Field>
+        <Field label="多模态"><Toggle checked={f.image} onChange={(v) => set({ ...f, image: v })} label="支持图片输入" /></Field>
       </div>
       <Btn kind="primary" onClick={finish} disabled={!f.base_url || !f.model}>保存并测试</Btn>
       {test && (test.ok
-        ? <div class="okbox">✓ 通了（{test.ms}ms）：{test.reply}<br />切换大脑需要重启服务端一次。之后可以去「Agents」改人设。<Btn onClick={done}>完成</Btn></div>
-        : <div class="errbox">没通：{test.error}</div>)}
+        ? <div class="okbox">✓ 连接成功（{test.ms}ms）：{test.reply}<br />重启服务端后启用内置 agent。<Btn onClick={done}>完成</Btn></div>
+        : <div class="errbox">连接失败：{test.error}</div>)}
     </Card>
   );
 }
@@ -88,8 +90,8 @@ function Models({ cfg, save }: { cfg: any; save: (p: any) => Promise<void> }) {
   return (
     <>
       <Card title="大脑">
-        <Select value={brain} onChange={setBrain} options={[["", "自动（配了模型就用内置 agent）"], ["pi", "内置 agent"], ["openclaw", "OpenClaw CLI"]]} />
-        <small class="muted"> 切换要重启</small>
+        <Select value={brain} onChange={setBrain} options={[["", "自动（已配置模型时用内置 agent）"], ["pi", "内置 agent"], ["openclaw", "OpenClaw CLI"]]} />
+        <small class="hint">重启后生效</small>
       </Card>
       {m.providers.map((p: any, i: number) => (
         <Card title={`服务商 ${p.id}`} actions={<Btn small kind="danger" onClick={() => up((c) => c.providers.splice(i, 1))}>删除</Btn>}>
@@ -97,9 +99,9 @@ function Models({ cfg, save }: { cfg: any; save: (p: any) => Promise<void> }) {
             <Field label="id"><Input value={p.id} onInput={(v) => up((c) => (c.providers[i].id = v))} /></Field>
             <Field label="接口类型"><Select value={p.api} onChange={(v) => up((c) => (c.providers[i].api = v))} options={APIS} /></Field>
             <Field label="接口地址"><Input value={p.base_url} onInput={(v) => up((c) => (c.providers[i].base_url = v))} /></Field>
-            <Field label="API Key" hint="显示 *** 表示已保存，不改就保持"><Input type="password" value={p.api_key} onInput={(v) => up((c) => (c.providers[i].api_key = v))} /></Field>
+            <Field label="API Key" hint="*** 表示已保存"><Input type="password" value={p.api_key} onInput={(v) => up((c) => (c.providers[i].api_key = v))} /></Field>
           </div>
-          <table><thead><tr><th>模型名</th><th>看图</th><th>上下文</th><th>最大输出</th><th>输入价</th><th>输出价</th><th></th></tr></thead>
+          <table><thead><tr><th>模型名</th><th>图片</th><th>上下文</th><th>最大输出</th><th>输入价</th><th>输出价</th><th></th></tr></thead>
             <tbody>{(p.models ?? []).map((x: any, j: number) => {
               const mm = (fn: (o: any) => void) => up((c) => fn(c.providers[i].models[j]));
               return <tr>
@@ -118,12 +120,12 @@ function Models({ cfg, save }: { cfg: any; save: (p: any) => Promise<void> }) {
       <div class="row"><Btn onClick={() => up((c) => c.providers.push({ id: `p${c.providers.length + 1}`, api: "openai-completions", base_url: "", api_key: "", models: [] }))}>＋ 服务商</Btn></div>
       <Card title="默认模型">
         <div class="form">
-          <Field label="默认" hint="agent 没单独指定时用它"><Select value={m.default ?? ""} onChange={(v) => up((c) => (c.default = v))} options={[["", "未选"], ...refs]} /></Field>
-          <Field label="便宜模型" hint="压缩、记忆冲刷、heartbeat"><Select value={m.cheap ?? ""} onChange={(v) => up((c) => (c.cheap = v))} options={[["", "同默认"], ...refs]} /></Field>
+          <Field label="默认" hint="agent 未指定模型时使用"><Select value={m.default ?? ""} onChange={(v) => up((c) => (c.default = v))} options={[["", "未选"], ...refs]} /></Field>
+          <Field label="便宜模型" hint="用于压缩、记忆整理、heartbeat"><Select value={m.cheap ?? ""} onChange={(v) => up((c) => (c.cheap = v))} options={[["", "同默认"], ...refs]} /></Field>
         </div>
       </Card>
       <Card title="嵌入接口（可选）">
-        <p class="muted">配了以后记忆检索会加上语义相似度（近义说法也能搜到）；不配就只用关键词。OpenAI 兼容的 /embeddings 接口。</p>
+        <p class="muted">OpenAI 兼容的 /embeddings 接口，用于记忆的语义检索；未配置时仅用关键词检索。</p>
         <div class="form">
           <Field label="接口地址"><Input value={emb.base_url} onInput={(v) => setEmb({ ...emb, base_url: v })} /></Field>
           <Field label="API Key"><Input type="password" value={emb.api_key} onInput={(v) => setEmb({ ...emb, api_key: v })} /></Field>
@@ -136,11 +138,11 @@ function Models({ cfg, save }: { cfg: any; save: (p: any) => Promise<void> }) {
 }
 
 const SEARCH_PROVIDERS: [string, string][] = [
-  ["auto", "自动（配了 Key 用对应服务，否则抓必应网页）"], ["bing", "必应网页（不用 Key，国内可用）"], ["duckduckgo", "DuckDuckGo 网页（不用 Key，需能访问外网）"],
-  ["bocha", "博查 API（国内，要 Key）"], ["tavily", "Tavily API（要 Key）"], ["brave", "Brave Search API（要 Key）"], ["searxng", "自建 SearXNG"],
+  ["auto", "自动"], ["bing", "必应网页（无需 Key）"], ["duckduckgo", "DuckDuckGo 网页（无需 Key）"],
+  ["bocha", "博查 API"], ["tavily", "Tavily API"], ["brave", "Brave Search API"], ["searxng", "SearXNG（自建）"],
 ];
 const SHELLS: [string, string][] = [
-  ["auto", "自动（Windows 用 PowerShell，其它用 bash）"], ["powershell", "PowerShell"], ["cmd", "cmd"], ["wsl", "交给 WSL 里的 bash（跑 Linux 脚本）"], ["bash", "bash"], ["sh", "sh"],
+  ["auto", "自动（Windows: PowerShell，其它: bash）"], ["powershell", "PowerShell"], ["cmd", "cmd"], ["wsl", "WSL bash"], ["bash", "bash"], ["sh", "sh"],
 ];
 
 function Tools({ cfg, save }: { cfg: any; save: (p: any) => Promise<void> }) {
@@ -154,30 +156,29 @@ function Tools({ cfg, save }: { cfg: any; save: (p: any) => Promise<void> }) {
   const saveAll = () => save({ tools: { web: w, exec: e } });
   return (
     <>
-      <Card title="联网（搜索 + 读网页）">
-        <p class="muted">agent 遇到新闻、天气、价格这类实时信息会先搜再答。什么都不配也能用（抓必应网页）；想更稳定可以配一个搜索 API。</p>
+      <Card title="联网">
+        <p class="muted">网页搜索与读取。默认使用必应网页，可改用搜索 API。</p>
         <div class="form">
-          <Field label="启用"><Toggle checked={w.enabled} onChange={(v) => setW({ ...w, enabled: v })} label="允许 agent 联网" /></Field>
+          <Field label="启用"><Toggle checked={w.enabled} onChange={(v) => setW({ ...w, enabled: v })} label="启用" /></Field>
           <Field label="搜索服务"><Select value={w.search_provider} onChange={(v) => setW({ ...w, search_provider: v })} options={SEARCH_PROVIDERS} /></Field>
-          <Field label="API Key" hint="博查 / Tavily / Brave 用"><Input type="password" value={w.search_api_key} onInput={(v) => setW({ ...w, search_api_key: v })} /></Field>
-          <Field label="SearXNG 地址" hint="选 SearXNG 时填，如 http://127.0.0.1:8888"><Input value={w.search_base_url} onInput={(v) => setW({ ...w, search_base_url: v })} /></Field>
-          <Field label="网络代理" hint="上网要走代理就填，如 http://127.0.0.1:7890；调模型也会走它，本机地址直连"><Input value={w.proxy} onInput={(v) => setW({ ...w, proxy: v })} placeholder="留空 = 用环境变量 HTTPS_PROXY，没有就直连" /></Field>
+          <Field label="API Key" hint="博查 / Tavily / Brave"><Input type="password" value={w.search_api_key} onInput={(v) => setW({ ...w, search_api_key: v })} /></Field>
+          <Field label="SearXNG 地址" hint="如 http://127.0.0.1:8888"><Input value={w.search_base_url} onInput={(v) => setW({ ...w, search_base_url: v })} /></Field>
+          <Field label="网络代理" hint="如 http://127.0.0.1:7890，模型请求同样走代理，本机地址直连"><Input value={w.proxy} onInput={(v) => setW({ ...w, proxy: v })} placeholder="留空则使用 HTTPS_PROXY 环境变量" /></Field>
         </div>
-        <div class="row"><Input value={q} onInput={setQ} /><Btn onClick={async () => { await saveAll(); setSr({ loading: true }); try { setSr(await api("/tools/test-search", { body: { query: q } })); } catch (x: any) { setSr({ errors: [x.message] }); } }}>保存并试一下搜索</Btn></div>
+        <div class="row"><Input value={q} onInput={setQ} /><Btn onClick={async () => { await saveAll(); setSr({ loading: true }); try { setSr(await api("/tools/test-search", { body: { query: q } })); } catch (x: any) { setSr({ errors: [x.message] }); } }}>保存并测试</Btn></div>
         {sr && (sr.loading ? <p class="muted">搜索中…</p> : sr.ok
           ? <><p>✓ {sr.provider}，{sr.ms}ms{sr.proxy ? `，经代理 ${sr.proxy}` : ""}</p><ul>{sr.hits.map((h: any) => <li><a href={h.url} target="_blank">{h.title}</a> <small class="muted">{h.snippet.slice(0, 80)}</small></li>)}</ul></>
-          : <p class="over">✗ 搜索失败：{(sr.errors ?? []).join("；")}</p>)}
+          : <p class="over">✗ 失败：{(sr.errors ?? []).join("；")}</p>)}
       </Card>
       <Card title="执行命令">
-        <p class="muted">让 agent 在这台电脑上跑命令和脚本（技能里的脚本、处理文件、调本机程序）。<b>只有主人</b>能触发：设备、网页聊天、定时任务、
-          标了「主人」的 IM 私聊；IM 里的陌生人和群聊拿不到这个工具。不想让它碰电脑就关掉；也可以在「Agents → 工具」里单独给某个 agent 关。</p>
+        <p class="muted">允许 agent 在本机执行命令。仅对可信会话开放（设备、网页聊天、定时任务、主人 IM 私聊），也可在 Agents → 工具 中按 agent 关闭。</p>
         <div class="form">
-          <Field label="启用"><Toggle checked={e.enabled} onChange={(v) => setE({ ...e, enabled: v })} label="允许执行命令" /></Field>
-          <Field label="用什么跑"><Select value={e.shell} onChange={(v) => setE({ ...e, shell: v })} options={SHELLS} /></Field>
-          <Field label="WSL 发行版" hint="选 WSL 时填，如 Ubuntu；留空 = 默认发行版"><Input value={e.wsl_distro} onInput={(v) => setE({ ...e, wsl_distro: v })} /></Field>
+          <Field label="启用"><Toggle checked={e.enabled} onChange={(v) => setE({ ...e, enabled: v })} label="启用" /></Field>
+          <Field label="Shell"><Select value={e.shell} onChange={(v) => setE({ ...e, shell: v })} options={SHELLS} /></Field>
+          <Field label="WSL 发行版" hint="留空为默认发行版"><Input value={e.wsl_distro} onInput={(v) => setE({ ...e, wsl_distro: v })} /></Field>
           <Field label="默认超时（秒）"><Input type="number" value={e.timeout_secs} onInput={(v) => setE({ ...e, timeout_secs: Number(v) })} /></Field>
         </div>
-        <div class="row"><Input value={cmd} onInput={setCmd} /><Btn onClick={async () => { await saveAll(); setEr({ loading: true }); try { setEr(await api("/tools/test-exec", { body: { command: cmd } })); } catch (x: any) { setEr({ error: x.message }); } }}>保存并试一下</Btn></div>
+        <div class="row"><Input value={cmd} onInput={setCmd} /><Btn onClick={async () => { await saveAll(); setEr({ loading: true }); try { setEr(await api("/tools/test-exec", { body: { command: cmd } })); } catch (x: any) { setEr({ error: x.message }); } }}>保存并测试</Btn></div>
         {er && (er.loading ? <p class="muted">执行中…</p> : <><p class={er.ok ? "" : "over"}>{er.ok ? "✓" : "✗"} {er.timed_out ? "超时" : er.error || `exit=${er.code}`}，{er.ms}ms</p>{er.output && <pre class="log">{er.output}</pre>}</>)}
       </Card>
       <Btn kind="primary" onClick={saveAll}>保存</Btn>
@@ -188,20 +189,28 @@ function Tools({ cfg, save }: { cfg: any; save: (p: any) => Promise<void> }) {
 function Voice({ cfg, save }: { cfg: any; save: (p: any) => Promise<void> }) {
   const [b, setB] = useState({ asr_key: "", asr_secret: "", tts_key: "", tts_secret: "", ...(cfg.baidu ?? {}) });
   const [tok, setTok] = useState({ api_token: cfg.api_token ?? "", stream_token: cfg.stream_token ?? "" });
+  const [vp, setVp] = useState(cfg.voice_push ?? "presence");
   return (
     <>
-      <Card title="百度语音（识别 + 合成）">
+      <Card title="语音推送">
+        <p class="muted">agent 主动说的话、定时任务、提醒、IM 回复的语音播报。在家状态来自设备蓝牙，或在 IM 中发送 /home、/away。</p>
+        <div class="row">
+          <Select value={vp} onChange={setVp} options={[["presence", "在家时播放"], ["always", "总是播放"], ["never", "从不播放"]]} />
+          <Btn kind="primary" onClick={() => save({ voice_push: vp })}>保存</Btn>
+        </div>
+      </Card>
+      <Card title="百度语音">
         <div class="form">
           <Field label="识别 API Key"><Input value={b.asr_key} onInput={(v) => setB({ ...b, asr_key: v })} /></Field>
           <Field label="识别 Secret Key"><Input type="password" value={b.asr_secret} onInput={(v) => setB({ ...b, asr_secret: v })} /></Field>
           <Field label="合成 API Key"><Input value={b.tts_key} onInput={(v) => setB({ ...b, tts_key: v })} /></Field>
           <Field label="合成 Secret Key"><Input type="password" value={b.tts_secret} onInput={(v) => setB({ ...b, tts_secret: v })} /></Field>
-          <Field label="识别档位" hint="极速版对口语、人名、专有名词更准，也更快；要先在百度智能云控制台开通「短语音识别极速版」，按次计费（有免费额度）"><Select value={b.asr_mode ?? "standard"} onChange={(v) => setB({ ...b, asr_mode: v })} options={[["standard", "标准版（默认）"], ["pro", "极速版（更准）"]]} /></Field>
+          <Field label="识别档位" hint="极速版更准更快，需在百度智能云开通「短语音识别极速版」"><Select value={b.asr_mode ?? "standard"} onChange={(v) => setB({ ...b, asr_mode: v })} options={[["standard", "标准版"], ["pro", "极速版"]]} /></Field>
         </div>
         <Btn kind="primary" onClick={() => save({ baidu: b })}>保存（重启生效）</Btn>
       </Card>
-      <Card title="局域网访问密钥">
-        <p class="muted">API_TOKEN：设置后监控页和推送/拍照接口要带 X-Api-Token（留空 = 局域网开放）。STREAM_TOKEN 要同时改设备端。设备上行接口不受影响。</p>
+      <Card title="访问令牌">
+        <p class="muted">API_TOKEN 保护监控页与推送 / 拍照接口（留空则局域网开放）。STREAM_TOKEN 需与设备端一致。</p>
         <div class="form">
           <Field label="API_TOKEN"><Input type="password" value={tok.api_token} onInput={(v) => setTok({ ...tok, api_token: v })} /></Field>
           <Field label="STREAM_TOKEN"><Input type="password" value={tok.stream_token} onInput={(v) => setTok({ ...tok, stream_token: v })} /></Field>
@@ -217,9 +226,9 @@ function Misc({ cfg, dataDir, save }: { cfg: any; dataDir: string; save: (p: any
   const [rt, setRt] = useState({ max_concurrency: cfg.runtime?.max_concurrency ?? 4, timeout_secs: cfg.runtime?.timeout_secs ?? 120 });
   return (
     <>
-      <Card title="数据目录"><code>{dataDir}</code><p class="muted">人设、记忆、对话、定时任务、渠道配置都在这里。备份就拷这个目录。</p></Card>
-      <Card title="端口（重启生效）">
-        <p class="muted">改了端口：WSL 用户要同步改 Windows 端口转发和防火墙；设备靠 UDP 广播自动发现服务端，HTTP 端口变了要改设备配置。</p>
+      <Card title="数据目录"><code>{dataDir}</code></Card>
+      <Card title="端口">
+        <p class="muted">重启后生效。WSL 下需同步修改 Windows 端口转发与防火墙。</p>
         <div class="form">
           {(["port", "mqtt_port", "disc_port", "stream_port"] as const).map((k) => (
             <Field label={{ port: "HTTP", mqtt_port: "MQTT", disc_port: "UDP 发现", stream_port: "直播 TCP" }[k]}>
@@ -227,27 +236,27 @@ function Misc({ cfg, dataDir, save }: { cfg: any; dataDir: string; save: (p: any
         </div>
         <Btn kind="primary" onClick={() => save(p)}>保存</Btn>
       </Card>
-      <Card title="运行时（重启生效）">
+      <Card title="运行时">
         <div class="form">
-          <Field label="同时跑几轮对话" hint="全局并发上限"><Input type="number" value={rt.max_concurrency} onInput={(v) => setRt({ ...rt, max_concurrency: Number(v) })} /></Field>
+          <Field label="最大并发" hint="重启后生效"><Input type="number" value={rt.max_concurrency} onInput={(v) => setRt({ ...rt, max_concurrency: Number(v) })} /></Field>
           <Field label="单轮超时（秒）"><Input type="number" value={rt.timeout_secs} onInput={(v) => setRt({ ...rt, timeout_secs: Number(v) })} /></Field>
         </div>
         <Btn kind="primary" onClick={() => save({ runtime: rt })}>保存</Btn>
       </Card>
-      <Card title="重启服务端">
-        <p class="muted">改了端口、百度 Key、大脑类型这类要重启才生效的设置后用。也可以在飞书 / QQ 里给她发 <code>/restart</code>（只有主人能用），发 <code>/help</code> 看全部命令。</p>
+      <Card title="重启">
+        <p class="muted">IM 中主人也可发送 <code>/restart</code>。</p>
         <Btn kind="danger" onClick={async () => {
-          if (!window.confirm("现在重启服务端？正在进行的对话会中断，大约 10 秒后恢复。")) return;
+          if (!window.confirm("重启服务端？进行中的对话会中断。")) return;
           await api("/restart", { body: {} });
           toast("正在重启…");
           for (let i = 0; i < 40; i++) {
             await new Promise((r) => setTimeout(r, 1000));
-            try { const r = await fetch("/health"); if (r.ok && i > 2) { toast("重启好了"); location.reload(); return; } } catch { /* 还没起来 */ }
+            try { const r = await fetch("/health"); if (r.ok && i > 2) { toast("已重启"); location.reload(); return; } } catch { /* 还没起来 */ }
           }
-          toast("还没连上，过一会儿刷新页面看看", "err");
+          toast("未能重新连接，请稍后刷新", "err");
         }}>重启服务端</Btn>
       </Card>
-      <Card title="从 OpenClaw 导入"><p class="muted">在「定时任务」页点「从 OpenClaw 导入」：人设、记忆、定时任务一起搬过来。</p><Btn onClick={() => go("jobs")}>去导入</Btn></Card>
+      <Card title="从 OpenClaw 导入"><p class="muted">导入人设、记忆与定时任务。</p><Btn onClick={() => go("jobs")}>打开</Btn></Card>
     </>
   );
 }
@@ -261,27 +270,27 @@ export function Update() {
   useInterval(() => { if (busy) reload(); }, 1000);
   if (!d) return <Err msg={err} />;
   const st = d.state, info = d.info;
-  const kindText: Record<string, string> = { windows: "Windows 安装版：下载新安装包后静默安装（会弹一次管理员确认），装完自动重启", appimage: "AppImage：下载新版替换后自动重启", deb: "deb 包：需要管理员权限，会下载好并给出一条安装命令", unsupported: "这种运行方式（开发版 / 自己编译）不支持在线更新，请到发布页手动下载" };
+  const kindText: Record<string, string> = { windows: "静默安装后自动重启（需管理员确认一次）", appimage: "替换 AppImage 后自动重启", deb: "下载后给出安装命令（需管理员权限）", unsupported: "当前运行方式不支持在线更新，请从发布页下载" };
   return (
     <Card title="更新" actions={<Btn small disabled={!d.enabled || busy} onClick={async () => { try { await api("/update/check", { body: {} }); reload(); } catch (e) { toastErr(e); } }}>检查更新</Btn>}>
-      <p>当前版本 <b>{d.current}</b>{info ? (info.newer ? <> · 最新 <b>{info.latest}</b> 🆕</> : <> · 已是最新</>) : null}
-        {info?.error ? <span class="muted"> · 上次检查失败：{info.error}</span> : null}</p>
-      {!d.enabled && <p class="muted">更新检查已关闭（config.json 里 update_check: false）。</p>}
+      <p>当前版本 <b>{d.current}</b>{info ? (info.newer ? <> · 最新 <b>{info.latest}</b></> : <> · 已是最新</>) : null}
+        {info?.error ? <span class="muted"> · 检查失败：{info.error}</span> : null}</p>
+      {!d.enabled && <p class="muted">更新检查已关闭（update_check: false）。</p>}
       <p class="muted">{kindText[d.kind] ?? ""}</p>
       {info?.newer && <>
         {info.notes ? <details><summary>更新内容</summary><pre>{info.notes}</pre></details> : null}
         <div class="row">
           <Btn kind="primary" disabled={busy || d.kind === "unsupported"} onClick={async () => {
-            if (!window.confirm(`更新到 ${info.latest}？\n下载校验后会自动安装并重启服务端（设置和数据都保留），期间设备会断开一会儿。`)) return;
+            if (!window.confirm(`更新到 ${info.latest}？\n安装后服务端将重启，数据与设置保留。`)) return;
             try { await api("/update/install", { body: {} }); reload(); } catch (e) { toastErr(e); }
-          }}>立即更新到 {info.latest}</Btn>
+          }}>更新到 {info.latest}</Btn>
           <a href={info.url} target="_blank">发布页 ↗</a>
         </div>
       </>}
       {st && st.phase !== "idle" && <div class={st.phase === "error" ? "errbox" : "card"}>
         <p>{st.message}{st.phase === "downloading" && st.total ? `：${fmtMB(st.done)} / ${fmtMB(st.total)}（${Math.round(st.done * 100 / st.total)}%）` : ""}</p>
         {st.phase === "downloading" && st.total ? <progress max={st.total} value={st.done} style="width:100%" /> : null}
-        {st.phase === "installing" && <p class="muted">服务端正在重启，过半分钟刷新这个页面。</p>}
+        {st.phase === "installing" && <p class="muted">服务端重启中，稍后刷新页面。</p>}
         {st.command && <pre>{st.command}</pre>}
       </div>}
     </Card>
@@ -304,16 +313,16 @@ function Backup() {
   return (
     <>
       <Card title="导出">
-        <p class="muted">勾选要带走的内容，打成一个 .zip。换电脑时在新电脑上「导入」；分享给别人时<b>别勾「包含密钥」</b>。</p>
+        <p class="muted">选择要导出的内容，生成 .zip。分享给他人时不要包含密钥。</p>
         {groups.map((g) => (
           <div class="bk-group">
-            <h4>{g} <a class="muted" onClick={() => { let n = new Set(chosen); const ids = items.filter((i) => i.group === g).map((i) => i.id); const all = ids.every((id) => n.has(id)); ids.forEach((id) => (n = toggle(n, id, !all))); setSel(n); }}>全选/全不选</a></h4>
+            <h4>{g} <a class="muted" onClick={() => { let n = new Set(chosen); const ids = items.filter((i) => i.group === g).map((i) => i.id); const all = ids.every((id) => n.has(id)); ids.forEach((id) => (n = toggle(n, id, !all))); setSel(n); }}>全选</a></h4>
             {items.filter((i) => i.group === g).map((i) => (
               <div><Toggle checked={chosen.has(i.id)} onChange={(v) => setSel(toggle(chosen, i.id, v))} label={i.label} />
                 <small class="muted">{fmtMB(i.bytes)}{i.secret ? " · 含密钥项" : ""}{i.note ? ` · ${i.note}` : ""}</small></div>))}
           </div>))}
         <div class="row">
-          <Toggle checked={secrets} onChange={setSecrets} label="包含密钥（模型 API Key、百度 Key、IM 凭据、MCP 的密钥）——只在迁移自己的电脑时勾" />
+          <Toggle checked={secrets} onChange={setSecrets} label="包含密钥（API Key、IM 凭据等）" />
           <span class="grow" /><span class="muted">约 {fmtMB(total)}</span>
           <Btn kind="primary" disabled={!chosen.size} onClick={async () => {
             const r = await fetch("/api/admin/backup/export", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ items: [...chosen], secrets }) });
@@ -326,7 +335,7 @@ function Backup() {
         </div>
       </Card>
       <Card title="导入">
-        <p class="muted">选一个导出的 .zip，看看里面有什么，勾选后导入。被替换的内容会先备份到数据目录的 backups/ 下；设置里的端口等本机相关的项、包里空着的密钥都保留这台电脑的。导入后服务端自动重启。</p>
+        <p class="muted">被替换的内容先备份到 backups/；端口等本机设置与空缺的密钥保留本机值。导入后自动重启。</p>
         <Btn onClick={() => {
           const el = document.createElement("input");
           el.type = "file"; el.accept = ".zip";
@@ -339,14 +348,14 @@ function Backup() {
             setMan(j.manifest); setImp(new Set(j.manifest.items.map((i: any) => i.id)));
           };
           el.click();
-        }}>选择备份包…</Btn>
+        }}>选择文件…</Btn>
         {man && <>
           <p>来自 <b>{man.host}</b> · {new Date(man.createdAt).toLocaleString("zh-CN", { hour12: false })} · Kagura {man.version}{man.secrets ? " · 含密钥" : " · 不含密钥"}</p>
           {man.items.map((i: any) => <div><Toggle checked={imp.has(i.id)} onChange={(v) => setImp(toggle(imp, i.id, v))} label={i.label} /> <small class="muted">{fmtMB(i.bytes)}</small></div>)}
           <div class="row"><span class="grow" />
             <Btn kind="primary" disabled={!imp.size} onClick={async () => {
-              if (!window.confirm(`导入选中的 ${imp.size} 项？会替换这台电脑上对应的内容（原内容先备份），然后重启服务端。`)) return;
-              try { await api("/backup/import", { body: { items: [...imp] } }); toast("导入中，服务端正在重启，过半分钟刷新页面"); setMan(null); } catch (e) { toastErr(e); }
+              if (!window.confirm(`导入 ${imp.size} 项并重启服务端？`)) return;
+              try { await api("/backup/import", { body: { items: [...imp] } }); toast("导入中，服务端重启后刷新页面"); setMan(null); } catch (e) { toastErr(e); }
             }}>导入并重启</Btn></div>
         </>}
       </Card>
