@@ -46,7 +46,7 @@ let photoQ = "";
 const takePhoto: AgentTool<any> = {
   name: "take_photo", label: "拍照", description: "拍照并看图",
   parameters: Type.Object({ question: Type.String() }),
-  async execute(_id, p: { question: string }) {
+  async execute(_id, p: any) {
     photoQ = p.question;
     return { content: [{ type: "text", text: "已请求设备拍照" }], details: {}, terminate: true };
   },

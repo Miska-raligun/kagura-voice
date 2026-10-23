@@ -1,24 +1,25 @@
 name: server
 
-# 新服务端（server/，TypeScript）的 CI：验证脚本 + 三平台单文件打包冒烟。
-# M0 阶段只验证可行性；发布用的 release.yml 在 M10 再加。
+# 新服务端（server/，TypeScript）的 CI：
+#   unit     ：类型检查 + vitest 单测 + M0 验证脚本（Node 22 / 24）
+#   contract ：打出真正的单文件可执行，在 Windows / Linux / macOS 上跑全部契约用例
+#              （contract-tests/，与 Python 版同一套）
 on:
   push:
     branches: [feat/kagura-agent-server]
-    paths: ["server/**", ".github/workflows/server.yml"]
+    paths: ["server/**", "contract-tests/**", "web/**", ".github/workflows/server.yml"]
   pull_request:
-    paths: ["server/**", ".github/workflows/server.yml"]
+    paths: ["server/**", "contract-tests/**", "web/**", ".github/workflows/server.yml"]
   workflow_dispatch:
 
 jobs:
-  sea:
-    name: ${{ matrix.os }} / node ${{ matrix.node }}
+  unit:
+    name: unit / node ${{ matrix.node }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, windows-latest, macos-14]
         node: ["22", "24"]
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-22.04
     defaults:
       run:
         working-directory: server
@@ -30,31 +31,58 @@ jobs:
           cache: npm
           cache-dependency-path: server/package-lock.json
       - run: npm ci
-      - name: Spikes（pi agent / OpenAI 兼容接口 / 存储·MQTT·JPEG / 中文检索）
-        shell: bash
+      - run: npx tsc --noEmit -p .
+      - run: npx vitest run
+      - name: M0 验证脚本
         run: |
           for f in spikes/pi-agent.ts spikes/pi-openai-compat.ts spikes/infra.ts spikes/fts-cjk.ts; do
-            echo "::group::$f"
             node --experimental-strip-types --no-warnings "$f"
-            echo "::endgroup::"
           done
-      - name: Bundle（esbuild → 单个 CJS）
-        run: |
-          node scripts/build.mjs spikes/sea-smoke.ts dist/sea-smoke.cjs
-          node scripts/build.mjs spikes/feishu-bundle.ts dist/feishu.cjs
-          node --no-warnings dist/feishu.cjs
-      - name: SEA（注入 node 可执行）
-        run: node scripts/sea.mjs dist/sea-smoke.cjs dist/kagura-smoke
-      - name: 运行单文件可执行
+
+  contract:
+    name: contract / ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-latest, macos-14]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"            # 发布产物用 Node 24 LTS（node:sqlite 已转正）
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Build 单文件可执行
+        working-directory: server
         shell: bash
         run: |
-          exe=dist/kagura-smoke; [ -f dist/kagura-smoke.exe ] && exe=dist/kagura-smoke.exe
+          npm ci
+          node scripts/build.mjs src/main.ts dist/kagura.cjs
+          node scripts/sea.mjs dist/kagura.cjs dist/kagura
           ls -la dist
-          "./$exe" | tee smoke.log
-          grep -q SEA-SMOKE-OK smoke.log
+      - name: Install contract test deps
+        run: pip install "paho-mqtt==1.6.1" pytest requests
+      - name: Contract tests（对单文件可执行）
+        working-directory: contract-tests
+        shell: bash
+        env:
+          KAGURA_SERVER_PROVIDES: broker,discovery
+        run: |
+          exe=server/dist/kagura; [ -f ../server/dist/kagura.exe ] && exe=server/dist/kagura.exe
+          KAGURA_SERVER_CMD="$exe" python -m pytest -q
+      - name: Server logs on failure
+        if: failure()
+        shell: bash
+        run: |
+          for f in $(python -c "import tempfile,glob,os;print(' '.join(glob.glob(os.path.join(tempfile.gettempdir(),'kagura-contract-*','server.log'))))"); do
+            echo "== $f"; tail -60 "$f"
+          done
       - uses: actions/upload-artifact@v4
-        if: matrix.node == '24'
         with:
-          name: kagura-smoke-${{ matrix.os }}
-          path: server/dist/kagura-smoke*
-          retention-days: 3
+          name: kagura-${{ matrix.os }}
+          path: server/dist/kagura*
+          retention-days: 7

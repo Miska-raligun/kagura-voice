@@ -16,6 +16,7 @@ const r = await build({
   logLevel: "warning",
   metafile: true,
   legalComments: "none",
+  loader: { ".html": "text" },      // web/monitor.html 内联进产物，单文件可执行里没有 web/ 目录
 });
 const bytes = Object.values(r.metafile.outputs).reduce((a, o) => a + o.bytes, 0);
 console.log(`built ${outfile} (${(bytes / 1024 / 1024).toFixed(1)} MB)`);

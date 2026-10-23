@@ -23,7 +23,7 @@ const speak: AgentTool<any> = {
   label: "播报",
   description: "让设备用语音说一句话",
   parameters: Type.Object({ text: Type.String() }),
-  async execute(_id, params: { text: string }) {
+  async execute(_id, params: any) {
     spoken.push(params.text);
     return { content: [{ type: "text", text: "ok" }], details: {} };
   },

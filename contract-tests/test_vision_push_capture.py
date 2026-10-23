@@ -141,3 +141,15 @@ def test_need_photo_followup_flow(srv, device):
     assert b64text(r2.headers["X-Reply-Text"]) == "是一个苹果。"
     calls = srv.fake_log()["llm"]
     assert calls[1]["image"] is True and calls[1]["message"] == "看看我手里拿的什么"
+
+
+def test_interleaved_captures_keep_both_results(srv, device):
+    """网页拍照与设备拍照同时进行：后发的拍照命令不能把前一张还没取走的结果清掉。"""
+    a = srv.post("/capture-request", json={"device_id": device.id}).json()["request_id"]
+    b = srv.post("/capture-request", json={"device_id": device.id}).json()["request_id"]
+    _upload(srv, device, a, b64(rgb565()))
+    c = srv.post("/capture-request", json={"device_id": device.id}).json()["request_id"]
+    _upload(srv, device, b, b64(rgb565()))
+    for rid in (a, b):
+        assert srv.get(f"/capture-result/{rid}").json()["status"] == "done", rid
+    assert srv.get(f"/capture-result/{c}").status_code == 202
