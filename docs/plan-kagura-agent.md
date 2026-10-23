@@ -1,9 +1,12 @@
-# Kagura 自研 Agent 系统与三端安装包 —— 开发计划
+# Kagura 自研 Agent 系统与安装包 —— 开发计划
 
-> 状态：草案 v2（2026-10-23）。待确认「§11 动工前需要回答」后开始 M0。
+> 状态：v3（2026-10-23），技术选型已确认，可以开始 M0。
 > 目标读者：项目作者 + 之后接手开发的人（包括 Claude）。
 > v2 变更：按作者要求，本期范围定为**系统层核心**——定时任务、heartbeat、多 agent 隔离与
 > agent 间通信、memory、soul（人设文件体系）、管理 UI；通用 skill 后续再迁。新服务端放本仓库。
+> v3 变更：加入 **IM 渠道**（首批飞书、QQ，§6.12）；本期**只发 Windows + Linux**（没有 Apple
+> 开发者账号，macOS 代码保持可编译、以后再发）；模型/嵌入接口全部由用户手动配置、不预设；
+> 管理 UI 只允许本机访问；OpenClaw 定时任务导入、agent 间通信权限都做进管理 UI。
 
 ## 1. 目标与边界
 
@@ -15,15 +18,17 @@
    全部在本项目的系统层实现（§6）。
 2. **现有设备功能原样支持**：固件协议不变（老固件不升级也能用），监控页功能不变，
    服务端 31 个 HTTP 接口、MQTT、UDP 发现、直播 TCP 全部保留（§4）。
-3. 提供一个类似 OpenClaw 控制台、但贴合本系统的**管理 UI**（§7）。
-4. Windows / macOS / Linux 三端**安装包即开即用**；GitHub Actions 打 tag 自动发布 Release（§9）。
+3. 接入**移动端 IM**（飞书、QQ 首批），手机上直接和 agent 聊，定时任务也能投递过去（§6.12）。
+4. 提供一个类似 OpenClaw 控制台、但贴合本系统的**管理 UI**（§7）。
+5. **Windows / Linux 安装包即开即用**；GitHub Actions 打 tag 自动发布 Release（§9）。
+   代码保持三端可编译，macOS 等有开发者账号后再发。
 
 **本期不做**
 
 - 通用 skill 的迁移（浏览器操作、各类第三方集成等）。但**本期会把 skill 的加载机制做好**
   （§6.8），之后迁移只是把 skill 文件夹拷进来。
-- 聊天软件渠道（微信/Telegram 等）。本期的"渠道"只有设备语音和管理 UI 里的网页聊天，
-  渠道层留好接口。
+- 首批之外的 IM（企业微信、钉钉、Telegram、个人微信等）：渠道层是插件式接口，后续逐个加。
+- macOS 安装包的发布（见上）。
 - 云端多租户托管。单机版，但架构不堵死（进程内运行、无子进程、无全局并发 2 的限制）。
 
 ## 2. 名词对照（OpenClaw → 本系统）
@@ -38,7 +43,9 @@
 | heartbeat（`HEARTBEAT.md` 清单，周期唤醒，无事回 `HEARTBEAT_OK`） | 调度器里的一种任务：`heartbeat` | 与 cron 共用一个调度器，§6.5 |
 | cron / automations（at / every / cron 表达式，main / isolated 会话） | 调度器里的 `at` / `every` / `cron` 任务 | §6.5 |
 | `sessions_list` / `sessions_send` / `sessions_spawn` + `agentToAgent.allow` | 同名工具 + 同类白名单 | §6.6 |
-| bindings（渠道账号 → agent） | **设备绑定**（device_id → agent） | 角色切换 = 改绑定，§6.7 |
+| channels（飞书、QQ Bot 等） | **渠道**，首批飞书、QQ | §6.12 |
+| bindings（渠道账号 → agent） | **绑定**：设备 → agent、IM 账号/会话 → agent | 角色切换 = 改设备绑定，§6.7 |
+| pairing / allowlist（陌生人私聊要配对） | 同 | §6.12 |
 | skills（`SKILL.md` 文件夹） | 同格式 | 本期只做加载机制，§6.8 |
 | Gateway 控制台 | **管理 UI** `/admin` | §7 |
 
@@ -49,12 +56,14 @@
 | D1 | 服务端语言 | **整体迁到 TypeScript（Node ≥22.19）**，一个运行时 | 保留 Python + Node 旁挂：安装包两套运行时，三端打包与进程守护都翻倍 |
 | D2 | 单文件可执行 | **Node SEA**；依赖只选纯 JS / Node 内置（不用原生模块） | `bun --compile` 更省事，但 pi 声明 Node ≥22.19，兼容性 M0 实测 |
 | D3 | 存储 | **Node 内置 `node:sqlite`**（会话、记忆索引、任务运行记录）+ 人设/记忆仍是 markdown 文件 | `better-sqlite3` 是原生模块，单文件打包麻烦；`node:sqlite` 的 FTS5 是否可用 M0 实测 |
-| D4 | 安装包 | Windows **Inno Setup .exe**；macOS **.dmg**；Linux **AppImage + .deb** | Electron/Tauri 壳：体积大一层，管理 UI 用浏览器打开就够 |
-| D5 | 签名 | Windows 先不签；**macOS 必须签名 + 公证** | 需 Apple 开发者账号，证书走 GitHub Secrets |
+| D4 | 安装包 | Windows **Inno Setup .exe**；Linux **AppImage + .deb**（macOS .dmg 以后） | Electron/Tauri 壳：体积大一层，管理 UI 用浏览器打开就够 |
+| D5 | 签名与平台 | **已定**：本期只发 Windows（先不签）+ Linux；macOS 暂不发布 | 有 Apple 开发者账号后补签名 + 公证 |
 | D6 | 管理 UI 技术 | **Preact + Vite**，构建成静态文件打进可执行 | 纯手写 HTML（像现在的 monitor.html）：页面多了难维护 |
 | D7 | 语音 | 保留百度，抽成接口 | 之后换流式服务商不动上层 |
 | D8 | OpenClaw 适配器 | **保留**为一种可选 agent 后端（调 CLI），作者自用可继续接 OpenClaw | 不保留：作者的设备也得一起迁 |
 | D9 | Python 版去留 | 新版达到 §10 验收后冻结到 `legacy/`，一个版本后删除 | — |
+
+> 作者已确认 D1–D9 按推荐执行（2026-10-23）。
 
 ## 4. 现有设备功能对照（验收清单）
 
@@ -91,7 +100,7 @@
 kagura-server（单个可执行文件）
 ├─ device 层   HTTP :5000 设备路由 · MQTT :1883（aedes）· UDP :5001 · TCP :5002 直播
 ├─ voice 层    ASR / TTS 接口（百度实现）· TTS 缓存
-├─ channel 层  device（语音进出）· webchat（管理 UI 里聊天）· 预留 IM 渠道接口
+├─ channel 层  device（语音进出）· webchat（管理 UI 里聊天）· feishu · qq · 插件式接口
 ├─ router      渠道消息 → 绑定的 agent → 会话（§6.7）
 ├─ runtime     agent 注册表 · 会话池 · 每会话串行队列 · 全局并发上限 · 超时/中止
 │   └─ 每轮：组装上下文（soul 文件 + 记忆 + 历史）→ pi Agent → 工具执行 → 落盘 → 回渠道
@@ -257,9 +266,49 @@ agent 决定是否 `speak`。现有提示词（摇一摇、触摸描述、`_SPEA
 agent 配 `provider` + `model`（pi-ai 内置 DeepSeek、通义千问、任意 OpenAI 兼容接口）；压缩、
 记忆冲刷、heartbeat 可单独配便宜模型。每次调用的 token 与费用记进 `agent.sqlite`，管理 UI 展示。
 
+### 6.12 IM 渠道（飞书、QQ）
+
+**接口**：每个渠道一个适配器，实现 `connect / onMessage / send(text|image|audio) / status`。
+消息进来统一成 `{channel, account, chatType: dm|group, peer, sender, text, images[], audio?, mentionedMe}`，
+交给 router 按绑定找到 agent 和会话；agent 的回复再由同一个适配器发回去。
+
+**首批实现**
+
+| 渠道 | 接入方式 | 是否需要公网 | 备注 |
+|---|---|---|---|
+| 飞书 / Lark | 官方 `@larksuiteoapi/node-sdk` 的**长连接**（WebSocket）接收 `im.message.receive_v1` | 不需要，只要能出站上网 | 桌面版的最佳情况 |
+| QQ（官方机器人） | QQ 开放平台机器人 API：私聊（C2C）、群里 @ 机器人 | **待 M0 核实**：有资料说 WebSocket 接入已停止维护、只剩 Webhook（Webhook 需要公网地址，桌面版用不了） | 被动回复有 5 分钟有效期；主动推送有频次限制 |
+| QQ（OneBot v11，可选） | 连本机 NapCat 等 OneBot 实现的 WebSocket | 不需要 | **非官方协议，有封号风险**，只作为可选项、默认关闭，管理 UI 里写明风险 |
+
+**安全（照 OpenClaw 的 pairing 思路）**
+
+- 私聊默认**配对制**：陌生人第一次发消息，机器人回一个配对码，作者在管理 UI 里批准后才放行；
+  也可以改成白名单或完全开放。
+- 群聊默认**只响应 @ 机器人**的消息；可按群配置。
+- 每个渠道账号、每个群/私聊都可以单独绑定到某个 agent。
+
+**会话与记忆**
+
+- 会话 key：`<agentId>:feishu:<chatId>` 这样按渠道和聊天分开；同一个 agent 的 `MEMORY.md` 跨渠道共享，
+  所以在设备上说过的事，在飞书上她也记得。
+- 可选「主人私聊并入 main 会话」：作者本人的私聊直接进 main 会话，和 heartbeat 共享上下文。
+
+**格式与媒体**
+
+- 渠道提示注入系统提示（§6.3）：IM 可以用 markdown、可以长一点；设备语音要口语化、短。
+- 图片消息 → 多模态输入；语音消息 → 走 ASR（可选）；agent 的 `take_photo` 在 IM 里触发时，照片
+  直接发回聊天。
+- 定时任务 / heartbeat 的投递目标增加 `feishu:<chatId>`、`qq:<openid>`（§6.5 的 `delivery`）。
+
+**跨渠道**
+
+- `speak` 工具可以从 IM 里让设备开口（「跟家里说一声我晚点回」）。
+- 渠道断线自动重连，状态在管理 UI 总览里显示。
+
 ## 7. 管理 UI（`/admin`）
 
-浏览器打开，本机免登录（只监听本机时）；局域网访问需管理员密码。页面：
+浏览器打开，**本期只允许本机访问**（服务端检查请求来源是 127.0.0.1/::1，其他一律 403）。
+设备接口照常监听局域网；现有 `/monitor` 保持原样（局域网 + `API_TOKEN`）。页面：
 
 | 页面 | 能做什么 |
 |---|---|
@@ -267,12 +316,13 @@ agent 配 `provider` + `model`（pi-ai 内置 DeepSeek、通义千问、任意 O
 | Agents | 新建/复制/删除 agent；编辑 SOUL/IDENTITY/USER/AGENTS/TOOLS/HEARTBEAT（带预览和字数预算提示）；选模型、音色（可试听）、设备图片目录、工具/技能白名单、a2a 权限 |
 | 会话 | 按 agent 浏览会话与完整对话（含工具调用）；重置、手动压缩、导出 |
 | 记忆 | 浏览/编辑 MEMORY.md 与每日笔记；检索测试（输入一句话看会搜出什么）；重建索引 |
-| 定时任务 | 列表 + 新建向导（at/every/cron、会话、投递、活跃时段）；立即运行；运行历史与输出；heartbeat 开关与间隔 |
-| Agent 通信 | a2a 调用记录（谁找谁、内容、耗时）；白名单编辑 |
+| 定时任务 | 列表 + 新建向导（at/every/cron、会话、投递到设备/IM/不投递、活跃时段）；立即运行；运行历史与输出；heartbeat 开关与间隔；**从 OpenClaw 导入任务** |
+| Agent 通信 | a2a 调用记录（谁找谁、内容、耗时）；**哪些 agent 之间允许互相通信**的开关矩阵、跳数与频率上限 |
+| 渠道 | 添加飞书/QQ 账号（填凭据、测试连接）；在线状态；**配对申请审批**；私聊/群 → agent 的绑定；群聊响应规则 |
 | 设备 | 设备绑定（哪个设备绑哪个 agent）；现有监控页（拍照/直播/定时拍照/快照）嵌入；设备日志与崩溃报告；`debug-audio` 试听 |
 | 网页聊天 | 直接和任一 agent 文字聊天（webchat 渠道），调试人设很方便 |
 | 用量 | 按 agent/天的 token 与费用曲线；本月预估 |
-| 设置 | 模型 API Key、百度 Key、端口、数据目录、`API_TOKEN`、管理员密码、开机自启、从 OpenClaw 导入 |
+| 设置 | 模型服务商与 Key、嵌入接口（可选）、百度 Key、端口、数据目录、`API_TOKEN`、开机自启、从 OpenClaw 导入。**不预设任何模型**，首次启动向导里由用户自己选和填 |
 
 后端是 `/api/admin/*` JSON 接口，管理 UI 和将来的 IM 渠道/脚本都用它。
 
@@ -300,37 +350,39 @@ agent 配 `provider` + `model`（pi-ai 内置 DeepSeek、通义千问、任意 O
 3. 系统层测试：假模型脚本化驱动，覆盖调度器（时区、错过补跑、活跃时段、重试、重启恢复）、
    a2a（白名单、跳数上限、子 agent 不能再 spawn）、隔离（路径逃逸、跨 agent 查询）、
    记忆（冲刷、检索、索引重建）、压缩。
-4. 设备模拟器：扮演 CoreS3 走完 UDP 发现 → 心跳 → /chat → push → 直播；CI 在三端安装包上各跑一遍。
-5. 固件侧继续 `check_split.py` + `import_sim.py`；真机由作者验证。
-6. agent 质量：一组对话样例对比 OpenClaw 与新系统的回复和 token，作者打分。
+4. 设备模拟器：扮演 CoreS3 走完 UDP 发现 → 心跳 → /chat → push → 直播；CI 在 Windows/Linux 安装包上各跑一遍。
+5. 渠道：适配器层用假的飞书/QQ 服务端做测试（收消息、配对、群 @、断线重连、投递）；真账号联调由作者完成。
+6. 固件侧继续 `check_split.py` + `import_sim.py`；真机由作者验证。
+7. agent 质量：一组对话样例对比 OpenClaw 与新系统的回复和 token，作者打分。
 
 **打包与发布**
 
-- `ci.yml`（PR）：单测 + 黑盒 + 系统层测试 + 三端构建。`release.yml`（`v*` tag）：构建、签名、发 Release。
-- 矩阵：`windows-latest`、`macos-14`（arm64）、`macos-13`（x64）、`ubuntu-22.04`。
-- 产物：`Kagura-Setup-x.y.z.exe`、`Kagura-x.y.z-arm64.dmg` / `-x64.dmg`、`.AppImage`、`.deb`、
+- `ci.yml`（PR）：单测 + 黑盒 + 系统层测试 + 三端构建（macOS 只编译不打包）。`release.yml`（`v*` tag）：构建 Windows/Linux 安装包、发 Release。
+- 矩阵：`windows-latest`、`ubuntu-22.04`（发布）；`macos-14` 只在 CI 里编译和跑测试，不出安装包。
+- 产物：`Kagura-Setup-x.y.z.exe`、`Kagura-x.y.z-x86_64.AppImage`、`kagura_x.y.z_amd64.deb`、
   固件包 `kagura-device-x.y.z.zip`（`device/` + 烧录说明）。
-- 安装时：Windows 加防火墙入站规则（5000/1883/5001/5002）与开机自启；macOS LaunchAgent；
-  Linux systemd `--user`。首次启动自动打开 `/admin` 的初始化向导。
+- 安装时：Windows 加防火墙入站规则（5000/1883/5001/5002）与开机自启；Linux systemd `--user`。
+  首次启动自动打开 `/admin` 的初始化向导。
 - 证书与 Key 全走 GitHub Secrets，不进仓库。
 
 ## 10. 里程碑
 
 | 阶段 | 内容 | 完成标准 |
 |---|---|---|
-| **M0 技术验证** | pi 当前包名/API；Node SEA（或 bun）在三端打出可执行；`node:sqlite` + FTS；aedes；纯 JS JPEG；百度接口；OpenClaw 任务导出格式 | 三端 CI 产物能启动并回答一句话；定下 D1–D3 |
+| **M0 技术验证** | pi 当前包名/API；Node SEA（或 bun）在 Windows/Linux 打出可执行（macOS 只编译）；`node:sqlite` + FTS；aedes；纯 JS JPEG；百度接口；OpenClaw 任务导出格式；**飞书长连接收发一条消息；QQ 官方机器人能否不用公网接入** | CI 产物能启动并回答一句话；QQ 接入路线定下来 |
 | **M1 黑盒协议测试** | 现有路由测试改黑盒，Python 版全绿 | 覆盖 §4.1 每个接口 |
 | **M2 服务端骨架移植** | §4 全部移植到 TS，agent 先接 OpenClaw 适配器 | 黑盒在新版全绿；作者真机试用一周无回退 |
 | **M3 agent 运行时** | §6.1–6.3、6.7、6.9、6.11：agent 目录、会话落盘、soul 组装、压缩、内置工具、设备绑定 | 设备对话改走 pi；对话样例评审通过 |
 | **M4 memory** | §6.4 | 检索与冲刷测试通过；管理 UI 可编辑 |
 | **M5 调度器 + heartbeat** | §6.5 | 早报等任务从 OpenClaw 迁过来稳定跑一周 |
 | **M6 多 agent 通信** | §6.6、§6.8 加载机制 | a2a 测试通过；两个 agent 协作样例 |
-| **M7 管理 UI** | §7（M3 起各页面随功能逐步上线，这里补齐与打磨） | 不碰配置文件也能完成全部日常管理 |
-| **M8 边生成边播** | §6.10 服务端 + 固件小改 | 长回复首句 < 5 秒出声；老固件正常 |
-| **M9 打包发布 + 迁移** | §8、§9 | 干净虚拟机三端装完即用；从 OpenClaw + Python 版迁移无丢失 |
-| **M10 收尾** | 文档、`legacy/` 冻结、CLAUDE.md 更新 | — |
+| **M7 IM 渠道** | §6.12：渠道接口、飞书、QQ（按 M0 结论选路线）、配对、绑定、IM 投递 | 手机飞书/QQ 上能和两个 agent 分别聊；定时任务能投到 IM |
+| **M8 管理 UI** | §7（M3 起各页面随功能逐步上线，这里补齐与打磨） | 不碰配置文件也能完成全部日常管理 |
+| **M9 边生成边播** | §6.10 服务端 + 固件小改 | 长回复首句 < 5 秒出声；老固件正常 |
+| **M10 打包发布 + 迁移** | §8、§9 | 干净的 Windows/Linux 虚拟机装完即用；从 OpenClaw + Python 版迁移无丢失 |
+| **M11 收尾** | 文档、`legacy/` 冻结、CLAUDE.md 更新 | — |
 
-原则：M2 之前不动 agent；M8 之前不动固件；每一步都能单独回滚。
+原则：M2 之前不动 agent；M9 之前不动固件；每一步都能单独回滚。
 
 ## 11. 风险
 
@@ -343,13 +395,18 @@ agent 配 `provider` + `model`（pi-ai 内置 DeepSeek、通义千问、任意 O
 | 文件工具无沙箱 | 路径限制在 workspace；本期不执行 skill 脚本 |
 | heartbeat/定时任务费用失控 | 活跃时段、便宜模型、`HEARTBEAT_OK` 不投递、用量页预警 |
 | 未签名程序被误报 | Release 说明写清；有收入后买证书 |
+| QQ 官方机器人只剩 Webhook（桌面版没有公网地址） | M0 先核实；不行就只提供飞书 + 可选 OneBot（明确风险），或提供"自备公网转发"的高级选项 |
+| IM 平台规则变化（频次限制、被动回复时效、审核） | 适配器隔离；发送失败重试并在管理 UI 提示 |
+| 陌生人通过 IM 消耗额度/套话 | 默认配对制 + 群里只响应 @；每个渠道可设每日调用上限 |
 
-## 12. 动工前需要作者回答
+## 12. 作者已确认（2026-10-23）
 
-1. §3 的 D1–D9 是否同意推荐项？
-2. 你现在 OpenClaw 里**有哪些定时任务**（大概几条、是不是 isolated 的、投递到哪）？heartbeat 开着吗、
-   间隔多少？——决定 M5 的迁移样例。
-3. 目前有几个 agent、之间有没有互相调用的用法？
-4. 有没有 Apple 开发者账号？
-5. 默认用哪家模型？是否需要配嵌入接口（记忆的语义检索；不配就只有关键词检索）？
-6. 管理 UI 只本机用，还是需要手机在局域网里也能打开（决定登录与权限这块做多少）？
+- 技术选型 D1–D9 按推荐执行。
+- OpenClaw 的定时任务迁移做进管理 UI（导入向导），不单独整理清单。
+- 现有两个 agent，可以互相通信；通信权限在管理 UI 里配置。
+- 没有 Apple 开发者账号：本期只发 Windows + Linux。
+- 模型、嵌入接口全部由用户手动配置，不预设默认值。
+- 管理 UI 本期只开放本机访问。
+- IM 渠道要支持，首批飞书、QQ。
+
+**还待定**：QQ 走官方机器人还是 OneBot——M0 核实官方机器人能否不用公网接入后再定。
