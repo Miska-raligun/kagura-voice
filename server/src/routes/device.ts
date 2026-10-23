@@ -92,16 +92,7 @@ export function registerDevice(r: Router, ctx: Ctx) {
     const status = data.status;
     if (status !== "home" && status !== "away") return json({ error: "status must be 'home' or 'away'" }, 400);
     // 写 OpenClaw workspace 状态文件供 OpenClaw agent 读取；内置 agent 每轮直接带上 ctx.presence
-    const tmp = ctx.dirs.visionTmp;
-    const ts = strftime("%Y-%m-%dT%H:%M:%S+08:00");
-    try {
-      fs.writeFileSync(path.join(tmp, "user_presence.txt"), `${status}\n${ts}\n${dev}\n`);
-      fs.writeFileSync(path.join(tmp, "mio-home-status.json"), JSON.stringify({
-        at_home: status === "home", last_updated: ts, last_action: status === "home" ? "ble_detected_home" : "ble_detected_away",
-      }));
-    } catch (e: any) { console.log(`[presence] 写状态文件失败: ${e.message}`); }
-    ctx.presence = { status, ts, dev };
-    console.log(`[presence] ${dev} → ${status} @ ${ts}`);
+    ctx.setPresence(status, dev);
     return json({ status: "ok" });
   });
 

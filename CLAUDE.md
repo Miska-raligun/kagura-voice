@@ -295,6 +295,11 @@ CoreS3 (MicroPython)  ──HTTP──▶  voice_server.py (Flask :5000)  ──
   扩展工具、MCP 工具、`extension_*` 自写工具**都按 `exec` 同一条可信度规则**——它们本质上就是任意代码执行；
   只有工具自己标 `allowUntrusted` / 服务器配置 `allowUntrusted` 才放给不可信会话。`toolsFor` 按名字去重、内置优先，
   别让扩展覆盖 `exec` 之类的内置工具。新工具从下一轮对话起生效（工具表在每轮开始时取）。
+- **IM 回复同时播语音（`channels/manager.ts`，LRN 2026-10-23，症状「飞书聊天时有时播语音有时不播，要提醒才播」）**：
+  以前全靠模型自己决定要不要调 `speak`。现在由代码决定：主人私聊 + 账号 `voice_push`（home/always/off）+ `ctx.presence`，
+  **跑完这一轮再判断一次**（这条消息里说了「我到家了」→ `set_presence` 也算），`toSpoken()` 转成适合念的一段后 `sendPush`。
+  在家时 `spokenTo` 设成目标设备，模型再 speak 同一台会被工具挡回（同 /chat），不会播两遍；模型已 speak 过别的就不再补播。
+  在家状态统一走 `ctx.setPresence` / `loadPresence`（设备 BLE、`set_presence` 工具、`/home` `/away` 命令三个入口）。
 - **`global` 声明必须有主**（LRN 2026-08-25）：`netsvc.mqtt_check` 里写过
   `global _mqtt_ok`，但本模块从来没有这个名字（状态在 `diag`）。后果是
   **任何一次 MQTT 掉线都变成 NameError 逃出 `mqtt_check`**，主循环连吃 10 次

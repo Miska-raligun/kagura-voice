@@ -65,20 +65,8 @@ async function main() {
   const ctx = new Ctx(cfg, dirs, voice, brain, mqtt, stream, pi ? sys.registry.roleDefs() : cfg.roles);
   attachAgentSystem(sys, ctx);
 
-  // 重启恢复「在家/出门」：/presence 每次都会写 tmp/mio-home-status.json，启动时读回来。
-  // 不恢复的话一重启就变成「不知道」，而设备 BLE 只在状态变化时上报，语音会一直不敢播。
-  try {
-    const presenceFile = path.join(dirs.visionTmp, "mio-home-status.json");
-    if (fs.existsSync(presenceFile)) {
-      const saved = JSON.parse(fs.readFileSync(presenceFile, "utf8"));
-      if (typeof saved?.at_home === "boolean") {
-        ctx.presence = { status: saved.at_home ? "home" : "away", ts: String(saved.last_updated ?? ""), dev: "cores3" };
-        console.log(`[presence] 恢复上次状态：${ctx.presence.status}（${ctx.presence.ts}）`);
-      }
-    }
-  } catch (e: any) {
-    console.log(`[presence] ⚠️  恢复状态失败: ${e.message}`);
-  }
+  // 重启恢复「在家/出门」（设备 BLE 只在状态变化时上报，不恢复的话一重启就成了「不知道」）
+  ctx.loadPresence();
 
   console.log("=".repeat(50));
   console.log(`  Kagura 语音服务端 ${VERSION}` + (fake ? "（假服务商模式）" : ""));

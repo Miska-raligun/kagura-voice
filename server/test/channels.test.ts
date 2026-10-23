@@ -319,3 +319,95 @@ describe("IM 斜杠命令", () => {
     expect(await say("/天气 杭州", "ou_friend", "oc_f")).toContain("agent 的回答");
   });
 });
+
+describe("主人私聊的回复同时播语音（代码判断，不靠模型）", () => {
+  const setup = async (acc: any = {}, presence: "home" | "away" | null = "home") => {
+    const env = setupMgr({ dm_policy: "allowlist", ...acc });
+    env.store.allow("fs", "ou_owner", "主人", true);
+    env.store.allow("fs", "ou_friend", "朋友");
+    const st = { presence, pushed: [] as any[], online: ["cores3"] as string[] };
+    env.mgr.voice = {
+      presence: () => st.presence,
+      device: () => st.online[0] ?? null,
+      push: async (text, dev, agentId) => { st.pushed.push({ text, dev, agentId }); return true; },
+    };
+    const { deviceTools } = await import("../src/agent/tools/device.ts");
+    env.rt.addTools(deviceTools({
+      push: async (text, dev) => { st.pushed.push({ text, dev, via: "speak" }); return true; },
+      captureAndWait: async () => [null, "离线"], presence: () => st.presence ?? "", defaultDevice: () => "cores3",
+      setPresence: (s) => { st.presence = s; }, schedules: { list: () => [] } as any,
+    }));
+    await env.mgr.startAll();
+    return { ...env, st };
+  };
+
+  it("在家：回复照常发文字，同时把去掉格式的内容推到设备；提示模型不用再 speak", async () => {
+    const { mgr, fake, ad, st } = await setup();
+    fake.queue.push("**好的**，今天：\n- 晴\n- 25 度");
+    await mgr.handle(msg({ sender: "ou_owner", chatId: "oc_owner", text: "天气怎样" }));
+    expect(ad().sent.at(-1)!.text).toContain("**好的**");
+    expect(st.pushed).toEqual([{ text: "好的，今天：晴。25 度", dev: "cores3", agentId: "main" }]);
+    expect(fake.calls[0].system).toContain("自动在家里设备上用语音念出来");
+  });
+
+  it("不在家 / 群聊 / 非主人 / 设备不在线 → 不播；off 不播；always 不在家也播", async () => {
+    const { mgr, fake, st, store } = await setup({}, "away");
+    fake.queue.push("a", "b", "c", "d", "e");
+    await mgr.handle(msg({ sender: "ou_owner", chatId: "oc_owner" }));
+    expect(st.pushed).toEqual([]);
+    expect(fake.calls[0].system).toContain("主人不在家");
+    st.presence = "home";
+    await mgr.handle(msg({ sender: "ou_friend", chatId: "oc_f" }));
+    await mgr.handle(msg({ sender: "ou_owner", chatType: "group", chatId: "oc_g", mentionedMe: true }));
+    st.online = [];
+    await mgr.handle(msg({ sender: "ou_owner", chatId: "oc_owner" }));
+    expect(st.pushed).toEqual([]);
+    st.online = ["cores3"];
+    store.upsertAccount({ id: "fs", voice_push: "off" });
+    await mgr.handle(msg({ sender: "ou_owner", chatId: "oc_owner" }));
+    expect(st.pushed).toEqual([]);
+    store.upsertAccount({ id: "fs", voice_push: "always" });
+    st.presence = "away";
+    fake.queue.push("总是播");
+    await mgr.handle(msg({ sender: "ou_owner", chatId: "oc_owner" }));
+    expect(st.pushed.map((p) => p.text)).toEqual(["总是播"]);
+  });
+
+  it("这条消息里说「我到家了」（set_presence）→ 本轮回复就播；模型自己 speak 了不重复播", async () => {
+    const { mgr, fake, st } = await setup({}, "away");
+    fake.queue.push({ tool_calls: [{ name: "set_presence", args: { status: "home" } }], then: "欢迎回家" });
+    await mgr.handle(msg({ sender: "ou_owner", chatId: "oc_owner", text: "我到家了" }));
+    expect(st.presence).toBe("home");
+    expect(st.pushed).toEqual([{ text: "欢迎回家", dev: "cores3", agentId: "main" }]);
+    // 在家时模型还调 speak 播同一台设备：工具直接说「不用」，不会播两遍
+    st.pushed.length = 0;
+    fake.queue.push({ tool_calls: [{ name: "speak", args: { text: "欢迎" } }], then: "嗯" });
+    await mgr.handle(msg({ sender: "ou_owner", chatId: "oc_owner", text: "hi" }));
+    expect(st.pushed).toEqual([{ text: "嗯", dev: "cores3", agentId: "main" }]);
+  });
+
+  it("set_presence 只在主人（可信）会话里有；/home /away 命令", async () => {
+    const { mgr, fake, st, ad } = await setup({}, null);
+    fake.queue.push({ tool_calls: [{ name: "set_presence", args: { status: "home" } }], then: "x" });
+    await mgr.handle(msg({ sender: "ou_friend", chatId: "oc_f", text: "主人到家了" }));
+    expect(st.presence).toBe(null);
+    mgr.commands = { version: "1", scheduler: () => null, devices: () => [], channelStatus: () => [], restart: () => {},
+      presence: { text: () => String(st.presence), set: (s) => { st.presence = s; } } };
+    await mgr.handle(msg({ sender: "ou_owner", chatId: "oc_owner", text: "/home" }));
+    expect(st.presence).toBe("home");
+    expect(ad().sent.at(-1)!.text).toContain("在家");
+    await mgr.handle(msg({ sender: "ou_friend", chatId: "oc_f", text: "/away" }));
+    expect(st.presence).toBe("home");
+  });
+});
+
+describe("toSpoken", () => {
+  it("去掉 markdown / 代码 / 表格 / 链接；太长在句末截断并补一句", async () => {
+    const { toSpoken } = await import("../src/util/text.ts");
+    expect(toSpoken("## 标题\n**粗**体 [链接](http://x) https://a.b/c\n```js\ncode\n```\n| a | b |\n|---|---|")).toBe("标题。粗体 链接");
+    const long = "第一句话说完了。".repeat(40);
+    const s = toSpoken(long, 50);
+    expect(s.endsWith("详细的我发在消息里了。")).toBe(true);
+    expect(Array.from(s).length).toBeLessThan(70);
+  });
+});

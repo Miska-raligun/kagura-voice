@@ -24,6 +24,8 @@ export function normalizeAccount(raw: any, prev?: AccountConfig): AccountConfig 
   const gp = pick("group_policy", "mention");
   if (!["pairing", "allowlist", "open"].includes(dm)) throw new Error("dm_policy 只能是 pairing / allowlist / open");
   if (!["mention", "all", "off"].includes(gp)) throw new Error("group_policy 只能是 mention / all / off");
+  const vp = pick("voice_push", "home");
+  if (!["home", "always", "off"].includes(vp)) throw new Error("voice_push 只能是 home / always / off");
   // 凭据：传了就逐项覆盖；传 "***" 表示「保持原值」（管理界面回显的是打码值）
   const creds: Record<string, string> = { ...(prev?.credentials ?? {}) };
   for (const [k, v] of Object.entries(raw.credentials ?? {})) if (v !== "***") creds[k] = String(v);
@@ -31,6 +33,7 @@ export function normalizeAccount(raw: any, prev?: AccountConfig): AccountConfig 
     id, kind, name: String(pick("name", id)), enabled: !!pick("enabled", true), credentials: creds,
     agent: String(pick("agent", "")), dm_policy: dm, group_policy: gp,
     owner_main: !!pick("owner_main", false), daily_limit: Math.max(0, Number(pick("daily_limit", 200)) || 0),
+    voice_push: vp,
   };
 }
 

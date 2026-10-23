@@ -8,6 +8,7 @@
 //     /jobs              定时任务一览；/jobs run <id> 立即运行一个
 //     /compact           压缩本会话（较早的对话总结成摘要）
 //     /restart           重启服务端（重启完会在这个聊天里说一声）
+//     /home  /away       告诉服务端「我在家 / 我出门了」（在家时私聊回复会同时在设备上播语音）
 // 不认识的 /xxx 照常交给 agent（可能是它自己的约定）。
 import os from "node:os";
 import type { Runtime } from "../agent/runtime.ts";
@@ -27,6 +28,8 @@ export interface CommandDeps {
   channelStatus: () => { id: string; kind: string; state: string; detail?: string }[];
   /** 安排重启（先回复再重启）；notice = 重启后在哪说一声 */
   restart: (notice: { account: string; chatId: string }) => void;
+  /** 在家状态：读 / 写（主人手动纠正设备蓝牙没感知到的情况） */
+  presence?: { text(): string; set(status: "home" | "away"): void };
   /** 角色表要跟着 agent 变（换绑 agent 后设备角色不受影响，这里不用；换模型不影响角色） */
   onAgentChanged?: () => void;
 }
@@ -41,6 +44,7 @@ const HELP_OWNER = [
   "/jobs 定时任务；/jobs run <id> 立即运行",
   "/compact 压缩本会话",
   "/restart 重启服务端",
+  "/home 我在家（回复同时在设备上播语音）；/away 我出门了",
 ];
 
 const fmtDur = (s: number) => (s < 3600 ? `${Math.round(s / 60)} 分钟` : s < 86400 ? `${(s / 3600).toFixed(1)} 小时` : `${(s / 86400).toFixed(1)} 天`);
@@ -74,6 +78,7 @@ export async function runCommand(text: string, c: CommandCtx, d: CommandDeps): P
       lines.push(`今天合计 ${calls} 次调用${cost ? `，约 ¥${cost.toFixed(2)}` : ""}`);
       const dev = d.devices();
       lines.push(dev.length ? `设备：${dev.join("；")}` : "设备：还没连上来过");
+      if (d.presence) lines.push(`在家状态：${d.presence.text() || "不知道"}`);
       lines.push(`渠道：${d.channelStatus().map((s) => `${s.id}(${s.kind}) ${s.state}`).join("；") || "无"}`);
       const jobs = d.scheduler()?.list() ?? [];
       const bad = jobs.filter((j) => j.last_status === "error");
@@ -136,6 +141,13 @@ export async function runCommand(text: string, c: CommandCtx, d: CommandDeps): P
       if (!c.owner) return ownerOnly();
       const r = await d.rt.compact(c.agentId, c.sessionKey);
       return r ? "压缩好了：较早的对话已总结成摘要。" : "对话还短，不用压缩。";
+    }
+
+    case "home": case "away": {
+      if (!c.owner) return ownerOnly();
+      if (!d.presence) return "在家状态不可用";
+      d.presence.set(cmd);
+      return cmd === "home" ? "好，记下你在家了。之后在这里聊，我的回复也会在家里设备上念出来。" : "好，记下你出门了，之后只发文字。";
     }
 
     case "restart":

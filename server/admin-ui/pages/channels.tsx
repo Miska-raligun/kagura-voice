@@ -29,7 +29,7 @@ export function Channels() {
           <tbody>{d.pairings.map((p: any) => <Pairing p={p} done={reload} />)}</tbody></table>
       </Card>}
       {edit ? <AccountForm a={edit} agentOpts={agentOpts} done={() => { setEdit(null); reload(); }} /> : (
-        <Card title="账号" actions={<Btn kind="primary" onClick={() => setEdit({ kind: "feishu", credentials: {}, enabled: true, dm_policy: "pairing", group_policy: "mention", daily_limit: 200 })}>＋ 添加账号</Btn>}>
+        <Card title="账号" actions={<Btn kind="primary" onClick={() => setEdit({ kind: "feishu", credentials: {}, enabled: true, dm_policy: "pairing", group_policy: "mention", daily_limit: 200, voice_push: "home" })}>＋ 添加账号</Btn>}>
           {d.accounts.length ? <table class="hover"><thead><tr><th>名称</th><th>类型</th><th>状态</th><th>默认 agent</th><th>私聊</th><th>群聊</th><th></th></tr></thead>
             <tbody>{d.accounts.map((a: any) => (
               <tr onClick={() => setEdit(a)}>
@@ -75,6 +75,7 @@ function AccountForm({ a, agentOpts, done }: { a: any; agentOpts: [string, strin
         <Field label="默认交给"><Select value={f.agent ?? ""} onChange={(v) => set({ ...f, agent: v })} options={agentOpts} /></Field>
         <Field label="私聊" hint="配对制：陌生人先拿到配对码，你在这里批准后才放行"><Select value={f.dm_policy} onChange={(v) => set({ ...f, dm_policy: v })} options={[["pairing", "配对制（推荐）"], ["allowlist", "只认白名单"], ["open", "完全开放"]]} /></Field>
         <Field label="群聊"><Select value={f.group_policy} onChange={(v) => set({ ...f, group_policy: v })} options={[["mention", "只回应 @ 机器人（推荐）"], ["all", "所有消息"], ["off", "不理群消息"]]} /></Field>
+        <Field label="同时播语音" hint="主人私聊的回复要不要同时在家里设备上念出来（系统判断，不靠模型自觉）。在家状态来自设备蓝牙，也可以发 /home、/away 告诉它"><Select value={f.voice_push ?? "home"} onChange={(v) => set({ ...f, voice_push: v })} options={[["home", "在家时播（推荐）"], ["always", "总是播"], ["off", "不播"]]} /></Field>
         <Field label="每日上限" hint="每天最多回复多少条，0 = 不限（防陌生人刷额度）"><Input type="number" value={f.daily_limit} onInput={(v) => set({ ...f, daily_limit: Number(v) })} /></Field>
         <Field label="选项" wide><Toggle checked={f.enabled} onChange={(v) => set({ ...f, enabled: v })} label="启用" />
           <Toggle checked={f.owner_main} onChange={(v) => set({ ...f, owner_main: v })} label="主人的私聊并入 main 会话（和设备、heartbeat 共享上下文）" /></Field>

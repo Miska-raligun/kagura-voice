@@ -11,6 +11,8 @@ export interface DeviceHost {
   push(text: string, dev: string, per: number): Promise<boolean>;
   captureAndWait(dev: string): Promise<[string | null, string | null]>;
   presence(): string;
+  /** 主人亲口说的在家 / 出门（设备蓝牙没感知到时补上） */
+  setPresence(status: "home" | "away"): void;
   schedules: PhotoSchedules;
   defaultDevice(): string;
 }
@@ -73,6 +75,17 @@ export function deviceTools(host: DeviceHost) {
         parameters: Type.Object({}),
         async execute() { return ok(host.presence() || "不知道（设备还没上报过）"); },
       },
+      // 只在可信会话（主人本人）里有：陌生人说一句「主人到家了」不能改掉状态
+      ...(scope.trusted ? [{
+        name: "set_presence", label: "记下在家状态",
+        description: "主人明确说自己到家了 / 出门了（「我到家了」「我出门了」）时调用，更新在家状态。"
+          + "在家时主人在聊天软件里的消息，你的回复会自动同时在家里设备上用语音播出来。只凭主人本人明确的说法，别猜。",
+        parameters: Type.Object({ status: Type.Union([Type.Literal("home"), Type.Literal("away")]) }),
+        async execute(_id: string, p: any) {
+          host.setPresence(p.status);
+          return ok(p.status === "home" ? "已记下：主人在家" : "已记下：主人不在家");
+        },
+      } as AgentTool<any>] : []),
       {
         name: "photo_schedule_list", label: "定时拍照列表",
         description: "列出每日定时拍照计划（到点拍照、识别并播报）。",

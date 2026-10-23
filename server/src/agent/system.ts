@@ -1,4 +1,5 @@
 // 内置 agent 系统的装配：注册表 + 模型 + 运行时 + 各工具模块。main.ts 只调这里。
+import { HB_SILENT_SECS } from "../heartbeat.ts";
 import { applyBudgets } from "./soul.ts";
 import { VERSION } from "../cli.ts";
 import { restartSelf } from "../util/restart.ts";
@@ -81,10 +82,22 @@ export function attachAgentSystem(sys: AgentSystem, ctx: Ctx) {
       return `${id} ${ago < 200 ? "在线" : `离线 ${Math.round(ago / 60)} 分钟`}${rec.data.bat != null ? `，电量 ${rec.data.bat}%` : ""}`;
     }),
     channelStatus: () => sys.channels.status(),
+    presence: { text: () => ctx.presenceText(), set: (s) => ctx.setPresence(s, ctx.presence?.dev ?? "cores3", "chat") },
     restart: (n) => {
       const kind = sys.channels.store.account(n.account)?.kind ?? "";
       restartSelf(ctx.cfg.dataDir, { ...n, from: kind });
     },
+  };
+  // 主人在飞书 / QQ 私聊里的回复：在家就同时在设备上播（ChannelManager 按账号的 voice_push 决定）
+  sys.channels.voice = {
+    presence: () => (ctx.presence?.status === "home" ? "home" : ctx.presence?.status === "away" ? "away" : null),
+    device: (agentId) => {
+      const t = Date.now() / 1000;
+      const online = [...ctx.hb.devices.entries()].filter(([, r]) => t - r.ts < HB_SILENT_SECS).map(([d]) => d);
+      // 优先当前角色正是这个 agent 的设备，其次任意在线设备
+      return online.find((d) => ctx.roles.get(d).agent === agentId) ?? online[0] ?? null;
+    },
+    push: (text, dev, agentId) => ctx.sendPush(text, dev, registry.get(agentId)?.per),
   };
   const scheduler = new Scheduler(ctx.dirs.systemDb, runtime, registry, {
     async deliver(agentId, delivery, text) {
@@ -115,6 +128,7 @@ export function attachAgentSystem(sys: AgentSystem, ctx: Ctx) {
     push: (text, dev, per) => ctx.sendPush(text, dev, per),
     captureAndWait: (dev) => ctx.captureAndWait(dev),
     presence: () => ctx.presenceText(),
+    setPresence: (status) => ctx.setPresence(status, ctx.presence?.dev ?? "cores3", "chat"),
     schedules: ctx.schedules,
     defaultDevice: () => [...ctx.hb.devices.keys()][0] ?? "cores3",
   }));

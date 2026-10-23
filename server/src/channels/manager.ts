@@ -12,6 +12,18 @@ import { FeishuAdapter } from "./feishu.ts";
 import { QQAdapter } from "./qq.ts";
 import { OneBotAdapter } from "./onebot.ts";
 import { runCommand, type CommandDeps } from "./commands.ts";
+import { toSpoken } from "../util/text.ts";
+
+/** 渠道回复同时在家里设备上播语音要用的东西（attachAgentSystem 里接上） */
+export interface VoiceBridge {
+  presence(): "home" | "away" | null;
+  /** 这个 agent 的语音播到哪台设备（在线的）；没有在线设备返回 null */
+  device(agentId: string): string | null;
+  push(text: string, dev: string, agentId: string): Promise<boolean>;
+}
+
+const HINT_VOICE = "主人在家：这条回复发到聊天里的同时，会由系统自动在家里设备上用语音念出来（念去掉格式后的开头一段），不用再调 speak 播同样的内容。";
+const HINT_AWAY = "主人不在家（在外面用手机聊）：回复只发文字。除非主人明确让你往家里设备上传话，不要调 speak。";
 
 export type AdapterFactory = (a: AccountConfig) => ChannelAdapter;
 
@@ -31,6 +43,8 @@ export class ChannelManager {
 
   /** 斜杠命令的依赖，attachAgentSystem 里接上（没接就只认 /reset /new） */
   commands: Omit<CommandDeps, "rt" | "agents" | "store"> | null = null;
+  /** 主人私聊的回复同时播语音（没接就不播） */
+  voice: VoiceBridge | null = null;
 
   constructor(public store: ChannelStore, private rt: Runtime, private agents: AgentRegistry, private factory: AdapterFactory = defaultFactory) {}
 
@@ -132,8 +146,14 @@ export class ChannelManager {
     }
     const who = m.chatType === "group" ? `[${m.senderName || m.sender.slice(-6)}] ` : "";
     console.log(`[channel] 💬 ${a.kind}/${a.id} ${m.chatType} ${m.chatId} → ${agentId}: ${m.text.slice(0, 60)}`);
+    // 要不要同时播语音由代码按在家状态决定，不靠模型自觉。只管主人的私聊：群聊、陌生人的消息不往家里喇叭上念
+    const ownerDm = m.chatType === "dm" && !!allowed?.owner;
+    const voiceOn = () => ownerDm && !!this.voice && a.voice_push !== "off" && (a.voice_push === "always" || this.voice.presence() === "home");
+    const before = voiceOn() ? this.voice!.device(agentId) : null;
     try {
       const r = await this.rt.run({
+        spokenTo: before ?? undefined,
+        extraSystem: ownerDm && this.voice && a.voice_push !== "off" ? [before ? HINT_VOICE : a.voice_push === "home" && this.voice.presence() === "away" ? HINT_AWAY : ""].filter(Boolean) : undefined,
         agentId, sessionKey, kind: ownerMain ? "main" : "chat", channel: m.kind, purpose: "chat",
         text: who + (m.text || "（发来一张图片）"), images: m.images.map((i) => ({ type: "image" as const, ...i })),
         origin: `${m.kind}:${a.id}:${m.chatId}`,
@@ -144,6 +164,16 @@ export class ChannelManager {
       // take_photo 在 IM 里触发时，照片直接发回聊天
       const photo = r.meta.photos?.[0];
       await this.reply(m, r.text, photo && fs.existsSync(photo) ? fs.readFileSync(photo) : undefined);
+      // 跑完再判断一次：主人这条消息里说了「我到家了」（set_presence）也算；模型自己已经 speak 过就不重复
+      if (voiceOn() && !r.meta.spoke?.length) {
+        const dev = before ?? this.voice!.device(agentId);
+        const said = toSpoken(r.text);
+        if (!dev) console.log(`[channel] 🔇 主人在家，但没有在线设备可播`);
+        else if (said) {
+          const ok = await this.voice!.push(said, dev, agentId).catch(() => false);
+          console.log(`[channel] 🔊 回复同时播到 ${dev}${ok ? "" : "（失败）"}`);
+        }
+      }
     } catch (e: any) {
       await this.reply(m, `（出错了：${String(e.message).slice(0, 100)}）`);
     }

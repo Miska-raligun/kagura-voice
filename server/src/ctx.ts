@@ -262,6 +262,39 @@ export class Ctx {
     }
   }
 
+  /**
+   * 更新在家状态并落盘（设备 BLE 上报 /presence、主人在聊天里说「我到家了」都走这里）。
+   * 写两个文件：user_presence.txt / mio-home-status.json 是 OpenClaw 那边的 skill 读的，重启时也从这里恢复
+   */
+  setPresence(status: "home" | "away", dev: string, source = "ble") {
+    const ts = strftime("%Y-%m-%dT%H:%M:%S+08:00");
+    const tmp = this.dirs.visionTmp;
+    try {
+      fs.writeFileSync(path.join(tmp, "user_presence.txt"), `${status}\n${ts}\n${dev}\n`);
+      fs.writeFileSync(path.join(tmp, "mio-home-status.json"), JSON.stringify({
+        at_home: status === "home", last_updated: ts, last_action: `${source}_${status === "home" ? "detected_home" : "detected_away"}`,
+      }));
+    } catch (e: any) { console.log(`[presence] 写状态文件失败: ${e.message}`); }
+    this.presence = { status, ts, dev };
+    console.log(`[presence] ${dev} → ${status} @ ${ts}${source === "ble" ? "" : `（${source}）`}`);
+  }
+
+  /** 重启后恢复上次的在家状态（设备 BLE 只在状态变化时上报，不恢复的话一重启就成了「不知道」） */
+  loadPresence() {
+    try {
+      const f = path.join(this.dirs.visionTmp, "mio-home-status.json");
+      if (!fs.existsSync(f)) return;
+      const saved = JSON.parse(fs.readFileSync(f, "utf8"));
+      if (typeof saved?.at_home !== "boolean") return;
+      let dev = "cores3";
+      try { dev = fs.readFileSync(path.join(this.dirs.visionTmp, "user_presence.txt"), "utf8").split("\n")[2]?.trim() || dev; } catch { /* 没有就用默认 */ }
+      this.presence = { status: saved.at_home ? "home" : "away", ts: String(saved.last_updated ?? ""), dev };
+      console.log(`[presence] 恢复上次状态：${this.presence.status}（${this.presence.ts}）`);
+    } catch (e: any) {
+      console.log(`[presence] ⚠️  恢复状态失败: ${e.message}`);
+    }
+  }
+
   presenceText(): string {
     if (!this.presence) return "";
     return `${this.presence.status === "home" ? "在家" : "不在家"}（${this.presence.ts.slice(5, 16).replace("T", " ")} 起）`;

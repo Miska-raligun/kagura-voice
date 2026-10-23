@@ -76,3 +76,18 @@ export function stripChars(s: string, chars: string): string {
 
 export const hex = (bytes: number) => [...crypto.getRandomValues(new Uint8Array(Math.ceil(bytes / 2)))]
   .map((b) => b.toString(16).padStart(2, "0")).join("").slice(0, bytes);
+
+/**
+ * IM 回复转成适合用语音念的一段：去掉 markdown、代码块、表格、链接；太长就在句末截断，
+ * 补一句「详细的发在消息里了」（念一大段表格/列表没人听得下去）。
+ */
+export function toSpoken(text: string, maxChars = 200, tail = "详细的我发在消息里了。"): string {
+  let t = text.replace(/```[\s\S]*?```/g, "").replace(/^\s*\|.*\|\s*$/gm, "")
+    .replace(/!\[[^\]]*\]\([^)]+\)/g, "").replace(/\[([^\]]+)\]\([^)]+\)/g, "$1").replace(/https?:\/\/\S+/g, "");
+  t = stripMarkdown(t).replace(/([，。！？、；：,.!?;:])\s*\n+/g, "$1").replace(/\n+/g, "。").replace(/([。！？!?])。+/g, "$1").replace(/^。+|。+$/g, "").trim();
+  const chars = Array.from(t);
+  if (chars.length <= maxChars) return t;
+  const head = chars.slice(0, maxChars).join("");
+  const cut = Math.max(...["。", "！", "？", "!", "?", "；"].map((p) => head.lastIndexOf(p)));
+  return (cut > maxChars * 0.4 ? head.slice(0, cut + 1) : head + "…") + tail;
+}

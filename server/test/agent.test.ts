@@ -16,6 +16,7 @@ function withDevice(rt: Runtime) {
     push: async (text, dev, per) => { pushed.push({ text, dev, per }); return true; },
     captureAndWait: async () => [null, "离线"],
     presence: () => "在家",
+    setPresence: () => {},
     schedules: sched,
     defaultDevice: () => "cores3",
   }));
