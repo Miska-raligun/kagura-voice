@@ -7,6 +7,7 @@ import { TOUCH_KIND_DESC, touchPhrases } from "../shortcut/touch.ts";
 import { HB_SILENT_SECS } from "../heartbeat.ts";
 import { testTone } from "../util/wav.ts";
 import { now, sleep, strftime } from "../util/time.ts";
+import { VERSION } from "../cli.ts";
 
 const unauthorized = () => json({ error: "invalid or missing X-Api-Token" }, 401);
 const RESET_CAUSES: Record<number, string> = { 1: "上电/复位键", 2: "硬复位", 3: "看门狗复位⚠️", 4: "深睡唤醒", 5: "软复位" };
@@ -150,7 +151,8 @@ export function registerDevice(r: Router, ctx: Ctx) {
   });
 
   r.get("/time", () => json({ timestamp: Math.trunc(now()) }));
-  r.get("/health", () => json({ status: "ok" }));
+  // app/version：再启动一个 Kagura 时靠它认出「已经在运行的是 Kagura 自己」（旧 voice_server.py 只回 status）
+  r.get("/health", () => json({ status: "ok", app: "kagura", version: VERSION, pid: process.pid }));
   r.get("/test-tone", () => bytes(testTone(), "audio/wav"));
 
   /** 试听设备最近一次上传的录音。浏览器直接打开没法带请求头，所以 token 也可以走 ?token= */

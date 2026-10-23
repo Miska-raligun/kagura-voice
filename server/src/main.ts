@@ -25,12 +25,27 @@ import fs from "node:fs";
 import path from "node:path";
 import { execFile, execFileSync } from "node:child_process";
 import { isWsl, toLinuxPath } from "./util/platform.ts";
+import { preflight, realIO, closeAsk, pauseBeforeExit, type PortNeed } from "./startup/preflight.ts";
 
 // Node 22 下 node:sqlite 等会打实验特性警告，对用户只是噪声
 process.removeAllListeners("warning");
 
 async function main() {
   const cfg = loadConfig();
+
+  // 端口体检：被占了就说清楚是谁、问用户怎么处理（以前是报一行错就退出，Windows 窗口一闪就关）
+  const needs: PortNeed[] = [
+    { what: "设备接口 / 管理界面", port: cfg.port, proto: "tcp", required: true },
+    { what: "MQTT（主动播报）", port: cfg.mqttPort, proto: "tcp", required: true },
+    { what: "摄像头直播", port: cfg.streamPort, proto: "tcp", required: true },
+    { what: "设备自动发现", port: cfg.discPort, proto: "udp", required: false },
+  ];
+  if (cfg.adminPort && cfg.adminPort !== cfg.port) needs.push({ what: "本机管理端口", port: cfg.adminPort, proto: "tcp", host: "127.0.0.1", required: true });
+  const pf = await preflight(needs, cfg.port, `http://localhost:${cfg.adminPort || cfg.port}/admin`, realIO());
+  closeAsk();
+  if (pf === "already-running") process.exit(0);
+  if (pf === "exit") throw new Error("端口被占用，没有启动。");
+
   const dirs = makeDirs(cfg);
   const fake = cfg.fakeProviders ? new FakeProviders(dirs.ttsCache) : null;
   const baidu = fake ? null : new BaiduVoice(cfg.baidu, dirs.ttsCache);
@@ -144,7 +159,8 @@ function maybeOpenAdmin(cfg: ReturnType<typeof loadConfig>, setupNeeded: boolean
 
 runCli(process.argv.slice(2))
   .then((handled) => (handled ? undefined : main()))
-  .catch((e) => {
+  .catch(async (e) => {
     console.error("启动失败:", e?.message ?? e);
+    await pauseBeforeExit();     // Windows 双击启动：不停一下窗口就直接关了，用户什么都看不到
     process.exit(1);
   });
