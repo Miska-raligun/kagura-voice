@@ -1,9 +1,10 @@
 # Kagura 自研 Agent 系统与安装包 —— 开发计划
 
-> 状态：v3（2026-10-23）。**M0–M9 代码已完成**：M0 结论见 [m0-report.md](m0-report.md)；契约测试在
+> 状态：v3（2026-10-23）。**M0–M10 代码已完成**：M0 结论见 [m0-report.md](m0-report.md)；契约测试在
 > [contract-tests/](../contract-tests/README.md)（84 例通用 + 13 例内置 agent 专用），Python 版、TS 版（OpenClaw 模式 /
 > 内置 agent 模式）、三平台单文件可执行全绿。服务端说明见 [server/README.md](../server/README.md)。
-> 待作者真机验收（M2 起各阶段的「真机试用」以及飞书/QQ 真账号联调一起做），之后 M9 边生成边播、M10 打包发布。
+> 待作者真机验收（M2 起各阶段的「真机试用」以及飞书/QQ 真账号联调一起做），之后 M11 收尾。
+> M10：安装包在 CI 上真装、对装好的程序跑完整契约测试、再卸载验证清理；打 `v*` tag 才发 Release。
 > 实现偏差：管理 UI 用 Preact + **esbuild**（不是 Vite）——esbuild 已在构建链里，少一套工具；
 > 产物内联进单文件可执行。agent 系统在 OpenClaw 模式下也会建起来（管理界面与首次设置向导要用）。
 > 目标读者：项目作者 + 之后接手开发的人（包括 Claude）。

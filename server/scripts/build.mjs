@@ -40,7 +40,11 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.a
     target: "node22",
     format: "cjs",
     // CJS 产物里没有 import.meta.url，给一个等价实现
-    define: { "import.meta.url": "__kagura_import_meta_url" },
+    define: {
+      "import.meta.url": "__kagura_import_meta_url",
+      // 版本号：发布时由 release.yml 从 tag 传入（KAGURA_VERSION=1.2.3），否则用 package.json 的
+      __KAGURA_VERSION__: JSON.stringify(process.env.KAGURA_VERSION || JSON.parse(fs.readFileSync(path.join(here, "..", "package.json"), "utf8")).version),
+    },
     banner: { js: 'const __kagura_import_meta_url = require("url").pathToFileURL(__filename).href;' },
     logLevel: "warning",
     metafile: true,

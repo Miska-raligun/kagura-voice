@@ -2,6 +2,12 @@
 
 基于 OpenClaw 的语音对话助手，支持本地麦克风模式和 M5Stack CoreS3 硬件终端模式。
 
+> **新服务端（推荐）**：`server/` 下的 TypeScript 版是 `voice_server.py` 的替代品——Windows / Linux
+> **安装包即开即用**（GitHub Releases 下载），自带 MQTT、内置 agent 系统（记忆、定时任务、heartbeat、
+> 多 agent 通信）、飞书 / QQ 渠道、本机管理界面 `http://127.0.0.1:5000/admin`，也可以继续接 OpenClaw。
+> 安装与配置见 [server/README.md](server/README.md)，开发计划见 [docs/plan-kagura-agent.md](docs/plan-kagura-agent.md)。
+> 下文是旧版（Python + OpenClaw + mosquitto）的说明，设备端部分两版通用。
+
 ## 功能
 
 - 百度语音识别（中文 ASR）

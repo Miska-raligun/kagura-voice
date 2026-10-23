@@ -1,0 +1,13 @@
+# systemd 用户服务：systemctl --user enable --now kagura
+# 数据目录 ~/.local/share/kagura；日志 journalctl --user -u kagura -f
+[Unit]
+Description=Kagura 语音服务端
+After=network-online.target
+
+[Service]
+ExecStart=/opt/kagura/kagura --no-browser
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

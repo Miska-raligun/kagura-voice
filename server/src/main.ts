@@ -16,6 +16,10 @@ import { registerDevice } from "./routes/device.ts";
 import { registerMonitor } from "./routes/monitor.ts";
 import { registerAdmin } from "./routes/admin.ts";
 import { registerAdminUi } from "./routes/admin-ui.ts";
+import { runCli, VERSION } from "./cli.ts";
+import fs from "node:fs";
+import path from "node:path";
+import { execFile } from "node:child_process";
 
 // Node 22 下 node:sqlite 等会打实验特性警告，对用户只是噪声
 process.removeAllListeners("warning");
@@ -38,7 +42,7 @@ async function main() {
   attachAgentSystem(sys, ctx);
 
   console.log("=".repeat(50));
-  console.log("  Kagura 语音服务端" + (fake ? "（假服务商模式）" : ""));
+  console.log(`  Kagura 语音服务端 ${VERSION}` + (fake ? "（假服务商模式）" : ""));
   console.log("=".repeat(50));
   console.log(`数据目录: ${cfg.dataDir}`);
   if (baidu) {
@@ -54,9 +58,9 @@ async function main() {
   registerAdmin(r, ctx, sys);
   registerAdminUi(r);
 
-  await mqtt.start(cfg.mqttPort);
-  await stream.start(cfg.streamPort);
-  await startDiscovery(cfg.discPort);
+  await listenOrExplain("MQTT", cfg.mqttPort, () => mqtt.start(cfg.mqttPort));
+  await listenOrExplain("直播", cfg.streamPort, () => stream.start(cfg.streamPort));
+  await listenOrExplain("UDP 发现", cfg.discPort, () => startDiscovery(cfg.discPort));
   ctx.reminders.start((text, dev) => ctx.sendPush(text, dev));
   sys.scheduler?.start(cfg.schedulerTick);
   sys.channels.startAll().catch((e) => console.log(`[channel] ⚠️  ${e.message}`));
@@ -64,15 +68,41 @@ async function main() {
   setInterval(() => ctx.cleanupPhotoResults(), 300_000).unref();
   setInterval(() => ctx.hb.watch(), 30_000).unref();
 
-  await r.listen(cfg.port);
+  await listenOrExplain("HTTP", cfg.port, () => r.listen(cfg.port));
   if (pi) console.log(`Agent : ${sys.registry.list().map((a) => a.id).join(", ")}（内置，默认模型 ${sys.models.defaultRef() || "未配置"}）`);
   else console.log(`Agent : ${cfg.openclaw.defaultAgent}（OpenClaw）`);
   console.log(`管理界面: http://127.0.0.1:${cfg.port}/admin（只限本机）`);
   console.log(`监听 0.0.0.0:${cfg.port}，Ctrl+C 退出`);
   console.log(`监控网页: http://<本机IP>:${cfg.port}/monitor\n`);
+  maybeOpenAdmin(cfg, !sys.models.defaultRef());
 }
 
-main().catch((e) => {
-  console.error("启动失败:", e);
-  process.exit(1);
-});
+/** 端口被占用时说人话（最常见：mosquitto 还开着、旧服务端没停、开了两个 Kagura） */
+async function listenOrExplain<T>(what: string, port: number, fn: () => Promise<T>): Promise<T> {
+  try { return await fn(); }
+  catch (e: any) {
+    if (e?.code === "EADDRINUSE") {
+      const hint = port === 1883 ? "多半是 mosquitto 还在运行（新服务端自带 MQTT broker），先停掉它" : "可能已经开着一个 Kagura 或旧的 voice_server.py";
+      throw new Error(`${what} 端口 ${port} 被占用：${hint}。也可以在 config.json 里改端口。`);
+    }
+    throw e;
+  }
+}
+
+/** 首次运行（在终端/桌面双击启动、还没配模型）自动打开管理界面的首次设置向导 */
+function maybeOpenAdmin(cfg: ReturnType<typeof loadConfig>, setupNeeded: boolean) {
+  const marker = path.join(cfg.dataDir, ".welcomed");
+  if (cfg.fakeProviders || process.argv.includes("--no-browser") || !process.stdout.isTTY || fs.existsSync(marker)) return;
+  try { fs.writeFileSync(marker, new Date().toISOString()); } catch { return; }
+  const url = `http://127.0.0.1:${cfg.port}/admin${setupNeeded ? "#/settings/wizard" : ""}`;
+  const [bin, args] = process.platform === "win32" ? ["cmd", ["/c", "start", "", url]] : process.platform === "darwin" ? ["open", [url]] : ["xdg-open", [url]];
+  execFile(bin, args as string[], () => {});
+  console.log(`已在浏览器打开 ${url}`);
+}
+
+runCli(process.argv.slice(2))
+  .then((handled) => (handled ? undefined : main()))
+  .catch((e) => {
+    console.error("启动失败:", e?.message ?? e);
+    process.exit(1);
+  });

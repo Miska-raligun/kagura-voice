@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Kagura 管理界面
+Comment=打开 Kagura 语音服务端的本机管理界面
+Exec=xdg-open http://127.0.0.1:5000/admin
+Icon=kagura
+Terminal=false
+Categories=Utility;

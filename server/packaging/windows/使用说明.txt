@@ -1,0 +1,32 @@
+﻿Kagura 语音服务端 —— 使用说明
+================================
+
+1. 启动
+   开始菜单「Kagura 服务端」。第一次启动会自动打开浏览器里的管理界面：
+       http://127.0.0.1:5000/admin
+   在「设置 → 首次设置」里填一个模型服务商（接口地址、模型名、API Key），再到「语音与设备」填百度语音的 Key。
+   管理界面只能在这台电脑上打开，局域网其它设备访问会被拒绝。
+
+2. 让设备连上来
+   设备（CoreS3）开机会在局域网里自动找服务端（UDP 5001），不用填 IP。
+   连不上时检查：
+   - 安装时勾选了「允许局域网里的设备连接」（Windows 防火墙规则名 Kagura）；
+   - 设备和电脑在同一个 WiFi / 局域网；
+   - 没有别的程序占用 1883 端口（例如 mosquitto，新服务端自带 MQTT，不需要它）。
+
+3. 数据在哪
+   %APPDATA%\Kagura —— 配置 config.json、agent 人设与记忆（agents\）、对话、定时任务、渠道配置都在这里。
+   备份就拷这个目录。卸载不会删除它。
+
+4. 从旧版迁移
+   - 旧的 Python 服务端：在命令行运行
+       "C:\Program Files\Kagura\kagura.exe" migrate D:\kagura-voice
+     （参数是 voice_server.py 所在目录；会迁移 config.py、提醒、定时拍照、快照、语音缓存）
+   - OpenClaw：管理界面「定时任务 → 从 OpenClaw 导入」，或命令行 kagura.exe import-openclaw
+
+5. 开机自启
+   安装时勾选「开机自动启动」会在启动文件夹放一个最小化运行的快捷方式。
+   不想要了：Win+R 输入 shell:startup，删掉里面的 Kagura。
+
+6. 杀毒软件 / SmartScreen 提示
+   安装包暂时没有代码签名，Windows 可能提示「未知发布者」：点「更多信息 → 仍要运行」。

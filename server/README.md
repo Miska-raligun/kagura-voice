@@ -4,6 +4,25 @@
 设备端固件**不用改**。大脑二选一：**内置 agent 系统**（基于 pi，M3–M6）或 OpenClaw CLI 适配器。
 完整计划见 `docs/plan-kagura-agent.md`。
 
+## 安装（推荐）
+
+GitHub Releases 下载对应安装包（打 `v*` tag 时由 `.github/workflows/release.yml` 自动构建，
+构建时会在 CI 上真的装一遍、对装好的程序跑完整契约测试再卸载）：
+
+| 系统 | 文件 | 装完 |
+|---|---|---|
+| Windows 10/11 | `Kagura-Setup-x.y.z.exe` | 自动加防火墙规则（程序级、所有网络类型）、可选开机自启；装完启动并打开管理界面 |
+| Debian/Ubuntu | `kagura_x.y.z_amd64.deb` | `systemctl --user enable --now kagura`（数据 `~/.local/share/kagura`） |
+| 其它 Linux | `Kagura-x.y.z-x86_64.AppImage` | 终端里运行即可 |
+| 设备固件 | `kagura-device-x.y.z.zip` | 按包内「烧录说明.md」上传 |
+
+命令行：`kagura --version`、`kagura migrate <旧版目录>`（迁移 Python 版配置/提醒/定时拍照/快照/TTS 缓存）、
+`kagura import-openclaw [目录]`、`kagura --no-browser`。首次在终端或桌面启动、还没配模型时会自动打开管理界面的设置向导。
+端口被占用会直接告诉你是谁（1883 → 多半是 mosquitto）。
+
+本地打包：`node scripts/make-icon.mjs && bash packaging/linux/build.sh 0.1.0`（Windows 用 Inno Setup 编译
+`packaging/windows/kagura.iss`）；固件包 `python3 tools/pack_device.py 0.1.0 server/dist`。
+
 ## 端口
 
 | 端口 | 用途 | 覆盖 |
