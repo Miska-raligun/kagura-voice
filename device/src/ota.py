@@ -79,7 +79,7 @@ def _save_state():
 def _publish_info():
     """把同步状态交给心跳上报。"""
     st = _load_state()
-    info = {}
+    info = {"ota": 1}      # 能力标记：管理界面靠它区分「固件太旧、不认 sync 命令」和「还没同步过」
     for k_src, k_dst in (("code", "fw"), ("res", "res"), ("ver", "fwv")):
         if st.get(k_src):
             info[k_dst] = st[k_src]
@@ -292,25 +292,28 @@ def _main_has_guard():
         return False
 
 
-def _confirm(n_files, ver):
-    """屏幕上问一句。返回 True = 用户点了「更新」。"""
+def _screen(cn_lines, en_lines, bg=0x101828):
+    """整屏写几行字（接管屏幕前先作废 draw_state 的缓存）。返回是否有中文字体。"""
     ui._ui_invalidate()
-    bg = 0x101828
     Lcd.fillScreen(bg)
     cn = ui._FONT_CN
     Lcd.setFont(cn or ui._FONT_16)
     Lcd.setTextColor(0xffffff, bg)
-    guard = _main_has_guard()
-    if cn:
-        lines = ["有新的设备代码", "{} 个文件  版本 {}".format(n_files, ver or "?"),
-                 "装完会自动重启" if guard else "注意：main.py 太旧，失败不能自动回滚"]
-    else:
-        lines = ["New device code", "{} files  v{}".format(n_files, ver or "?"),
-                 "Will reboot after install" if guard else "Old main.py: no auto rollback"]
     y = 30
-    for ln in lines:
+    for ln in (cn_lines if cn else en_lines):
         Lcd.drawString(ln, 16, y)
         y += 34
+    return cn
+
+
+def _confirm(n_files, ver):
+    """屏幕上问一句。返回 True = 用户点了「更新」。"""
+    bg = 0x101828
+    guard = _main_has_guard()
+    cn = _screen(["有新的设备代码", "{} 个文件  版本 {}".format(n_files, ver or "?"),
+                  "装完会自动重启" if guard else "注意：main.py 太旧，失败不能自动回滚"],
+                 ["New device code", "{} files  v{}".format(n_files, ver or "?"),
+                  "Will reboot after install" if guard else "Old main.py: no auto rollback"], bg)
     Lcd.fillRect(10, 170, 145, 60, 0x1f7a3a)
     Lcd.fillRect(165, 170, 145, 60, 0x5a5a5a)
     Lcd.setTextColor(0xffffff, 0x1f7a3a)
@@ -354,12 +357,16 @@ def _sync_code(entries, rev, ver):
         st["code"] = rev
         st["ver"] = ver
         return 0, 0, ""
-    # 1. 全部下载、校验成 .new —— 任何一个失败就全部作废，绝不装半套
+    # 1. 全部下载、校验成 .new —— 任何一个失败就全部作废，绝不装半套。
+    #    十几个文件要下好一会儿，先告诉用户在干什么（不然点了「更新设备代码」设备上像没反应）
+    _screen(["正在下载新的设备代码", "{} 个文件，稍等……".format(len(todo) + len(gone))],
+            ["Downloading new code", "{} files...".format(len(todo) + len(gone))])
     for e in todo:
         err = _download(e["p"], e["n"], e["h"], _abs(e["p"]) + ".new")
         if err:
             for x in todo:
                 _remove(_abs(x["p"]) + ".new")
+            ui.draw_state("idle", force=True)
             return 0, 0, "{}: {}".format(e["p"], err)
         gc.collect()
     # 2. 用户确认

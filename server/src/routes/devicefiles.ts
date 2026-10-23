@@ -14,6 +14,9 @@ const RES_SYNC_DEBOUNCE_MS = 1500;
 
 export interface SyncResult { scope: string; ok: boolean; changed: number; removed: number; error: string; ts: number }
 
+/** 设备固件认不认 sync 命令：带 ota 同步模块的固件心跳里有 ota/fw/res 字段（旧固件收到命令直接忽略） */
+export const otaCapable = (hb: Record<string, any>) => hb.ota === 1 || "fw" in hb || "res" in hb;
+
 export function registerDeviceFiles(r: Router, ctx: Ctx, files: DeviceFiles) {
   const results = new Map<string, SyncResult>();
   let resTimer: NodeJS.Timeout | null = null;
@@ -73,7 +76,7 @@ export function registerDeviceFiles(r: Router, ctx: Ctx, files: DeviceFiles) {
       slots: IMAGE_SLOTS,
       roles: ctx.roles.all().map((ro) => ({ id: ro.id, name: ro.name })),
       devices: [...ctx.hb.devices.entries()].map(([id, rec]) => ({
-        id, online: t - rec.ts < 200,
+        id, online: t - rec.ts < 200, ota_capable: otaCapable(rec.data),
         code_rev: rec.data.fw ?? null, res_rev: rec.data.res ?? null, fw_version: rec.data.fwv ?? null,
         last_sync: results.get(id) ?? null,
       })),
@@ -111,9 +114,17 @@ export function registerDeviceFiles(r: Router, ctx: Ctx, files: DeviceFiles) {
     const d = req.json() ?? {};
     if (!ctx.mqtt.ok) return json({ error: "MQTT 不可用" }, 503);
     const dev = d.device ? validateDeviceId(d.device) : "";
-    const sent = sendSync(scopeOf(d.scope, "res"), dev);
-    if (!sent.length) return json({ error: "还没有设备连上来过" }, 404);
-    for (const x of sent) results.delete(x);
-    return json({ sent });
+    const scope = scopeOf(d.scope, "res");
+    const t = now();
+    const known = dev ? [dev] : [...ctx.hb.devices.keys()];
+    if (!known.length) return json({ error: "还没有设备连上来过" }, 404);
+    const info = (id: string) => ctx.hb.devices.get(id);
+    const unsupported = known.filter((id) => info(id) && !otaCapable(info(id)!.data));
+    const offline = known.filter((id) => !unsupported.includes(id) && (!info(id) || t - info(id)!.ts >= 200));
+    const want = files.manifest("code").rev;
+    const upToDate = scope === "code" ? known.filter((id) => info(id)?.data.fw === want) : [];
+    const targets = known.filter((id) => !unsupported.includes(id) && !offline.includes(id) && !upToDate.includes(id));
+    for (const x of targets) { results.delete(x); sendSync(scope, x); }
+    return json({ sent: targets, unsupported, offline, up_to_date: upToDate });
   }));
 }

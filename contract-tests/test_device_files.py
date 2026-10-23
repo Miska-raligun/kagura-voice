@@ -58,7 +58,7 @@ def test_upload_image_syncs_device(srv):
 def test_code_override_and_manual_sync(srv):
     d = Device(srv, "files2")
     try:
-        srv.post("/heartbeat", json={"device_id": "files2"})
+        srv.post("/heartbeat", json={"device_id": "files2", "ota": 1})
         before = srv.get("/device/files?scope=code").json()["rev"]
         assert _put(srv, "src/app.py", b"print('mine')\n").status_code == 200
         assert srv.get("/device/file?p=src/app.py").content == b"print('mine')\n"
@@ -80,3 +80,21 @@ def test_rejects_bad_paths_and_content(srv):
     assert _put(srv, "src/../../x.py", b"x").status_code == 400
     assert _put(srv, "resource/img_bg.jpg", b"\x89PNG not jpeg").status_code == 400
     assert _put(srv, "main.py", b"x").status_code == 400
+
+
+def test_old_firmware_flagged_not_synced(srv):
+    """旧固件（心跳里没有 ota 标记）不认 sync 命令：不发，明确告诉用户要先用 USB 刷一次。"""
+    d = Device(srv, "files3")
+    try:
+        srv.post("/heartbeat", json={"device_id": "files3"})
+        r = srv.post("/api/admin/device-files/sync", json={"scope": "code", "device": "files3"}).json()
+        assert r["sent"] == [] and r["unsupported"] == ["files3"]
+        st = srv.get("/api/admin/device-files").json()
+        assert next(x for x in st["devices"] if x["id"] == "files3")["ota_capable"] is False
+        # 已经是最新的不再打扰
+        rev = srv.get("/device/files?scope=code").json()["rev"]
+        srv.post("/heartbeat", json={"device_id": "files3", "ota": 1, "fw": rev})
+        r = srv.post("/api/admin/device-files/sync", json={"scope": "code", "device": "files3"}).json()
+        assert r["sent"] == [] and r["up_to_date"] == ["files3"]
+    finally:
+        d.close()

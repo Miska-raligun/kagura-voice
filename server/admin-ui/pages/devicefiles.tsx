@@ -52,10 +52,16 @@ export function DeviceFiles() {
   const sync = async (scope: string) => {
     try {
       const r = await api("/device-files/sync", { body: { scope } });
-      toast(scope === "code" ? `已通知 ${r.sent.join("、")}：请在设备屏幕上点「更新」` : `已通知 ${r.sent.join("、")} 同步`);
+      const msgs: string[] = [];
+      if (r.sent.length) msgs.push(scope === "code" ? `已通知 ${r.sent.join("、")}：设备会先下载，再在屏幕上问你要不要更新` : `已通知 ${r.sent.join("、")} 同步图片`);
+      if (r.up_to_date.length) msgs.push(`${r.up_to_date.join("、")} 的代码已经是最新`);
+      if (r.offline.length) msgs.push(`${r.offline.join("、")} 不在线`);
+      if (r.unsupported.length) msgs.push(`${r.unsupported.join("、")} 的固件太旧，还不认在线更新：先用 USB 把固件包里 src 的 .py 全部传一遍`);
+      toast(msgs.join("；"), r.sent.length ? "ok" : "err");
       reload();
     } catch (e) { toastErr(e); }
   };
+
   const resPath = (base: string, r = role) => `resource/${r ? r + "/" : ""}${base}.jpg`;
   const code = d.files.filter((f: any) => f.p.startsWith("src/"));
 
@@ -70,13 +76,15 @@ export function DeviceFiles() {
           <tbody>{d.devices.map((x: any) => (
             <tr>
               <td>{x.id} {!x.online && <Badge s="stopped" text="离线" />}</td>
-              <td><RevBadge dev={x.res_rev} want={d.res_rev} /></td>
-              <td><RevBadge dev={x.code_rev} want={d.code_rev} unknown="未知（手动烧录）" />{x.fw_version && <small class="muted"> {x.fw_version}</small>}</td>
+              <td>{x.ota_capable ? <RevBadge dev={x.res_rev} want={d.res_rev} /> : <Badge s="error" text="固件太旧，不支持" />}</td>
+              <td>{x.ota_capable ? <RevBadge dev={x.code_rev} want={d.code_rev} unknown="未知（手动烧录）" /> : <Badge s="error" text="先用 USB 刷一次" />}{x.fw_version && <small class="muted"> {x.fw_version}</small>}</td>
               <td>{x.last_sync ? <>{x.last_sync.ok ? <Badge s="ok" text="成功" /> : <Badge s="error" text="失败" />}{" "}
                 <small class="muted">{x.last_sync.ok ? `更新 ${x.last_sync.changed}、删除 ${x.last_sync.removed}` : x.last_sync.error} · {ago(Date.now() / 1000 - x.last_sync.ts)}</small></> : "—"}</td>
             </tr>))}</tbody></table> : <Empty>还没收到设备心跳。</Empty>}
         <p class="muted">图片传上去就会自动同步（设备离线的话下次开机补上）。代码更新要在设备屏幕上点「更新」，装完自动重启；
           新代码起不来会自动换回旧的（需要设备上的 /flash/main.py 是新版，固件包里有）。</p>
+        {d.devices.some((x: any) => !x.ota_capable) && <p class="over">标「固件太旧」的设备还不认在线更新：用 USB 把固件包（0.1.0-beta.2 及以后）里
+          <code>flash/main.py</code> 和 <code>flash/kagura/src/</code> 下的全部 .py 传一遍，重启后就能在这里更新了。</p>}
       </Card>
 
       <Card title="角色图片" actions={<Select value={role} onChange={setRole}
