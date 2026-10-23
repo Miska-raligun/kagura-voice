@@ -101,12 +101,14 @@ export function registerChat(r: Router, ctx: Ctx) {
         const prev = ctx.state.popLastQuick(sid);
         if (prev) llmText = `[背景：用户刚才问「${prev[0]}」，快捷指令已回复「${prev[1]}」]\n${userText}`;
         llmText = withTouch(llmText, req.header("X-Touch"));
-        reply = await ctx.brain.chat({ message: llmText, sessionId: sid, localTime, agent: role.agent });
+        const meta: { needPhoto?: boolean; volume?: string } = {};
+        reply = await ctx.brain.chat({ message: llmText, sessionId: sid, localTime, agent: role.agent, deviceId: dev, spoken: true, meta });
         if (reply.startsWith("[PHOTO]")) {
-          needPhoto = true;
+          meta.needPhoto = true;
           reply = reply.slice("[PHOTO]".length).trim();
-          console.log(`[${dev}] 📷  大脑请求拍照，返回 X-Need-Photo: 1`);
         }
+        if (meta.needPhoto) { needPhoto = true; console.log(`[${dev}] 📷  大脑请求拍照，返回 X-Need-Photo: 1`); }
+        if (meta.volume) { extra["X-Volume"] = meta.volume; console.log(`[${dev}] 🔊  [volume/tool] ${meta.volume}`); }
       }
       console.log(`[${dev}] 💬  ${preview(reply)}`);
 
@@ -159,7 +161,7 @@ export function registerChat(r: Router, ctx: Ctx) {
       const tAsr = now();
       console.log(`[${dev}] 🗣️  ${userText}`);
       const imagePath = imageB64 ? ctx.decodeImageB64(imageB64, dev, "vision") : null;
-      const reply = await ctx.brain.chat({ message: withTouch(userText, req.header("X-Touch")), sessionId: sid, imagePath, localTime, agent: role.agent });
+      const reply = await ctx.brain.chat({ message: withTouch(userText, req.header("X-Touch")), sessionId: sid, imagePath, localTime, agent: role.agent, deviceId: dev, spoken: true });
       console.log(`[${dev}] 💬  ${preview(reply)}`);
       const tLlm = now();
       const wavOut = await ctx.voice.synthesize(reply, role.per);

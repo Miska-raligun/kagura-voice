@@ -90,7 +90,7 @@ export function registerDevice(r: Router, ctx: Ctx) {
     const dev = validateDeviceId(data.device_id ?? "cores3");
     const status = data.status;
     if (status !== "home" && status !== "away") return json({ error: "status must be 'home' or 'away'" }, 400);
-    // 写 OpenClaw workspace 状态文件，供 agent 读取（M3 起改为直接注入内置 agent 的上下文）
+    // 写 OpenClaw workspace 状态文件供 OpenClaw agent 读取；内置 agent 每轮直接带上 ctx.presence
     const tmp = ctx.dirs.visionTmp;
     const ts = strftime("%Y-%m-%dT%H:%M:%S+08:00");
     try {
@@ -99,6 +99,7 @@ export function registerDevice(r: Router, ctx: Ctx) {
         at_home: status === "home", last_updated: ts, last_action: status === "home" ? "ble_detected_home" : "ble_detected_away",
       }));
     } catch (e: any) { console.log(`[presence] 写状态文件失败: ${e.message}`); }
+    ctx.presence = { status, ts, dev };
     console.log(`[presence] ${dev} → ${status} @ ${ts}`);
     return json({ status: "ok" });
   });
@@ -160,14 +161,17 @@ export function registerDevice(r: Router, ctx: Ctx) {
     return file(p, "audio/wav", { "Cache-Control": "no-cache" });
   });
 
-  // ── 摇一摇 / 触摸：立即返回，后台问大脑（agent 用 cores3-speak 推送语音）──
+  // ── 摇一摇 / 触摸：立即返回，后台问大脑 ──
+  // OpenClaw：agent 自己用 cores3-speak 推送语音；内置 agent：回复由服务端推送播报（spoken）
+  const pi = () => ctx.brain.kind === "pi";
   const background = (dev: string, label: string, prompt: string, localTime: string) => {
     const [role, sid] = ctx.roleCtx(dev);
     (async () => {
       for (const attempt of [1, 2]) {   // CLI 偶发瞬态失败（升级迁移、gateway 忙等），重试一次
         try {
-          const reply = await ctx.brain.chat({ message: prompt, sessionId: sid, localTime, agent: role.agent });
+          const reply = await ctx.brain.chat({ message: prompt, sessionId: sid, localTime, agent: role.agent, deviceId: dev, spoken: pi() });
           console.log(`[${dev}] ${label} → ${preview(reply)}`);
+          if (pi() && reply && !/^(NO_REPLY|HEARTBEAT_OK)$/.test(reply.trim())) await ctx.sendPush(reply, dev);
           return;
         } catch (e: any) {
           console.log(`[${dev}] ⚠️  ${label} 错误(第${attempt}次): ${e.message}`);
@@ -176,14 +180,18 @@ export function registerDevice(r: Router, ctx: Ctx) {
       }
     })();
   };
+  const SPEAK_REQ_OC = (what: string) => `你必须用 cores3-speak skill 把${what}说出来，这是硬性要求：纯文字她根本听不到。`;
 
   r.get("/shake", (req) => {
     const dev = validateDeviceId(req.header("X-Device-Id"));
     if (!ctx.state.checkRate(dev)) return json({ error: "请求过于频繁，请稍后再试" }, 429);
-    background(dev, "🫨  shake", "用户摇了摇你——她现在就在你面前的 Cores3 设备旁。"
-      + "你必须用 cores3-speak skill 把语音说出来，跟她随便聊几句。"
-      + "这是硬性要求：收到摇一摇必须用 Cores3 语音回复，"
-      + "不要只回文字（纯文字她根本听不到）。", req.header("X-Local-Time"));
+    const prompt = pi()
+      ? "[设备事件] 主人摇了摇你——她现在就在你面前的设备旁。跟她随便聊几句（你的回复会直接播出来）。"
+      : "用户摇了摇你——她现在就在你面前的 Cores3 设备旁。"
+        + "你必须用 cores3-speak skill 把语音说出来，跟她随便聊几句。"
+        + "这是硬性要求：收到摇一摇必须用 Cores3 语音回复，"
+        + "不要只回文字（纯文字她根本听不到）。";
+    background(dev, "🫨  shake", prompt, req.header("X-Local-Time"));
     return json({ status: "ok" });
   });
 
@@ -196,11 +204,10 @@ export function registerDevice(r: Router, ctx: Ctx) {
     if (!desc) return json({ error: "unknown touch kind" }, 400);
     const detail = touchPhrases(req.header("X-Touch-Detail"));
     const extra = detail.length ? "（" + detail.join("；") + "）" : "";
-    background(dev, `🖐️  touch/${kind}`, `${desc}${extra}。她现在就在你面前的 CoreS3 设备旁。`
+    const body = `${desc}${extra}。她现在就在你面前的 CoreS3 设备旁。`
       + "这是身体接触，不是提问——用一句话回应被碰到的感觉就好，别开启新话题，"
-      + "也别追问她想干什么。"
-      + "你必须用 cores3-speak skill 把话说出来，"
-      + "这是硬性要求：纯文字她根本听不到。", req.header("X-Local-Time"));
+      + "也别追问她想干什么。";
+    background(dev, `🖐️  touch/${kind}`, pi() ? `[设备事件] ${body}（你的回复会直接播出来）` : body + SPEAK_REQ_OC("话"), req.header("X-Local-Time"));
     return json({ status: "ok" });
   });
 }

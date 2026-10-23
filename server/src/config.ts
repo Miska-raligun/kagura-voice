@@ -21,8 +21,38 @@ export interface Config {
   streamToken: string;
   roles: RoleDef[] | null;
   baidu: { asrKey: string; asrSecret: string; ttsKey: string; ttsSecret: string };
-  /** OpenClaw 适配器（M2 的大脑；M3 起可换 pi agent） */
+  /** OpenClaw 适配器（可选大脑，作者自用可继续接 OpenClaw） */
   openclaw: { bin: string; dir: string; defaultAgent: string };
+  /** 大脑：pi = 内置 agent 系统（M3 起），openclaw = 调 OpenClaw CLI */
+  brain: "pi" | "openclaw";
+  /** 模型服务商（全部由用户手动配置，不预设），见 server/README.md */
+  models: ModelsConfig;
+  /** 可选：嵌入接口（OpenAI 兼容 /embeddings），没配就只用关键词检索 */
+  embedding: { baseUrl: string; apiKey: string; model: string } | null;
+  runtime: { maxConcurrency: number; timeoutSecs: number };
+  a2a: { enabled: boolean; maxHops: number; perPairPerMin: number };
+  /** 调度器 tick 间隔（秒）。测试里调小 */
+  schedulerTick: number;
+}
+
+export interface ModelDef {
+  id: string; name?: string; input?: ("text" | "image")[]; reasoning?: boolean;
+  context_window?: number; max_tokens?: number;
+  cost?: { input?: number; output?: number; cache_read?: number; cache_write?: number };
+}
+export interface ProviderDef {
+  id: string; name?: string;
+  /** openai-completions（DeepSeek/通义/Kimi/智谱/本地 Ollama 等 OpenAI 兼容接口）| anthropic-messages | openai-responses | google-generative-ai */
+  api: string;
+  base_url: string; api_key?: string; headers?: Record<string, string>;
+  models: ModelDef[];
+}
+export interface ModelsConfig {
+  providers: ProviderDef[];
+  /** 默认模型 "provider/model"；agent.json 可覆盖 */
+  default: string;
+  /** 压缩、记忆冲刷、heartbeat 用的便宜模型；不填就用默认模型 */
+  cheap: string;
 }
 
 /** 各系统的应用数据目录（安装版默认位置）。 */
@@ -52,13 +82,25 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const baidu = file.baidu ?? {};
   const oc = file.openclaw ?? {};
   const home = os.homedir();
+  const m = file.models ?? {};
+  const models: ModelsConfig = {
+    providers: Array.isArray(m.providers) ? m.providers : [],
+    default: String(m.default ?? ""),
+    cheap: String(m.cheap ?? ""),
+  };
+  const fake = env.KAGURA_FAKE_PROVIDERS === "1";
+  // 没写 brain 时：配了模型就用内置 agent，否则沿用 OpenClaw（老用户升级零配置）
+  const brain = (env.KAGURA_BRAIN || file.brain || (models.providers.length ? "pi" : "openclaw")) === "pi" ? "pi" : "openclaw";
+  const emb = file.embedding;
+  const rt = file.runtime ?? {};
+  const a2a = file.a2a ?? {};
   return {
     dataDir,
     port: int(env.KAGURA_PORT, file.port ?? 5000),
     mqttPort: int(env.KAGURA_MQTT_PORT, file.mqtt_port ?? 1883),
     streamPort: int(env.KAGURA_STREAM_PORT, file.stream_port ?? 5002),
     discPort: int(env.KAGURA_DISC_PORT, file.disc_port ?? 5001),
-    fakeProviders: env.KAGURA_FAKE_PROVIDERS === "1",
+    fakeProviders: fake,
     apiToken: String(file.api_token ?? ""),
     streamToken: String(file.stream_token ?? ""),
     roles: Array.isArray(file.roles) ? file.roles : null,
@@ -71,6 +113,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       dir: env.KAGURA_OPENCLAW_DIR || oc.dir || path.join(home, ".openclaw"),
       defaultAgent: oc.default_agent ?? "main",
     },
+    brain,
+    models,
+    embedding: emb && emb.base_url && emb.model ? { baseUrl: String(emb.base_url), apiKey: String(emb.api_key ?? ""), model: String(emb.model) } : null,
+    runtime: { maxConcurrency: Number(rt.max_concurrency ?? 4), timeoutSecs: Number(rt.timeout_secs ?? 120) },
+    a2a: { enabled: a2a.enabled ?? true, maxHops: Number(a2a.max_hops ?? 3), perPairPerMin: Number(a2a.per_pair_per_min ?? 10) },
+    schedulerTick: Number(env.KAGURA_SCHEDULER_TICK || file.scheduler_tick || 15),
   };
 }
 
@@ -88,8 +136,11 @@ export function dirs(cfg: Config) {
     debugAudio: d("debug_audio"),
     deviceLogs: d("device_logs"),
     crashReports: d("crash_reports"),
-    // 照片临时目录：OpenClaw 要按路径读图，所以沿用它的 workspace/tmp
-    visionTmp: (() => { const p = path.join(cfg.openclaw.dir, "workspace", "tmp"); fs.mkdirSync(p, { recursive: true }); return p; })(),
+    // 照片临时目录：OpenClaw 要按路径读图，所以沿用它的 workspace/tmp；内置 agent 直接读文件，放数据目录
+    visionTmp: cfg.brain === "pi" ? d("tmp") : (() => { const p = path.join(cfg.openclaw.dir, "workspace", "tmp"); fs.mkdirSync(p, { recursive: true }); return p; })(),
+    agents: d("agents"),
+    skills: d("skills"),
+    systemDb: path.join(cfg.dataDir, "system.sqlite"),
     remindersFile: path.join(cfg.dataDir, "reminders.json"),
     schedulesFile: path.join(cfg.dataDir, "photo_schedules.json"),
     rolesFile: path.join(cfg.dataDir, "roles_state.json"),

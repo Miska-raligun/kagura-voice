@@ -16,6 +16,7 @@ class Semaphore {
 }
 
 export class OpenClawBrain implements Brain {
+  readonly kind = "openclaw";
   private sem = new Semaphore(2);
   private sessionTails = new Map<string, Promise<unknown>>();
   constructor(private bin: string) {}

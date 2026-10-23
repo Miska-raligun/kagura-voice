@@ -10,14 +10,16 @@ import { json, type Router } from "./http/router.ts";
 import type { Voice } from "./voice/types.ts";
 import type { Brain, ChatRequest } from "./brain/types.ts";
 import type { ServerState } from "./state.ts";
+import type { FakeLlm, FakeStep } from "./agent/models.ts";
 
 const DEFAULT_ASR = "你好";
 const DEFAULT_LLM = "好的。";
 const BYTES_PER_CHAR = 1600;      // 每个字 50ms 的静音
 
-export class FakeProviders implements Voice, Brain {
+export class FakeProviders implements Voice, Brain, FakeLlm {
+  readonly kind = "fake";
   asrQueue: string[] = [];
-  llmQueue: (string | { error: string })[] = [];
+  llmQueue: FakeStep[] = [];
   log = { asr: 0, llm: [] as any[], tts: [] as any[] };
   constructor(private ttsDir: string) {}
 
@@ -28,11 +30,16 @@ export class FakeProviders implements Voice, Brain {
     return this.asrQueue.length ? this.asrQueue.shift()! : DEFAULT_ASR;
   }
 
+  // ── 内置 agent 模式（KAGURA_BRAIN=pi）：假模型从同一个队列取脚本，日志格式不变 ──
+  nextStep(): FakeStep { return this.llmQueue.length ? this.llmQueue.shift()! : DEFAULT_LLM; }
+  logCall(e: Record<string, any>) { this.log.llm.push(e); }
+
   async chat(req: ChatRequest): Promise<string> {
     this.log.llm.push({ message: req.message, session: req.sessionId, agent: req.agent, image: !!req.imagePath, local_time: req.localTime || "" });
     const item = this.llmQueue.length ? this.llmQueue.shift()! : DEFAULT_LLM;
     if (typeof item === "object" && "error" in item) throw new Error(item.error);
-    return item as string;
+    if (typeof item === "object") return item.text ?? "";
+    return item;
   }
 
   async synthesize(text: string, per = 111): Promise<string | null> {

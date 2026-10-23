@@ -2,7 +2,7 @@
 // 对应 voice_server.py 里不属于某一个路由的那些函数。
 import fs from "node:fs";
 import path from "node:path";
-import type { Config, Dirs } from "./config.ts";
+import type { Config, Dirs, RoleDef } from "./config.ts";
 import type { Req } from "./http/router.ts";
 import type { Voice } from "./voice/types.ts";
 import type { Brain } from "./brain/types.ts";
@@ -51,11 +51,16 @@ export class Ctx {
   reminders: Reminders;
   schedules: PhotoSchedules;
 
+  /** 最近一次在家状态（BLE 上报），内置 agent 每轮带上 */
+  presence: { status: string; ts: string; dev: string } | null = null;
+
   constructor(
     public cfg: Config, public dirs: Dirs, public voice: Voice, public brain: Brain,
     public mqtt: MqttHub, public stream: StreamHub,
+    /** 内置 agent 模式下角色表来自 agent 注册表；OpenClaw 模式来自 config.roles */
+    roleDefs: RoleDef[] | null = cfg.roles,
   ) {
-    this.roles = new Roles(cfg.roles, dirs.rolesFile);
+    this.roles = new Roles(roleDefs, dirs.rolesFile);
     this.hb = new Heartbeats(dirs.deviceLogs);
     this.reminders = new Reminders(dirs.remindersFile);
     this.schedules = new PhotoSchedules(dirs.schedulesFile);
@@ -76,9 +81,10 @@ export class Ctx {
   // ── 推送 ──
 
   /** TTS 合成 → 存盘 → MQTT 通知设备下载播放 */
-  async sendPush(text: string, dev: string): Promise<boolean> {
+  async sendPush(text: string, dev: string, per?: number): Promise<boolean> {
     if (!this.mqtt.ok) return false;
-    const wav = await this.voice.synthesize(text, this.roles.get(dev).per);   // 用设备当前角色的音色
+    // 默认用设备当前角色的音色；agent 主动 speak 时传它自己的音色
+    const wav = await this.voice.synthesize(text, per ?? this.roles.get(dev).per);
     if (!wav) return false;
     const fname = `${hex(8)}.wav`;
     fs.copyFileSync(wav, path.join(this.dirs.pushAudio, fname));
@@ -207,7 +213,9 @@ export class Ctx {
     const result: Record<string, any> = { ts: started, ok: false, error: null, reply: "", snapshot: null, spoken: false, device_id: dev };
     try {
       const [role, sid] = this.roleCtx(dev);
-      const reply = await this.brain.chat({ message: prompt + SPEAK_HINT, sessionId: sid, imagePath, localTime: strftime("%Y-%m-%d %H:%M"), agent: role.agent });
+      // OpenClaw 要靠提示词拦住 cores3-speak；内置 agent 知道这轮回复会被播报（spoken），不需要
+      const hint = this.brain.kind === "pi" ? "" : SPEAK_HINT;
+      const reply = await this.brain.chat({ message: prompt + hint, sessionId: sid, imagePath, localTime: strftime("%Y-%m-%d %H:%M"), agent: role.agent, deviceId: dev, spoken: true });
       console.log(`[snapshot] 👁  ${label || "手动"} 识别: ${preview(reply)}`);
       result.reply = reply;
       result.ok = true;
@@ -238,6 +246,11 @@ export class Ctx {
       };
     }
     return this.describeAndSpeak(img!, dev, prompt, label, started);
+  }
+
+  presenceText(): string {
+    if (!this.presence) return "";
+    return `${this.presence.status === "home" ? "在家" : "不在家"}（${this.presence.ts.slice(5, 16).replace("T", " ")} 起）`;
   }
 
   /** 一行分阶段耗时；超过设备超时就明确告警 */

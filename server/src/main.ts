@@ -8,6 +8,8 @@ import { Ctx } from "./ctx.ts";
 import { BaiduVoice } from "./voice/baidu.ts";
 import { OpenClawBrain } from "./brain/openclaw.ts";
 import { FakeProviders } from "./fake.ts";
+import { PiBrain } from "./brain/pi.ts";
+import { createAgentSystem, attachAgentSystem } from "./agent/system.ts";
 import { rgb565ToJpeg } from "./util/image.ts";
 import { registerChat } from "./routes/chat.ts";
 import { registerDevice } from "./routes/device.ts";
@@ -22,11 +24,14 @@ async function main() {
   const fake = cfg.fakeProviders ? new FakeProviders(dirs.ttsCache) : null;
   const baidu = fake ? null : new BaiduVoice(cfg.baidu, dirs.ttsCache);
   const voice = fake ?? baidu!;
-  const brain = fake ?? new OpenClawBrain(cfg.openclaw.bin);
+  // 大脑：内置 agent（pi）或 OpenClaw CLI；假服务商模式下 OpenClaw 位置换成脚本假大脑
+  const sys = cfg.brain === "pi" ? createAgentSystem(cfg, dirs, fake) : null;
+  const brain = sys ? new PiBrain(sys.runtime) : (fake ?? new OpenClawBrain(cfg.openclaw.bin));
   const mqtt = new MqttHub();
   // 直播帧质量压到 70：单帧小一半，肉眼几乎看不出差别
   const stream = new StreamHub((raw) => rgb565ToJpeg(raw, 70), cfg.streamToken);
-  const ctx = new Ctx(cfg, dirs, voice, brain, mqtt, stream);
+  const ctx = new Ctx(cfg, dirs, voice, brain, mqtt, stream, sys ? sys.registry.roleDefs() : cfg.roles);
+  if (sys) attachAgentSystem(sys, ctx);
 
   console.log("=".repeat(50));
   console.log("  Kagura 语音服务端" + (fake ? "（假服务商模式）" : ""));
@@ -52,7 +57,8 @@ async function main() {
   setInterval(() => ctx.hb.watch(), 30_000).unref();
 
   await r.listen(cfg.port);
-  console.log(`Agent : ${cfg.openclaw.defaultAgent}（OpenClaw）`);
+  if (sys) console.log(`Agent : ${sys.registry.list().map((a) => a.id).join(", ")}（内置，默认模型 ${sys.models.defaultRef() || "未配置"}）`);
+  else console.log(`Agent : ${cfg.openclaw.defaultAgent}（OpenClaw）`);
   console.log(`监听 0.0.0.0:${cfg.port}，Ctrl+C 退出`);
   console.log(`监控网页: http://<本机IP>:${cfg.port}/monitor\n`);
 }
