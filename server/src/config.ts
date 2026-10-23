@@ -43,6 +43,8 @@ export interface Config {
   a2a: { enabled: boolean; maxHops: number; perPairPerMin: number };
   /** 调度器 tick 间隔（秒）。测试里调小 */
   schedulerTick: number;
+  /** 人设文件注入上限覆盖（见 agent/soul.ts 的 DEFAULT_BUDGETS） */
+  promptBudgets: Record<string, number>;
 }
 
 export interface ModelDef {
@@ -130,6 +132,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     embedding: emb && emb.base_url && emb.model ? { baseUrl: String(emb.base_url), apiKey: String(emb.api_key ?? ""), model: String(emb.model) } : null,
     runtime: { maxConcurrency: Number(rt.max_concurrency ?? 4), timeoutSecs: Number(rt.timeout_secs ?? 120) },
     a2a: { enabled: a2a.enabled ?? true, maxHops: Number(a2a.max_hops ?? 3), perPairPerMin: Number(a2a.per_pair_per_min ?? 10) },
+    promptBudgets: file.prompt_budgets && typeof file.prompt_budgets === "object" ? file.prompt_budgets : {},
     schedulerTick: Number(env.KAGURA_SCHEDULER_TICK || file.scheduler_tick || 15),
   };
 }

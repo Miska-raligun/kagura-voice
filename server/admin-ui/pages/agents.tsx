@@ -1,7 +1,7 @@
 // Agents：新建/复制/删除；基本信息、人设文件（带字数预算）、工具与技能白名单、heartbeat、通信权限
 import { useEffect, useState } from "preact/hooks";
 import { api, chars, enc, go } from "../api.ts";
-import { Btn, Card, Empty, Err, Field, Input, Select, Split, Tabs, TextArea, Toggle, confirmDo, toast, useLoad } from "../ui.tsx";
+import { Btn, Card, Empty, Err, Field, Input, Select, Split, Tabs, TextArea, Toggle, confirmDo, toast, toastErr, useLoad } from "../ui.tsx";
 
 type Tab = "basic" | "soul" | "tools" | "heartbeat" | "a2a";
 
@@ -108,7 +108,7 @@ const SOUL_DESC: Record<string, string> = {
   "MEMORY.md": "长期记忆（子任务不注入；也可以在「记忆」页编辑）",
 };
 
-export function FileEditor({ id, path, budget }: { id: string; path: string; budget?: number }) {
+export function FileEditor({ id, path, budget, budgets, onBudget }: { id: string; path: string; budget?: number; budgets?: Record<string, number>; onBudget?: () => void }) {
   const [text, setText] = useState<string | null>(null);
   const [orig, setOrig] = useState("");
   useEffect(() => { setText(null); api(`/agents/${enc(id)}/file?path=${enc(path)}`).then((r) => { setText(r.content); setOrig(r.content); }); }, [id, path]);
@@ -119,6 +119,12 @@ export function FileEditor({ id, path, budget }: { id: string; path: string; bud
       <TextArea value={text} onInput={setText} rows={18} mono />
       <div class="row">
         <span class={budget && n > budget ? "over" : "muted"}>{n} 字{budget ? ` / 注入上限 ${budget}（超出部分不会给模型看，文件本身不动）` : ""}</span>
+        {budget && budgets && <Btn small kind="ghost" title="所有 agent 的同名文件共用这个上限" onClick={async () => {
+          const v = window.prompt(`${path} 最多注入多少字？（所有 agent 共用；越大越费 token）`, String(budget));
+          const nb = Math.trunc(Number(v));
+          if (!v || !(nb > 0)) return;
+          try { await api("/config", { method: "PUT", body: { prompt_budgets: { ...budgets, [path]: nb } } }); toast(`注入上限改成 ${nb}，下一轮对话生效`); onBudget?.(); } catch (e) { toastErr(e); }
+        }}>改上限</Btn>}
         <span class="grow" />
         {text !== orig && <span class="muted">未保存</span>}
         <Btn kind="primary" disabled={text === orig} onClick={async () => { await api(`/agents/${enc(id)}/file?path=${enc(path)}`, { method: "PUT", body: { content: text } }); setOrig(text); toast("已保存，下一轮对话生效"); }}>保存</Btn>
@@ -128,14 +134,14 @@ export function FileEditor({ id, path, budget }: { id: string; path: string; bud
 }
 
 function SoulFiles({ id }: { id: string }) {
-  const [meta] = useLoad(() => api("/meta"));
+  const [meta, reloadMeta] = useLoad(() => api("/meta"));
   const [file, setFile] = useState("SOUL.md");
   const files: string[] = meta?.soul_files ?? Object.keys(SOUL_DESC);
   return (
     <Card>
       <Tabs value={file} onChange={setFile} tabs={files.map((f) => [f, f.replace(".md", "")] as [string, string])} />
       <p class="muted">{SOUL_DESC[file]}</p>
-      <FileEditor id={id} path={file} budget={meta?.budgets?.[file]} />
+      <FileEditor id={id} path={file} budget={meta?.budgets?.[file]} budgets={meta?.budgets} onBudget={reloadMeta} />
     </Card>
   );
 }

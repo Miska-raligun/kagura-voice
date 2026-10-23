@@ -1,4 +1,5 @@
 // 内置 agent 系统的装配：注册表 + 模型 + 运行时 + 各工具模块。main.ts 只调这里。
+import { applyBudgets } from "./soul.ts";
 import type { Config, Dirs } from "../config.ts";
 import type { Ctx } from "../ctx.ts";
 import { AgentRegistry } from "./registry.ts";
@@ -27,6 +28,7 @@ export interface AgentSystem {
 }
 
 export function createAgentSystem(cfg: Config, dirs: Dirs, fake: FakeLlm | null): AgentSystem {
+  applyBudgets(cfg.promptBudgets);
   const registry = new AgentRegistry(dirs.agents);
   registry.load(cfg.roles);
   // 假服务商模式：所有 agent 都用按脚本回复的假模型

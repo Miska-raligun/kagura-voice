@@ -7,7 +7,7 @@ import { json, type Req, type Res, type Router } from "../http/router.ts";
 import type { Ctx } from "../ctx.ts";
 import type { AgentSystem } from "../agent/system.ts";
 import { SOUL_FILES } from "../agent/registry.ts";
-import { BUDGETS } from "../agent/soul.ts";
+import { BUDGETS, applyBudgets } from "../agent/soul.ts";
 import { Memories } from "../agent/tools/memory.ts";
 import { importOpenClaw, findOpenClawDirs, describeImport } from "../agent/import-openclaw.ts";
 import { scheduleFrom } from "../agent/tools/cron.ts";
@@ -266,6 +266,7 @@ export function registerAdmin(r: Router, ctx: Ctx, sys: AgentSystem) {
       if (next.a2a.per_pair_per_min) a2a.cfg.perPairPerMin = Number(next.a2a.per_pair_per_min);
       hot.push("a2a");
     }
+    if ("prompt_budgets" in patch) { applyBudgets(next.prompt_budgets); hot.push("prompt_budgets"); }
     const restart = ["port", "mqtt_port", "stream_port", "disc_port", "baidu", "api_token", "stream_token", "brain", "runtime", "openclaw"].filter((k) => k in patch);
     return json({ status: "ok", applied: hot, restart_needed: restart });
   });

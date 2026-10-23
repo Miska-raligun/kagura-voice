@@ -6,7 +6,7 @@ import { makeRuntime } from "./helpers.ts";
 import { deviceTools } from "../src/agent/tools/device.ts";
 import { Runtime } from "../src/agent/runtime.ts";
 import { AgentRegistry } from "../src/agent/registry.ts";
-import { buildSystemPrompt, clip } from "../src/agent/soul.ts";
+import { buildSystemPrompt, clip, applyBudgets, BUDGETS } from "../src/agent/soul.ts";
 import { PiBrain } from "../src/brain/pi.ts";
 
 function withDevice(rt: Runtime) {
@@ -125,7 +125,7 @@ describe("soul 组装", () => {
     const { reg } = makeRuntime();
     const a = reg.get("main")!;
     fs.writeFileSync(path.join(a.workspace, "MEMORY.md"), "主人喜欢乌龙茶");
-    fs.writeFileSync(path.join(a.workspace, "SOUL.md"), "灵".repeat(5000));
+    fs.writeFileSync(path.join(a.workspace, "SOUL.md"), "灵".repeat(25000));
     const d = new Date();
     const pad = (n: number) => String(n).padStart(2, "0");
     fs.writeFileSync(path.join(a.workspace, "memory", `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}.md`), "今天去了公园");
@@ -134,6 +134,15 @@ describe("soul 组装", () => {
     expect(main).toContain("今天去了公园");
     expect(main).toContain("已截断");
     expect(main).toContain("不超过 80 字");
+    // 5000 字在默认上限内不截断；配置调小之后才截
+    fs.writeFileSync(path.join(a.workspace, "SOUL.md"), "灵".repeat(5000));
+    expect(buildSystemPrompt({ agent: a, kind: "main", channel: "device" })).not.toContain("已截断");
+    applyBudgets({ "SOUL.md": 1000, bogus: 5 });
+    expect(BUDGETS["SOUL.md"]).toBe(1000);
+    expect("bogus" in BUDGETS).toBe(false);
+    expect(buildSystemPrompt({ agent: a, kind: "main", channel: "device" })).toContain("已截断");
+    applyBudgets({});
+    expect(BUDGETS["SOUL.md"]).toBe(20000);
     const sub = buildSystemPrompt({ agent: a, kind: "sub", channel: "a2a" });
     expect(sub).not.toContain("乌龙茶");
     expect(sub).not.toContain("<USER.md>");

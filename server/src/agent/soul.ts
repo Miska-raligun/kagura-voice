@@ -6,10 +6,22 @@ import type { AgentInfo } from "./registry.ts";
 import { parseLocalTime, strftime } from "../util/time.ts";
 
 /** 每个文件注入的字数上限（字符数，中文一个字算一个） */
-export const BUDGETS: Record<string, number> = {
-  "SOUL.md": 4000, "IDENTITY.md": 2000, "USER.md": 2000, "AGENTS.md": 4000, "TOOLS.md": 2000,
-  "MEMORY.md": 4000, "HEARTBEAT.md": 2000, daily: 3000,
+// 每个人设文件最多注入多少字（超出部分截掉，文件本身不动）。默认与 OpenClaw 的 bootstrapMaxChars 一致：每个文件 2 万字。
+// config.json 里 "prompt_budgets": { "SOUL.md": 30000, "daily": 10000 } 可以单独调。
+export const DEFAULT_BUDGETS: Record<string, number> = {
+  "SOUL.md": 20000, "IDENTITY.md": 20000, "USER.md": 20000, "AGENTS.md": 20000, "TOOLS.md": 20000,
+  "MEMORY.md": 20000, "HEARTBEAT.md": 20000, daily: 8000,
 };
+export const BUDGETS: Record<string, number> = { ...DEFAULT_BUDGETS };
+
+/** 用配置覆盖注入上限（只认已知的键和正整数） */
+export function applyBudgets(over: Record<string, unknown> | undefined) {
+  Object.assign(BUDGETS, DEFAULT_BUDGETS);
+  for (const [k, v] of Object.entries(over ?? {})) {
+    const n = Math.trunc(Number(v));
+    if (k in DEFAULT_BUDGETS && n > 0) BUDGETS[k] = n;
+  }
+}
 
 /** 会话种类决定注入哪些文件：sub（子 agent）不给 USER/MEMORY，同 OpenClaw */
 export type SessionKind = "main" | "chat" | "isolated" | "sub";
