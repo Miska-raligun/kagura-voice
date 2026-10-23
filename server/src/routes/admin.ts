@@ -9,7 +9,7 @@ import type { AgentSystem } from "../agent/system.ts";
 import { SOUL_FILES } from "../agent/registry.ts";
 import { BUDGETS } from "../agent/soul.ts";
 import { Memories } from "../agent/tools/memory.ts";
-import { importOpenClaw } from "../agent/import-openclaw.ts";
+import { importOpenClaw, findOpenClawDirs, describeImport } from "../agent/import-openclaw.ts";
 import { scheduleFrom } from "../agent/tools/cron.ts";
 import { Roles } from "../roles.ts";
 import { ModelRegistry } from "../agent/models.ts";
@@ -175,10 +175,12 @@ export function registerAdmin(r: Router, ctx: Ctx, sys: AgentSystem) {
   // ── 从 OpenClaw 导入（人设、记忆、定时任务；任务默认暂停）──
   post("/api/admin/import/openclaw", (req) => {
     const d = req.json() ?? {};
-    const dir = String(d.dir || ctx.cfg.openclaw.dir || path.join(os.homedir(), ".openclaw"));
+    const dir = String(d.dir || findOpenClawDirs(ctx.cfg.openclaw.dir, os.homedir())[0] || "");
+    if (!dir) return json({ error: "没找到 OpenClaw 目录（本机 ~/.openclaw 和 WSL 里都找过了），请填写路径，例如 \\\\wsl.localhost\\Ubuntu\\home\\你\\.openclaw" }, 404);
     const rep = importOpenClaw(dir, registry, sched(), { overwrite: !!d.overwrite });
     for (const a of registry.list()) memories.forget(a.id);
-    return json(rep);
+    changed();      // 新建了 agent 的话：角色表、heartbeat 跟着变
+    return json({ ...rep, lines: describeImport(rep) });
   });
 
   // ── Agent 通信 ──

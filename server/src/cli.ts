@@ -36,13 +36,21 @@ export async function runCli(argv: string[]): Promise<boolean> {
     const dirs = makeDirs(cfg);
     const { createAgentSystem } = await import("./agent/system.ts");
     const { Scheduler } = await import("./agent/scheduler.ts");
-    const { importOpenClaw } = await import("./agent/import-openclaw.ts");
+    const { importOpenClaw, findOpenClawDirs, describeImport } = await import("./agent/import-openclaw.ts");
+    let dir = rest[0] ? path.resolve(rest[0]) : "";
+    if (!dir) {
+      const found = findOpenClawDirs(cfg.openclaw.dir, os.homedir());
+      if (!found.length) throw new Error("没找到 OpenClaw 目录（本机 ~/.openclaw 和 WSL 里都找过了）。请写明路径，例如：\n"
+        + "  kagura import-openclaw \"\\\\wsl.localhost\\Ubuntu\\home\\你\\.openclaw\"");
+      dir = found[0];
+      if (found.length > 1) console.log(`找到多个 OpenClaw 目录，用第一个；要用别的请写明路径：\n${found.map((f) => "  " + f).join("\n")}`);
+    }
     const sys = createAgentSystem(cfg, dirs, null);
     const sched = new Scheduler(dirs.systemDb, sys.runtime, sys.registry, { deliver: async () => "", busy: () => false });
-    const rep = importOpenClaw(path.resolve(rest[0] || path.join(os.homedir(), ".openclaw")), sys.registry, sched, { overwrite: force });
-    for (const f of rep.files) console.log(`  ${f.agent}: ${f.copied.join("、") || "（没有文件）"} ← ${f.from}`);
-    for (const j of rep.jobs.imported) console.log(`  ✓ 任务 ${j.name}（${j.agent}，已暂停，到管理界面确认后启用）`);
-    for (const j of rep.jobs.skipped) console.log(`  ✗ 任务 ${j.name}：${j.reason}`);
+    const rep = importOpenClaw(dir, sys.registry, sched, { overwrite: force });
+    for (const l of describeImport(rep)) console.log(l);
+    if (rep.agents.some((a) => a.created)) console.log("\n新建的 agent 要重启服务端才会加载（开着的话先关掉再开）。");
+    console.log("提示：人设里写着 cores3-speak / cores3-camera 的地方，改成内置的 speak / take_photo 工具，或者直接删掉。");
     sys.runtime.close();
     return true;
   }

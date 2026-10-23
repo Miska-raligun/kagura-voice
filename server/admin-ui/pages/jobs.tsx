@@ -1,7 +1,7 @@
 // 定时任务：列表 + 新建向导（at/every/cron、会话、投递、活跃时段）；立即运行；运行历史；从 OpenClaw 导入
 import { useState } from "preact/hooks";
 import { api, enc, fmtTime, go, money } from "../api.ts";
-import { Badge, Btn, Card, Empty, Err, Field, Input, Select, TextArea, Toggle, confirmDo, toast, useInterval, useLoad } from "../ui.tsx";
+import { Badge, Btn, Card, Empty, Err, Field, Input, Select, TextArea, Toggle, confirmDo, toast, toastErr, useInterval, useLoad } from "../ui.tsx";
 
 export function scheduleText(s: any) {
   if (!s) return "—";
@@ -48,14 +48,9 @@ function ImportOpenClaw({ done }: { done: () => void }) {
   return (
     <Card title="从 OpenClaw 导入" actions={<Btn kind="ghost" onClick={() => setOpen(false)}>关闭</Btn>} class="wide">
       <p class="muted">拷贝人设、记忆文件，并把定时任务转换过来（导入后默认暂停，逐条确认再启用）。已存在的每日笔记不覆盖。</p>
-      <div class="row"><Input value={dir} onInput={setDir} placeholder="OpenClaw 目录，留空 = ~/.openclaw" />
-        <Btn kind="primary" onClick={async () => { const r = await api("/import/openclaw", { body: { dir: dir || undefined } }); setRep(r); done(); }}>导入</Btn></div>
-      {rep && <div>
-        <h4>人设与记忆</h4>
-        {rep.files.length ? <ul>{rep.files.map((f: any) => <li>{f.agent}：{f.copied.join("、") || "（没有文件）"} <small class="muted">← {f.from}</small></li>)}</ul> : <Empty>没找到对应的 workspace</Empty>}
-        <h4>定时任务</h4>
-        <ul>{rep.jobs.imported.map((j: any) => <li>✓ {j.name}（{j.agent}）</li>)}{rep.jobs.skipped.map((j: any) => <li class="muted">✗ {j.name}：{j.reason}</li>)}</ul>
-      </div>}
+      <div class="row"><Input value={dir} onInput={setDir} placeholder="OpenClaw 目录，留空 = 自动找（本机和 WSL 里的 ~/.openclaw）" />
+        <Btn kind="primary" onClick={async () => { try { const r = await api("/import/openclaw", { body: { dir: dir || undefined } }); setRep(r); done(); } catch (e) { toastErr(e); } }}>导入</Btn></div>
+      {rep && <pre class="log">{rep.lines.join("\n")}</pre>}
     </Card>
   );
 }

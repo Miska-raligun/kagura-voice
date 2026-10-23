@@ -7,20 +7,82 @@
 //   sessionTarget: "main" | "isolated"；agentId
 import fs from "node:fs";
 import path from "node:path";
+import { execFileSync } from "node:child_process";
 import type { AgentRegistry } from "./registry.ts";
 import { SOUL_FILES } from "./registry.ts";
 import type { Scheduler, Schedule } from "./scheduler.ts";
 
 export interface ImportReport {
+  dir: string;
+  /** OpenClaw 里找到的 agent：from = 它的 workspace（null = 没找到目录），into = 导进了 Kagura 的哪个 agent */
+  agents: { id: string; name: string; from: string | null; into: string; created: boolean }[];
   files: { agent: string; copied: string[]; from: string }[];
   jobs: { imported: { id: string; name: string; agent: string }[]; skipped: { name: string; reason: string }[] };
+  /** 一个 workspace 都没找到时，告诉用户查过哪些地方 */
+  searched: string[];
 }
 
-/** 按 OpenClaw 的几种布局找某个 agent 的 workspace */
-function workspaceCandidates(dir: string, agentId: string, isDefault: boolean) {
-  const c = [path.join(dir, `workspace-${agentId}`), path.join(dir, "agents", agentId, "workspace")];
-  if (isDefault || agentId === "main") c.unshift(path.join(dir, "workspace"));
-  return c;
+/** OpenClaw 的配置是 JSON5：去掉注释和尾逗号再解析，失败就当没有 */
+export function parseJson5ish(text: string): any {
+  try { return JSON.parse(text); } catch { /* 往下 */ }
+  const noComments = text.replace(/("(?:\\.|[^"\\])*")|\/\/[^\n]*|\/\*[\s\S]*?\*\//g, (_m, str) => str ?? "");
+  const noTrailing = noComments.replace(/,(\s*[}\]])/g, "$1");
+  // 不带引号的键：{ id: "main" } → { "id": "main" }
+  const quotedKeys = noTrailing.replace(/([{,]\s*)([A-Za-z_$][\w$]*)\s*:/g, '$1"$2":');
+  try { return JSON.parse(quotedKeys); } catch { return null; }
+}
+
+/**
+ * 把 openclaw.json 里写的 workspace 路径换成本机能访问的路径：
+ * 「~/…」相对 OpenClaw 目录的上一级（家目录）；Windows 上读 \\wsl.localhost\发行版\… 时，
+ * 「/home/…」这类 Linux 绝对路径要接到同一个发行版前缀后面。
+ */
+export function resolveOcPath(p: string, ocDir: string): string {
+  const home = path.dirname(ocDir);
+  if (p === "~" || p.startsWith("~/")) return path.join(home, ...p.slice(2).split("/").filter(Boolean));
+  const unc = /^(\\\\[^\\]+\\[^\\]+)/.exec(ocDir);
+  if (p.startsWith("/") && unc) return unc[1] + p.replace(/\//g, "\\");
+  return path.isAbsolute(p) ? p : path.join(ocDir, p);
+}
+
+interface OcAgent { id: string; name: string; isDefault: boolean; workspace: string | null }
+
+/** 找出 OpenClaw 里的全部 agent：openclaw.json 的 agents.list + 目录里的 workspace-<id> / agents/<id> */
+export function discoverOcAgents(dir: string, searched: string[] = []): OcAgent[] {
+  const out = new Map<string, OcAgent>();
+  let defaults: any = {};
+  for (const f of ["openclaw.json", "clawdbot.json", "config.json"]) {
+    const file = path.join(dir, f);
+    if (!fs.existsSync(file)) continue;
+    const conf = parseJson5ish(fs.readFileSync(file, "utf8"));
+    defaults = conf?.agents?.defaults ?? {};
+    for (const a of Array.isArray(conf?.agents?.list) ? conf.agents.list : []) {
+      if (!a?.id) continue;
+      out.set(String(a.id), { id: String(a.id), name: String(a.name ?? a.identity?.name ?? a.id), isDefault: !!a.default, workspace: a.workspace ? resolveOcPath(String(a.workspace), dir) : null });
+    }
+    break;
+  }
+  if (!out.size) out.set("main", { id: "main", name: "main", isDefault: true, workspace: null });
+  if (![...out.values()].some((a) => a.isDefault)) [...out.values()][0].isDefault = true;
+  // 目录里还有没在配置里登记的 agent
+  try {
+    for (const d of fs.readdirSync(dir)) {
+      const m = /^workspace-([A-Za-z0-9_-]+)$/.exec(d);
+      if (m && !out.has(m[1])) out.set(m[1], { id: m[1], name: m[1], isDefault: false, workspace: path.join(dir, d) });
+    }
+  } catch { /* 目录读不了 */ }
+  for (const a of out.values()) {
+    if (a.workspace && fs.existsSync(a.workspace)) continue;
+    const cands = [
+      ...(a.workspace ? [a.workspace] : []),
+      ...(a.isDefault && defaults.workspace ? [resolveOcPath(String(defaults.workspace), dir)] : []),
+      ...(a.isDefault || a.id === "main" ? [path.join(dir, "workspace")] : []),
+      path.join(dir, `workspace-${a.id}`), path.join(dir, "agents", a.id, "workspace"),
+    ];
+    searched.push(...cands);
+    a.workspace = cands.find((p) => fs.existsSync(p)) ?? null;
+  }
+  return [...out.values()];
 }
 
 function readJobs(dir: string): any[] {
@@ -53,35 +115,64 @@ export function convertSchedule(s: any): Schedule {
 
 export function importOpenClaw(dir: string, agents: AgentRegistry, sched: Scheduler | null, opts: { overwrite?: boolean } = {}): ImportReport {
   if (!fs.existsSync(dir)) throw new Error(`找不到 OpenClaw 目录 ${dir}`);
-  const report: ImportReport = { files: [], jobs: { imported: [], skipped: [] } };
-  const def = agents.default();
-  for (const a of agents.list()) {
-    const from = workspaceCandidates(dir, a.id, a.id === def.id).find((p) => fs.existsSync(p));
-    if (!from) continue;
+  const report: ImportReport = { dir, agents: [], files: [], jobs: { imported: [], skipped: [] }, searched: [] };
+  const oc = discoverOcAgents(dir, report.searched);
+  const ocIds = new Set(oc.map((a) => a.id));
+  const idMap = new Map<string, string>();       // OpenClaw agent id → Kagura agent id
+  const created: string[] = [];
+  for (const a of oc) {
+    let into = agents.get(a.id)?.id;
+    // OpenClaw 的默认 agent 名字跟 Kagura 的默认 agent 对不上（比如 kagura vs main）：导进 Kagura 的默认 agent
+    const def = agents.default();
+    if (!into && a.isDefault && !ocIds.has(def.id)) into = def.id;
+    let isNew = false;
+    if (!into) {
+      if (!/^[A-Za-z0-9_-]{1,32}$/.test(a.id)) { report.agents.push({ id: a.id, name: a.name, from: a.workspace, into: "", created: false }); continue; }
+      agents.create(a.id, { name: a.name });
+      into = a.id; isNew = true; created.push(a.id);
+    }
+    idMap.set(a.id, into);
+    report.agents.push({ id: a.id, name: a.name, from: a.workspace, into, created: isNew });
+  }
+  // 新建的 agent 和其它 agent 互相可以通信（OpenClaw 里它们本来就能互相找）
+  for (const id of created) {
+    for (const other of agents.list()) {
+      if (other.id === id) continue;
+      if (!other.a2a.allow.includes(id) && !other.a2a.allow.includes("*")) agents.update(other.id, { a2a: { ...other.a2a, allow: [...other.a2a.allow, id] } });
+      const me = agents.get(id)!;
+      if (!me.a2a.allow.includes(other.id)) agents.update(id, { a2a: { ...me.a2a, allow: [...me.a2a.allow, other.id] } });
+    }
+  }
+  for (const a of oc) {
+    const into = idMap.get(a.id);
+    if (!into || !a.workspace) continue;
+    const target = agents.get(into)!;
+    const from = a.workspace;
     const copied: string[] = [];
     for (const f of SOUL_FILES) {
       const src = path.join(from, f);
       if (!fs.existsSync(src)) continue;
-      fs.copyFileSync(src, path.join(a.workspace, f));
+      fs.copyFileSync(src, path.join(target.workspace, f));
       copied.push(f);
     }
     const mem = path.join(from, "memory");
     if (fs.existsSync(mem)) {
+      fs.mkdirSync(path.join(target.workspace, "memory"), { recursive: true });
       for (const f of fs.readdirSync(mem)) {
         if (!f.endsWith(".md")) continue;
-        const dst = path.join(a.workspace, "memory", f);
+        const dst = path.join(target.workspace, "memory", f);
         if (fs.existsSync(dst) && !opts.overwrite) continue;
         fs.copyFileSync(path.join(mem, f), dst);
         copied.push(`memory/${f}`);
       }
     }
-    report.files.push({ agent: a.id, copied, from });
+    report.files.push({ agent: into, copied, from });
   }
   if (sched) {
     for (const j of readJobs(dir)) {
       const name = String(j.name ?? j.id ?? "未命名");
       try {
-        const agent = agents.get(j.agentId ?? j.agent ?? "") ? (j.agentId ?? j.agent) : def.id;
+        const agent = idMap.get(String(j.agentId ?? j.agent ?? "")) ?? agents.default().id;
         const p = j.payload ?? {};
         const kind = p.kind === "systemEvent" ? "systemEvent" : "agentTurn";
         const message = String(p.message ?? p.text ?? j.message ?? "").trim();
@@ -101,4 +192,55 @@ export function importOpenClaw(dir: string, agents: AgentRegistry, sched: Schedu
     }
   }
   return report;
+}
+
+/**
+ * 找 OpenClaw 目录：配置里写的 → 本机 ~/.openclaw → （Windows）各个 WSL 发行版里各用户家目录下的 .openclaw。
+ * 旧方案 OpenClaw 都装在 WSL 里，Windows 版不写路径时以前只找 C:\Users\你\.openclaw，结果什么都没导、也不报错。
+ */
+export function findOpenClawDirs(configured: string, home: string, wslDistros: () => string[] = listWslDistros): string[] {
+  const out: string[] = [];
+  const add = (p: string) => { if (p && !out.includes(p) && fs.existsSync(p)) out.push(p); };
+  add(configured);
+  add(path.join(home, ".openclaw"));
+  if (process.platform === "win32") {
+    for (const d of wslDistros()) {
+      for (const root of [`\\\\wsl.localhost\\${d}`, `\\\\wsl$\\${d}`]) {
+        let users: string[] = [];
+        try { users = fs.readdirSync(`${root}\\home`); } catch { continue; }
+        for (const u of users) add(`${root}\\home\\${u}\\.openclaw`);
+        add(`${root}\\root\\.openclaw`);
+        break;
+      }
+    }
+  }
+  return out;
+}
+
+/** wsl.exe -l -q 的输出是 UTF-16LE，还可能带 BOM 和空行 */
+export function parseWslList(buf: Buffer): string[] {
+  const utf16 = buf.length > 1 && (buf[1] === 0 || (buf[0] === 0xff && buf[1] === 0xfe));
+  const text = utf16 ? buf.toString("utf16le") : buf.toString("utf8");
+  return text.replace(/^\uFEFF/, "").split(/\r?\n/).map((s) => s.replace(/\0/g, "").trim()).filter(Boolean);
+}
+
+function listWslDistros(): string[] {
+  try { return parseWslList(execFileSync("wsl.exe", ["-l", "-q"], { timeout: 8000, windowsHide: true, stdio: ["ignore", "pipe", "ignore"] })); }
+  catch { return []; }
+}
+
+/** 给命令行 / 管理界面用的人话报告 */
+export function describeImport(rep: ImportReport): string[] {
+  const lines = [`OpenClaw 目录：${rep.dir}`];
+  for (const a of rep.agents) {
+    if (!a.into) { lines.push(`  ✗ agent ${a.id}：id 只能用字母/数字/_-，跳过`); continue; }
+    const tag = a.created ? `新建了 agent ${a.into}` : a.into === a.id ? `导入到 ${a.into}` : `导入到默认 agent ${a.into}`;
+    lines.push(a.from ? `  · ${a.id}（${a.name}）→ ${tag}` : `  ✗ ${a.id}（${a.name}）：找不到它的 workspace 目录${a.created ? `（已${tag}，人设是模板）` : ""}`);
+    const f = rep.files.find((x) => x.agent === a.into && x.from === a.from);
+    if (f) lines.push(`      ${f.copied.length ? f.copied.join("、") : "（目录里没有人设 / 记忆文件）"} ← ${f.from}`);
+  }
+  if (!rep.files.length && rep.searched.length) lines.push("  一个 workspace 都没找到，查过：", ...[...new Set(rep.searched)].map((p) => `      ${p}`));
+  for (const j of rep.jobs.imported) lines.push(`  ✓ 任务 ${j.name}（${j.agent}，已暂停，到管理界面确认后启用）`);
+  for (const j of rep.jobs.skipped) lines.push(`  ✗ 任务 ${j.name}：${j.reason}`);
+  return lines;
 }
