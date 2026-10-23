@@ -303,6 +303,8 @@ CoreS3 (MicroPython)  ──HTTP──▶  voice_server.py (Flask :5000)  ──
   `--tray` 用 `Start-Process -WindowStyle Hidden` 起隐藏子进程（**别直接 spawn**：子进程会挂在父控制台上，父进程一退就被关掉；
   且 SEA 的 `process.argv` 有时会多带一次 exe 路径，必须过滤，否则会被当子命令报错）。
   子进程起服务端后用 PowerShell NotifyIcon 出托盘：打开管理页面 / 打开日志 / 重启 / 退出；退出走 `POST /api/admin/quit`。
+  托盘脚本写成 `<数据目录>/logs/tray.ps1`（UTF-16 带 BOM），再用 `Start-Process -File` 起独立隐藏进程——
+  **别用 spawn + -EncodedCommand**：实测子进程秒退 code=0、什么都不做；脚本里 `[ref]$created` 前必须先 `$created = $false`，否则 PowerShell 报「无法将 [ref] 应用于不存在的变量」。
   托盘用 `Global\\KaguraTrayMutex` 防重复；定时轮询 `/api/admin/meta`，服务端没了就自己消失。
   隐藏进程设 `KAGURA_NO_PROMPT=1`，preflight 和出错后的「按回车」都不再等待（否则没有窗口时会永久卡住）。
 - **IM / 网页聊天回复同时播语音（`channels/manager.ts` 的 `speakAside`，LRN 2026-10-23，症状「聊天时有时播语音有时不播，要提醒才播」）**：
