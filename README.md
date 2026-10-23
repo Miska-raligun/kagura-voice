@@ -1,512 +1,104 @@
 # Kagura Voice
 
-基于 OpenClaw 的语音对话助手，支持本地麦克风模式和 M5Stack CoreS3 硬件终端模式。
+一个住在桌面小设备里的中文语音伙伴：M5Stack CoreS3 负责听、说、看、被摸，
+电脑上的服务端负责思考、记事、按时提醒，还能在飞书 / QQ 上陪你聊天。
 
-> **新服务端（推荐）**：`server/` 下的 TypeScript 版是 `voice_server.py` 的替代品——Windows / Linux
-> **安装包即开即用**（GitHub Releases 下载），自带 MQTT、内置 agent 系统（记忆、定时任务、heartbeat、
-> 多 agent 通信）、飞书 / QQ 渠道、本机管理界面 `http://127.0.0.1:5000/admin`，也可以继续接 OpenClaw。
-> 安装与配置见 [server/README.md](server/README.md)，开发计划见 [docs/plan-kagura-agent.md](docs/plan-kagura-agent.md)。
-> 下文是旧版（Python + OpenClaw + mosquitto）的说明，设备端部分两版通用。
+- **装上就能用**：Windows / Linux 安装包，一个程序包含全部服务（不用装 Python、Node、mosquitto、OpenClaw）
+- **自带 agent 系统**：人设文件、长期记忆、定时任务、heartbeat 主动关心、多个角色互相协作
+- **模型自己选**：DeepSeek、通义、Kimi、智谱、Claude、GPT、Gemini、本机 Ollama……都由你自己填，不预设
+- **本机管理界面**：浏览器打开就能改人设、看对话、管定时任务、接 IM，不用碰配置文件
 
-## 功能
+## 下载安装
 
-- 百度语音识别（中文 ASR）
-- OpenClaw Agent 对话
-- 百度语音合成（中文 TTS）
-- M5Stack CoreS3 硬件终端：触摸录音、VAD 自动停止、语音播放
-- 本地模式：麦克风录音、自动检测说话开始/结束
-- 屏幕 UI：整屏背景图 + 状态 kaomoji + 彩色主题条 + 模式指示灯 + 时间显示
-- LED 指示灯：不同颜色对应不同工作状态
-- 连续对话模式：长按切换，自动循环对话无需反复触摸
-- 摄像头图像识别：说出拍照关键词自动触发，或服务端远程下发拍照命令
-- 取景模式：点顶栏 CAM 键调出摄像头，屏幕实时预览取景，拍完可重拍或发给 AI 识别
-- Web 监控页：浏览器远程按快门看家里，可设定间隔自动刷新，也可开直播看准实时画面
-- 每日定时拍照：到点自动拍一张交给 AI 识别，结果语音播报，照片留档可回看
-- 声控唤醒模式：三击切换，检测短促声音自动激活录音
-- BLE 在家感知：通过蓝牙扫描手机自动判断用户在家/出门，通知 OpenClaw
-- RTC 时间同步：从服务端同步时间，屏幕显示时钟，对话支持时间感知问候
-- IMU 摇晃彩蛋：摇晃设备显示隐藏图片 + 切换连续对话 + AI 主动聊天
-- 快捷指令短路：问时间/日期/星期等高频问题，服务端本地秒回，不走 LLM
-- 语音定时提醒："三分钟后提醒我关火"、"明天早上八点叫我起床"，到点自动语音播报
-- 音量语音控制："小声一点 / 大声一点"，设备记住设置
-- 屏显对话文本：待机界面显示最近一轮对话（需 UIFlow2 固件带中文字体）
-- 硬件看门狗：设备异常自动恢复，不再假死
+到 [Releases](https://github.com/Miska-raligun/kagura-voice/releases) 下载：
 
-## 硬件要求（CoreS3 模式）
+| 系统 | 文件 | 怎么装 |
+|---|---|---|
+| Windows 10/11 | `Kagura-Setup-x.y.z.exe` | 双击安装。会自动放行防火墙、可选开机自启，装完打开设置向导 |
+| Debian / Ubuntu | `kagura_x.y.z_amd64.deb` | `sudo apt install ./kagura_*.deb`，再 `systemctl --user enable --now kagura` |
+| 其它 Linux | `Kagura-x.y.z-x86_64.AppImage` | `chmod +x` 后运行 |
+| CoreS3 固件 | `kagura-device-x.y.z.zip` | 按包里的「烧录说明.md」上传到设备 |
 
-- M5Stack CoreS3（或 CoreS3 SE）
-- 运行 OpenClaw 的服务器（PC / WSL / Linux）
-- CoreS3 和服务器在同一局域网
+> 安装包暂未签名，Windows 可能提示「未知发布者」：点「更多信息 → 仍要运行」。
+> macOS 版暂不发布（代码可以编译，等有开发者账号再签名发布）。
 
-## 依赖
+## 第一次用
 
-- [OpenClaw](https://openclaw.ai)（需在本机运行）
-- ffmpeg / ffplay（本地模式需要）
-- Python 3.10+
+1. **打开管理界面**：装好后会自动打开；也可以手动访问 <http://127.0.0.1:5000/admin>（只限这台电脑）。
+2. **接一个模型**：「设置 → 首次设置」里填接口地址、模型名、API Key，点「保存并测试」。
+3. **填语音 Key**：「设置 → 语音与设备」填[百度智能云](https://console.bce.baidu.com)的语音识别、语音合成 Key。
+4. **刷设备**：按固件包的烧录说明上传，设备开机、屏幕上连 WiFi，会在局域网里自动找到服务端。
+5. **跟她说话**：点一下屏幕说话。想改她的性格，去「Agents → 人设文件」改 `SOUL.md`。
 
-```bash
-pip install -r requirements.txt
-```
+旧版用户：先停掉 `voice_server.py` 和 mosquitto（新服务端自带 MQTT，占 1883 端口），然后
+`kagura migrate <旧仓库目录>` 把配置、提醒、定时拍照、照片、语音缓存搬过来；
+OpenClaw 的人设、记忆和定时任务在管理界面「定时任务 → 从 OpenClaw 导入」。
 
-运行测试（服务端逻辑，无需硬件和外部服务）：
+## 能做什么
 
-```bash
-pytest tests/
-```
+**设备上**（详见 [docs/device.md](docs/device.md)）
 
-## 配置
+- 点一下说话；连续对话、声控唤醒两种免手模式，说「不聊了」就退出
+- 长回复**边生成边播**：第一句合成好就出声
+- 拍照问「这是什么」；取景模式手动拍；远程拍照、网页直播、每日定时拍照并播报
+- 「三分钟后提醒我关火」「小声一点」「现在几点」本地秒回，不花模型的钱
+- 摸摸她、拿起来、摇一摇都会有反应；蓝牙感知你在不在家
+- 多个角色（不同性格、声音和形象）一键切换
 
-1. 复制 `config.example.py` 为 `config.py`：
+**大脑**（内置 agent 系统，也可以继续接 OpenClaw）
 
-```bash
-cp config.example.py config.py
-```
-
-2. 在[百度智能云](https://console.bce.baidu.com)创建**两个应用**：
-   - 语音识别应用 → 填入 `BAIDU_API_KEY` 和 `BAIDU_SECRET_KEY`
-   - 语音合成应用（需开通语音合成权限）→ 填入 `BAIDU_TTS_API_KEY` 和 `BAIDU_TTS_SECRET_KEY`
-
-### 安全说明
-
-服务端设计为**在可信局域网内运行**，HTTP 接口默认不做鉴权（方便多个 agent
-直接调用 `/push` 等接口协作）。请不要将 5000 端口暴露到公网。
-
-如果局域网内有不可信设备，可在 `config.py` 中设置共享密钥：
-
-```python
-API_TOKEN = "随便一串足够长的字符串"
-```
-
-设置后 `/push` 与 `/capture-request`（远程拍照）需携带 `X-Api-Token` 头才能调用；
-留空则完全开放（默认）。另外服务端对 `/chat` 类接口有按设备 + 按来源 IP
-的双层限流，防止恶意刷 LLM 调用。
-
-## 使用
-
-### 本地语音模式
-
-```bash
-python3 voice_assistant.py
-```
-
-说话 → 识别 → OpenClaw 回复 → 语音播放，按 `Ctrl+C` 退出。
-
-文字输入模式：
-
-```bash
-python3 voice_assistant.py --text
-```
-
-### CoreS3 硬件终端模式
-
-**服务端**（PC / WSL）：
-
-```bash
-python3 voice_server.py
-```
-
-**WSL 用户**需要在 Windows 管理员 PowerShell 中开启端口转发。设备用到的端口有四个，
-**少转发一个就是对应功能单独失灵**（比如只漏 5002，其它都正常，唯独直播连不上）：
-
-| 端口 | 协议 | 用途 | 漏了会怎样 |
-|---|---|---|---|
-| 5000 | TCP | HTTP 主服务 | 完全不能用 |
-| 1883 | TCP | MQTT（播报/拍照命令） | 主动播报和远程拍照失效 |
-| 5001 | UDP | 服务端自动发现 | 设备找不到服务端，退回写死的 IP |
-| 5002 | TCP | 摄像头直播流 | 直播一直「正在唤醒摄像头」后超时 |
-
-```powershell
-# 推荐：直接跑仓库里的脚本（已包含全部端口 + 防火墙规则，且会自动取当前 WSL IP）
-powershell -ExecutionPolicy Bypass -File openclaw-startup.ps1
-
-# 或手动加单个端口
-netsh interface portproxy add v4tov4 listenport=5000 listenaddress=0.0.0.0 connectport=5000 connectaddress=<WSL_IP>
-```
-
-> WSL 的 IP 每次重启都会变，所以别把 `<WSL_IP>` 写死——用脚本，它会现取。
-> 查当前转发表：`netsh interface portproxy show v4tov4`
-
-**CoreS3 端**：
-
-设备端代码在 `device/` 目录下，按模块拆分。上传后的设备目录结构：
-
-```
-/flash/main.py                  ← device/main.py（三行引导）
-/flash/kagura/src/*.py          ← device/src/ 全部文件
-/flash/kagura/resource/*        ← 图片资源（jpg/png/bmp，见 device/resource/README.md）
-/flash/kagura/data/             ← 运行时状态，首次启动自动创建
-```
-
-步骤：
-
-1. 用 M5Burner 烧录 UIFlow2 固件（WiFi 可不配，见下文"在设备上配置 WiFi"）
-2. 打开 uiflow2.m5stack.com 连接设备，点左侧 **webterminal → File** 打开文件管理
-3. 建目录 `/flash/kagura/src`，把 `device/src/` 下 13 个 `.py` 全部上传进去
-4. 把 `device/main.py` 上传为 `/flash/main.py`（开机自动运行）
-5. 可选：建 `/flash/kagura/resource` 并上传背景图
-6. 服务端 IP 由 UDP 广播自动发现，无需改 `cfg.SERVER_BASE`
-
-> 之后改代码只需重传改动的那个模块，不必每次重贴整个文件。
-> 单文件版 `cores3_client.py` 仍保留作为回退，内容烧成 `/flash/main.py`
-> 并删掉 `/flash/kagura/` 即可退回旧行为。
-
-#### 在设备上配置 WiFi
-
-设备端自带屏上 WiFi 配网流程，不需要再拿数据线连电脑：
-
-- **首次开机**：如果没有可用 WiFi（未预设 / 存档缺失），自动弹出配网界面
-- **修改网络**：开机瞬间按住屏幕 2 秒内进入配网界面（即使已连上旧 WiFi）
-- **操作流程**：扫描附近网络 → 点选 SSID → 屏幕软键盘输入密码（支持大小写 / 符号切换）→ 自动连接
-- **凭据存储**：保存在 `/flash/kagura/data/wifi.json`，下次开机自动连接
-- **隐藏网络**：在 picker 底栏点 "Manual" 手动输入 SSID 和密码
-- **开放网络**：选中无锁标记的 SSID，跳过密码直接连接
-
-### 操作手势（CoreS3）
-
-| 手势 | 功能 |
+| 能力 | 说明 |
 |---|---|
-| 短按屏幕 | 普通语音对话 |
-| 短按顶栏 CAM 键 | 进入取景模式（实时预览 + 手动拍照） |
-| 说出拍照关键词 | 自动触发拍照（"看看"、"拍照"、"图片"等） |
-| 长按 | 切换声控唤醒模式（再次长按退出） |
-| 摇晃设备 | 显示彩蛋图片 + 切换连续对话（off→on 时 AI 主动聊天） |
+| 人设 | 每个 agent 一套 `SOUL.md` / `IDENTITY.md` / `USER.md` / `AGENTS.md` 等，和 OpenClaw 同名同义，直接拷过来就能用 |
+| 记忆 | `MEMORY.md` 加每日笔记；关键词 + 向量混合检索；对话太长时先把要紧的事记下来再压缩 |
+| 定时任务 | 一次性 / 间隔 / cron，投递到设备或 IM；活跃时段、失败重试；她自己也能建（「每天八点给我讲新闻」） |
+| Heartbeat | 定期按清单检查有没有该告诉你的事，没事就不打扰 |
+| 多 agent | 角色之间可以互相发消息、派子任务，有权限矩阵和防失控限制 |
+| 技能 | 兼容 `SKILL.md` 文件夹格式（本期只读说明，不执行脚本） |
+| IM | 飞书、QQ 官方机器人（都不需要公网），陌生人配对制，群里只回 @；记忆跨渠道共享 |
 
-> 拍照有三条路径，识别链路都是 `/chat-vision`，只是"谁决定拍什么"不同：
-> 对话中说出拍照关键词（由 OpenClaw 判断后回拍照指令）、服务端通过 MQTT
-> 下发远程拍照命令（`/capture-request`）、以及下面的取景模式。
+## 管理界面
 
-### 取景模式（手动拍照）
+<http://127.0.0.1:5000/admin>：总览 · Agents · 会话 · 记忆 · 定时任务 · Agent 通信 · 渠道 · 设备 · 网页聊天 · 用量 · 设置。
+设备监控页（拍照、直播）在 `http://<电脑IP>:5000/monitor`，局域网可访问（可设访问密钥）。
 
-语音触发拍照看不到镜头对着什么，取景模式补上这一环：
+## 数据与隐私
 
-1. 待机界面点顶栏紫色 **CAM** 键 → 屏幕变成实时取景框
-2. 底部两个按钮：**EXIT** 退出 / **SHOOT** 快门
-3. 按下快门后画面定格，按钮变成：**RETAKE** 重拍 / **SEND** 发给 AI
-4. SEND 后走 `/chat-vision`（不带语音，服务端用默认提问），AI 看图后语音回应
+所有数据都在你自己的电脑上：Windows `%APPDATA%\Kagura`，Linux `~/.local/share/kagura`。
+人设、记忆是普通 markdown 文件，对话与任务在 SQLite 里。备份就拷这个目录；卸载不会删除它。
+对外只连你自己配置的模型服务商、百度语音和 IM 平台。
 
-长按屏幕任意处随时退出；90 秒无操作自动退出回待机。
+## 端口
 
-设备端相关开关（`device/src/cfg.py`）：
-
-| 常量 | 说明 |
+| 端口 | 用途 |
 |---|---|
-| `CAMERA_MODE_ENABLED` | 关掉则 CAM 键失效，短按一律录音 |
-| `CAMERA_QVGA` | `True` 按 320×240 初始化（取景铺满屏）；出问题改 `False` 回固件默认分辨率 |
-| `PREVIEW_SWAP` | 预览字节序，真机实测 `False` 正常。改 `True` 会花屏（轮廓在、彩虹色、逐帧闪） |
-| `PREVIEW_LEN_IN_PIXELS` | `drawRawBuf` 的 `len` 按像素算（真机实测）。传字节数=2 倍，会错块+竖条纹+频闪 |
-| `CAM_PREVIEW_CLIP` | 预览只画到按钮条上沿，避免底栏每帧补画产生的频闪；出问题改 `False` |
-| `CAM_IDLE_TIMEOUT` | 取景界面无操作自动退出的秒数 |
+| 5000/tcp | 设备接口、监控页、管理界面（管理界面只限本机） |
+| 1883/tcp | 内置 MQTT（主动播报、远程拍照） |
+| 5001/udp | 设备自动发现服务端 |
+| 5002/tcp | 摄像头直播 |
 
-### LED 状态指示
+Windows 安装包会自动放行；Linux 如果开了防火墙需要手动放行这四个端口。
 
-| 颜色 | 状态 |
+## 仓库结构
+
+| 路径 | 内容 |
 |---|---|
-| 熄灭 | 空闲 |
-| 红 | 录音中 |
-| 黄 | 思考中 |
-| 绿 | 播放中 |
-| 青 | 广播消息 |
-| 紫 | 拍照中 |
-| 粉 | 摇晃彩蛋 |
+| [`server/`](server/README.md) | 服务端（TypeScript，打成单文件可执行）：设备接口、agent 系统、IM 渠道、管理界面 |
+| [`device/`](docs/device.md) | CoreS3 固件（MicroPython） |
+| `contract-tests/` | 黑盒契约测试：只走 HTTP/MQTT/UDP/TCP，新旧服务端共用一套 |
+| `docs/` | [开发计划](docs/plan-kagura-agent.md)、[设备使用指南](docs/device.md)、[旧版服务端说明](docs/legacy-python.md) |
+| `voice_server.py` 等 | 旧版 Python 服务端（已被 `server/` 取代，保留到迁移完成） |
+| `CLAUDE.md` | 架构与踩坑记录（开发必读） |
 
-### 主动播报
-
-服务端提供 `/push` 接口，可通过 HTTP 推送文字消息，CoreS3 会自动轮询并播放：
+## 开发
 
 ```bash
-curl -X POST http://localhost:5000/push \
-  -H "Content-Type: application/json" \
-  -d '{"text": "主人，今天多云转晴，气温25度", "device_id": "cores3"}'
+cd server && npm ci
+npx tsc --noEmit -p . && npx tsc --noEmit -p admin-ui && npx vitest run   # 类型检查 + 单测
+node scripts/build.mjs && node dist/kagura.cjs                              # 构建并运行
+cd ../contract-tests && KAGURA_SERVER_CMD="node server/dist/kagura.cjs" KAGURA_SERVER_PROVIDES=broker,discovery python -m pytest -q
+python3 tools/check_split.py && python3 tools/import_sim.py                # 固件静态检查
 ```
 
-可配合 OpenClaw 的定时任务使用，例如每天早上播报天气。
-
-### Web 监控页
-
-浏览器打开 `http://<服务端IP>:5000/monitor`（手机也能开），可以：
-
-- **拍一张**：远程按快门，几秒后画面出现在页面上，点图可放大
-- **直播**：连续画面，真机实测约 10 fps（见下）
-- **直播中抓拍**：直播时快门变成「抓拍这一帧」——**直接取服务端手上的最新一帧**，
-  所见即所得、瞬时完成，也不打扰正在推流的设备。代价是分辨率为直播的 160×120。
-- **直播中高清拍**：直播时多出的「🔍 高清拍」按钮。设备**临时切回 QVGA 320×240
-  拍一张再切回来**，画面停几秒，换 4 倍像素——要给 AI 看清楚就用这个。
-  两者抓到的图都进缩略图条，大图继续直播。
-- **自动刷新**：选 5 秒 / 1 分钟等间隔，页面自动连续拍，当监控用
-- **拍完让它说一句**：勾上后，手动按的那张会交给 OpenClaw 识别并语音播报
-  （自动刷新不会触发——每 5 秒说一句会吵死，也白烧 token）。
-  和直播配合最好用：看到画面里有情况 →「高清拍」→ 它直接说出来。
-- **管定时计划**：直接在页面上增删「每天几点拍一张」，改时间、改提问、停用、试跑
-- **看留档**：定时任务和「说一句」拍过的照片 + AI 识别结果按时间倒序排列
-
-设置了 `API_TOKEN` 时，页面首次访问会弹窗要密钥，之后存在浏览器 localStorage 里。
-
-#### 直播（准实时）
-
-**这不是视频流，是连拍**，真机实测约 10 fps。设备本地取景之所以更流畅，是因为
-帧根本不出设备；要送到浏览器就得过网络，ESP32 的上行就是瓶颈。
-为了把帧率做到能看，做了三件事：
-
-| 手段 | 效果 |
-|---|---|
-| 分辨率降到 QQVGA 160×120 | 单帧 38KB，是 QVGA 的 1/4 |
-| 一条常驻 TCP（`:5002`）代替每帧一个 HTTP 请求 | 省掉每帧的连接握手 |
-| 发 RGB565 裸帧，不做 base64 | 省掉 33% 体积膨胀 |
-
-协议很简单：设备连上 `:5002` 后先发一行
-`KAGURA_STREAM v1 <device_id> <token>\n`，之后每帧是 `4 字节大端长度 + 裸字节`，
-发 4 字节 0 表示正常结束。服务端只保留最新一帧，网页用长轮询取。
-
-安全兜底：网页每 20 秒续期一次，设备端拿到的截止时间是 45 秒——**关掉网页或断网后，
-设备最多再传 45 秒就自己收摊**，不会把摄像头一直开着。另有 `STREAM_MAX_SECS=300` 的硬上限。
-
-直播期间设备屏幕显示 `img_streaming`，不显示实时画面也不写「直播中」字样，
-LED 转红。长按屏幕可以在设备侧强行中断直播。
-
-> 没上传也能用：设备会打印一行 `img err: [Errno 2] ENOENT` 然后自动退回
-> `img_bg`。想要专属画面就把一张 320×240 的图传到
-> `/flash/kagura/resource/img_streaming.jpg`。
-
-**直播连不上时**先看设备串口日志：
-
-- `cannot connect to <ip>:5002 ... port not forwarded` → 端口转发没配，见上面的表
-- `camera init error` → 摄像头本身的问题，先把 `STREAM_QQVGA` 改 `False` 试试
-  （用 QVGA 传，不依赖 `camera.deinit()`，只是慢）
-
-### 每日定时拍照
-
-到点自动走完 **拍照 → OpenClaw 识别 → TTS 语音播报** 整条链路，
-相当于让设备每天固定时间「看一眼」并开口说出来。
-
-在监控页添加即可，也可以直接调接口：
-
-```bash
-curl -X POST http://localhost:5000/api/monitor/schedules \
-  -H "Content-Type: application/json" \
-  -d '{"time": "08:00", "device_id": "cores3", "prompt": "看看客厅有没有什么异常"}'
-```
-
-- `prompt` 留空则不作限定，只给一句「看看这张照片，跟我说说吧」，
-  让 agent 按自己的人设发挥（`chat()` 本来就会告知有照片需要识别，不用重复交代）
-- 计划落盘 `photo_schedules.json`，服务端重启不丢
-- 每条计划每天只触发一次；服务端在计划时间 15 分钟后才启动的话，当天不补拍
-- 拍照失败（设备离线等）会留一条带错误信息的记录，不会静默消失
-- 照片与识别结果留档在 `snapshots/`，只保留最近 60 条
-
-> 播报由服务端负责，所以发给 agent 的提问里明确要求它**不要**调用 `cores3-speak`，
-> 否则设备会把同一句话念两遍。
-
-### BLE 在家感知
-
-CoreS3 通过蓝牙定期扫描附近设备，按手机蓝牙名称匹配，自动判断用户是否在家。
-
-**配置方法**：在 `device/src/cfg.py` 里设置手机蓝牙名称：
-
-```python
-BLE_PHONE_NAME = "iPhone-xxx"   # 你的手机蓝牙名称（部分匹配）
-```
-
-**工作原理**：
-- 每 30 秒执行一次 BLE 扫描（3 秒），检测目标手机是否在附近
-- 连续检测到 2 次 → 判定"在家"；5 分钟未检测到 → 判定"出门"
-- 状态变化时自动通知服务端，写入 OpenClaw workspace 状态文件
-
-> 注意：手机蓝牙需保持开启。按名称匹配可避免 iOS/Android 的 MAC 地址随机化问题。
-
-### RTC 时间同步
-
-CoreS3 启动时自动从服务端同步时间，待机界面显示当前时钟。
-
-- 屏幕右上角显示 `HH:MM` + 电池百分比
-- 对话请求自动携带 `X-Local-Time` 头，OpenClaw 可据此调整问候语（"早上好"/"晚上好"）
-
-### 快捷指令短路
-
-部分高频简单问题（时间、日期、星期）由服务端本地直接回复，不经过 OpenClaw / LLM，
-响应从数秒降到约 1 秒，同时节省 LLM 调用：
-
-| 说法示例 | 回复 |
-|---|---|
-| “现在几点 / 几点了 / 报时” | 现在是下午 2 点 23 分。 |
-| “今天几号 / 今天日期” | 今天是 2026 年 5 月 15 日。 |
-| “今天星期几 / 今天周几” | 今天是星期五。 |
-
-- 时间优先取设备 `X-Local-Time` 头（CoreS3 的 RTC），无则用服务端本地时间
-- 规则集中在 `quick_commands.py` 的 `_RULES`，想加新指令直接往里 append `(正则, 处理函数)`
-- 未命中的问题照常走 OpenClaw；拍照（`/chat-vision`）不受影响
-- 快捷问答会作为背景带给下一次 LLM 对话，上下文不断层
-
-### 语音定时提醒
-
-对着设备说定时需求，服务端解析并在到点时通过 MQTT 推送语音播报：
-
-| 说法示例 | 效果 |
-|---|---|
-| “三分钟后提醒我关火” | 3 分钟后播报“叮咚，提醒时间到：关火” |
-| “半小时后叫我” | 30 分钟后播报 |
-| “明天早上八点叫我起床” | 次日 8:00 播报 |
-| “下午3点半提醒我开会” | 当天 15:30 播报（已过则顺延明天） |
-
-- 支持中文数字与阿拉伯数字（“十五分钟” / “15分钟”都可以）
-- 提醒持久化在服务端 `reminders.json`，服务端重启不丢
-- 需要 MQTT broker 在线；发送失败每 60 秒重试，最多 3 次
-
-### 音量语音控制
-
-说“小声一点”“大声一点”即可调整设备音量（步进 0.2，范围 0.2~1.0），
-设置保存在设备 flash，重启后保持。
-
-### 环形音频可视化（默认关闭）
-
-> **默认 `VISUAL_ENABLED = False`。** 待机时一直转的光环观感上像"卡在加载中"，
-> 同期试过的"分层增量重绘 + 顶栏/文字实心底"也因为把照片夹成上下黑边、
-> 表情压一块黑面板而回退了。现在是整屏背景图 + 文字直接压在图上，
-> 靠内容键比对做到"内容没变就不重画"——治闪烁靠的是这个，不是分层。
-> 下面这套代码保留着，改回 `True` 即可启用。
-
-屏幕中央是一圈 24 段的动态光环：
-
-| 状态 | 效果 |
-|---|---|
-| 待机 | 光点沿环缓慢追逐（呼吸感） |
-| 录音中 | **跟着你的音量实时填充**（自动增益，环境噪声不误触） |
-| 播放中 | **跟着语音包络起伏**，像在说话 |
-| 思考中 | 静态环（HTTP 请求阻塞期间设备无法动画，见下） |
-
-实现要点：
-
-- 环由 24 个预计算的小方块组成，每帧在**原位置重绘**，因此不需要擦除，
-  背景是照片还是纯色都不影响；只用到 `fillRect`，不依赖固件是否提供
-  `fillCircle` / canvas 等 API
-- **差分渲染**：只重画亮度变化的段，实测平均每帧约 6 段，20fps 下负载极低
-- 录音电平来自 `rms_slices()`——把 0.25s 的录音块拆成 5 个子片，
-  和原来算 VAD 的开销完全相同，等于白送 20fps 的音频响应
-- 播放包络在播放前一次性稀疏采样算好，按播放进度索引
-
-**关于「思考中」为什么不动**：这期间 HTTP 请求是阻塞的，单线程下主循环不运行。
-不是硬件做不到——CoreS3 的 MicroPython 支持 `_thread`，且阻塞 socket 期间会释放
-GIL，后台线程完全能跑动画。只是为一个状态引入线程的复杂度和风险不划算，所以
-有意保持静态帧。
-
-**回退开关**（`device/src/cfg.py`）：
-
-```python
-VISUAL_ENABLED   = False   # 默认关；改 True 启用环形动画
-USE_STATE_IMAGES = True    # 每状态各自的背景图；改 False 则所有状态统一用 img_bg
-```
-
-### 屏显对话文本
-
-待机界面下方显示最近一轮对话（你说的话 + 回复摘要），误识别一眼可见。
-需要 UIFlow2 固件带中文字体（EFontCN 系列）；没有则自动跳过，不影响其他功能。
-
-### IMU 摇晃彩蛋
-
-摇晃 CoreS3 设备会显示一张隐藏图片（2 秒），然后切换连续对话模式：
-
-- **连续对话 off → on**：显示彩蛋 → 开启连续对话 → AI 主动用语音跟你聊天
-- **连续对话 on → off**：显示彩蛋 → 关闭连续对话
-
-**配置方法**：将彩蛋图片放到 `/flash/kagura/resource/img_shake.jpg`
-（`.png` / `.bmp` 也可，代码会自动按扩展名查找）。
-
-若未放置图片，则显示 kaomoji 表情 `(*/ω＼*)`。
-
-> 图片格式与大小的注意事项见 `device/resource/README.md`——简单说：
-> PNG 能用，但照片类建议转 JPG，否则容易超过 File Manager 约 100KB 的
-> 单文件上传上限。
-
-### 触觉
-
-把触摸屏和 IMU 从「按钮」变成「皮肤」：被摸、被轻拍、被拿起来都能感知。
-
-- **反射**：摸到的当下立刻换表情，不过网。这层决定手感——走一趟 LLM 是 3~10 秒，
-  那不叫触觉，叫事后转述。
-- **体感**：聚合成「刚被摸了多久 / 多久没人碰」，随下次对话捎给 AI 当背景，
-  不额外花一次 LLM 调用。
-- **主动开口**：只有长时间抚摸、被拍打、被拿起来这类显著信号才让 AI 主动说话，
-  带 90 秒冷却。
-
-与原有操作**不冲突**：点按仍是录音、长按不动仍是切唤醒模式，只有**手指发生位移**
-才判定为抚摸并吞掉这次点击。
-
-**配图**：三种触觉状态和「思考中」默认都复用 `img_streaming`，**不需要额外准备素材**。
-想各配一张就改 `device/src/ui.py` 的 `IMG_MAP`：
-
-```python
-"petted":  "img_petted",    # 再把图片传到 /flash/kagura/resource/img_petted.jpg
-```
-
-没传对应图片的自动退回 `img_bg`。
-
-> 缺图只会在开机后打一次 `img err`，之后走缓存不再重试——所以**新传的图要重启
-> 设备才认**。
-
-**回退开关**（`device/src/cfg.py`）：
-
-```python
-TOUCH_FEEL_ENABLED  = True   # 整个触觉；关掉则触摸行为与加触觉之前完全一致
-FEEL_NOTIFY_ENABLED = True   # 只关「主动开口」，保留反射和体感
-FEEL_WAKE_ON_PICKUP = True   # 休眠中被拿起来自动醒
-FEEL_DEBUG          = False  # 打开后每次反射层重画屏幕都打一行，排查闪烁用
-```
-
-> 一整段抚摸只该重画两次屏（摸上去换图、停手后回待机）。若发现摸的时候画面
-> 在两张图之间反复切换，打开 `FEEL_DEBUG` 看重画了几次——这是整屏 JPEG
-> 重解码，每次约 100ms，多了肉眼就是闪。
-
-觉得她话太多就先关 `FEEL_NOTIFY_ENABLED`，表情反馈和背景感知都还在。
-IMU 那几个阈值（`IMU_TAP_G` 等）是拍脑袋的起点值，需按实际桌面和摆放姿态调。
-
-## 项目结构
-
-```
-├── voice_assistant.py   # 本地语音对话（麦克风 + 扬声器）
-├── voice_server.py      # CoreS3 服务端（ASR + OpenClaw + TTS）
-├── device/              # CoreS3 设备端（MicroPython，按模块拆分）
-│   ├── main.py          #   引导：加 sys.path 后启动 app
-│   ├── src/             #   cfg/hw/clock/ui/wifisetup/audio/netsvc/chat/app
-│   └── resource/        #   图片资源说明
-├── tools/               # 设备端拆分的静态校验 + import 模拟
-├── cores3_client.py     # 旧单文件版（已弃用，仅作回退）
-├── baidu_tokens.py      # 百度 access token 缓存（线程安全）
-├── quick_commands.py    # 快捷指令规则（时间/日期/星期/音量/定时提醒解析）
-├── reminders.py         # 定时提醒调度器（持久化 + MQTT 播报）
-├── photo_schedules.py   # 每日定时拍照调度器（持久化 + 当天去重 + 错过窗口）
-├── stream_server.py     # 直播流接收（TCP :5002，裸 RGB565 帧 → JPEG，只留最新一帧）
-├── oc_utils.py          # 共享工具（JSON 提取、Markdown 清洗）
-├── web/monitor.html     # Web 监控页（远程快门 + 定时计划管理 + 快照回看）
-├── tests/               # 服务端单元测试（外部依赖全打桩）
-├── .github/workflows/   # CI：push/PR 自动跑测试
-├── requirements.txt     # Python 依赖
-├── CLAUDE.md            # 架构与开发约定（供 AI 协作参考）
-├── config.py            # API Key 配置（不提交）
-└── config.example.py    # 配置示例
-```
-
-## TODO
-
-- [x] 主动播报：服务端推送消息，CoreS3 自动播放
-- [x] 屏幕 UI 优化：不同状态显示不同表情/动画
-- [x] 连续对话模式：不需要每次触摸，自动监听
-- [x] 摄像头图像识别：语音触发拍照，发送给 OpenClaw 分析
-- [x] 取景模式：屏幕实时预览 + 手动快门 + 重拍/发送确认
-- [x] 中文显示：CoreS3 屏幕支持中文字体
-- [x] 录音指示：录音/发送/播放时的 LED 或动画反馈
-- [x] 离线唤醒词：不需要触摸，声音检测自动激活
-- [x] BLE 在家感知：蓝牙扫描手机自动判断在家/出门
-- [x] RTC 时间同步：屏幕显示时钟，对话时间感知
-- [x] IMU 摇晃彩蛋：摇晃设备显示隐藏图片 + AI 主动聊天
-- [x] 服务端可靠性：线程安全、内存泄漏修复、MQTT 容错
-- [x] 快捷指令短路：时间/日期/星期等问题本地秒回，不走 LLM
-- [x] 服务端单测 + 可选 API_TOKEN + IP 兜底限流 + openclaw 并发控制
-- [x] 设备端功耗优化：主循环限速、唤醒模式麦克风常开、rms 提速
-- [x] 语音定时提醒：相对/绝对时间解析，持久化调度，到点 MQTT 播报
-- [x] Web 监控页：浏览器远程拍照 + 自动刷新 + 定时计划管理 + 快照回看
-- [x] 每日定时拍照：到点拍照 → AI 识别 → 语音播报，照片与结果留档
-- [x] 直播推流：常驻 TCP + QQVGA 裸帧，浏览器看约 10 fps 准实时画面
-- [x] 音量语音控制 + 屏显对话文本 + 硬件看门狗 + MQTT 队列化
-- [x] 延迟优化：VAD 尾静音减半、HTTP 连接复用、百度 API 重试
-- [x] CI + CLAUDE.md
-- [ ] 音色优化：寻找更符合神乐风格的 TTS 声音
-- [ ] 流式 TTS：边合成边播，进一步降低首字延迟
+发布：打 `v*` tag，GitHub Actions 会构建安装包、在 Windows / Linux 上真装一遍并跑完整契约测试，通过后发 Release。
+带 `-` 的版本（如 `v0.1.0-beta.1`）发成预发布。

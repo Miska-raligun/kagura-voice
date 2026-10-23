@@ -1,8 +1,8 @@
 # Kagura 服务端（TypeScript 版）
 
 `voice_server.py` 的替代品：一个单文件可执行，内置 MQTT broker、UDP 发现、直播 TCP，
-设备端固件**不用改**。大脑二选一：**内置 agent 系统**（基于 pi，M3–M6）或 OpenClaw CLI 适配器。
-完整计划见 `docs/plan-kagura-agent.md`。
+设备端固件**不用改**（新固件多一个「边生成边播」）。大脑二选一：**内置 agent 系统**（基于 pi）或 OpenClaw CLI 适配器。
+这份文档面向配置与开发；使用者先看仓库根目录的 [README](../README.md)。完整计划见 `docs/plan-kagura-agent.md`。
 
 ## 安装（推荐）
 
@@ -57,10 +57,11 @@ GitHub Releases 下载对应安装包（打 `v*` tag 时由 `.github/workflows/r
 }
 ```
 
-字段含义与旧 `config.py` 一一对应。`roles`、`openclaw` 可省略（默认 `~/.npm-global/bin/openclaw`、`~/.openclaw`；写的话要用绝对路径，不展开 `~`）。从旧版迁移：
+字段含义与旧 `config.py` 一一对应。`roles`、`openclaw` 可省略（默认 `~/.npm-global/bin/openclaw`、`~/.openclaw`；写的话要用绝对路径，不展开 `~`）。
+日常用管理界面「设置」页改就行，不用手写。从旧版迁移：
 
 ```bash
-python3 tools/migrate_to_server.py        # config.py → config.json，并复制提醒/定时拍照/角色状态/快照
+kagura migrate <旧仓库目录>     # config.py → config.json，并复制提醒/定时拍照/角色状态/快照/TTS 缓存
 ```
 
 ## 大脑：内置 agent（推荐）或 OpenClaw
@@ -172,7 +173,7 @@ npx tsc --noEmit -p .      # 类型检查
 npx vitest run             # 单测
 # 契约测试（与 Python 版同一套黑盒用例）
 cd ../contract-tests && KAGURA_SERVER_CMD=server/dist/kagura KAGURA_SERVER_PROVIDES=broker,discovery python -m pytest -q
-# 同一套再对内置 agent 跑一遍（另加 test_agent_system.py 的 13 例）
+# 同一套再对内置 agent 跑一遍（另加 test_agent_system.py 的内置 agent 专用用例）
 KAGURA_BRAIN=pi KAGURA_SERVER_CMD=server/dist/kagura KAGURA_SERVER_PROVIDES=broker,discovery python -m pytest -q
 ```
 
