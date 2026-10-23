@@ -133,6 +133,8 @@ export class Runtime {
   private locks = new Map<string, Promise<unknown>>();
   private sem: Semaphore;
   private providers: ToolProvider[] = [];
+  /** 扩展 / 扩展包 / MCP 的工具：排在所有内置工具后面，重名时内置的赢（不管谁先注册） */
+  private pluginProviders: ToolProvider[] = [];
   /** 压缩前的记忆冲刷（memory 模块注入） */
   beforeCompact: ((agent: AgentInfo, sessionKey: string) => Promise<void>) | null = null;
   /** 系统提示里的技能目录（skills 模块注入） */
@@ -144,7 +146,13 @@ export class Runtime {
     this.sem = new Semaphore(Math.max(1, opts.maxConcurrency));
   }
 
-  addTools(p: ToolProvider) { this.providers.push(p); }
+  addTools(p: ToolProvider, opts: { plugin?: boolean } = {}) { (opts.plugin ? this.pluginProviders : this.providers).push(p); }
+  private allProviders() { return [...this.providers, ...this.pluginProviders]; }
+  /** 内置工具的名字（扩展里重名的会被挡掉，管理界面要标出来） */
+  builtinToolNames(agent: AgentInfo): Set<string> {
+    const scope: RunScope = { agentId: agent.id, sessionKey: `${agent.id}:main`, kind: "main", channel: "webchat", purpose: "list", hop: 0, chain: [], meta: {}, trusted: true };
+    return new Set(this.providers.flatMap((p) => p(scope, agent)).map((t) => t.name));
+  }
 
   store(agentId: string): AgentStore {
     let s = this.stores.get(agentId);
@@ -282,14 +290,14 @@ export class Runtime {
   allToolNames(agent: AgentInfo): { name: string; label: string; description: string }[] {
     const scope: RunScope = { agentId: agent.id, sessionKey: `${agent.id}:main`, kind: "main", channel: "webchat", purpose: "list", hop: 0, chain: [], meta: {}, trusted: true };
     const seen = new Set<string>();
-    return this.providers.flatMap((p) => p(scope, agent)).filter((t) => (seen.has(t.name) ? false : (seen.add(t.name), true)))
+    return this.allProviders().flatMap((p) => p(scope, agent)).filter((t) => (seen.has(t.name) ? false : (seen.add(t.name), true)))
       .map((t) => ({ name: t.name, label: t.label, description: t.description }));
   }
 
   private toolsFor(scope: RunScope, agent: AgentInfo, req: RunRequest): AgentTool<any>[] {
     // 同名工具只留第一个：内置的先注册，扩展 / MCP 起了重名也盖不掉内置工具
     const seen = new Set<string>();
-    const all = this.providers.flatMap((p) => p(scope, agent)).filter((t) => (seen.has(t.name) ? false : (seen.add(t.name), true)));
+    const all = this.allProviders().flatMap((p) => p(scope, agent)).filter((t) => (seen.has(t.name) ? false : (seen.add(t.name), true)));
     const allow = agent.tools.includes("*") ? null : new Set(agent.tools);
     return all.filter((t) => (!allow || allow.has(t.name)) && (!req.toolAllow || req.toolAllow(t.name)));
   }

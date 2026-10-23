@@ -200,6 +200,7 @@ export function dirs(cfg: Config) {
     agents: d("agents"),
     skills: d("skills"),
     extensions: d("extensions"),
+    packages: d("packages"),
     systemDb: path.join(cfg.dataDir, "system.sqlite"),
     remindersFile: path.join(cfg.dataDir, "reminders.json"),
     schedulesFile: path.join(cfg.dataDir, "photo_schedules.json"),

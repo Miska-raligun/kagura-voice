@@ -474,3 +474,64 @@ def test_agent_writes_own_tool_then_uses_it(a):
     assert bad["error"]
     assert a.request("DELETE", "/api/admin/extensions/main/ct-double").status_code == 200
     assert not any(x["name"] == "ct-double" for x in a.get("/api/admin/extensions").json()["extensions"])
+
+
+def _tgz(files):
+    import io
+    import tarfile
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tf:
+        for name, text in files.items():
+            data = text.encode("utf-8")
+            ti = tarfile.TarInfo(name)
+            ti.size = len(data)
+            tf.addfile(ti, io.BytesIO(data))
+    return buf.getvalue()
+
+
+_PKG_EXT = """import { Type } from "@earendil-works/pi-ai";
+import { Text } from "@earendil-works/pi-tui";
+import { helper } from "./lib.js";
+export default function (pi) {
+  pi.registerCommand("noop", {});
+  pi.registerTool({ name: "ctpkg_%s", description: "测试", parameters: Type.Object({}), renderCall: () => new Text("x"),
+    async execute() { return { content: [{ type: "text", text: helper("%s") }] }; } });
+}
+"""
+
+
+def test_pi_packages_install_local_and_upload(a, tmp_path):
+    """pi 扩展包：本地目录原地安装、上传 .tgz 安装 → 工具可调用 → 停用 / 卸载"""
+    import base64
+    local = tmp_path / "ct-local-pkg"
+    (local / "extensions").mkdir(parents=True)
+    (local / "package.json").write_text(json.dumps({"name": "ct-local-pkg", "version": "0.0.1", "keywords": ["pi-package"]}), encoding="utf-8")
+    (local / "extensions" / "index.ts").write_text(_PKG_EXT % ("local", "local"), encoding="utf-8")
+    (local / "extensions" / "lib.js").write_text("export const helper = (s) => 'PKG-' + s.toUpperCase();", encoding="utf-8")
+    r = a.post("/api/admin/packages/install", json={"source": str(local)})
+    assert r.status_code == 200, r.text
+    p = r.json()["package"]
+    assert p["kind"] == "local" and [t["name"] for e in p["extensions"] for t in e["tools"]] == ["ctpkg_local"], p
+    assert "registerCommand" in p["extensions"][0]["unsupported"]
+
+    tgz = _tgz({"package/package.json": json.dumps({"name": "ct-up-pkg", "version": "1.0.0"}),
+                "package/extensions/index.ts": _PKG_EXT % ("up", "up"),
+                "package/extensions/lib.js": "export const helper = (s) => 'PKG-' + s.toUpperCase();",
+                "package/skills/ct-pkg-skill/SKILL.md": "---\nname: ct-pkg-skill\ndescription: 扩展包带的技能\n---\n内容"})
+    r = a.post("/api/admin/packages/install", json={"filename": "ct-up-pkg.tgz", "b64": base64.b64encode(tgz).decode()})
+    assert r.status_code == 200, r.text
+    assert r.json()["package"]["skills"] == ["ct-pkg-skill"]
+
+    a.fake_llm(tool("ctpkg_local", _then="好"), tool("ctpkg_up", _then="好"))
+    a.post("/chat", data=wav(), headers={"X-Device-Id": "ag_pkg"})
+    a.post("/chat", data=wav(), headers={"X-Device-Id": "ag_pkg"})
+    t = _transcript_text(a)
+    assert "PKG-LOCAL" in t and "PKG-UP" in t
+
+    ids = {p["name"]: p["id"] for p in a.get("/api/admin/packages").json()["packages"]}
+    pk = a.post(f"/api/admin/packages/{ids['ct-up-pkg']}/enable", json={"enabled": False}).json()["packages"]
+    assert next(p for p in pk if p["name"] == "ct-up-pkg")["extensions"] == []
+    for i in ids.values():
+        assert a.request("DELETE", f"/api/admin/packages/{i}").status_code == 200
+    assert a.get("/api/admin/packages").json()["packages"] == []
+    assert local.exists(), "删除本地包不能删用户的目录"

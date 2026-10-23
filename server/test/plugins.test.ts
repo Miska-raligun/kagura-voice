@@ -103,7 +103,7 @@ describe("扩展（pi 格式）", () => {
     const e = await loadExtension(path.join(dir, "hello.ts"), GLOBAL, "hello");
     expect(e.error).toBe("");
     expect(e.tools.map((t) => t.name)).toEqual(["hello_tool", "open_tool"]);
-    expect(e.unsupported).toEqual(expect.arrayContaining(["registerCommand", "on"]));
+    expect(e.unsupported).toEqual(["registerCommand"]);     // session_start 现在支持（启动时触发一次）
   });
 
   it("语法错 / 没有 default 导出 / 工具名非法 → error 里说清楚", async () => {

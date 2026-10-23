@@ -120,7 +120,8 @@ kagura migrate <旧仓库目录>     # config.py → config.json，并复制提�
 
 `speak` `take_photo` `set_volume` `get_presence` `photo_schedule_*` · `memory_search` `memory_get` `memory_write` ·
 `cron_list` `cron_add` `cron_update` `cron_remove` `cron_run` · `sessions_list` `sessions_history` `sessions_send` `sessions_spawn` · `skill_read` ·
-`exec` · `web_search` `web_fetch` · `extension_list` `extension_read` `extension_write` `extension_remove`（自己写工具）· `mcp__<服务器>__<工具>`
+`exec` · `web_search` `web_fetch` · `extension_list` `extension_read` `extension_write` `extension_remove`（自己写工具）·
+`package_search` `package_install` `package_list` `package_remove`（pi 扩展包）· `mcp__<服务器>__<工具>`
 
 **执行命令（`exec`）的权限**：只有可信会话里才有这个工具——设备、网页聊天、定时任务 / heartbeat、渠道白名单里标了 owner 的私聊。
 IM 陌生人和群聊里没有；经 a2a 转手、或在不可信会话里建 / 改的定时任务，都沿用发起方的可信度（`RunScope.trusted`、`Job.untrusted`）。
@@ -147,6 +148,15 @@ agent 在可信会话里有 `extension_write` 等工具：写完立即加载并�
 **MCP**：`<数据目录>/mcp.json`，`{ "mcpServers": { 名字: { command/args/env/cwd 或 url/headers, enabled, timeout, toolExposure } } }`，
 值里可写 `${环境变量}`；可从 pi / Claude Desktop / Cursor 的配置一键导入。工具名 `mcp__<服务器>__<工具>`，`toolExposure: {"工具": "hidden"}` 隐藏。
 基于 `@earendil-works/pi-mcp`（stdio + Streamable HTTP；OAuth 登录的远程服务器暂不支持，可用 headers 带 token）。
+
+**pi 扩展包**（管理界面「扩展 / MCP → 扩展包（pi 商店）」）：直接搜 pi 的扩展商店（[pi.dev/packages](https://pi.dev/packages)，即 npm 上带
+`pi-package` 关键字的包）一键安装；也能填 `pi install` 的来源写法（`npm:包名[@版本]`、`git:github.com/作者/仓库[@ref]`、GitHub 网址、
+本机路径）、上传 .tgz / .zip / 单个 .ts，或「从 pi 导入」（读 `~/.pi/agent/settings.json` 的 packages 和 `~/.pi/agent/extensions/`）。
+装在 `<数据目录>/packages/<id>/`，清单 `packages.json`；本地路径原地加载不复制（同 pi）。包里的扩展当全局扩展、技能当全局技能；
+提示词模板、主题、命令、快捷键是 pi 终端界面用的，忽略并标出来。依赖由内置的小安装器从 npm 源装（semver 选版本、校验 sha512、
+冲突版本嵌套，**不跑安装脚本**），pi 宿主提供的包（pi-ai / pi-agent-core / pi-coding-agent / pi-tui / typebox）换成内置的。
+node_modules 里的依赖也走同一个转译加载器，纯 ESM 包能用。和内置工具重名的扩展工具会被挡掉（内置优先），管理页划线标出。
+agent 在可信会话里有 `package_search` / `package_install` / `package_list` / `package_remove`。
 
 **权限**：扩展工具、MCP 工具和 `extension_*` 默认都只在可信会话里出现（同 `exec`）；扩展工具定义里加 `allowUntrusted: true`、
 MCP 服务器配置里加 `"allowUntrusted": true` 才给 IM 陌生人 / 群聊用。同名工具内置的优先。

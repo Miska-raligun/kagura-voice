@@ -1,8 +1,9 @@
 // 扩展 / MCP：pi 格式的扩展（agent 自己写的工具也在这）+ MCP 服务器配置（mcp.json，与 pi 同格式）。
-// 路由参数：#/plugins/ext|<owner>|<name>  或  #/plugins/mcp
+// 还有 pi 扩展包：从 pi 的扩展商店（pi.dev/packages）搜索安装、git / 本地路径 / 上传、从 pi 导入。
+// 路由参数：#/plugins/ext|<owner>|<name>  ·  #/plugins/pkg  ·  #/plugins/mcp
 import { useEffect, useState } from "preact/hooks";
 import { api, enc, go } from "../api.ts";
-import { Badge, Btn, Card, Empty, Err, Field, Input, Select, Split, Tabs, TextArea, confirmDo, toast, toastErr, useLoad } from "../ui.tsx";
+import { Badge, Btn, Card, Empty, Err, Field, Input, Select, Split, Tabs, TextArea, Toggle, confirmDo, toast, toastErr, useLoad } from "../ui.tsx";
 
 const GLOBAL = "~global";
 
@@ -10,8 +11,8 @@ export function Plugins({ arg }: { arg: string }) {
   const [tab = "ext", ...rest] = arg.split("|");
   return (
     <>
-      <Tabs value={tab as "ext" | "mcp"} onChange={(v) => go("plugins", v)} tabs={[["ext", "扩展（自定义工具）"], ["mcp", "MCP 服务器"]]} />
-      {tab === "mcp" ? <Mcp /> : <Exts owner={rest[0] ?? ""} name={rest[1] ?? ""} />}
+      <Tabs value={tab as "ext" | "pkg" | "mcp"} onChange={(v) => go("plugins", v)} tabs={[["ext", "扩展（自定义工具）"], ["pkg", "扩展包（pi 商店）"], ["mcp", "MCP 服务器"]]} />
+      {tab === "mcp" ? <Mcp /> : tab === "pkg" ? <Packages /> : <Exts owner={rest[0] ?? ""} name={rest[1] ?? ""} />}
     </>
   );
 }
@@ -20,7 +21,8 @@ function ExtView({ e }: { e: any }) {
   return (
     <>
       {e.error ? <div class="errbox"><b>加载失败</b><pre>{e.error}</pre></div>
-        : <p>工具：{e.tools.length ? e.tools.map((t: any) => <><code>{t.name}</code>{t.allowUntrusted ? <small class="muted">（陌生人也能用）</small> : null} </>) : <span class="muted">（没有注册工具）</span>}
+        : <p>工具：{e.tools.length ? e.tools.map((t: any) => <><code style={t.shadowed ? "text-decoration:line-through" : ""} title={t.description}>{t.name}</code>
+          {t.shadowed ? <small class="muted">（和内置工具重名，用内置的）</small> : null}{t.allowUntrusted ? <small class="muted">（陌生人也能用）</small> : null} </>) : <span class="muted">（没有注册工具）</span>}
           {e.mcpServers.length ? <> · MCP：{e.mcpServers.map((m: string) => <code>{m}</code>)}</> : null}</p>}
       {e.unsupported?.length ? <p class="muted">这些 pi API 这里不支持、已忽略：{e.unsupported.join("、")}</p> : null}
     </>
@@ -39,7 +41,7 @@ function Exts({ owner, name }: { owner: string; name: string }) {
         <Btn small onClick={async () => { await api("/extensions/reload", { body: {} }); toast("已重新加载"); reload(); }}>重新加载</Btn>
       </div>
       {d.owners.map((o: any) => {
-        const list = d.extensions.filter((e: any) => e.owner === o.id);
+        const list = d.extensions.filter((e: any) => e.owner === o.id && !e.pkg);
         return list.length ? <>
           <h4 class="muted">{ownerName(o.id)}</h4>
           <ul class="list">{list.map((e: any) => (
@@ -48,7 +50,7 @@ function Exts({ owner, name }: { owner: string; name: string }) {
               <small>{e.error ? e.error.split("\n")[0] : e.tools.map((t: any) => t.name).join("、") || "（没有工具）"}</small>
             </li>))}</ul></> : null;
       })}
-      {!d.extensions.length && <Empty>还没有扩展。可以自己写，也可以在聊天里让 agent 给自己写一个工具。</Empty>}
+      {!d.extensions.filter((e: any) => !e.pkg).length && <Empty>还没有扩展。可以自己写，也可以在聊天里让 agent 给自己写一个工具。</Empty>}
     </>}>
       {creating ? <NewExt owners={d.owners} template={d.template} done={(o, n) => { setCreating(false); reload(); go("plugins", `ext|${o}|${n}`); }} />
         : name ? <ExtDetail key={owner + name} owner={owner} name={name} info={d.extensions.find((e: any) => e.owner === owner && e.name === name)}
@@ -176,6 +178,102 @@ function Mcp() {
             try { await api("/mcp", { method: "PUT", body: { config: text } }); toast("已保存，正在连接"); reload(); } catch (e) { toastErr(e); }
           }}>保存并连接</Btn>
         </div>
+      </Card>
+    </>
+  );
+}
+
+function b64(buf: ArrayBuffer) {
+  let s = "";
+  const u = new Uint8Array(buf);
+  for (let i = 0; i < u.length; i += 0x8000) s += String.fromCharCode(...u.subarray(i, i + 0x8000));
+  return btoa(s);
+}
+
+function Packages() {
+  const [d, reload, err] = useLoad(() => api("/packages"));
+  const [src, setSrc] = useState("");
+  const [q, setQ] = useState("");
+  const [items, setItems] = useState<any[] | null>(null);
+  const [searchErr, setSearchErr] = useState("");
+  const search = async (query = q) => {
+    setSearchErr("");
+    try { setItems((await api(`/packages/search?q=${enc(query)}&size=20`)).items); } catch (e: any) { setSearchErr(e.message); setItems([]); }
+  };
+  useEffect(() => { search(""); }, []);
+  const install = async (source: string) => {
+    try {
+      const r = await api("/packages/install", { body: { source } });
+      const p = r.package;
+      const tools = p.extensions.flatMap((e: any) => e.tools.map((t: any) => t.name));
+      toast(`已安装 ${p.name}${tools.length ? `：${tools.join("、")}` : ""}`);
+      reload(); if (items) search();
+    } catch (e) { toastErr(e); }
+  };
+  if (!d) return <Err msg={err} />;
+  const piLeft = d.pi_sources.filter((s: any) => !s.installed);
+  return (
+    <>
+      <Card title="安装扩展包">
+        <p class="muted">格式与 pi 一致（<code>pi install</code> 能装的这里都能装）：<code>npm:包名</code> 或直接写包名、<code>git:github.com/作者/仓库</code>、GitHub 网址、本机路径，也可以上传 .tgz / .zip / 单个 .ts 文件。
+          包里的扩展（工具）和技能装好就能用；pi 终端界面用的命令、快捷键、主题这里用不上。依赖自动装（不跑安装脚本）。</p>
+        <div class="row">
+          <span class="grow"><Input value={src} onInput={setSrc} placeholder="npm:pi-web-access  或  git:github.com/作者/仓库" /></span>
+          <Btn kind="primary" disabled={!src.trim()} onClick={() => install(src.trim())}>安装</Btn>
+          <Btn onClick={async () => {
+            const el = document.createElement("input");
+            el.type = "file"; el.accept = ".tgz,.gz,.tar,.zip,.ts,.js,.mjs";
+            el.onchange = async () => {
+              const f = el.files?.[0];
+              if (!f) return;
+              try { const r = await api("/packages/install", { body: { filename: f.name, b64: b64(await f.arrayBuffer()) } }); toast(`已安装 ${r.package.name}`); reload(); } catch (e) { toastErr(e); }
+            };
+            el.click();
+          }}>上传…</Btn>
+          {piLeft.length ? <Btn onClick={async () => {
+            try {
+              const r = await api("/packages/import-pi", { body: {} });
+              toast(`从 pi 导入了 ${r.installed.length} 个${r.failed.length ? `，${r.failed.length} 个失败：${r.failed.map((f: any) => `${f.source}（${f.error}）`).join("；")}` : ""}`, r.failed.length ? "err" : "ok");
+              reload();
+            } catch (e) { toastErr(e); }
+          }}>从 pi 导入（{piLeft.length} 个）</Btn> : null}
+        </div>
+        <p class="muted">⚠️ 扩展包是第三方代码，在这台电脑上以服务端的权限运行。只装你信得过的；里面的工具默认只在可信对话（网页、设备、主人私聊）里出现。</p>
+      </Card>
+
+      <Card title="已安装" actions={<Btn small onClick={reload}>刷新</Btn>}>
+        {d.packages.length ? d.packages.map((p: any) => (
+          <details class="pkg" open={d.packages.length <= 3}>
+            <summary><b>{p.name}</b> <span class="muted">{p.version ? `@${p.version}` : ""}</span>
+              {p.enabled ? null : <Badge s="stopped" text="已停用" />}
+              {p.extensions.some((e: any) => e.error) ? <Badge s="error" text="有扩展加载失败" /> : null}
+              <small class="muted"> · {p.extensions.flatMap((e: any) => e.tools).filter((t: any) => !t.shadowed).length} 个工具{p.skills.length ? ` · ${p.skills.length} 个技能` : ""}</small></summary>
+            {p.description ? <p class="muted">{p.description}</p> : null}
+            <p class="muted">来源：<code>{p.source}</code>{p.deps ? ` · ${p.deps} 个依赖` : ""} · 位置：<code>{p.entry ?? p.dir}</code></p>
+            {p.warnings.map((w: string) => <p class="muted">⚠️ {w}</p>)}
+            {p.extensions.map((e: any) => <div><b>{e.name}</b><ExtView e={e} /></div>)}
+            {p.skills.length ? <p>技能：{p.skills.map((s: string) => <code>{s}</code>)}</p> : null}
+            <div class="row">
+              <Toggle checked={p.enabled} onChange={async (v) => { try { await api(`/packages/${enc(p.id)}/enable`, { body: { enabled: v } }); reload(); } catch (e) { toastErr(e); } }} label="启用" />
+              <span class="grow" />
+              {p.kind !== "upload" ? <Btn small onClick={async () => { await api(`/packages/${enc(p.id)}/update`, { body: {} }); toast(p.kind === "local" ? "已重新加载" : "已更新"); reload(); }}>{p.kind === "local" ? "重新加载" : "更新"}</Btn> : null}
+              <Btn small kind="danger" onClick={confirmDo(`卸载 ${p.name}？`, async () => { try { await api(`/packages/${enc(p.id)}`, { method: "DELETE" }); toast("已卸载"); reload(); } catch (e) { toastErr(e); } })}>卸载</Btn>
+            </div>
+          </details>)) : <Empty>还没装扩展包。在下面的 pi 扩展商店里挑一个，或者在上面填来源。</Empty>}
+      </Card>
+
+      <Card title="pi 扩展商店" actions={<a href="https://pi.dev/packages" target="_blank">pi.dev/packages ↗</a>}>
+        <div class="row">
+          <span class="grow"><Input value={q} onInput={setQ} placeholder="搜索（英文关键词效果更好，如 web、memory、github）" /></span>
+          <Btn onClick={() => search()}>搜索</Btn>
+        </div>
+        <p class="muted">商店里大多数包是给写代码的终端助手用的；适合 Kagura 的是「加工具」「加技能」的那类（联网、查资料、记忆、各种 API）。</p>
+        {searchErr ? <Err msg={searchErr} /> : items === null ? <div class="muted">加载中…</div> : !items.length ? <Empty>没搜到</Empty> :
+          <table><tbody>{items.map((x: any) => (
+            <tr>
+              <td><a href={x.npm} target="_blank"><b>{x.name}</b></a> <small class="muted">@{x.version} · 周下载 {x.weekly.toLocaleString()}</small><br /><small class="muted">{x.description}</small></td>
+              <td>{x.installed ? <Badge s="ok" text="已安装" /> : <Btn small onClick={() => install(`npm:${x.name}`)}>安装</Btn>}</td>
+            </tr>))}</tbody></table>}
       </Card>
     </>
   );

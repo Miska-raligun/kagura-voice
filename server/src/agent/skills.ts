@@ -34,10 +34,19 @@ export function parseFrontMatter(text: string): { meta: Record<string, string>; 
 }
 
 export class Skills {
+  /** 扩展包带的技能目录（每个目录下是若干 <技能>/SKILL.md）；全局目录里同名的覆盖它们 */
+  extraRoots: () => { root: string; pkg: string }[] = () => [];
+
   constructor(private globalDir: string) {}
 
   private scan(dir: string, scope: Skill["scope"]): Skill[] {
     if (!fs.existsSync(dir)) return [];
+    // 扩展包里的 skills 路径也可能直接指向一个技能目录
+    if (fs.existsSync(path.join(dir, "SKILL.md"))) {
+      const { meta } = parseFrontMatter(fs.readFileSync(path.join(dir, "SKILL.md"), "utf8"));
+      const folder = path.basename(dir);
+      return [{ name: NAME_RE.test(meta.name ?? "") ? meta.name : folder, description: (meta.description ?? "").slice(0, 300), dir, scope, folder }];
+    }
     const out: Skill[] = [];
     for (const d of fs.readdirSync(dir, { withFileTypes: true })) {
       if (!d.isDirectory() || !NAME_RE.test(d.name)) continue;
@@ -53,6 +62,7 @@ export class Skills {
   /** 这个 agent 能用的技能（白名单过滤；本 agent 的同名技能覆盖全局） */
   list(agent: AgentInfo): Skill[] {
     const map = new Map<string, Skill>();
+    for (const r of this.extraRoots()) for (const s of this.scan(r.root, "global")) map.set(s.name, s);
     for (const s of this.scan(this.globalDir, "global")) map.set(s.name, s);
     for (const s of this.scan(path.join(agent.workspace, "skills"), "agent")) map.set(s.name, s);
     const allow = agent.skills.includes("*") ? null : new Set(agent.skills);

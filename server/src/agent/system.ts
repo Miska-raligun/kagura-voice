@@ -18,7 +18,8 @@ import { Skills } from "./skills.ts";
 import { execTools } from "./tools/exec.ts";
 import { webTools } from "./tools/web.ts";
 import { McpManager } from "./mcp.ts";
-import { Extensions, extensionTools } from "./extensions.ts";
+import { Extensions, extensionTools, setExtAgentDir } from "./extensions.ts";
+import { PackageManager } from "./packages.ts";
 import { proxiedFetch } from "../util/proxy.ts";
 import { ChannelStore } from "../channels/store.ts";
 import { ChannelManager } from "../channels/manager.ts";
@@ -35,6 +36,7 @@ export interface AgentSystem {
   channels: ChannelManager;
   mcp: McpManager;
   extensions: Extensions;
+  packages: PackageManager;
 }
 
 export function createAgentSystem(cfg: Config, dirs: Dirs, fake: FakeLlm | null): AgentSystem {
@@ -63,11 +65,17 @@ export function createAgentSystem(cfg: Config, dirs: Dirs, fake: FakeLlm | null)
   const mcp = new McpManager(path.join(cfg.dataDir, "mcp.json"), { fetch: proxiedFetch, cwd: cfg.dataDir, version: VERSION });
   const extensions = new Extensions(dirs.extensions, registry);
   extensions.onMcpServers = (list) => { mcp.setExtensionServers(list); mcp.reload().catch((e) => console.log(`[mcp] ⚠️  ${e.message}`)); };
+  // pi 扩展包（pi.dev/packages 即 npm 上带 pi-package 关键字的包、git、本地、上传）：其中的扩展当全局扩展、技能当全局技能
+  const packages = new PackageManager(dirs.packages, { fetch: proxiedFetch });
+  extensions.packages = packages;
+  packages.onChange = async () => { await extensions.reloadAll(); };
+  skills.extraRoots = () => packages.enabled().flatMap((x) => x.res.skillRoots.map((root) => ({ root, pkg: x.rec.id })));
+  setExtAgentDir(path.join(cfg.dataDir, "pi-agent"));
   runtime.addTools(extensionTools(extensions));
-  runtime.addTools(extensions.tools());
-  runtime.addTools(mcp.tools());
+  runtime.addTools(extensions.tools(), { plugin: true });
+  runtime.addTools(mcp.tools(), { plugin: true });
   const channels = new ChannelManager(new ChannelStore(path.join(cfg.dataDir, "channels.json")), runtime, registry);
-  return { registry, models, runtime, memories, scheduler: null, a2a, skills, channels, mcp, extensions };
+  return { registry, models, runtime, memories, scheduler: null, a2a, skills, channels, mcp, extensions, packages };
 }
 
 /** 依赖 Ctx 的部分（设备工具要推送、拍照；调度器要投递）在 Ctx 建好之后接上 */

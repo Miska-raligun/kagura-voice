@@ -29,7 +29,8 @@ textarea { resize:vertical; } textarea.mono { line-height:1.5; }
 .form { display:grid; grid-template-columns:repeat(auto-fill,minmax(260px,1fr)); gap:10px 16px; margin-bottom:12px; }
 .field { display:flex; flex-direction:column; gap:3px; } .field.wide { grid-column:1/-1; } .lbl { font-size:12.5px; color:var(--muted); } .hint { color:var(--muted); font-size:12px; }
 .toggle { display:inline-flex; gap:6px; align-items:center; margin-right:14px; cursor:pointer; }
-.row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin:8px 0; } .row input { flex:1; min-width:160px; width:auto; } .grow { flex:1; }
+.row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin:8px 0; } .row input:not([type=checkbox]) { flex:1; min-width:160px; width:auto; } .grow { flex:1; } .row .grow input { width:100%; }
+details.pkg { border-top:1px solid var(--line); padding:10px 0; } details.pkg:first-of-type { border-top:0; } details.pkg summary { cursor:pointer; }
 table { width:100%; border-collapse:collapse; } th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); vertical-align:top; }
 th { color:var(--muted); font-weight:500; font-size:12.5px; } table.hover tr:hover td { background:var(--accent2); cursor:pointer; } tr.on td { background:var(--accent2); }
 td .btn { margin-right:4px; } td input:not([type=checkbox]) { min-width:70px; }

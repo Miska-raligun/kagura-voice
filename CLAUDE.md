@@ -294,7 +294,11 @@ CoreS3 (MicroPython)  ──HTTP──▶  voice_server.py (Flask :5000)  ──
   运行时 sucrase 转译 + `vm.compileFunction`，`@earendil-works/pi-ai`/`typebox` 走内置 shim（打包后没有 node_modules）。
   扩展工具、MCP 工具、`extension_*` 自写工具**都按 `exec` 同一条可信度规则**——它们本质上就是任意代码执行；
   只有工具自己标 `allowUntrusted` / 服务器配置 `allowUntrusted` 才放给不可信会话。`toolsFor` 按名字去重、内置优先，
-  别让扩展覆盖 `exec` 之类的内置工具。新工具从下一轮对话起生效（工具表在每轮开始时取）。
+  别让扩展覆盖 `exec` 之类的内置工具——扩展 / MCP 的提供者用 `addTools(p, { plugin: true })` 注册，
+  永远排在内置之后（设备工具是后注册的，不分开排的话扩展里的 `speak` 会盖掉内置的）。新工具从下一轮对话起生效。
+  **pi 扩展包**（`packages.ts`）：单文件可执行里没有 npm，自带最小安装器（semver + sha512 + 冲突嵌套，不跑安装脚本）；
+  依赖也走扩展加载器（`resolveBare` 自己解析 exports，`import.meta` 换成注入的对象），这样纯 ESM 包也能转译加载。
+  宿主包（pi-ai / pi-coding-agent / pi-tui / typebox）一律换内置 shim，pi-tui 与 pi-coding-agent 里没实现的导出拿到不报错、调用才报。
 - **IM 回复同时播语音（`channels/manager.ts`，LRN 2026-10-23，症状「飞书聊天时有时播语音有时不播，要提醒才播」）**：
   以前全靠模型自己决定要不要调 `speak`。现在由代码决定：主人私聊 + 账号 `voice_push`（home/always/off）+ `ctx.presence`，
   **跑完这一轮再判断一次**（这条消息里说了「我到家了」→ `set_presence` 也算），`toSpoken()` 转成适合念的一段后 `sendPush`。
