@@ -23,6 +23,7 @@ import uuid
 from pathlib import Path
 from typing import Optional
 import shutil
+import sys
 import requests as http_requests
 from flask import Flask, request, send_file, jsonify, Response, after_this_request
 import paho.mqtt.client as mqtt
@@ -36,7 +37,11 @@ import stream_server
 
 # ── 路径配置 ──────────────────────────────────────────────────────────────────
 
-OPENCLAW_DIR = Path.home() / ".openclaw"
+OPENCLAW_DIR = Path(os.environ.get("KAGURA_OPENCLAW_DIR") or (Path.home() / ".openclaw"))
+# 运行时数据目录。默认就是本文件所在目录（与旧版一致）；契约测试用 KAGURA_DATA_DIR 指到临时目录
+DATA_DIR = Path(os.environ.get("KAGURA_DATA_DIR") or Path(__file__).parent)
+# device_logs / crash_reports 历来相对当前工作目录，没设 KAGURA_DATA_DIR 时保持原样
+_CWD_DATA_DIR = Path(os.environ["KAGURA_DATA_DIR"]) if os.environ.get("KAGURA_DATA_DIR") else Path(".")
 TTS_SCRIPT = str(OPENCLAW_DIR / "workspace/skills/edge-tts/scripts/tts-converter.js")
 TTS_VOICE = "zh-CN-XiaoxiaoNeural"
 OPENCLAW_BIN = str(Path.home() / ".npm-global/bin/openclaw")
@@ -46,12 +51,12 @@ PULSE_ENV = {**os.environ, "PULSE_SERVER": "unix:/mnt/wslg/PulseServer"}
 
 WAV_PATH = "/tmp/oc_server_input.wav"
 MP3_PATH = "/tmp/oc_server_response.mp3"
-PUSH_AUDIO_DIR = Path(__file__).parent / "push_audio"
+PUSH_AUDIO_DIR = DATA_DIR / "push_audio"
 PUSH_AUDIO_DIR.mkdir(exist_ok=True)
 PUSH_AUDIO_MAX_FILES = 50    # 设备下载即删,这里只兜底清理下载失败的孤儿文件
 
 # TTS 内容寻址缓存:同一文本+音色只调一次百度 API(固定提示语零成本/零延迟)
-TTS_CACHE_DIR = Path(__file__).parent / "tts_cache"
+TTS_CACHE_DIR = DATA_DIR / "tts_cache"
 TTS_CACHE_DIR.mkdir(exist_ok=True)
 TTS_CACHE_MAX_FILES = 200
 
@@ -59,7 +64,7 @@ VISION_TMP_DIR = OPENCLAW_DIR / "workspace" / "tmp"
 VISION_TMP_DIR.mkdir(parents=True, exist_ok=True)
 
 # 定时拍照的留档：photo_results 5 分钟就清，这里长期保留供网页回看
-SNAPSHOT_DIR = Path(__file__).parent / "snapshots"
+SNAPSHOT_DIR = DATA_DIR / "snapshots"
 SNAPSHOT_DIR.mkdir(exist_ok=True)
 SNAPSHOT_MAX = 60
 
@@ -67,7 +72,7 @@ WEB_DIR = Path(__file__).parent / "web"
 
 # 每台设备最近一次上传的录音（覆盖写，只留一条）：识别差时拿来试听，
 # 分辨是「录音本身就糊」还是「百度没认出来」。GET /debug-audio/<device_id>
-DEBUG_AUDIO_DIR = Path(__file__).parent / "debug_audio"
+DEBUG_AUDIO_DIR = DATA_DIR / "debug_audio"
 
 SAMPLE_RATE = 16000
 
@@ -316,6 +321,8 @@ def synthesize(text: str, per: int = 111) -> Optional[str]:
 # ── MQTT 推送客户端 ──────────────────────────────────────────────────────────
 
 _mqtt_client = None
+MQTT_HOST = os.environ.get("KAGURA_MQTT_HOST", "localhost")
+MQTT_PORT = int(os.environ.get("KAGURA_MQTT_PORT", "1883"))
 
 
 def _init_mqtt() -> None:
@@ -323,10 +330,10 @@ def _init_mqtt() -> None:
     global _mqtt_client
     try:
         client = mqtt.Client()
-        client.connect("localhost", 1883)
+        client.connect(MQTT_HOST, MQTT_PORT)
         client.loop_start()
         _mqtt_client = client
-        print("MQTT 已连接 localhost:1883")
+        print(f"MQTT 已连接 {MQTT_HOST}:{MQTT_PORT}")
     except Exception as e:
         print(f"⚠️  MQTT 连接失败（推送功能不可用）: {e}")
         _mqtt_client = None
@@ -1108,7 +1115,7 @@ def handle_presence():
 # 设备每分钟 POST /heartbeat（状态 + 增量 dbg 日志）。日志落盘 device_logs/，
 # 失联/恢复在服务端日志留下带时长的记录。GET /device-status 随时查当前状态。
 
-DEVICE_LOGS_DIR = Path("device_logs")
+DEVICE_LOGS_DIR = _CWD_DATA_DIR / "device_logs"
 _HB_SILENT_SECS = 200          # 超过此秒数无心跳视为失联（心跳间隔 60s）
 
 _hb_devices: dict = {}         # device_id → {"ts", "data", "alerted"}
@@ -1242,7 +1249,7 @@ def crash_report():
     except OSError as e:
         print(f"[{device_id}] boot log 写入失败: {e}")
     if log:
-        report_dir = Path("crash_reports")
+        report_dir = _CWD_DATA_DIR / "crash_reports"
         report_dir.mkdir(exist_ok=True)
         fname = report_dir / f"{device_id}_{time.strftime('%Y%m%d_%H%M%S')}.log"
         fname.write_text(log)
@@ -1776,19 +1783,27 @@ def monitor_run_schedule(sid: str):
 # ── 启动 ──────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
+    # 契约测试（contract-tests/）用：假 ASR/LLM/TTS + /__fake/* 控制接口，不联网不花钱
+    _fake = os.environ.get("KAGURA_FAKE_PROVIDERS") == "1"
+    if _fake:
+        import fake_providers
+        fake_providers.install(sys.modules[__name__])
+    http_port = int(os.environ.get("KAGURA_PORT", "5000"))
+    stream_port = int(os.environ.get("KAGURA_STREAM_PORT", str(stream_server.PORT)))
     print("=" * 50)
-    print("  OpenClaw 语音服务端")
+    print("  OpenClaw 语音服务端" + ("（假服务商模式）" if _fake else ""))
     print("=" * 50)
-    print("获取百度 token...", end="", flush=True)
-    _asr_tokens.get()
-    print(" OK")
+    if not _fake:
+        print("获取百度 token...", end="", flush=True)
+        _asr_tokens.get()
+        print(" OK")
     _init_mqtt()
     threading.Thread(target=_photo_cleanup_loop, daemon=True, name="photo-cleanup").start()
     threading.Thread(target=_hb_watch_loop, daemon=True, name="hb-watch").start()
     reminders.init(_send_push)
     photo_schedules.init(_run_scheduled_capture)
-    stream_server.init(_stream_frame_to_jpeg, token=STREAM_TOKEN)
+    stream_server.init(_stream_frame_to_jpeg, token=STREAM_TOKEN, port=stream_port)
     print(f"Agent : {AGENT_ID}  |  TTS : {TTS_VOICE}")
-    print("监听 0.0.0.0:5000，Ctrl+C 退出")
-    print("监控网页: http://<本机IP>:5000/monitor\n")
-    app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)
+    print(f"监听 0.0.0.0:{http_port}，Ctrl+C 退出")
+    print(f"监控网页: http://<本机IP>:{http_port}/monitor\n")
+    app.run(host="0.0.0.0", port=http_port, debug=False, threaded=True)

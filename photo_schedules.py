@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import threading
 import time
@@ -18,7 +19,7 @@ import uuid
 from pathlib import Path
 from typing import Callable, Optional
 
-STORE_PATH = Path(__file__).parent / "photo_schedules.json"
+STORE_PATH = Path(os.environ.get("KAGURA_DATA_DIR") or Path(__file__).parent) / "photo_schedules.json"
 CHECK_INTERVAL = 20      # 扫描间隔（秒）；HH:MM 精度下足够
 MISS_WINDOW = 900        # 迟到超过 15 分钟不再补拍，只标记当天已处理
 MAX_SCHEDULES = 20       # 上限，防止网页误操作堆出几百条

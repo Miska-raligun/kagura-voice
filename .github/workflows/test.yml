@@ -2,7 +2,7 @@ name: tests
 
 on:
   push:
-    branches: [main]
+    branches: [main, feat/kagura-agent-server]
   pull_request:
 
 jobs:
@@ -26,3 +26,21 @@ jobs:
         run: python tools/check_split.py
       - name: Device import simulation
         run: python tools/import_sim.py
+
+  contract:
+    # 黑盒协议测试：起真实的服务端进程，只走 HTTP/MQTT/UDP/TCP。
+    # 迁移到 TypeScript 版时，同一套用例要对新版也跑绿（见 contract-tests/README.md）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: pip install -r requirements.txt -r contract-tests/requirements.txt
+      - name: Contract tests (Python server)
+        working-directory: contract-tests
+        run: pytest
+      - name: Server logs on failure
+        if: failure()
+        run: for f in /tmp/kagura-contract-*/server.log; do echo "== $f"; tail -80 "$f"; done

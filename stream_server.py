@@ -205,8 +205,9 @@ def _accept_loop() -> None:
 def init(to_jpeg: Callable[[bytes], Optional[bytes]], token: str = "",
          port: int = PORT) -> bool:
     """启动 TCP 接收线程。端口占用等失败时返回 False，不影响主服务启动。"""
-    global _server_sock, _to_jpeg, _token
+    global _server_sock, _to_jpeg, _token, PORT
     _to_jpeg = to_jpeg
+    PORT = port          # 下发 stream_start 时告诉设备连哪个端口，必须是实际监听的那个
     _token = token or ""
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)

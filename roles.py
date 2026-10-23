@@ -9,12 +9,13 @@
 """
 
 import json
+import os
 import re
 import threading
 from pathlib import Path
 from typing import Optional
 
-STATE_FILE = Path(__file__).parent / "roles_state.json"
+STATE_FILE = Path(os.environ.get("KAGURA_DATA_DIR") or Path(__file__).parent) / "roles_state.json"
 
 # 默认角色 id 为空串：设备端 St.role="" 即用默认图目录，与旧版逐字节一致
 _DEFAULT = [{"id": "", "name": "神乐", "agent": "main", "per": 111, "aliases": []}]

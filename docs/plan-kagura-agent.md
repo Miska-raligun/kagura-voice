@@ -1,7 +1,7 @@
 # Kagura 自研 Agent 系统与安装包 —— 开发计划
 
-> 状态：v3（2026-10-23）。**M0 已完成**，结论见 [m0-report.md](m0-report.md)：路线全部可行，打包用 Node 24 LTS，
-> 记忆检索用 CJK 逐字切分，QQ 定为官方机器人 WebSocket。下一步 M1。
+> 状态：v3（2026-10-23）。**M0、M1 已完成**：M0 结论见 [m0-report.md](m0-report.md)；M1 的契约测试在
+> [contract-tests/](../contract-tests/README.md)（83 例，Python 版全绿）。下一步 M2。
 > 目标读者：项目作者 + 之后接手开发的人（包括 Claude）。
 > v2 变更：按作者要求，本期范围定为**系统层核心**——定时任务、heartbeat、多 agent 隔离与
 > agent 间通信、memory、soul（人设文件体系）、管理 UI；通用 skill 后续再迁。新服务端放本仓库。
