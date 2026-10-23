@@ -199,6 +199,7 @@ export function dirs(cfg: Config) {
     visionTmp: cfg.brain === "pi" ? d("tmp") : (() => { const p = openclawTmp(cfg); fs.mkdirSync(p, { recursive: true }); return p; })(),
     agents: d("agents"),
     skills: d("skills"),
+    extensions: d("extensions"),
     systemDb: path.join(cfg.dataDir, "system.sqlite"),
     remindersFile: path.join(cfg.dataDir, "reminders.json"),
     schedulesFile: path.join(cfg.dataDir, "photo_schedules.json"),

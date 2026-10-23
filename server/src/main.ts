@@ -90,6 +90,8 @@ async function main() {
   await listenOrExplain("UDP 发现", cfg.discPort, () => startDiscovery(cfg.discPort));
   ctx.reminders.start((text, dev) => ctx.sendPush(text, dev));
   sys.scheduler?.start(cfg.schedulerTick);
+  // 扩展加载完会顺带（重新）连接 MCP 服务器；都在后台，不拖慢启动
+  sys.extensions.reloadAll().catch((e) => console.log(`[ext] ⚠️  ${e.message}`));
   sys.channels.startAll().then(async () => {
     // /restart 之前在哪个聊天里发的，回来在那说一声
     const n = takeRestartNotice(cfg.dataDir);

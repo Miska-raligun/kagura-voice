@@ -281,11 +281,15 @@ export class Runtime {
   /** 某个 agent 在普通会话里能看到的全部内置工具（管理界面白名单用，不过滤白名单本身） */
   allToolNames(agent: AgentInfo): { name: string; label: string; description: string }[] {
     const scope: RunScope = { agentId: agent.id, sessionKey: `${agent.id}:main`, kind: "main", channel: "webchat", purpose: "list", hop: 0, chain: [], meta: {}, trusted: true };
-    return this.providers.flatMap((p) => p(scope, agent)).map((t) => ({ name: t.name, label: t.label, description: t.description }));
+    const seen = new Set<string>();
+    return this.providers.flatMap((p) => p(scope, agent)).filter((t) => (seen.has(t.name) ? false : (seen.add(t.name), true)))
+      .map((t) => ({ name: t.name, label: t.label, description: t.description }));
   }
 
   private toolsFor(scope: RunScope, agent: AgentInfo, req: RunRequest): AgentTool<any>[] {
-    const all = this.providers.flatMap((p) => p(scope, agent));
+    // 同名工具只留第一个：内置的先注册，扩展 / MCP 起了重名也盖不掉内置工具
+    const seen = new Set<string>();
+    const all = this.providers.flatMap((p) => p(scope, agent)).filter((t) => (seen.has(t.name) ? false : (seen.add(t.name), true)));
     const allow = agent.tools.includes("*") ? null : new Set(agent.tools);
     return all.filter((t) => (!allow || allow.has(t.name)) && (!req.toolAllow || req.toolAllow(t.name)));
   }

@@ -16,6 +16,9 @@ import { A2A } from "./a2a.ts";
 import { Skills } from "./skills.ts";
 import { execTools } from "./tools/exec.ts";
 import { webTools } from "./tools/web.ts";
+import { McpManager } from "./mcp.ts";
+import { Extensions, extensionTools } from "./extensions.ts";
+import { proxiedFetch } from "../util/proxy.ts";
 import { ChannelStore } from "../channels/store.ts";
 import { ChannelManager } from "../channels/manager.ts";
 import path from "node:path";
@@ -29,6 +32,8 @@ export interface AgentSystem {
   a2a: A2A;
   skills: Skills;
   channels: ChannelManager;
+  mcp: McpManager;
+  extensions: Extensions;
 }
 
 export function createAgentSystem(cfg: Config, dirs: Dirs, fake: FakeLlm | null): AgentSystem {
@@ -53,8 +58,15 @@ export function createAgentSystem(cfg: Config, dirs: Dirs, fake: FakeLlm | null)
   // 执行命令（只给可信会话）+ 联网搜索 / 读网页。cfg.tools 由管理界面就地更新，改了立即生效
   runtime.addTools(execTools(cfg.tools));
   runtime.addTools(webTools(cfg.tools));
+  // 扩展（pi 格式，agent 也能自己写）与 MCP 服务器；启动后由 main 在后台加载 / 连接（startPlugins）
+  const mcp = new McpManager(path.join(cfg.dataDir, "mcp.json"), { fetch: proxiedFetch, cwd: cfg.dataDir, version: VERSION });
+  const extensions = new Extensions(dirs.extensions, registry);
+  extensions.onMcpServers = (list) => { mcp.setExtensionServers(list); mcp.reload().catch((e) => console.log(`[mcp] ⚠️  ${e.message}`)); };
+  runtime.addTools(extensionTools(extensions));
+  runtime.addTools(extensions.tools());
+  runtime.addTools(mcp.tools());
   const channels = new ChannelManager(new ChannelStore(path.join(cfg.dataDir, "channels.json")), runtime, registry);
-  return { registry, models, runtime, memories, scheduler: null, a2a, skills, channels };
+  return { registry, models, runtime, memories, scheduler: null, a2a, skills, channels, mcp, extensions };
 }
 
 /** 依赖 Ctx 的部分（设备工具要推送、拍照；调度器要投递）在 Ctx 建好之后接上 */

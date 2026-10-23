@@ -290,6 +290,11 @@ CoreS3 (MicroPython)  ──HTTP──▶  voice_server.py (Flask :5000)  ──
   其它渠道可信；嵌套调用（a2a）沿用上层，后台派出的经 `lineage.trusted` 带过去；**不可信会话里 cron_add / cron_update
   的任务标 `untrusted`，跑起来也不可信**（管理界面改过才清掉）——新加任何「替别人跑一轮」的入口都要把可信度带上，
   漏一处就是让陌生人借道执行命令。联网走 `util/proxy.ts`：配了代理就换全局 dispatcher（含调模型），本机地址直连。
+- **扩展 / MCP（`server/src/agent/extensions.ts`、`mcp.ts`）**：扩展是 pi 格式（`export default (pi) => pi.registerTool(...)`），
+  运行时 sucrase 转译 + `vm.compileFunction`，`@earendil-works/pi-ai`/`typebox` 走内置 shim（打包后没有 node_modules）。
+  扩展工具、MCP 工具、`extension_*` 自写工具**都按 `exec` 同一条可信度规则**——它们本质上就是任意代码执行；
+  只有工具自己标 `allowUntrusted` / 服务器配置 `allowUntrusted` 才放给不可信会话。`toolsFor` 按名字去重、内置优先，
+  别让扩展覆盖 `exec` 之类的内置工具。新工具从下一轮对话起生效（工具表在每轮开始时取）。
 - **`global` 声明必须有主**（LRN 2026-08-25）：`netsvc.mqtt_check` 里写过
   `global _mqtt_ok`，但本模块从来没有这个名字（状态在 `diag`）。后果是
   **任何一次 MQTT 掉线都变成 NameError 逃出 `mqtt_check`**，主循环连吃 10 次

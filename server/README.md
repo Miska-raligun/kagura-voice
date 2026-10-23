@@ -109,6 +109,8 @@ kagura migrate <旧仓库目录>     # config.py → config.json，并复制提�
 <数据目录>/agents/<id>/agent.sqlite   会话、消息、用量、记忆索引
 <数据目录>/system.sqlite              定时任务、运行记录、agent 通信记录
 <数据目录>/skills/<name>/SKILL.md     全局技能（脚本由 agent 用 exec 执行）
+<数据目录>/extensions/<名>.ts         全局扩展（pi 格式的自定义工具）；只给某个 agent 的放在它 workspace/extensions/
+<数据目录>/mcp.json                   MCP 服务器配置（与 pi / Claude Desktop 同格式）
 ```
 
 从 OpenClaw 搬人设、记忆与定时任务（任务导入后默认暂停）：
@@ -118,7 +120,7 @@ kagura migrate <旧仓库目录>     # config.py → config.json，并复制提�
 
 `speak` `take_photo` `set_volume` `get_presence` `photo_schedule_*` · `memory_search` `memory_get` `memory_write` ·
 `cron_list` `cron_add` `cron_update` `cron_remove` `cron_run` · `sessions_list` `sessions_history` `sessions_send` `sessions_spawn` · `skill_read` ·
-`exec` · `web_search` `web_fetch`
+`exec` · `web_search` `web_fetch` · `extension_list` `extension_read` `extension_write` `extension_remove`（自己写工具）· `mcp__<服务器>__<工具>`
 
 **执行命令（`exec`）的权限**：只有可信会话里才有这个工具——设备、网页聊天、定时任务 / heartbeat、渠道白名单里标了 owner 的私聊。
 IM 陌生人和群聊里没有；经 a2a 转手、或在不可信会话里建 / 改的定时任务，都沿用发起方的可信度（`RunScope.trusted`、`Job.untrusted`）。
@@ -134,10 +136,25 @@ IM 陌生人和群聊里没有；经 a2a 转手、或在不可信会话里建 / 
 `shell`：auto（Windows=PowerShell，其它=bash）/ powershell / cmd / wsl / bash / sh。`search_provider`：auto（有 Key 用对应服务，
 否则抓必应网页，再不行 DuckDuckGo）/ bing / duckduckgo / bocha / tavily / brave / searxng。`proxy` 对所有出站请求生效（含调模型），本机地址直连。
 
+### 扩展与 MCP（agent 自己给自己写工具）
+
+**扩展**用 pi 的格式：一个 .ts/.js 文件 `export default function (pi) { pi.registerTool({ name, description, parameters, execute }) }`，
+可以 import 同目录的文件、Node 内置模块，`@earendil-works/pi-ai` / `typebox` 的 `Type` 内置可用（运行时用 sucrase 转译，不用装依赖）。
+`pi.registerMcpServer(name, cfg)` 也认；pi 的界面类 API（命令、快捷键、事件、TUI）没有，加载时记下来忽略。
+agent 在可信会话里有 `extension_write` 等工具：写完立即加载并返回加载结果（有错就带报错），下一轮起就能直接调用新工具。
+管理界面「扩展 / MCP」可以新建、编辑、删除、重新加载。
+
+**MCP**：`<数据目录>/mcp.json`，`{ "mcpServers": { 名字: { command/args/env/cwd 或 url/headers, enabled, timeout, toolExposure } } }`，
+值里可写 `${环境变量}`；可从 pi / Claude Desktop / Cursor 的配置一键导入。工具名 `mcp__<服务器>__<工具>`，`toolExposure: {"工具": "hidden"}` 隐藏。
+基于 `@earendil-works/pi-mcp`（stdio + Streamable HTTP；OAuth 登录的远程服务器暂不支持，可用 headers 带 token）。
+
+**权限**：扩展工具、MCP 工具和 `extension_*` 默认都只在可信会话里出现（同 `exec`）；扩展工具定义里加 `allowUntrusted: true`、
+MCP 服务器配置里加 `"allowUntrusted": true` 才给 IM 陌生人 / 群聊用。同名工具内置的优先。
+
 ### 管理界面
 
 在运行服务端的这台电脑上打开 **http://127.0.0.1:5000/admin**（只允许本机访问，局域网其它机器 403）。
-总览、技能（新建 / 编辑 / 上传 .zip / 删除）、Agents（人设文件带字数预算、音色试听、工具/技能白名单、heartbeat、通信权限）、会话、记忆（编辑与检索测试）、
+总览、技能（新建 / 编辑 / 上传 .zip / 删除）、扩展 / MCP、Agents（人设文件带字数预算、音色试听、工具/技能白名单、heartbeat、通信权限）、会话、记忆（编辑与检索测试）、
 定时任务（向导、立即运行、运行历史、从 OpenClaw 导入）、Agent 通信矩阵、渠道（飞书/QQ 账号、配对审批、绑定）、
 设备（绑定、日志、崩溃报告、录音试听、监控页、**传角色图片 / 在线更新设备代码**）、网页聊天、用量、设置（模型服务商、嵌入、百度、端口、首次设置向导）。
 不碰配置文件也能完成全部日常管理。前端在 `admin-ui/`（Preact，esbuild 编译后内联进单文件可执行）。

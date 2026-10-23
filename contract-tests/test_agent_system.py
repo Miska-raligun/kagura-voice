@@ -402,3 +402,75 @@ def test_admin_chat_stream_images_files_and_delete(a):
     assert a.post("/api/admin/chat", json={"agent": "main", "session": "mio:webchat:x", "text": "hi"}).status_code == 400
     assert a.request("DELETE", f"/api/admin/agents/main/sessions/{key}").status_code == 200
     assert not any(x["key"] == key for x in a.get("/api/admin/agents/main/sessions").json())
+
+
+_MCP_PY = r'''
+import json, sys
+for line in sys.stdin:
+    try:
+        m = json.loads(line)
+    except Exception:
+        continue
+    if "id" not in m:
+        continue
+    def ok(r):
+        sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": m["id"], "result": r}) + "\n"); sys.stdout.flush()
+    meth = m.get("method")
+    if meth == "initialize":
+        ok({"protocolVersion": m["params"]["protocolVersion"], "capabilities": {"tools": {}}, "serverInfo": {"name": "ct", "version": "1"}})
+    elif meth == "tools/list":
+        ok({"tools": [{"name": "shout", "description": "大写", "inputSchema": {"type": "object", "properties": {"text": {"type": "string"}}}}]})
+    elif meth == "tools/call":
+        ok({"content": [{"type": "text", "text": "MCP:" + m["params"]["arguments"]["text"].upper()}]})
+    else:
+        ok({})
+'''
+
+
+def test_mcp_server_config_and_tool_call(a, tmp_path):
+    """MCP：管理接口写 mcp.json → 连上 stdio 服务器 → agent 调 mcp__ct__shout → 删掉配置就断开"""
+    import sys
+    script = tmp_path / "ct_mcp.py"
+    script.write_text(_MCP_PY, encoding="utf-8")
+    cfg = {"mcpServers": {"ct": {"command": sys.executable, "args": ["-u", str(script)]}}}
+    r = a.request("PUT", "/api/admin/mcp", json={"config": json.dumps(cfg)})
+    assert r.status_code == 200, r.text
+    srv = next(s for s in r.json()["servers"] if s["name"] == "ct")
+    assert srv["state"] == "connected", srv
+    assert [t["tool"] for t in srv["tools"]] == ["mcp__ct__shout"]
+    a.fake_llm(tool("mcp__ct__shout", _then="喊完了", text="hello"))
+    a.post("/chat", data=wav(), headers={"X-Device-Id": "ag_mcp"})
+    assert "MCP:HELLO" in _transcript_text(a)
+    assert a.request("PUT", "/api/admin/mcp", json={"config": "{oops"}).status_code == 400
+    assert a.request("PUT", "/api/admin/mcp", json={"config": json.dumps({"mcpServers": {}})}).json()["servers"] == []
+
+
+_EXT = """import { Type } from "@earendil-works/pi-ai";
+export default function (pi) {
+  pi.registerTool({
+    name: "ct_double", label: "翻倍", description: "把数字翻倍",
+    parameters: Type.Object({ n: Type.Number() }),
+    async execute(id, params: { n: number }, signal, onUpdate, ctx) {
+      return { content: [{ type: "text", text: "DOUBLE=" + params.n * 2 + " ws=" + (ctx.cwd ? "ok" : "none") }] };
+    },
+  });
+}
+"""
+
+
+def test_agent_writes_own_tool_then_uses_it(a):
+    """自己给自己写工具：extension_write 写扩展 → 立刻加载 → 下一轮直接调用 → 管理界面看得到、能删"""
+    a.fake_llm(tool("extension_write", _then="写好了", name="ct-double", code=_EXT))
+    a.post("/chat", data=wav(), headers={"X-Device-Id": "ag_ext"})
+    exts = a.get("/api/admin/extensions").json()["extensions"]
+    e = next(x for x in exts if x["name"] == "ct-double")
+    assert e["owner"] == "main" and not e["error"], e
+    assert [t["name"] for t in e["tools"]] == ["ct_double"]
+    a.fake_llm(tool("ct_double", _then="算好了", n=21))
+    a.post("/chat", data=wav(), headers={"X-Device-Id": "ag_ext"})
+    assert "DOUBLE=42 ws=ok" in _transcript_text(a)
+    # 管理界面改坏 → 报错带回来；删除
+    bad = a.request("PUT", "/api/admin/extensions/main/ct-double", json={"code": "export default 1"}).json()
+    assert bad["error"]
+    assert a.request("DELETE", "/api/admin/extensions/main/ct-double").status_code == 200
+    assert not any(x["name"] == "ct-double" for x in a.get("/api/admin/extensions").json()["extensions"])
