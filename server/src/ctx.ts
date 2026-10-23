@@ -4,13 +4,13 @@ import fs from "node:fs";
 import path from "node:path";
 import type { Config, Dirs, RoleDef } from "./config.ts";
 import type { Req } from "./http/router.ts";
-import type { Voice } from "./voice/types.ts";
+import type { Voice, VoiceRef } from "./voice/types.ts";
 import type { Brain } from "./brain/types.ts";
 import type { MqttHub } from "./mqtt.ts";
 import type { StreamHub } from "./stream.ts";
 import { STALE_AFTER } from "./stream.ts";
 import { ServerState } from "./state.ts";
-import { Roles, type Role } from "./roles.ts";
+import { Roles, roleVoice, type Role } from "./roles.ts";
 import { Heartbeats } from "./heartbeat.ts";
 import { Reminders } from "./jobs/reminders.ts";
 import { PhotoSchedules, type Schedule } from "./jobs/photoSchedules.ts";
@@ -107,7 +107,7 @@ export class Ctx {
     if (!this.mqtt.ok) return false;
     const cur = this.roles.get(dev);
     const role = agentId ? (cur.agent === agentId ? cur : this.roles.all().find((r) => r.agent === agentId)) : cur;
-    const wav = await this.voice.synthesize(text, role?.per ?? this.agentPer?.(agentId!) ?? cur.per);
+    const wav = await this.voice.synthesize(text, role ? roleVoice(role) : this.agentVoice?.(agentId!) ?? roleVoice(cur));
     if (!wav) return false;
     const fname = `${hex(8)}.wav`;
     fs.copyFileSync(wav, path.join(this.dirs.pushAudio, fname));
@@ -118,8 +118,8 @@ export class Ctx {
     return true;
   }
 
-  /** 不对应任何角色的 agent 的音色（agent 系统挂上） */
-  agentPer: ((agentId: string) => number | undefined) | null = null;
+  /** 不对应任何角色的 agent 的声音（agent 系统挂上） */
+  agentVoice: ((agentId: string) => VoiceRef | undefined) | null = null;
 
   // ── 录音留档 ──
 

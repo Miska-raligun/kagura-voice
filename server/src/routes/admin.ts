@@ -14,6 +14,7 @@ import { importOpenClaw, findOpenClawDirs, describeImport } from "../agent/impor
 import { scheduleFrom } from "../agent/tools/cron.ts";
 import { Roles } from "../roles.ts";
 import { parseToolsConfig, parseVoicePush } from "../config.ts";
+import { SpeechHub, parseSpeechConfig } from "../voice/hub.ts";
 import { GLOBAL_OWNER } from "../agent/skills.ts";
 import { registerAdminChat } from "./admin-chat.ts";
 import { registerAdminPlugins } from "./admin-plugins.ts";
@@ -347,6 +348,11 @@ export function registerAdmin(r: Router, ctx: Ctx, sys: AgentSystem) {
       memories.setEmbedder(e?.base_url && e?.model ? new OpenAIEmbedder({ baseUrl: e.base_url, apiKey: e.api_key ?? "", model: e.model }) : null);
       hot.push("embedding");
     }
+    if ("speech" in patch && !ctx.cfg.fakeProviders) {
+      ctx.cfg.speech = parseSpeechConfig(next.speech);
+      if (ctx.voice instanceof SpeechHub) ctx.voice.configure(ctx.cfg.speech);
+      hot.push("speech");
+    }
     if ("voice_push" in patch) { ctx.cfg.voicePush = parseVoicePush(next.voice_push); hot.push("voice_push"); }
     if ("role_push" in patch) { ctx.cfg.rolePush = next.role_push === "switch" ? "switch" : "hold"; hot.push("role_push"); }
     if (next.a2a) {
@@ -408,12 +414,27 @@ export function registerAdmin(r: Router, ctx: Ctx, sys: AgentSystem) {
       return json({ ok: true, reply: r.content.filter((c: any) => c.type === "text").map((c: any) => c.text).join(""), ms: Date.now() - t0, usage: r.usage });
     } catch (e: any) { return json({ ok: false, error: e.message, ms: Date.now() - t0 }); }
   });
-  /** 音色试听 */
+  /**
+   * 音色试听。provider / voice 指定服务商和音色（不传 = 默认服务商）；
+   * speech 传页面上还没保存的服务商设置，用它临时试（与模型「测试」同理：不用先保存）
+   */
   post("/api/admin/tts", async (req) => {
     const d = req.json() ?? {};
-    const wav = await ctx.voice.synthesize(String(d.text || "你好，我是你的桌面小助手。"), Number(d.per ?? 111));
-    if (!wav) return json({ error: "语音合成失败（检查百度 Key）" }, 500);
-    return { status: 200, headers: { "Content-Type": "audio/wav" }, body: fs.readFileSync(wav) };
+    const text = String(d.text || "你好，我是你的桌面小助手。");
+    const ref = { per: Number(d.per ?? 111), ...(d.provider ? { provider: String(d.provider) } : {}), ...(d.voice ? { voice: String(d.voice) } : {}) };
+    try {
+      let voice = ctx.voice;
+      if (d.speech && ctx.voice instanceof SpeechHub) {
+        const draft = parseSpeechConfig({ ...d.speech, providers: (d.speech.providers ?? []).map((p: any) => {
+          const old = ctx.cfg.speech.providers.find((o) => o.id === p.id);
+          return p.api_key === "***" && old ? { ...p, api_key: old.api_key } : p;
+        }) });
+        voice = new SpeechHub(ctx.cfg.baidu, ctx.dirs.ttsCache, { ...draft, tts: ref.provider ?? draft.tts });
+      }
+      const wav = await voice.synthesize(text, ref);
+      if (!wav) return json({ error: "语音合成失败" }, 500);
+      return { status: 200, headers: { "Content-Type": "audio/wav" }, body: fs.readFileSync(wav) };
+    } catch (e: any) { return json({ error: `语音合成失败：${e.message}` }, 500); }
   });
 
   // ── 用量（全部 agent）──

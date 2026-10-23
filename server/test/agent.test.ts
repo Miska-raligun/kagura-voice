@@ -186,8 +186,8 @@ describe("注册表", () => {
     const { reg } = makeRuntime();
     expect(reg.list().map((a) => a.id)).toEqual(["main", "mio"]);
     expect(reg.roleDefs()).toEqual([
-      { id: "", name: "神乐", agent: "main", per: 111, aliases: [] },
-      { id: "mio", name: "小澪", agent: "mio", per: 4, aliases: [] },
+      { id: "", name: "神乐", agent: "main", per: 111, tts_provider: "", tts_voice: "", aliases: [] },
+      { id: "mio", name: "小澪", agent: "mio", per: 4, tts_provider: "", tts_voice: "", aliases: [] },
     ]);
     expect(reg.canContact("main", "mio")).toBe(true);
     expect(reg.canContact("mio", "main")).toBe(true);

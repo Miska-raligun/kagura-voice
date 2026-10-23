@@ -8,8 +8,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { isWsl, wslUncPath } from "./util/platform.ts";
+import { parseSpeechConfig, type SpeechConfig } from "./voice/hub.ts";
 
-export interface RoleDef { id?: string; name?: string; agent?: string; per?: number; aliases?: string[] }
+export interface RoleDef { id?: string; name?: string; agent?: string; per?: number; tts_provider?: string; tts_voice?: string; aliases?: string[] }
 
 export function parseVoicePush(v: unknown): "presence" | "always" | "never" {
   return v === "always" || v === "never" ? v : "presence";
@@ -34,6 +35,8 @@ export interface Config {
   streamToken: string;
   roles: RoleDef[] | null;
   baidu: { asrKey: string; asrSecret: string; ttsKey: string; ttsSecret: string; asrMode?: "standard" | "pro" };
+  /** 语音识别 / 合成用哪家（百度、OpenAI 兼容、MiniMax），见 voice/hub.ts */
+  speech: SpeechConfig;
   /** OpenClaw 适配器（可选大脑，作者自用可继续接 OpenClaw） */
   openclaw: {
     bin: string; dir: string; defaultAgent: string;
@@ -181,6 +184,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       // 识别档位：standard = 标准版（免费额度多）；pro = 极速版（更准更快，要在百度控制台开通，按次计费）
       asrMode: baidu.asr_mode === "pro" ? "pro" : "standard",
     },
+    speech: parseSpeechConfig(file.speech),
     openclaw: {
       bin: oc.bin ?? path.join(home, ".npm-global", "bin", "openclaw"),
       dir: env.KAGURA_OPENCLAW_DIR || oc.dir || path.join(home, ".openclaw"),

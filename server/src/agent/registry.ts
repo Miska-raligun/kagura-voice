@@ -20,6 +20,10 @@ export interface AgentConfig {
   aliases: string[];
   /** 百度 TTS 音色 */
   per: number;
+  /** 语音合成服务商 id（config.json 的 speech.providers），空 = 默认服务商 */
+  tts_provider: string;
+  /** 该服务商的音色（openai 的 voice、MiniMax 的 voice_id、VoiceStudio 的声音 id）；空 = 服务商默认；百度用 per */
+  tts_voice: string;
   /** 设备上的图片目录名（= 设备看到的 X-Role）。默认 agent 用 ""（resource/ 根目录那套图） */
   device_role: string;
   /** 排序：角色切换的循环顺序；最小的是默认 agent */
@@ -48,7 +52,7 @@ export interface AgentInfo extends AgentConfig {
 }
 
 const DEFAULTS: Omit<AgentConfig, "id" | "name"> = {
-  aliases: [], per: 111, device_role: "", order: 0, model: "", cheap_model: "",
+  aliases: [], per: 111, tts_provider: "", tts_voice: "", device_role: "", order: 0, model: "", cheap_model: "",
   tools: ["*"], skills: ["*"], a2a: { allow: [] },
   heartbeat: { enabled: false, every_minutes: 30, active_hours: "08:00-23:00", delivery: "device:cores3" },
   compaction: { max_tokens: 16000, keep_messages: 16 },
@@ -81,6 +85,8 @@ function normalize(raw: any, id: string): AgentConfig {
   c.name = String(raw?.name || id);
   c.aliases = (Array.isArray(c.aliases) ? c.aliases : []).map(String);
   c.per = Number.isFinite(Number(c.per)) ? Math.trunc(Number(c.per)) : 111;
+  c.tts_provider = String(c.tts_provider ?? "");
+  c.tts_voice = String(c.tts_voice ?? "");
   c.device_role = String(c.device_role ?? "");
   if (!ROLE_ID_RE.test(c.device_role)) throw new Error(`agent ${id} 的 device_role 只能用字母/数字/_-: ${c.device_role}`);
   c.order = Number(c.order ?? 0);
@@ -197,7 +203,7 @@ export class AgentRegistry {
     for (const a of this.list()) {
       if (seen.has(a.device_role)) { console.log(`[agent] ⚠️  ${a.id} 的 device_role「${a.device_role}」重复，设备上切换不到它`); continue; }
       seen.add(a.device_role);
-      out.push({ id: a.device_role, name: a.name, agent: a.id, per: a.per, aliases: a.aliases });
+      out.push({ id: a.device_role, name: a.name, agent: a.id, per: a.per, tts_provider: a.tts_provider, tts_voice: a.tts_voice, aliases: a.aliases });
     }
     return out;
   }

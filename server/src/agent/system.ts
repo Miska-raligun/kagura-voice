@@ -21,6 +21,7 @@ import { McpManager } from "./mcp.ts";
 import { Extensions, extensionTools, setExtAgentDir } from "./extensions.ts";
 import { PackageManager } from "./packages.ts";
 import { Outbox } from "./outbox.ts";
+import { roleVoice } from "../roles.ts";
 import { proxiedFetch } from "../util/proxy.ts";
 import { ChannelStore } from "../channels/store.ts";
 import { ChannelManager } from "../channels/manager.ts";
@@ -107,7 +108,7 @@ export function attachAgentSystem(sys: AgentSystem, ctx: Ctx) {
     const t = Date.now() / 1000;
     return [...ctx.hb.devices.entries()].filter(([, r]) => t - r.ts < HB_SILENT_SECS).map(([d]) => d);
   };
-  ctx.agentPer = (id) => registry.get(id)?.per;
+  ctx.agentVoice = (id) => { const a = registry.get(id); return a ? roleVoice(a) : undefined; };
   const outbox = new Outbox({
     policy: () => ctx.cfg.voicePush ?? "presence",
     rolePush: () => ctx.cfg.rolePush ?? "hold",

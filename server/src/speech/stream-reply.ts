@@ -13,11 +13,12 @@ import { SentenceSplitter, wavPcm } from "./sentences.ts";
 import { wavHeader } from "../util/wav.ts";
 import { b64Header } from "../util/text.ts";
 import type { AgentStreamEvent } from "../agent/runtime.ts";
-import type { Voice } from "../voice/types.ts";
+import type { Voice, VoiceRef } from "../voice/types.ts";
 
 export interface StreamReplyOpts {
   voice: Voice;
-  per: number;
+  /** 用谁的声音（百度音色编号，或服务商 + 音色） */
+  per: number | VoiceRef;
   userText: string;
   headers: Record<string, string>;
   /** 跑大脑：拿到逐字事件与 meta（工具对响应头的影响），返回完整回复 */

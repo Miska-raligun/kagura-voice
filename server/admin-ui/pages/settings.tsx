@@ -204,6 +204,7 @@ function Voice({ cfg, save }: { cfg: any; save: (p: any) => Promise<void> }) {
         </div>
         <Btn kind="primary" onClick={() => save(vp)}>保存</Btn>
       </Card>
+      <Speech cfg={cfg} save={save} />
       <Card title="百度语音">
         <div class="form">
           <Field label="识别 API Key"><Input value={b.asr_key} onInput={(v) => setB({ ...b, asr_key: v })} /></Field>
@@ -223,6 +224,82 @@ function Voice({ cfg, save }: { cfg: any; save: (p: any) => Promise<void> }) {
         <Btn kind="primary" onClick={() => save(tok)}>保存（重启生效）</Btn>
       </Card>
     </>
+  );
+}
+
+const SPEECH_KINDS: [string, string][] = [["openai", "OpenAI 兼容（VoiceStudio、OpenAI、硅基流动等）"], ["minimax", "MiniMax（仅合成）"], ["baidu", "百度"]];
+const SPEECH_PRESETS: { name: string; p: any }[] = [
+  { name: "VoiceStudio（本机）", p: { kind: "openai", name: "VoiceStudio", base_url: "http://127.0.0.1:3900/v1", model: "", voice: "" } },
+  { name: "OpenAI", p: { kind: "openai", name: "OpenAI", base_url: "https://api.openai.com/v1", model: "gpt-4o-mini-tts", voice: "alloy", asr_model: "whisper-1" } },
+  { name: "硅基流动", p: { kind: "openai", name: "硅基流动", base_url: "https://api.siliconflow.cn/v1", model: "FunAudioLLM/CosyVoice2-0.5B", voice: "FunAudioLLM/CosyVoice2-0.5B:anna", asr_model: "FunAudioLLM/SenseVoiceSmall" } },
+  { name: "MiniMax", p: { kind: "minimax", name: "MiniMax", base_url: "https://api.minimaxi.com/v1", model: "speech-02-turbo", voice: "female-shaonv" } },
+];
+
+/** 语音识别 / 合成服务商：选默认的那家，增删改服务商 */
+function Speech({ cfg, save }: { cfg: any; save: (p: any) => Promise<void> }) {
+  const init = () => {
+    const sp = JSON.parse(JSON.stringify(cfg.speech ?? {}));
+    const providers: any[] = sp.providers?.length ? sp.providers : [];
+    if (!providers.some((p) => p.kind === "baidu")) providers.unshift({ id: "baidu", kind: "baidu", name: "百度" });
+    return { asr: sp.asr || providers[0].id, tts: sp.tts || providers[0].id, providers };
+  };
+  const [sp, setSp] = useState(init);
+  const [text, setText] = useState("你好，我是你的桌面小助手。");
+  const up = (fn: (x: any) => void) => { const c = JSON.parse(JSON.stringify(sp)); fn(c); setSp(c); };
+  const name = (p: any) => p.name || p.id;
+  const asrOpts = sp.providers.filter((p: any) => p.kind !== "minimax").map((p: any) => [p.id, name(p)] as [string, string]);
+  const ttsOpts = sp.providers.map((p: any) => [p.id, name(p)] as [string, string]);
+  const add = (preset: any) => up((c) => {
+    let id = (preset.name === "VoiceStudio（本机）" ? "voicestudio" : String(preset.p.name || preset.p.kind)).toLowerCase().replace(/[^a-z0-9_-]/g, "") || "tts";
+    while (c.providers.some((p: any) => p.id === id)) id += "2";
+    c.providers.push({ id, api_key: "", ...preset.p });
+  });
+  const test = async (id: string) => {
+    try {
+      const blob = await api<Blob>("/tts", { body: { provider: id, text, speech: sp } });
+      new Audio(URL.createObjectURL(blob)).play();
+    } catch (e) { toastErr(e); }
+  };
+  return (
+    <Card title="语音服务" actions={<Select value="" onChange={(v) => { const pr = SPEECH_PRESETS.find((x) => x.name === v); if (pr) add(pr); }}
+      options={[["", "＋ 添加服务商"], ...SPEECH_PRESETS.map((x) => [x.name, x.name] as [string, string])]} />}>
+      <div class="form">
+        <Field label="语音识别"><Select value={sp.asr} onChange={(v) => setSp({ ...sp, asr: v })} options={asrOpts} /></Field>
+        <Field label="语音合成（默认）" hint="agent 可在 基本 设置中单独指定；失败时退回默认"><Select value={sp.tts} onChange={(v) => setSp({ ...sp, tts: v })} options={ttsOpts} /></Field>
+      </div>
+      {sp.providers.filter((p: any) => p.kind !== "baidu").map((p: any) => {
+        const i = sp.providers.indexOf(p);
+        const set = (k: string, v: any) => up((c) => (c.providers[i][k] = v));
+        return (
+          <details class="pkg" open={!p.base_url || !p.model}>
+            <summary><b>{name(p)}</b> <small class="muted">{p.id} · {p.kind}</small></summary>
+            <div class="form" style="margin-top:10px">
+              <Field label="名称"><Input value={p.name ?? ""} onInput={(v) => set("name", v)} /></Field>
+              <Field label="类型"><Select value={p.kind} onChange={(v) => set("kind", v)} options={SPEECH_KINDS.filter(([k]) => k !== "baidu")} /></Field>
+              <Field label="接口地址"><Input value={p.base_url ?? ""} onInput={(v) => set("base_url", v)} placeholder="https://…/v1" /></Field>
+              <Field label="API Key" hint="*** 表示已保存；本机服务可留空"><Input type="password" value={p.api_key ?? ""} onInput={(v) => set("api_key", v)} /></Field>
+              <Field label="合成模型" hint={p.kind === "minimax" ? "如 speech-02-turbo" : "如 tts-1；VoiceStudio 填引擎 id 或留空"}><Input value={p.model ?? ""} onInput={(v) => set("model", v)} /></Field>
+              <Field label="默认音色" hint={p.kind === "minimax" ? "voice_id（含复刻的音色）" : "voice 名或 VoiceStudio 的声音 id"}><Input value={p.voice ?? ""} onInput={(v) => set("voice", v)} /></Field>
+              {p.kind === "openai" && <Field label="识别模型" hint="用作语音识别时填，如 whisper-1"><Input value={p.asr_model ?? ""} onInput={(v) => set("asr_model", v)} /></Field>}
+              <Field label="语速" hint="1 为正常"><Input type="number" value={p.speed ?? ""} placeholder="1" onInput={(v) => set("speed", v ? Number(v) : undefined)} /></Field>
+            </div>
+            <div class="row">
+              <Btn small onClick={() => test(p.id)}>试听</Btn>
+              <Btn small kind="danger" onClick={() => up((c) => {
+                c.providers.splice(i, 1);
+                if (c.asr === p.id) c.asr = c.providers[0].id;
+                if (c.tts === p.id) c.tts = c.providers[0].id;
+              })}>删除</Btn>
+            </div>
+          </details>
+        );
+      })}
+      <div class="row">
+        <Input value={text} onInput={setText} />
+        <Btn onClick={() => test(sp.tts)}>试听默认</Btn>
+        <Btn kind="primary" onClick={() => save({ speech: { ...sp, providers: sp.providers.map((p: any) => ({ ...p, id: String(p.id).trim(), base_url: String(p.base_url ?? "").trim() })) } })}>保存</Btn>
+      </div>
+    </Card>
   );
 }
 

@@ -1,7 +1,7 @@
 // 对话路由：/chat、/chat-vision、/role/cycle（设备上行，不要 token，靠限流兜底）。
 import fs from "node:fs";
 import { bytes, json, type Req, type Res, type Router } from "../http/router.ts";
-import type { Role } from "../roles.ts";
+import { roleVoice, type Role } from "../roles.ts";
 import { streamReply, type StreamReplyOpts } from "../speech/stream-reply.ts";
 import {
   type Ctx, validateDeviceId, preview, MAX_AUDIO_BYTES, ASR_EMPTY_REPLY, CONT_EXIT_REPLY, PHOTO_ONLY_PROMPT,
@@ -22,7 +22,7 @@ export function registerChat(r: Router, ctx: Ctx) {
     run: StreamReplyOpts["run"]): Res => ({
     status: 200, headers: {}, body: "",
     raw: (res) => streamReply(res, {
-      voice: ctx.voice, per: role.per, userText, headers, run,
+      voice: ctx.voice, per: roleVoice(role), userText, headers, run,
       log: (s) => console.log(`[${dev}] ${s}`),
       done: (r) => {
         ctx.hb.seen(dev);
@@ -149,7 +149,7 @@ export function registerChat(r: Router, ctx: Ctx) {
       console.log(`[${dev}] 💬  ${preview(reply)}`);
 
       const tLlm = now();
-      const wavOut = await ctx.voice.synthesize(reply, role.per);
+      const wavOut = await ctx.voice.synthesize(reply, roleVoice(role));
       if (!wavOut) return json({ error: "TTS 生成失败" }, 500);
       ctx.logTiming(dev, t0, tAsr, tLlm);
       ctx.hb.seen(dev);
@@ -206,7 +206,7 @@ export function registerChat(r: Router, ctx: Ctx) {
       const reply = await ctx.inChat(dev, () => ctx.brain.chat({ message: withTouch(userText, req.header("X-Touch")), sessionId: sid, imagePath, localTime, agent: role.agent, deviceId: dev, spoken: true, trusted: ctx.deviceTrusted(req, dev) }));
       console.log(`[${dev}] 💬  ${preview(reply)}`);
       const tLlm = now();
-      const wavOut = await ctx.voice.synthesize(reply, role.per);
+      const wavOut = await ctx.voice.synthesize(reply, roleVoice(role));
       if (!wavOut) return json({ error: "TTS 生成失败" }, 500);
       ctx.logTiming(dev, t0, tAsr, tLlm);
       ctx.hb.seen(dev);
@@ -227,7 +227,7 @@ export function registerChat(r: Router, ctx: Ctx) {
     ctx.deviceHere(dev);
     const target = ctx.roles.set(dev, ctx.roles.next(dev).id)!;
     const text = ctx.roles.greeting(target);
-    const wavOut = await ctx.voice.synthesize(text, target.per);
+    const wavOut = await ctx.voice.synthesize(text, roleVoice(target));
     if (!wavOut) return json({ error: "TTS 生成失败" }, 500);
     console.log(`[${dev}] 🎭  [role/tap] → ${target.name} (${target.agent})`);
     return bytes(fs.readFileSync(wavOut), "audio/wav", { "X-Role": target.id, "X-Reply-Text": b64Header(text) });

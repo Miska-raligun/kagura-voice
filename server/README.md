@@ -183,7 +183,17 @@ MCP 服务器配置里加 `"allowUntrusted": true` 才给 IM 陌生人 / 群聊�
   扩展包、IM 渠道、定时任务、设备图片、照片，打成一个 .zip。默认不带密钥（模型 Key、百度 Key、IM 凭据、MCP 的 env / headers），
   迁移自己的电脑时可以勾「包含密钥」。导入时先看包里有什么再勾选，写进 `.import-pending/`，重启后在打开数据库之前换进去，
   被替换的先备份到 `backups/before-import-<时间>/`。端口等本机相关设置、包里空着的密钥保留本机的；npm / git 装的扩展包导入后重新下载。
-- 百度识别档位（「设置 → 百度」）：标准版（默认）或极速版（`"baidu": { "asr_mode": "pro" }`，更准更快，要先在百度智能云开通、按次计费）。
+- **语音服务商可选**（「设置 → 语音 → 语音服务」，config.json 的 `speech`）：识别、合成各选一家——百度（默认）、
+  OpenAI 兼容接口（OpenAI、硅基流动、本机 [VoiceStudio](https://github.com/debpalash/VoiceStudio) 等，`/audio/speech`、`/audio/transcriptions`）、
+  MiniMax（仅合成，支持复刻音色）。每个 agent 可在「基本」里单独指定合成服务商和音色（`tts_provider` / `tts_voice`），
+  指定的那家失败时自动退回默认服务商；别家返回的音频统一转成设备要的 16k 单声道。改完即时生效。
+  ```json
+  "speech": { "asr": "baidu", "tts": "voicestudio", "providers": [
+    { "id": "baidu", "kind": "baidu" },
+    { "id": "voicestudio", "kind": "openai", "base_url": "http://127.0.0.1:3900/v1", "voice": "<声音 id>" },
+    { "id": "minimax", "kind": "minimax", "api_key": "…", "model": "speech-02-turbo", "voice": "<voice_id>" } ] }
+  ```
+- 百度识别档位（「设置 → 语音」）：标准版（默认）或极速版（`"baidu": { "asr_mode": "pro" }`，更准更快，要先在百度智能云开通、按次计费）。
 
 ### 管理界面
 
@@ -287,7 +297,7 @@ KAGURA_BRAIN=pi KAGURA_SERVER_CMD=server/dist/kagura KAGURA_SERVER_PROVIDES=brok
 | `src/mqtt.ts` / `discovery.ts` / `stream.ts` | 内置 broker、UDP 发现、直播 TCP |
 | `src/shortcut/` | 快捷指令、提醒解析、触觉背景 |
 | `src/jobs/` | 提醒、每日定时拍照 |
-| `src/voice/` | 百度 ASR/TTS（缓存 key 与 Python 版逐字节一致，旧 `tts_cache/` 可直接复用） |
+| `src/voice/` | 语音服务商（`hub.ts`：百度 / OpenAI 兼容 / MiniMax，按 agent 选、失败退回默认、统一转 16k）；百度 ASR/TTS（缓存 key 与 Python 版逐字节一致，旧 `tts_cache/` 可直接复用） |
 | `src/brain/` | 大脑接口；`pi.ts` = 内置 agent，`openclaw.ts` = OpenClaw CLI 适配器 |
 | `src/agent/` | 内置 agent 系统：`registry`（agent 目录）、`runtime`（每轮运行/串行/压缩）、`soul`（系统提示组装）、`models`、`memory`、`scheduler` + `cron`、`a2a`、`skills`、`tools/*` |
 | `src/routes/admin.ts` / `admin-ui.ts` | 管理接口 `/api/admin/*` 与 `/admin` 页面（只许本机） |

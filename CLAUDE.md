@@ -323,6 +323,10 @@ CoreS3 (MicroPython) ──HTTP──▶ server/（TypeScript 单文件可执行
   把在家状态改成 home——`/chat` 里放在 ASR 有结果之后（免手模式的环境声不算）、大脑之前，这样「我出门了」里 agent 调的 `set_presence(away)` 后到、以它为准。**新加任何 agent 主动说话的入口都走出口，别直接 `ctx.sendPush`。**
   **角色切换钩子挂在 Ctx 上（`setRoles`）**：改 agent 时角色表整个重建，钩子挂在 Roles 实例上会悄悄丢失（契约测试踩过）。
   在家状态统一走 `ctx.setPresence` / `loadPresence`（设备 BLE、设备交互、`set_presence` 工具、`/home` `/away` 命令）。
+- **语音服务商（`server/src/voice/hub.ts`）**：识别、合成不写死百度——`speech.asr` / `speech.tts` 选默认服务商（baidu / openai 兼容 / minimax），
+  agent 的 `tts_provider` / `tts_voice` 经 `roleVoice(role)` 变成 `VoiceRef` 传给 `synthesize`（**新加合成调用点一律传 `roleVoice(...)`，别再只传 `per`**，
+  否则角色单独选的服务商被悄悄丢掉）。音色只给它所属的那家；指定的那家失败退回默认服务商（百度时用 per）。别家音频统一 `toPcm16k`（设备只认 16k 单声道 16 位），
+  缓存 key 含服务商 / 模型 / 音色，**百度的 key 保持原样**（旧 tts_cache 照样命中）。管理界面改 speech 就地 `configure`，不用重启。
 - **管理接口与设备信任（`routes/admin.ts` 的 `isLocal`、`ctx.deviceTrusted`，LRN 2026-10-23 安全检查）**：
   ① 管理接口光看「来源是 127.0.0.1」不够——你电脑上任何网页都能让浏览器往 127.0.0.1 发请求（跨站请求伪造），
   DNS 重绑定还能绕过同源。`isLocal` 同时要求 Host 是本机地址、跨站的 Origin / `Sec-Fetch-Site: cross-site` 一律拒绝

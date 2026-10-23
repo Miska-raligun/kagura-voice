@@ -74,8 +74,14 @@ function Basic({ a, save }: { a: any; save: (p: any) => Promise<void> }) {
   const [models] = useLoad(() => api("/models"));
   const opts: [string, string][] = [["", `默认（${models?.default || "未配置"}）`], ...(models?.models ?? []).map((m: any) => [m.ref, m.ref] as [string, string])];
   const cheapOpts: [string, string][] = [["", `默认（${models?.cheap || "同主模型"}）`], ...(models?.models ?? []).map((m: any) => [m.ref, m.ref] as [string, string])];
+  const [conf] = useLoad(() => api("/config"));
+  const speech = conf?.config?.speech ?? {};
+  const providers: any[] = speech.providers?.length ? speech.providers : [{ id: "baidu", kind: "baidu", name: "百度" }];
+  const defTts = providers.find((p) => p.id === speech.tts) ?? providers[0];
+  const cur = providers.find((p) => p.id === f.tts_provider) ?? defTts;
+  const pname = (p: any) => p?.name || p?.id;
   const preview = async () => {
-    const blob = await api<Blob>("/tts", { body: { per: Number(f.per), text: `你好，我是${f.name}。` } });
+    const blob = await api<Blob>("/tts", { body: { per: Number(f.per), provider: f.tts_provider || undefined, voice: f.tts_voice || undefined, text: `你好，我是${f.name}。` } });
     new Audio(URL.createObjectURL(blob)).play();
   };
   return (
@@ -83,7 +89,12 @@ function Basic({ a, save }: { a: any; save: (p: any) => Promise<void> }) {
       <div class="form">
         <Field label="名字"><Input value={f.name} onInput={(v) => set({ ...f, name: v })} /></Field>
         <Field label="别名" hint="语音切换角色时识别的叫法，逗号分隔"><Input value={f.aliases} onInput={(v) => set({ ...f, aliases: v })} /></Field>
-        <Field label="百度音色 per" hint={<a onClick={preview}>▶ 试听</a>}><Input value={f.per} onInput={(v) => set({ ...f, per: v })} /></Field>
+        <Field label="语音合成" hint="在 设置 → 语音 中添加服务商"><Select value={f.tts_provider ?? ""} onChange={(v) => set({ ...f, tts_provider: v })}
+          options={[["", `默认（${pname(defTts)}）`], ...providers.map((p) => [p.id, pname(p)] as [string, string])]} /></Field>
+        {cur?.kind === "baidu"
+          ? <Field label="百度音色 per" hint={<a onClick={preview}>▶ 试听</a>}><Input value={f.per} onInput={(v) => set({ ...f, per: v })} /></Field>
+          : <Field label="音色" hint={<>{cur?.kind === "minimax" ? "voice_id" : "voice 名或声音 id"}，留空用服务商默认 · <a onClick={preview}>▶ 试听</a></>}>
+            <Input value={f.tts_voice ?? ""} placeholder={cur?.voice || ""} onInput={(v) => set({ ...f, tts_voice: v })} /></Field>}
         <Field label="设备图片目录" hint={'设备 resource/<目录>/；默认 agent 留空'}><Input value={f.device_role} onInput={(v) => set({ ...f, device_role: v })} /></Field>
         <Field label="模型"><Select value={f.model} onChange={(v) => set({ ...f, model: v })} options={opts} /></Field>
         <Field label="便宜模型" hint="用于压缩、记忆整理、heartbeat"><Select value={f.cheap_model} onChange={(v) => set({ ...f, cheap_model: v })} options={cheapOpts} /></Field>
@@ -94,7 +105,7 @@ function Basic({ a, save }: { a: any; save: (p: any) => Promise<void> }) {
         <Field label="会话" wide><Toggle checked={f.device_in_main} onChange={(v) => set({ ...f, device_in_main: v })} label="设备对话并入 main 会话" /></Field>
       </div>
       <Btn kind="primary" onClick={() => save({
-        name: f.name, aliases: String(f.aliases).split(/[,，\s]+/).filter(Boolean), per: Number(f.per), device_role: f.device_role,
+        name: f.name, aliases: String(f.aliases).split(/[,，\s]+/).filter(Boolean), per: Number(f.per), tts_provider: f.tts_provider ?? "", tts_voice: f.tts_voice ?? "", device_role: f.device_role,
         model: f.model, cheap_model: f.cheap_model, order: Number(f.order), voice_max_chars: Number(f.voice_max_chars),
         compaction: { max_tokens: Number(f.compaction.max_tokens), keep_messages: Number(f.compaction.keep_messages) }, device_in_main: f.device_in_main,
       })}>保存</Btn>

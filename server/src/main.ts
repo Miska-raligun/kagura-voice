@@ -5,7 +5,7 @@ import { MqttHub } from "./mqtt.ts";
 import { StreamHub } from "./stream.ts";
 import { startDiscovery } from "./discovery.ts";
 import { Ctx } from "./ctx.ts";
-import { BaiduVoice } from "./voice/baidu.ts";
+import { SpeechHub } from "./voice/hub.ts";
 import { OpenClawBrain } from "./brain/openclaw.ts";
 import { FakeProviders } from "./fake.ts";
 import { PiBrain } from "./brain/pi.ts";
@@ -84,8 +84,8 @@ async function main() {
   initLogFile(cfg.dataDir);
   const proxy = applyProxy(cfg.tools.web.proxy);
   const fake = cfg.fakeProviders ? new FakeProviders(dirs.ttsCache) : null;
-  const baidu = fake ? null : new BaiduVoice(cfg.baidu, dirs.ttsCache);
-  const voice = fake ?? baidu!;
+  const speech = fake ? null : new SpeechHub(cfg.baidu, dirs.ttsCache, cfg.speech);
+  const voice = fake ?? speech!;
   // 大脑：内置 agent（pi）或 OpenClaw CLI；假服务商模式下 OpenClaw 位置换成脚本假大脑
   // agent 系统总是建：OpenClaw 模式下管理界面、首次设置向导也要能用；只有「设备对话交给谁」随 brain 配置
   const sys = createAgentSystem(cfg, dirs, fake);
@@ -112,8 +112,10 @@ async function main() {
   console.log("=".repeat(50));
   console.log(`数据目录: ${cfg.dataDir}`);
   if (proxy) console.log(`网络代理: ${proxy.replace(/\/\/[^@/]*@/, "//***@")}（本机地址直连）`);
-  if (baidu) {
-    try { await baidu.warmup(); console.log("百度 token OK"); }
+  if (speech) {
+    const name = (id: string) => cfg.speech.providers.find((p) => p.id === id)?.name || id;
+    console.log(`语音: 识别 ${name(cfg.speech.asr)} · 合成 ${name(cfg.speech.tts)}`);
+    try { if (await speech.warmup()) console.log("百度 token OK"); }
     catch (e: any) { console.log(`⚠️  百度 token 获取失败（语音识别暂不可用）: ${e.message}`); }
   }
 

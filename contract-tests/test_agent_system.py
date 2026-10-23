@@ -245,6 +245,18 @@ def test_saying_going_out_to_device_means_away(a):
         d.close()
 
 
+def test_agent_own_tts_provider_and_voice(a):
+    """agent 单独指定合成服务商和音色：设备对话的回复用它合成"""
+    try:
+        a.request("PATCH", "/api/admin/agents/main", json={"tts_provider": "vs", "tts_voice": "kagura-clone"})
+        a.fake_llm("你好呀")
+        a.post("/chat", data=wav(), headers={"X-Device-Id": "ag_tts"})
+        last = a.fake_log()["tts"][-1]
+        assert last.get("provider") == "vs" and last.get("voice") == "kagura-clone", last
+    finally:
+        a.request("PATCH", "/api/admin/agents/main", json={"tts_provider": "", "tts_voice": ""})
+
+
 def test_voice_push_policy(a):
     """voice_push = never：说给主人听的话一律不播（对 agent 透明，任务照常算成功）"""
     d = Device(a, "ag10")

@@ -7,7 +7,7 @@ import crypto from "node:crypto";
 import { stripMarkdown } from "./util/text.ts";
 import { wavHeader } from "./util/wav.ts";
 import { json, type Router } from "./http/router.ts";
-import type { Voice } from "./voice/types.ts";
+import type { Voice, VoiceRef } from "./voice/types.ts";
 import type { Brain, ChatRequest } from "./brain/types.ts";
 import type { ServerState } from "./state.ts";
 import type { FakeLlm, FakeStep } from "./agent/models.ts";
@@ -42,11 +42,13 @@ export class FakeProviders implements Voice, Brain, FakeLlm {
     return item;
   }
 
-  async synthesize(text: string, per = 111): Promise<string | null> {
+  async synthesize(text: string, v?: number | VoiceRef): Promise<string | null> {
     const clean = stripMarkdown(text);
     if (!clean) return null;
-    this.log.tts.push({ text: clean, per });
-    const p = path.join(this.ttsDir, crypto.createHash("md5").update(`fake|${clean}|${per}`).digest("hex") + ".wav");
+    const ref: VoiceRef = typeof v === "number" ? { per: v } : v ?? {};
+    const per = ref.per ?? 111;
+    this.log.tts.push({ text: clean, per, ...(ref.provider ? { provider: ref.provider, voice: ref.voice ?? "" } : {}) });
+    const p = path.join(this.ttsDir, crypto.createHash("md5").update(`fake|${clean}|${per}|${ref.provider ?? ""}|${ref.voice ?? ""}`).digest("hex") + ".wav");
     if (!fs.existsSync(p)) {
       const body = Buffer.alloc(BYTES_PER_CHAR * Array.from(clean).length);
       fs.writeFileSync(p, Buffer.concat([wavHeader(body.length), body]));

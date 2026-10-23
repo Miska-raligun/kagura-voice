@@ -5,7 +5,11 @@
 import fs from "node:fs";
 import type { RoleDef } from "./config.ts";
 
-export interface Role { id: string; name: string; agent: string; per: number; aliases: string[] }
+export interface Role { id: string; name: string; agent: string; per: number; tts_provider: string; tts_voice: string; aliases: string[] }
+
+/** 这个角色说话用的声音（合成服务商 + 音色；百度用 per） */
+export const roleVoice = (r: Pick<Role, "per" | "tts_provider" | "tts_voice">) =>
+  ({ per: r.per, ...(r.tts_provider ? { provider: r.tts_provider } : {}), ...(r.tts_voice ? { voice: r.tts_voice } : {}) });
 
 const DEFAULT: RoleDef[] = [{ id: "", name: "神乐", agent: "main", per: 111, aliases: [] }];
 const ID_RE = /^[A-Za-z0-9_-]{0,24}$/;
@@ -25,6 +29,8 @@ function norm(r: RoleDef): Role {
     name: String(r.name || r.id || "默认"),
     agent: String(r.agent || "main"),
     per: Number.isFinite(Number(r.per)) && r.per !== undefined ? Math.trunc(Number(r.per)) : 111,
+    tts_provider: String(r.tts_provider ?? ""),
+    tts_voice: String(r.tts_voice ?? ""),
     aliases: (r.aliases ?? []).map(String),
   };
 }
