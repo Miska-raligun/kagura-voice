@@ -327,6 +327,12 @@ CoreS3 (MicroPython) ──HTTP──▶ server/（TypeScript 单文件可执行
   Windows 11 默认用 Windows Terminal 托管控制台，隐藏参数经常被无视（beta.17/18 就栽在这）。托盘版里 console 看不见
   （Node 自动丢弃输出，日志靠 `logs/kagura.log`），不能停下来问人（`KAGURA_NO_PROMPT`），出错要 `messageBox` 弹框；
   它派生的子进程都要 `windowsHide: true`，否则每跑一次命令就闪一个黑窗口。CI（server.yml / release.yml）有托盘版冒烟。
+- **导出 / 导入（`backup.ts`）与在线更新（`util/selfupdate.ts`）**：导入**绝不能在运行中直接覆盖数据库**——
+  写到 `.import-pending/`，重启后 `main()` 第一件事 `applyPending()`（在 loadConfig 之后、任何 DatabaseSync 之前）。
+  导出数据库用 `VACUUM INTO` 拍快照（WAL 里的也在），不用停服务。新加数据目录里的东西时记得在 `catalog`/`filesOf`/`itemOf`
+  三处登记，不然导出时就悄悄漏掉；带密钥的文件要在 `stripFile` 里清空、在 `applyPending` 里「空着就保留本机的」。
+  在线更新：Windows 由一个独立的隐藏 PowerShell 跑安装包再拉起托盘版（本进程先退出，安装包会强制结束它）；
+  装失败也要把原来的拉起来，不然用户点一下更新服务就没了。大请求体只对本机来源放宽（`Router.bigBodyPaths`）。
 - **新版本提醒（`util/update.ts`）**：启动 30 秒后、之后每 12 小时查一次 GitHub Releases，只提示不安装；
   预览版连预览版一起比，正式版只看正式版。`update_check: false` 关掉。
 - **`global` 声明必须有主**（LRN 2026-08-25）：`netsvc.mqtt_check` 里写过

@@ -59,6 +59,8 @@ export class Ctx {
   presence: { status: string; ts: string; dev: string } | null = null;
   /** 新版本提醒（main 里建好；没开就是 null） */
   updates: import("./util/update.ts").UpdateChecker | null = null;
+  /** 在线更新（下载安装包、校验、安装、重启） */
+  selfUpdater: import("./util/selfupdate.ts").SelfUpdater | null = null;
 
   constructor(
     public cfg: Config, public dirs: Dirs, public voice: Voice, public brain: Brain,

@@ -4,6 +4,9 @@ import http from "node:http";
 import fs from "node:fs";
 
 const MAX_BODY = 8 * 1024 * 1024;   // 比业务上限（5MB 音频/图片 base64）略大，超过直接 413
+/** 少数本机接口（导入备份包、上传扩展包）要收大文件：只对本机来源放宽 */
+const BIG_BODY = 1024 * 1024 * 1024;
+const LOOPBACK = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"]);
 
 export class Req {
   readonly path: string;
@@ -57,6 +60,8 @@ interface Route { method: string; re: RegExp; keys: string[]; handler: Handler }
 
 export class Router {
   private routes: Route[] = [];
+  /** 允许大请求体的路径（只对本机来源生效） */
+  bigBodyPaths = new Set<string>();
 
   add(method: string, pattern: string, handler: Handler): this {
     const keys: string[] = [];
@@ -85,9 +90,10 @@ export class Router {
     const server = http.createServer((rawReq, rawRes) => {
       const chunks: Buffer[] = [];
       let size = 0, tooBig = false;
+      const limit = this.bigBodyPaths.has((rawReq.url || "").split("?")[0]) && LOOPBACK.has(rawReq.socket.remoteAddress || "") ? BIG_BODY : MAX_BODY;
       rawReq.on("data", (c: Buffer) => {
         size += c.length;
-        if (size > MAX_BODY) { tooBig = true; return; }
+        if (size > limit) { tooBig = true; return; }
         chunks.push(c);
       });
       rawReq.on("end", async () => {

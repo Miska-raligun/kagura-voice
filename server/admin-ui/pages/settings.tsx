@@ -1,8 +1,8 @@
 // 设置：模型服务商与 Key、默认/便宜模型、嵌入接口、百度 Key、端口、token、从 OpenClaw 导入。
 // 不预设任何模型——首次向导只给常见服务商的接口地址做参考，模型名和 Key 由用户自己填。
-import { useState } from "preact/hooks";
+import { useEffect, useState } from "preact/hooks";
 import { api, go } from "../api.ts";
-import { Btn, Card, Err, Field, Input, Select, Tabs, Toggle, toast, useLoad } from "../ui.tsx";
+import { Btn, Card, Err, Field, Input, Select, Tabs, Toggle, toast, toastErr, useInterval, useLoad } from "../ui.tsx";
 
 const APIS: [string, string][] = [
   ["openai-completions", "OpenAI 兼容（DeepSeek / 通义 / Kimi / 智谱 / Ollama…）"],
@@ -20,7 +20,8 @@ const URL_HINTS: [string, string, string][] = [
 
 export function Settings({ arg }: { arg: string }) {
   const [d, reload, err] = useLoad(() => api("/config"));
-  const [tab, setTab] = useState(arg === "wizard" ? "wizard" : "models");
+  const [tab, setTab] = useState(["wizard", "update", "backup"].includes(arg) ? arg : "models");
+  useEffect(() => { if (["wizard", "update", "backup"].includes(arg)) setTab(arg); }, [arg]);   // 总览页「去更新」跳过来
   if (!d) return <Err msg={err} />;
   const cfg = d.config;
   const save = async (patch: any) => {
@@ -32,12 +33,14 @@ export function Settings({ arg }: { arg: string }) {
     <>
       {d.fake && <div class="errbox">当前是假服务商模式（测试用），模型设置不会生效。</div>}
       {cfg.brain === "openclaw" || (!cfg.brain && !(cfg.models?.providers ?? []).length) ? <div class="errbox">现在的大脑是 OpenClaw。配好模型并把「大脑」切到内置 agent 后重启才会用这里的设置。</div> : null}
-      <Tabs value={tab} onChange={setTab} tabs={[["wizard", "首次设置"], ["models", "模型"], ["tools", "工具"], ["voice", "语音与设备"], ["misc", "其它"]]} />
+      <Tabs value={tab} onChange={setTab} tabs={[["wizard", "首次设置"], ["models", "模型"], ["tools", "工具"], ["voice", "语音与设备"], ["update", "更新"], ["backup", "导出 / 导入"], ["misc", "其它"]]} />
       {tab === "wizard" && <Wizard cfg={cfg} save={save} done={() => { setTab("models"); go("overview"); }} />}
       {tab === "models" && <Models cfg={cfg} save={save} />}
       {tab === "tools" && <Tools cfg={cfg} save={save} />}
       {tab === "voice" && <Voice cfg={cfg} save={save} />}
       {tab === "misc" && <Misc cfg={cfg} dataDir={d.data_dir} save={save} />}
+      {tab === "update" && <Update />}
+      {tab === "backup" && <Backup />}
     </>
   );
 }
@@ -245,6 +248,108 @@ function Misc({ cfg, dataDir, save }: { cfg: any; dataDir: string; save: (p: any
         }}>重启服务端</Btn>
       </Card>
       <Card title="从 OpenClaw 导入"><p class="muted">在「定时任务」页点「从 OpenClaw 导入」：人设、记忆、定时任务一起搬过来。</p><Btn onClick={() => go("jobs")}>去导入</Btn></Card>
+    </>
+  );
+}
+
+const fmtMB = (n: number) => (n < 1024 * 1024 ? `${Math.max(1, Math.round(n / 1024))}KB` : `${(n / 1048576).toFixed(1)}MB`);
+
+/** 在线更新：查新版本、一键下载安装 */
+export function Update() {
+  const [d, reload, err] = useLoad(() => api("/update"));
+  const busy = ["downloading", "verifying", "installing"].includes(d?.state?.phase);
+  useInterval(() => { if (busy) reload(); }, 1000);
+  if (!d) return <Err msg={err} />;
+  const st = d.state, info = d.info;
+  const kindText: Record<string, string> = { windows: "Windows 安装版：下载新安装包后静默安装（会弹一次管理员确认），装完自动重启", appimage: "AppImage：下载新版替换后自动重启", deb: "deb 包：需要管理员权限，会下载好并给出一条安装命令", unsupported: "这种运行方式（开发版 / 自己编译）不支持在线更新，请到发布页手动下载" };
+  return (
+    <Card title="更新" actions={<Btn small disabled={!d.enabled || busy} onClick={async () => { try { await api("/update/check", { body: {} }); reload(); } catch (e) { toastErr(e); } }}>检查更新</Btn>}>
+      <p>当前版本 <b>{d.current}</b>{info ? (info.newer ? <> · 最新 <b>{info.latest}</b> 🆕</> : <> · 已是最新</>) : null}
+        {info?.error ? <span class="muted"> · 上次检查失败：{info.error}</span> : null}</p>
+      {!d.enabled && <p class="muted">更新检查已关闭（config.json 里 update_check: false）。</p>}
+      <p class="muted">{kindText[d.kind] ?? ""}</p>
+      {info?.newer && <>
+        {info.notes ? <details><summary>更新内容</summary><pre>{info.notes}</pre></details> : null}
+        <div class="row">
+          <Btn kind="primary" disabled={busy || d.kind === "unsupported"} onClick={async () => {
+            if (!window.confirm(`更新到 ${info.latest}？\n下载校验后会自动安装并重启服务端（设置和数据都保留），期间设备会断开一会儿。`)) return;
+            try { await api("/update/install", { body: {} }); reload(); } catch (e) { toastErr(e); }
+          }}>立即更新到 {info.latest}</Btn>
+          <a href={info.url} target="_blank">发布页 ↗</a>
+        </div>
+      </>}
+      {st && st.phase !== "idle" && <div class={st.phase === "error" ? "errbox" : "card"}>
+        <p>{st.message}{st.phase === "downloading" && st.total ? `：${fmtMB(st.done)} / ${fmtMB(st.total)}（${Math.round(st.done * 100 / st.total)}%）` : ""}</p>
+        {st.phase === "downloading" && st.total ? <progress max={st.total} value={st.done} style="width:100%" /> : null}
+        {st.phase === "installing" && <p class="muted">服务端正在重启，过半分钟刷新这个页面。</p>}
+        {st.command && <pre>{st.command}</pre>}
+      </div>}
+    </Card>
+  );
+}
+
+/** 导出 / 导入：勾选要带走的东西打成一个 zip；导入时先看包里有什么再勾选 */
+function Backup() {
+  const [cat, , err] = useLoad(() => api("/backup/catalog"));
+  const [sel, setSel] = useState<Set<string> | null>(null);
+  const [secrets, setSecrets] = useState(false);
+  const [man, setMan] = useState<any>(null);
+  const [imp, setImp] = useState<Set<string>>(new Set());
+  if (!cat) return <Err msg={err} />;
+  const items: any[] = cat.items;
+  const chosen = sel ?? new Set(items.filter((i) => i.default).map((i) => i.id));
+  const toggle = (set: Set<string>, id: string, on: boolean) => { const n = new Set(set); on ? n.add(id) : n.delete(id); return n; };
+  const groups = [...new Set(items.map((i) => i.group))];
+  const total = items.filter((i) => chosen.has(i.id)).reduce((n, i) => n + i.bytes, 0);
+  return (
+    <>
+      <Card title="导出">
+        <p class="muted">勾选要带走的内容，打成一个 .zip。换电脑时在新电脑上「导入」；分享给别人时<b>别勾「包含密钥」</b>。</p>
+        {groups.map((g) => (
+          <div class="bk-group">
+            <h4>{g} <a class="muted" onClick={() => { let n = new Set(chosen); const ids = items.filter((i) => i.group === g).map((i) => i.id); const all = ids.every((id) => n.has(id)); ids.forEach((id) => (n = toggle(n, id, !all))); setSel(n); }}>全选/全不选</a></h4>
+            {items.filter((i) => i.group === g).map((i) => (
+              <div><Toggle checked={chosen.has(i.id)} onChange={(v) => setSel(toggle(chosen, i.id, v))} label={i.label} />
+                <small class="muted">{fmtMB(i.bytes)}{i.secret ? " · 含密钥项" : ""}{i.note ? ` · ${i.note}` : ""}</small></div>))}
+          </div>))}
+        <div class="row">
+          <Toggle checked={secrets} onChange={setSecrets} label="包含密钥（模型 API Key、百度 Key、IM 凭据、MCP 的密钥）——只在迁移自己的电脑时勾" />
+          <span class="grow" /><span class="muted">约 {fmtMB(total)}</span>
+          <Btn kind="primary" disabled={!chosen.size} onClick={async () => {
+            const r = await fetch("/api/admin/backup/export", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ items: [...chosen], secrets }) });
+            if (!r.ok) { toast((await r.json()).error ?? `HTTP ${r.status}`, "err"); return; }
+            const name = /filename="([^"]+)"/.exec(r.headers.get("content-disposition") ?? "")?.[1] ?? "kagura-backup.zip";
+            const a = document.createElement("a");
+            a.href = URL.createObjectURL(await r.blob()); a.download = name; a.click();
+            setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+          }}>导出</Btn>
+        </div>
+      </Card>
+      <Card title="导入">
+        <p class="muted">选一个导出的 .zip，看看里面有什么，勾选后导入。被替换的内容会先备份到数据目录的 backups/ 下；设置里的端口等本机相关的项、包里空着的密钥都保留这台电脑的。导入后服务端自动重启。</p>
+        <Btn onClick={() => {
+          const el = document.createElement("input");
+          el.type = "file"; el.accept = ".zip";
+          el.onchange = async () => {
+            const f = el.files?.[0];
+            if (!f) return;
+            const r = await fetch("/api/admin/backup/inspect", { method: "POST", headers: { "content-type": "application/zip" }, body: f });
+            const j = await r.json();
+            if (!r.ok) { toast(j.error ?? `HTTP ${r.status}`, "err"); return; }
+            setMan(j.manifest); setImp(new Set(j.manifest.items.map((i: any) => i.id)));
+          };
+          el.click();
+        }}>选择备份包…</Btn>
+        {man && <>
+          <p>来自 <b>{man.host}</b> · {new Date(man.createdAt).toLocaleString("zh-CN", { hour12: false })} · Kagura {man.version}{man.secrets ? " · 含密钥" : " · 不含密钥"}</p>
+          {man.items.map((i: any) => <div><Toggle checked={imp.has(i.id)} onChange={(v) => setImp(toggle(imp, i.id, v))} label={i.label} /> <small class="muted">{fmtMB(i.bytes)}</small></div>)}
+          <div class="row"><span class="grow" />
+            <Btn kind="primary" disabled={!imp.size} onClick={async () => {
+              if (!window.confirm(`导入选中的 ${imp.size} 项？会替换这台电脑上对应的内容（原内容先备份），然后重启服务端。`)) return;
+              try { await api("/backup/import", { body: { items: [...imp] } }); toast("导入中，服务端正在重启，过半分钟刷新页面"); setMan(null); } catch (e) { toastErr(e); }
+            }}>导入并重启</Btn></div>
+        </>}
+      </Card>
     </>
   );
 }

@@ -27,10 +27,14 @@ import { execFile, execFileSync, spawn } from "node:child_process";
 import { isWsl, toLinuxPath } from "./util/platform.ts";
 import { applyProxy, proxiedFetch } from "./util/proxy.ts";
 import { UpdateChecker } from "./util/update.ts";
+import { SelfUpdater, installKind } from "./util/selfupdate.ts";
+import { applyPending } from "./backup.ts";
+import { registerAdminSystem } from "./routes/admin-system.ts";
+import type { PackageManager } from "./agent/packages.ts";
 import { initLogFile } from "./util/logfile.ts";
 import { startTray } from "./tray.ts";
 import { isGuiProcess, messageBox } from "./util/wingui.ts";
-import { waitForOldProcess, takeRestartNotice } from "./util/restart.ts";
+import { waitForOldProcess, takeRestartNotice, restartSelf } from "./util/restart.ts";
 import { preflight, realIO, closeAsk, pauseBeforeExit, type PortNeed } from "./startup/preflight.ts";
 
 // Node 22 下 node:sqlite 等会打实验特性警告，对用户只是噪声
@@ -54,7 +58,9 @@ if (process.platform === "win32" && process.argv.includes("--tray") && !GUI) {
 if (GUI) { process.env.KAGURA_NO_PROMPT = "1"; process.env.KAGURA_TRAY_CHILD = "1"; }
 
 async function main() {
-  const cfg = loadConfig();
+  let cfg = loadConfig();
+  // 上次在管理界面导入的备份：在打开任何数据库之前换进去（设置也可能变了，重新读一遍）
+  if (applyPending(cfg.dataDir)) cfg = loadConfig();
   await waitForOldProcess();      // IM 里 /restart 拉起的新进程：等旧进程把端口放出来
 
   // 端口体检：被占了就说清楚是谁、问用户怎么处理（以前是报一行错就退出，Windows 窗口一闪就关）
@@ -94,7 +100,12 @@ async function main() {
   // 重启恢复「在家/出门」（设备 BLE 只在状态变化时上报，不恢复的话一重启就成了「不知道」）
   ctx.loadPresence();
   ctx.loadTrust();
-  if (cfg.updateCheck) { ctx.updates = new UpdateChecker(VERSION, proxiedFetch); ctx.updates.start(); }
+  if (cfg.updateCheck) {
+    ctx.updates = new UpdateChecker(VERSION, proxiedFetch);
+    ctx.updates.start();
+    const kind = installKind();
+    ctx.selfUpdater = new SelfUpdater(cfg.dataDir, proxiedFetch, kind, kind === "appimage" ? () => setTimeout(() => restartSelf(cfg.dataDir, null), 800) : undefined);
+  }
 
   console.log("=".repeat(50));
   console.log(`  Kagura 语音服务端 ${VERSION}` + (fake ? "（假服务商模式）" : ""));
@@ -112,6 +123,7 @@ async function main() {
   registerDevice(r, ctx);
   registerMonitor(r, ctx);
   registerAdmin(r, ctx, sys);
+  registerAdminSystem(r, ctx);
   registerAdminUi(r);
   const builtinFw = Object.fromEntries(Object.entries(deviceFw).map(([p, b64]) => [p, Buffer.from(b64, "base64")]));
   registerDeviceFiles(r, ctx, new DeviceFiles(path.join(cfg.dataDir, "device_files"), builtinFw, VERSION));
@@ -122,7 +134,8 @@ async function main() {
   ctx.reminders.start((text, dev) => ctx.sendPush(text, dev));
   sys.scheduler?.start(cfg.schedulerTick);
   // 扩展加载完会顺带（重新）连接 MCP 服务器；都在后台，不拖慢启动
-  sys.extensions.reloadAll().catch((e) => console.log(`[ext] ⚠️  ${e.message}`));
+  sys.extensions.reloadAll().catch((e) => console.log(`[ext] ⚠️  ${e.message}`))
+    .then(() => reinstallImportedPackages(cfg.dataDir, sys.packages));
   sys.channels.startAll().then(async () => {
     // /restart 之前在哪个聊天里发的，回来在那说一声
     const n = takeRestartNotice(cfg.dataDir);
@@ -189,6 +202,18 @@ function openclawBrain(cfg: ReturnType<typeof loadConfig>, visionTmp: string) {
 }
 
 /** 首次运行（在终端/桌面双击启动、还没配模型）自动打开管理界面的首次设置向导 */
+/** 导入的备份里 npm / git 装的扩展包：启动后在后台重新下载安装 */
+async function reinstallImportedPackages(dataDir: string, pm: PackageManager) {
+  const f = path.join(dataDir, "packages-reinstall.json");
+  if (!fs.existsSync(f)) return;
+  let list: string[] = [];
+  try { list = JSON.parse(fs.readFileSync(f, "utf8")); } catch { /* 坏文件 */ }
+  fs.rmSync(f, { force: true });
+  for (const src of list) {
+    try { await pm.install(src); } catch (e: any) { console.log(`[pkg] ⚠️  重新安装 ${src} 失败：${e.message}`); }
+  }
+}
+
 function maybeOpenAdmin(cfg: ReturnType<typeof loadConfig>, setupNeeded: boolean) {
   const marker = path.join(cfg.dataDir, ".welcomed");
   // 托盘版没有终端（stdout 不是 TTY）也要能在第一次启动时打开管理界面

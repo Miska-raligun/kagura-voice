@@ -103,3 +103,5 @@ iframe.monitor { width:100%; height:calc(100vh - 150px); border:1px solid var(--
 .composer2 .chip img { height:44px; border-radius:4px; } .composer2 .chip a { cursor:pointer; color:var(--muted); padding:0 2px; }
 .composer2 .composer { margin-top:6px; } .composer2 .grow textarea { width:100%; }
 details.summary { margin-bottom:8px; }
+
+.bk-group { margin:6px 0 12px; } .bk-group h4 { margin:8px 0 4px; } .bk-group h4 a { font-weight:normal; font-size:12px; cursor:pointer; margin-left:8px; }

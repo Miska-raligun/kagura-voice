@@ -16,8 +16,8 @@ function isSea(): boolean {
 }
 
 /** 重启自己。返回后进程很快就会退出 */
-export function restartSelf(dataDir: string, notice: Omit<RestartNotice, "at">, env: NodeJS.ProcessEnv = process.env) {
-  try { fs.writeFileSync(noticeFile(dataDir), JSON.stringify({ ...notice, at: Date.now() / 1000 })); } catch { /* 说不了一声也照样重启 */ }
+export function restartSelf(dataDir: string, notice: Omit<RestartNotice, "at"> | null, env: NodeJS.ProcessEnv = process.env) {
+  if (notice) try { fs.writeFileSync(noticeFile(dataDir), JSON.stringify({ ...notice, at: Date.now() / 1000 })); } catch { /* 说不了一声也照样重启 */ }
   console.log("[restart] 🔄 收到重启命令");
   if (env.INVOCATION_ID) {
     // systemd：交给它重启（kagura.service 里 Restart=on-failure）
@@ -26,7 +26,8 @@ export function restartSelf(dataDir: string, notice: Omit<RestartNotice, "at">, 
   }
   // 单文件可执行：argv = [exe, exe, ...参数]；node 跑脚本：argv = [node, 脚本, ...参数]
   const args = (isSea() ? process.argv.slice(2) : process.argv.slice(1)).filter((a) => a !== "--no-browser");
-  const child = spawn(process.execPath, [...args, "--no-browser"], {
+  // AppImage：execPath 在临时挂载目录里，旧进程一退就没了；要从 AppImage 文件本身重新启动
+  const child = spawn(env.APPIMAGE || process.execPath, [...args, "--no-browser"], {
     detached: true,
     // Windows：新进程有自己的控制台窗口（旧窗口随旧进程关掉）；其它系统接着用当前终端
     stdio: process.platform === "win32" ? "ignore" : "inherit",
