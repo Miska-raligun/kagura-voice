@@ -5,6 +5,8 @@
 //   不占全局名额，否则 4 个互相等待的 agent 就能把系统锁死
 // - 历史超过阈值先做「记忆冲刷」再用便宜模型把较早的部分总结成摘要（§6.2）
 import path from "node:path";
+import fs from "node:fs";
+import { createHash } from "node:crypto";
 import { Agent, type AgentTool } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, ImageContent, Message } from "@earendil-works/pi-ai";
 import type { AgentRegistry, AgentInfo } from "./registry.ts";
@@ -58,7 +60,8 @@ export interface RunRequest {
 export type AgentStreamEvent =
   | { type: "text"; delta: string }
   | { type: "message_end"; toolCalls: number }
-  | { type: "tool_end"; name: string };
+  | { type: "tool_end"; name: string }
+  | { type: "tool_start"; name: string; args: unknown };
 
 export interface RunResult {
   text: string;
@@ -87,12 +90,29 @@ export function messageText(m: any): string {
   }).join("");
 }
 
-/** 落盘前把图片换成占位文字：base64 图片进库会让每轮上下文都背着几百 KB */
-function stripImages(m: Message): Message {
+/**
+ * 落盘前把图片换成文字引用：base64 图片进库会让每轮上下文都背着几百 KB。
+ * 图片本身存进 agent 工作目录 uploads/<日期>/img-<哈希>.<扩展名>（同一张只存一份），记录里留「[图片 路径]」——
+ * 管理界面凭路径显示，agent 以后也能用 exec 处理它。存不下来就退回「[图片]」。
+ */
+export const IMAGE_REF_RE = /^\[图片 (uploads\/[^\]]+)\]$/;
+function stripImages(m: Message, workspace?: string): Message {
   if ((m.role === "user" || m.role === "toolResult") && Array.isArray(m.content)) {
-    return { ...m, content: m.content.map((c: any) => (c.type === "image" ? { type: "text", text: "[图片]" } : c)) } as Message;
+    return { ...m, content: m.content.map((c: any) => (c.type === "image" ? { type: "text", text: saveImageRef(c, workspace) } : c)) } as Message;
   }
   return m;
+}
+
+function saveImageRef(c: { data: string; mimeType: string }, workspace?: string): string {
+  if (!workspace || !c.data) return "[图片]";
+  try {
+    const buf = Buffer.from(c.data, "base64");
+    const ext = /png/.test(c.mimeType) ? "png" : /webp/.test(c.mimeType) ? "webp" : /gif/.test(c.mimeType) ? "gif" : "jpg";
+    const rel = `uploads/${new Date().toLocaleDateString("sv-SE")}/img-${createHash("sha1").update(buf).digest("hex").slice(0, 12)}.${ext}`;
+    const abs = path.join(workspace, ...rel.split("/"));
+    if (!fs.existsSync(abs)) { fs.mkdirSync(path.dirname(abs), { recursive: true }); fs.writeFileSync(abs, buf); }
+    return `[图片 ${rel}]`;
+  } catch { return "[图片]"; }
 }
 
 class Semaphore {
@@ -222,6 +242,7 @@ export class Runtime {
         if (e.type === "message_update" && e.assistantMessageEvent?.type === "text_delta") req.onEvent({ type: "text", delta: e.assistantMessageEvent.delta });
         else if (e.type === "message_end" && e.message?.role === "assistant") req.onEvent({ type: "message_end", toolCalls: (e.message.content ?? []).filter((c: any) => c.type === "toolCall").length });
         else if (e.type === "tool_execution_end") req.onEvent({ type: "tool_end", name: e.toolName });
+        else if (e.type === "tool_execution_start") req.onEvent({ type: "tool_start", name: e.toolName, args: e.args });
       } catch (err: any) { console.log(`[agent] ⚠️  onEvent 出错: ${err.message}`); }
     });
 
@@ -253,7 +274,7 @@ export class Runtime {
     }
     const textOf = (a: AssistantMessage) => a.content.filter((c: any) => c.type === "text").map((c: any) => c.text).join("").trim();
     const text = textOf(last) || assistants.map(textOf).filter(Boolean).join("\n");
-    if (persist && (!req.keepIf || req.keepIf(text))) store.append(req.sessionKey, fresh.map(stripImages));
+    if (persist && (!req.keepIf || req.keepIf(text))) store.append(req.sessionKey, fresh.map((m) => stripImages(m, agent.workspace)));
     return { text, meta: scope.meta, toolCalls, usage };
   }
 

@@ -83,3 +83,22 @@ iframe.monitor { width:100%; height:calc(100vh - 150px); border:1px solid var(--
 .slot img, .slot .ph { width:100%; aspect-ratio:4/3; object-fit:cover; border-radius:6px; display:block; background:#0002; }
 .slot .ph { position:relative; display:flex; align-items:center; justify-content:center; color:var(--muted); }
 .slot .ph img { position:absolute; inset:0; height:100%; } .slot .ph img.dim { opacity:.35; } .slot .ph span { position:relative; }
+
+/* 会话 / 聊天 */
+.chat .msgs { max-height:calc(100vh - 330px); min-height:200px; overflow:auto; padding:4px 2px 8px; }
+.msg .md { word-break:break-word; line-height:1.6; } .msg .md > :first-child { margin-top:0; } .msg .md > :last-child { margin-bottom:0; }
+.msg .md p { margin:.4em 0; } .msg .md ul, .msg .md ol { margin:.3em 0; padding-left:1.4em; } .msg .md h1, .msg .md h2, .msg .md h3 { font-size:1.05em; margin:.6em 0 .3em; }
+.msg .md pre { background:var(--panel); border:1px solid var(--line); border-radius:6px; padding:8px 10px; overflow-x:auto; font-size:12.5px; }
+.msg .md code { font-size:.92em; } .msg .md :not(pre) > code { background:var(--panel); padding:1px 4px; border-radius:4px; }
+.msg .md table { border-collapse:collapse; margin:.4em 0; display:block; overflow-x:auto; } .msg .md th, .msg .md td { border:1px solid var(--line); padding:4px 8px; }
+.msg .md blockquote { margin:.4em 0; padding-left:10px; border-left:3px solid var(--line); color:var(--muted); } .msg .md img { max-width:100%; border-radius:6px; }
+.msg .md a { color:var(--accent); }
+.chatimg { max-width:min(320px, 100%); max-height:260px; border-radius:6px; display:block; margin:4px 0; }
+.msg.t > summary { cursor:pointer; list-style:none; } .msg.t .toolout { white-space:pre-wrap; word-break:break-word; max-height:300px; overflow:auto; font-size:12px; margin:6px 0 0; }
+.msg details.file, .msg div.file { margin:4px 0; font-size:13px; } .msg details.file pre { max-height:200px; overflow:auto; font-size:12px; white-space:pre-wrap; }
+.composer2 { border-top:1px solid var(--line); margin-top:10px; padding-top:6px; border-radius:6px; } .composer2.drag { outline:2px dashed var(--accent); }
+.composer2 .attach { display:flex; flex-wrap:wrap; gap:6px; margin:4px 0; }
+.composer2 .chip { display:inline-flex; align-items:center; gap:4px; border:1px solid var(--line); border-radius:6px; padding:2px 6px; font-size:12.5px; }
+.composer2 .chip img { height:44px; border-radius:4px; } .composer2 .chip a { cursor:pointer; color:var(--muted); padding:0 2px; }
+.composer2 .composer { margin-top:6px; } .composer2 .grow textarea { width:100%; }
+details.summary { margin-bottom:8px; }

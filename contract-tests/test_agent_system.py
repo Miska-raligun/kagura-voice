@@ -376,3 +376,29 @@ def test_skills_admin_crud_and_skill_read(a):
     assert "技能目录" in t and "ctest-skill" in t
     assert a.request("DELETE", "/api/admin/skills/~global/ctest-skill").status_code == 200
     assert not any(s["name"] == "ctest-skill" for s in a.get("/api/admin/skills").json()["skills"])
+
+
+def test_admin_chat_stream_images_files_and_delete(a):
+    """会话页聊天：新会话流式回复；带图片（模型收到图）和文件（存进工作目录）；会话列表有标题；能删除"""
+    import requests
+    key = "main:webchat:ctest1"
+    a.fake_llm("你好呀，**主人**")
+    r = requests.post(a.base + "/api/admin/chat?stream=1", json={"agent": "main", "session": key, "text": "第一句话"}, stream=True, timeout=30)
+    events = [json.loads(l) for l in r.iter_lines() if l]
+    assert "".join(e["delta"] for e in events if e["type"] == "text") == "你好呀，**主人**"
+    assert events[-1]["type"] == "done" and events[-1]["session"] == key
+    # 图片 + 文件
+    a.fake_llm("看到了")
+    png = b64(bytes.fromhex("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000d4944415478da63f8ffff3f0005fe02fe0d1f6a2c0000000049454e44ae426082"))
+    body = {"agent": "main", "session": key, "text": "看看这个", "images": [{"data": png, "mimeType": "image/png"}],
+            "files": [{"name": "清单.txt", "b64": b64("牛奶\n鸡蛋".encode())}]}
+    assert a.post("/api/admin/chat", json=body).json()["reply"] == "看到了"
+    call = a.fake_log()["llm"][-1]
+    assert call["image"] is True and "牛奶" in call["message"]
+    assert list((a.data / "agents" / "main" / "workspace" / "uploads").glob("*/清单.txt"))
+    s = next(x for x in a.get("/api/admin/agents/main/sessions").json() if x["key"] == key)
+    assert s["title"] == "第一句话" and s["channel"] == "webchat"
+    # 不属于这个 agent 的会话 key 拒绝
+    assert a.post("/api/admin/chat", json={"agent": "main", "session": "mio:webchat:x", "text": "hi"}).status_code == 400
+    assert a.request("DELETE", f"/api/admin/agents/main/sessions/{key}").status_code == 200
+    assert not any(x["key"] == key for x in a.get("/api/admin/agents/main/sessions").json())

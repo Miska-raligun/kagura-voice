@@ -40,9 +40,11 @@ describe("内置工具", () => {
     const r2 = await brain.chat({ message: "这是什么", sessionId: "x", agent: "main", deviceId: "cores3", spoken: true, imagePath: img });
     expect(r2).toBe("是一只猫");
     expect(fake.calls[1].image).toBe(true);
-    // 历史里图片换成占位文字，不把 base64 存进库
+    // 历史里图片换成文字引用、图片存进工作目录 uploads/，不把 base64 存进库
     const raw = rt.store("main").db.prepare("SELECT data FROM messages").all().map((x: any) => x.data).join("");
-    expect(raw).toContain("[图片]");
+    const ref = /\[图片 (uploads\/[^\]]+)\]/.exec(raw);
+    expect(ref).toBeTruthy();
+    expect(fs.readFileSync(path.join(rt.agents.get("main")!.workspace, ref![1]))).toEqual(Buffer.from([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3]));
     expect(raw).not.toContain("/9j/");
   });
 

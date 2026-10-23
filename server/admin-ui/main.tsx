@@ -11,21 +11,19 @@ import { Jobs } from "./pages/jobs.tsx";
 import { A2A } from "./pages/a2a.tsx";
 import { Channels } from "./pages/channels.tsx";
 import { Devices } from "./pages/devices.tsx";
-import { Chat } from "./pages/chat.tsx";
 import { Usage } from "./pages/usage.tsx";
 import { Settings } from "./pages/settings.tsx";
 
 const PAGES: [string, string, (p: { arg: string }) => any][] = [
   ["overview", "总览", Overview],
   ["agents", "Agents", Agents],
-  ["sessions", "会话", Sessions],
+  ["sessions", "会话 / 聊天", Sessions],
   ["memory", "记忆", Memory],
   ["skills", "技能", Skills],
   ["jobs", "定时任务", Jobs],
   ["a2a", "Agent 通信", A2A],
   ["channels", "渠道", Channels],
   ["devices", "设备", Devices],
-  ["chat", "网页聊天", Chat],
   ["usage", "用量", Usage],
   ["settings", "设置", Settings],
 ];
@@ -33,7 +31,8 @@ const PAGES: [string, string, (p: { arg: string }) => any][] = [
 /** #/agents/mio → ["agents", "mio"] */
 function useRoute(): [string, string] {
   const parse = (): [string, string] => {
-    const [, page = "overview", ...rest] = location.hash.replace(/^#/, "").split("/");
+    let [, page = "overview", ...rest] = location.hash.replace(/^#/, "").split("/");
+    if (page === "chat") page = "sessions";      // 旧的「网页聊天」页并进了会话页
     return [page || "overview", decodeURIComponent(rest.join("/"))];
   };
   const [r, set] = useState(parse());

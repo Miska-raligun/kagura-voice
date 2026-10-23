@@ -54,7 +54,7 @@ function AgentDetail({ id, onChange }: { id: string; onChange: () => void }) {
       <div class="titlebar">
         <h3>{a.name} <small class="muted">{a.id}</small></h3>
         <div class="actions">
-          <Btn kind="ghost" onClick={() => go("chat", id)}>聊两句</Btn>
+          <Btn kind="ghost" onClick={() => go("sessions", `${id}|${id}:webchat:${Date.now().toString(36)}`)}>聊两句</Btn>
           <Btn kind="ghost" onClick={() => go("sessions", id)}>会话</Btn>
           <Btn kind="danger" onClick={confirmDo(`删除 ${a.name}？目录会移进 agents/.trash/，可以手动找回。`, async () => { await api(`/agents/${enc(id)}`, { method: "DELETE" }); toast("已删除"); onChange(); go("agents"); })}>删除</Btn>
         </div>

@@ -14,6 +14,7 @@ import { scheduleFrom } from "../agent/tools/cron.ts";
 import { Roles } from "../roles.ts";
 import { parseToolsConfig } from "../config.ts";
 import { GLOBAL_OWNER } from "../agent/skills.ts";
+import { registerAdminChat } from "./admin-chat.ts";
 import { unzip } from "../util/zip.ts";
 import { resolveInside } from "../agent/paths.ts";
 import { applyProxy, activeProxy } from "../util/proxy.ts";
@@ -134,13 +135,17 @@ export function registerAdmin(r: Router, ctx: Ctx, sys: AgentSystem) {
   });
 
   // ── 会话 ──
-  get("/api/admin/agents/<id>/sessions", (req) => { agentOr404(req.params.id); return json(runtime.store(req.params.id).listSessions(200)); });
+  get("/api/admin/agents/<id>/sessions", (req) => {
+    agentOr404(req.params.id);
+    const st = runtime.store(req.params.id);
+    return json(st.listSessions(200).map((s) => ({ ...s, title: st.title(s.key), busy: runtime.busy(req.params.id, s.key) })));
+  });
   get("/api/admin/agents/<id>/sessions/<key>", (req) => {
     agentOr404(req.params.id);
     const st = runtime.store(req.params.id);
     const s = st.getSession(req.params.key);
     if (!s) return json({ error: "没有这个会话" }, 404);
-    return json({ ...s, messages: st.transcript(req.params.key, Number(req.query.get("limit") ?? 200)) });
+    return json({ ...s, title: st.title(req.params.key), messages: st.transcript(req.params.key, Number(req.query.get("limit") ?? 200)) });
   });
   post("/api/admin/agents/<id>/sessions/<key>/reset", (req) => { agentOr404(req.params.id); runtime.store(req.params.id).reset(req.params.key); return json({ status: "ok" }); });
   post("/api/admin/agents/<id>/sessions/<key>/compact", async (req) => {
@@ -426,14 +431,6 @@ export function registerAdmin(r: Router, ctx: Ctx, sys: AgentSystem) {
   });
 
   // ── 网页聊天（webchat 渠道）──
-  post("/api/admin/chat", async (req) => {
-    const d = req.json() ?? {};
-    const a = agentOr404(String(d.agent ?? registry.default().id));
-    const text = String(d.text ?? "").trim();
-    if (!text) return json({ error: "text 不能为空" }, 400);
-    const key = runtime.sessionKey(a.id, "webchat", "owner");
-    if (/^\/(reset|new)\s*$/i.test(text)) { runtime.store(a.id).reset(key); return json({ reply: "好，我们重新开始吧。", tools: [], session: key }); }
-    const res = await runtime.run({ agentId: a.id, sessionKey: key, kind: "chat", channel: "webchat", text });
-    return json({ reply: res.text, tools: res.toolCalls, usage: res.usage, session: key });
-  });
+  // 聊天（新建 / 接着聊 / 流式 / 图片文件）与删除会话在 admin-chat.ts
+  registerAdminChat(r, sys);
 }

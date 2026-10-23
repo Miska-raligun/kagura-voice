@@ -79,6 +79,24 @@ export class AgentStore {
   }
 
   /** 重置会话：消息全部标记压缩、摘要清空（记录保留在库里可查） */
+  /** 彻底删除一个会话（消息和摘要都删；用量记录保留，统计不受影响） */
+  remove(key: string): boolean {
+    this.db.prepare("DELETE FROM messages WHERE session = ?").run(key);
+    return this.db.prepare("DELETE FROM sessions WHERE key = ?").run(key).changes > 0;
+  }
+
+  /** 会话标题：第一条用户消息的正文（去掉每轮自动附的 [时间…] 行），截 40 字 */
+  title(key: string): string {
+    const r = this.db.prepare("SELECT data FROM messages WHERE session = ? AND role = 'user' ORDER BY id LIMIT 1").get(key) as any;
+    if (!r) return "";
+    try {
+      const m = JSON.parse(r.data);
+      const parts = typeof m.content === "string" ? [m.content] : (m.content ?? []).filter((c: any) => c.type === "text").map((c: any) => c.text);
+      const t = parts.filter((x: string) => !/^\[时间 [^\]]*\]$/.test(x)).join(" ").replace(/\s+/g, " ").trim();
+      return Array.from(t).slice(0, 40).join("");
+    } catch { return ""; }
+  }
+
   reset(key: string) {
     this.db.prepare("UPDATE messages SET compacted = 1 WHERE session = ?").run(key);
     this.db.prepare("UPDATE sessions SET summary = '' WHERE key = ?").run(key);
