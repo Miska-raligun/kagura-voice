@@ -1,8 +1,9 @@
 # Kagura 自研 Agent 系统与安装包 —— 开发计划
 
-> 状态：v3（2026-10-23）。**M0、M1、M2（代码）已完成**：M0 结论见 [m0-report.md](m0-report.md)；M1 的契约测试在
-> [contract-tests/](../contract-tests/README.md)（84 例）；M2 的 TS 服务端在 [server/](../server/README.md)，
-> 契约测试在 Python 版、TS 版、三平台单文件可执行上全绿。M2 验收剩「作者真机试用一周无回退」，之后 M3。
+> 状态：v3（2026-10-23）。**M0–M6 代码已完成**：M0 结论见 [m0-report.md](m0-report.md)；契约测试在
+> [contract-tests/](../contract-tests/README.md)（84 例通用 + 13 例内置 agent 专用），Python 版、TS 版（OpenClaw 模式 /
+> 内置 agent 模式）、三平台单文件可执行全绿。服务端说明见 [server/README.md](../server/README.md)。
+> 待作者真机验收（M2 起各阶段的「真机试用」一起做），之后 M7 IM 渠道、M8 管理 UI。
 > 目标读者：项目作者 + 之后接手开发的人（包括 Claude）。
 > v2 变更：按作者要求，本期范围定为**系统层核心**——定时任务、heartbeat、多 agent 隔离与
 > agent 间通信、memory、soul（人设文件体系）、管理 UI；通用 skill 后续再迁。新服务端放本仓库。

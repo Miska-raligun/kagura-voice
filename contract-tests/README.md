@@ -60,3 +60,14 @@ pytest
 
 验证过测试能抓出问题：故意改坏服务端（响应头、角色音色、直播结束帧、下载即删、限流阈值等）
 都会让用例失败。
+
+## 内置 agent 模式（`KAGURA_BRAIN=pi`，只对 TS 版）
+
+同一套用例在内置 agent 上再跑一遍，另外 `test_agent_system.py` 覆盖工具、会话落盘、调度器、agent 通信与管理接口
+（其它模式下自动跳过）。`/__fake/llm` 的脚本项除了字符串，还可以是：
+
+```json
+{"text": "我看看", "tool_calls": [{"name": "take_photo", "args": {"question": "桌上有什么"}}], "then": "工具结果回来后的回复"}
+```
+
+日志 `llm[]` 多了 `purpose`（chat / cron / heartbeat / a2a / spawn / flush / compact）与 `system`（系统提示）两个字段。

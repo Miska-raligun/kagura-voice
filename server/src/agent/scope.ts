@@ -26,3 +26,5 @@ export interface RunScope {
 const als = new AsyncLocalStorage<RunScope>();
 export const runScope = () => als.getStore();
 export const withScope = <T>(s: RunScope, fn: () => Promise<T>) => als.run(s, fn);
+/** 脱离当前运行跑（后台派出的任务）：不再算嵌套调用，要占全局并发名额 */
+export const outsideScope = <T>(fn: () => T) => als.exit(fn);

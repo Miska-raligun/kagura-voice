@@ -74,6 +74,15 @@ jobs:
         run: |
           exe=server/dist/kagura; [ -f ../server/dist/kagura.exe ] && exe=server/dist/kagura.exe
           KAGURA_SERVER_CMD="$exe" python -m pytest -q
+      - name: Contract tests（内置 agent，KAGURA_BRAIN=pi）
+        working-directory: contract-tests
+        shell: bash
+        env:
+          KAGURA_SERVER_PROVIDES: broker,discovery
+          KAGURA_BRAIN: pi
+        run: |
+          exe=server/dist/kagura; [ -f ../server/dist/kagura.exe ] && exe=server/dist/kagura.exe
+          KAGURA_SERVER_CMD="$exe" python -m pytest -q
       - name: Server logs on failure
         if: failure()
         shell: bash

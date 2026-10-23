@@ -9,6 +9,8 @@ import { Memories } from "./tools/memory.ts";
 import { OpenAIEmbedder } from "./memory.ts";
 import { Scheduler } from "./scheduler.ts";
 import { cronTools } from "./tools/cron.ts";
+import { A2A } from "./a2a.ts";
+import { Skills } from "./skills.ts";
 
 export interface AgentSystem {
   registry: AgentRegistry;
@@ -16,6 +18,8 @@ export interface AgentSystem {
   runtime: Runtime;
   memories: Memories;
   scheduler: Scheduler | null;
+  a2a: A2A;
+  skills: Skills;
 }
 
 export function createAgentSystem(cfg: Config, dirs: Dirs, fake: FakeLlm | null): AgentSystem {
@@ -31,7 +35,12 @@ export function createAgentSystem(cfg: Config, dirs: Dirs, fake: FakeLlm | null)
   const memories = new Memories(runtime, cfg.embedding && !fake ? new OpenAIEmbedder(cfg.embedding) : null);
   runtime.addTools(memories.tools());
   runtime.beforeCompact = (agent, key) => memories.flush(agent, key);
-  return { registry, models, runtime, memories, scheduler: null };
+  const skills = new Skills(dirs.skills);
+  runtime.skillCatalog = (a) => skills.catalog(a);
+  runtime.addTools(skills.tools());
+  const a2a = new A2A(dirs.systemDb, runtime, registry, cfg.a2a);
+  runtime.addTools(a2a.tools());
+  return { registry, models, runtime, memories, scheduler: null, a2a, skills };
 }
 
 /** 依赖 Ctx 的部分（设备工具要推送、拍照；调度器要投递）在 Ctx 建好之后接上 */
@@ -54,6 +63,10 @@ export function attachAgentSystem(sys: AgentSystem, ctx: Ctx) {
     },
   });
   sys.scheduler = scheduler;
+  // 后台子任务的结果回到发起方后：发起方在设备会话里 → 推送语音
+  sys.a2a.announce = async (scope, text) => {
+    if (scope.channel === "device" && scope.deviceId) await ctx.sendPush(text, scope.deviceId, registry.get(scope.agentId)?.per);
+  };
   scheduler.syncHeartbeats();
   runtime.addTools(cronTools(scheduler));
   runtime.presence = () => ctx.presenceText();

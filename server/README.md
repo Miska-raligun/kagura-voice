@@ -1,7 +1,7 @@
 # Kagura 服务端（TypeScript 版）
 
 `voice_server.py` 的替代品：一个单文件可执行，内置 MQTT broker、UDP 发现、直播 TCP，
-设备端固件**不用改**。当前（M2）大脑仍是 OpenClaw CLI 适配器，M3 起换成内置 pi agent。
+设备端固件**不用改**。大脑二选一：**内置 agent 系统**（基于 pi，M3–M6）或 OpenClaw CLI 适配器。
 完整计划见 `docs/plan-kagura-agent.md`。
 
 ## 端口
@@ -44,6 +44,74 @@
 python3 tools/migrate_to_server.py        # config.py → config.json，并复制提醒/定时拍照/角色状态/快照
 ```
 
+## 大脑：内置 agent（推荐）或 OpenClaw
+
+`config.json` 里写 `"brain": "pi"` 或 `"openclaw"`；不写时：配了 `models.providers` 就用内置 agent，否则 OpenClaw。
+
+### 模型（全部手动配置，不预设）
+
+```json
+{
+  "brain": "pi",
+  "models": {
+    "providers": [
+      { "id": "deepseek", "api": "openai-completions", "base_url": "https://api.deepseek.com/v1", "api_key": "sk-…",
+        "models": [{ "id": "deepseek-chat", "context_window": 64000, "max_tokens": 8192,
+                     "cost": { "input": 2, "output": 8 } }] },
+      { "id": "qwen", "api": "openai-completions", "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1", "api_key": "sk-…",
+        "models": [{ "id": "qwen-vl-max", "input": ["text", "image"] }] }
+    ],
+    "default": "qwen/qwen-vl-max",
+    "cheap": "deepseek/deepseek-chat"
+  },
+  "embedding": { "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1", "api_key": "sk-…", "model": "text-embedding-v3" },
+  "runtime": { "max_concurrency": 4, "timeout_secs": 120 },
+  "a2a": { "enabled": true, "max_hops": 3, "per_pair_per_min": 10 }
+}
+```
+
+- `api`：`openai-completions`（DeepSeek / 通义 / Kimi / 智谱 / Ollama 等 OpenAI 兼容接口）、`anthropic-messages`、
+  `openai-responses`、`google-generative-ai`。`cost` 单位是「每百万 token 的价格」，用于用量统计。
+- 设备拍照看图要求模型 `input` 含 `image`；纯文本模型收到图片会如实告诉用户看不了。
+- `cheap` 用于压缩、记忆冲刷、heartbeat；`embedding` 可选，不配就只用关键词检索记忆。
+
+### Agent 目录
+
+首次启动按 `roles` 建 agent（每个角色一个，id = 角色的 `agent` 名），之后以磁盘为准：
+
+```
+<数据目录>/agents/<id>/agent.json     名字、别名、音色 per、device_role（设备图片目录）、model、tools/skills 白名单、
+                                     a2a.allow、heartbeat、compaction、device_in_main
+<数据目录>/agents/<id>/workspace/     SOUL.md IDENTITY.md USER.md AGENTS.md TOOLS.md HEARTBEAT.md MEMORY.md memory/ skills/
+<数据目录>/agents/<id>/agent.sqlite   会话、消息、用量、记忆索引
+<数据目录>/system.sqlite              定时任务、运行记录、agent 通信记录
+<数据目录>/skills/<name>/SKILL.md     全局技能（本期只读说明，不执行脚本）
+```
+
+从 OpenClaw 搬人设、记忆与定时任务（任务导入后默认暂停）：
+`curl -X POST localhost:5000/api/admin/import/openclaw -d '{"dir":"/home/you/.openclaw"}'`
+
+### 内置工具
+
+`speak` `take_photo` `set_volume` `get_presence` `photo_schedule_*` · `memory_search` `memory_get` `memory_write` ·
+`cron_list` `cron_add` `cron_update` `cron_remove` `cron_run` · `sessions_list` `sessions_history` `sessions_send` `sessions_spawn` · `skill_read`
+
+### 管理接口（只允许本机访问；页面在 M8）
+
+| 接口 | 作用 |
+|---|---|
+| `GET /api/admin/overview` | 总览：agent 今日用量、设备、失败任务、heartbeat |
+| `GET/POST /api/admin/agents`、`GET/PATCH/DELETE /api/admin/agents/<id>` | agent 增删改（删除进 `agents/.trash/`） |
+| `GET/PUT /api/admin/agents/<id>/file?path=SOUL.md` | 读写人设与记忆文件 |
+| `GET /api/admin/agents/<id>/sessions[/<key>]`、`POST …/<key>/reset`、`…/compact` | 会话浏览、重置、压缩 |
+| `POST /api/admin/agents/<id>/memory/search`、`…/memory/reindex` | 记忆检索测试、重建索引 |
+| `GET/POST /api/admin/jobs`、`PATCH/DELETE /api/admin/jobs/<id>`、`POST …/run`、`GET …/runs` | 定时任务 |
+| `GET /api/admin/a2a`、`PUT /api/admin/a2a/allow`、`PUT /api/admin/a2a/settings` | agent 通信记录与权限矩阵 |
+| `GET /api/admin/devices`、`PUT /api/admin/devices/<id>` | 设备绑定哪个 agent |
+| `POST /api/admin/chat` | 网页聊天（`{"agent":"mio","text":"…"}`） |
+
+heartbeat 开关：`PATCH /api/admin/agents/main` `{"heartbeat":{"enabled":true,"every_minutes":30,"delivery":"device:cores3","active_hours":"08:00-23:00"}}`
+
 ## 运行
 
 ```bash
@@ -64,6 +132,8 @@ npx tsc --noEmit -p .      # 类型检查
 npx vitest run             # 单测
 # 契约测试（与 Python 版同一套黑盒用例）
 cd ../contract-tests && KAGURA_SERVER_CMD=server/dist/kagura KAGURA_SERVER_PROVIDES=broker,discovery python -m pytest -q
+# 同一套再对内置 agent 跑一遍（另加 test_agent_system.py 的 13 例）
+KAGURA_BRAIN=pi KAGURA_SERVER_CMD=server/dist/kagura KAGURA_SERVER_PROVIDES=broker,discovery python -m pytest -q
 ```
 
 ## 代码结构
@@ -79,5 +149,7 @@ cd ../contract-tests && KAGURA_SERVER_CMD=server/dist/kagura KAGURA_SERVER_PROVI
 | `src/shortcut/` | 快捷指令、提醒解析、触觉背景 |
 | `src/jobs/` | 提醒、每日定时拍照 |
 | `src/voice/` | 百度 ASR/TTS（缓存 key 与 Python 版逐字节一致，旧 `tts_cache/` 可直接复用） |
-| `src/brain/` | 大脑接口；`openclaw.ts` = OpenClaw CLI 适配器 |
+| `src/brain/` | 大脑接口；`pi.ts` = 内置 agent，`openclaw.ts` = OpenClaw CLI 适配器 |
+| `src/agent/` | 内置 agent 系统：`registry`（agent 目录）、`runtime`（每轮运行/串行/压缩）、`soul`（系统提示组装）、`models`、`memory`、`scheduler` + `cron`、`a2a`、`skills`、`tools/*` |
+| `src/routes/admin.ts` | 管理接口 `/api/admin/*`（只许本机） |
 | `src/fake.ts` | `KAGURA_FAKE_PROVIDERS=1` 时的假 ASR/LLM/TTS（契约测试用） |

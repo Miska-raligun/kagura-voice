@@ -37,6 +37,8 @@ export interface RunRequest {
   noTurnContext?: boolean;
   /** 覆盖 agent 的模型（heartbeat 用便宜模型） */
   model?: string;
+  /** 脱离调用方运行（后台子任务）时显式带上跳数与调用链，防循环 */
+  lineage?: { hop: number; chain: string[] };
   /** 落盘前最后一道判断：返回 false 就不落盘（heartbeat 回 HEARTBEAT_OK 时不让它撑大历史） */
   keepIf?: (text: string) => boolean;
 }
@@ -164,8 +166,8 @@ export class Runtime {
     const scope: RunScope = {
       agentId: agent.id, sessionKey: req.sessionKey, kind: req.kind, channel: req.channel,
       deviceId: req.deviceId, spokenTo: req.spokenTo, localTime: req.localTime, purpose: req.purpose ?? "chat",
-      hop: parent ? parent.hop + (parent.agentId !== agent.id ? 1 : 0) : 0,
-      chain: [...(parent?.chain ?? []), `${agent.id}|${req.sessionKey}`],
+      hop: parent ? parent.hop + (parent.agentId !== agent.id ? 1 : 0) : (req.lineage?.hop ?? 0),
+      chain: [...(parent?.chain ?? req.lineage?.chain ?? []), `${agent.id}|${req.sessionKey}`],
       meta: {},
     };
     const model = this.models.resolve(req.model || agent.model);

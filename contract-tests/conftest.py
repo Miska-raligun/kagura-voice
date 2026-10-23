@@ -54,8 +54,9 @@ def _wait_http(url: str, proc: subprocess.Popen, log: Path, timeout: float = 20)
 class Server:
     """一个被测服务端实例（含它依赖的 broker / 发现中继）。"""
 
-    def __init__(self, api_token: str = "", roles: list | None = None, stream_token: str = ""):
+    def __init__(self, api_token: str = "", roles: list | None = None, stream_token: str = "", extra_env: dict | None = None):
         self.data = Path(tempfile.mkdtemp(prefix="kagura-contract-"))
+        self.extra_env = extra_env or {}
         self.port = _free_port()
         self.mqtt_port = _free_port()
         self.stream_port = _free_port()
@@ -96,6 +97,7 @@ class Server:
             "PYTHONPATH": str(self.data) + os.pathsep + env.get("PYTHONPATH", ""),
             "PYTHONUNBUFFERED": "1",
         })
+        env.update(self.extra_env)
         if "broker" not in PROVIDES:
             p = self._spawn([sys.executable, str(HERE / "_broker.py"), str(self.mqtt_port)], "broker", env, HERE)
             deadline = time.time() + 10

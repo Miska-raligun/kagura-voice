@@ -145,7 +145,9 @@ export class AgentRegistry {
     if (!AGENT_ID_RE.test(id)) throw new Error("agent id 只能用字母/数字/_-（≤32）");
     const dir = path.join(this.root, id);
     if (fs.existsSync(dir)) throw new Error(`agent ${id} 已存在`);
-    const conf = normalize({ ...cfg, order: cfg.order ?? this.list().length }, id);
+    // 没指定设备图片目录就用 id（"" 留给默认 agent，重复了角色表会冲突）
+    const conf = normalize({ ...cfg, order: cfg.order ?? this.list().length, device_role: cfg.device_role ?? id.slice(0, 24) }, id);
+    if (this.list().some((a) => a.device_role === conf.device_role)) throw new Error(`设备图片目录「${conf.device_role}」已被别的 agent 占用`);
     const ws = path.join(dir, "workspace");
     fs.mkdirSync(ws, { recursive: true });
     const { id: _id, ...rest } = conf;
@@ -164,6 +166,7 @@ export class AgentRegistry {
     const merged: any = { ...base, ...patch };
     for (const k of ["a2a", "heartbeat", "compaction"] as const) if (patch[k]) merged[k] = { ...(base as any)[k], ...patch[k] };
     const conf = normalize(merged, id);
+    if (patch.device_role !== undefined && this.list().some((a) => a.id !== id && a.device_role === conf.device_role)) throw new Error(`设备图片目录「${conf.device_role}」已被别的 agent 占用`);
     const { id: _id, ...rest } = conf;
     fs.writeFileSync(path.join(dir, "agent.json"), JSON.stringify(rest, null, 2));
     const info = this.read(id);
@@ -189,7 +192,14 @@ export class AgentRegistry {
 
   /** 给角色切换用：agent → 角色定义（id 是设备图片目录） */
   roleDefs(): RoleDef[] {
-    return this.list().map((a) => ({ id: a.device_role, name: a.name, agent: a.id, per: a.per, aliases: a.aliases }));
+    const seen = new Set<string>();
+    const out: RoleDef[] = [];
+    for (const a of this.list()) {
+      if (seen.has(a.device_role)) { console.log(`[agent] ⚠️  ${a.id} 的 device_role「${a.device_role}」重复，设备上切换不到它`); continue; }
+      seen.add(a.device_role);
+      out.push({ id: a.device_role, name: a.name, agent: a.id, per: a.per, aliases: a.aliases });
+    }
+    return out;
   }
 
   /** a2a 权限：from 能不能主动找 to */

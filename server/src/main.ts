@@ -14,6 +14,7 @@ import { rgb565ToJpeg } from "./util/image.ts";
 import { registerChat } from "./routes/chat.ts";
 import { registerDevice } from "./routes/device.ts";
 import { registerMonitor } from "./routes/monitor.ts";
+import { registerAdmin } from "./routes/admin.ts";
 
 // Node 22 下 node:sqlite 等会打实验特性警告，对用户只是噪声
 process.removeAllListeners("warning");
@@ -47,6 +48,7 @@ async function main() {
   registerChat(r, ctx);
   registerDevice(r, ctx);
   registerMonitor(r, ctx);
+  if (sys) registerAdmin(r, ctx, sys);
 
   await mqtt.start(cfg.mqttPort);
   await stream.start(cfg.streamPort);
