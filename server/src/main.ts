@@ -19,7 +19,8 @@ import { registerAdminUi } from "./routes/admin-ui.ts";
 import { runCli, VERSION } from "./cli.ts";
 import fs from "node:fs";
 import path from "node:path";
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
+import { isWsl, toLinuxPath } from "./util/platform.ts";
 
 // Node 22 下 node:sqlite 等会打实验特性警告，对用户只是噪声
 process.removeAllListeners("warning");
@@ -34,7 +35,7 @@ async function main() {
   // agent 系统总是建：OpenClaw 模式下管理界面、首次设置向导也要能用；只有「设备对话交给谁」随 brain 配置
   const sys = createAgentSystem(cfg, dirs, fake);
   const pi = cfg.brain === "pi";
-  const brain = pi ? new PiBrain(sys.runtime) : (fake ?? new OpenClawBrain(cfg.openclaw.bin));
+  const brain = pi ? new PiBrain(sys.runtime) : (fake ?? openclawBrain(cfg, dirs.visionTmp));
   const mqtt = new MqttHub();
   // 直播帧质量压到 70：单帧小一半，肉眼几乎看不出差别
   const stream = new StreamHub((raw) => rgb565ToJpeg(raw, 70), cfg.streamToken);
@@ -69,9 +70,18 @@ async function main() {
   setInterval(() => ctx.hb.watch(), 30_000).unref();
 
   await listenOrExplain("HTTP", cfg.port, () => r.listen(cfg.port));
+  // 只绑本机的管理端口（WSL 里默认开）：管理界面的「只许本机」在这个端口上才分得清
+  if (cfg.adminPort && cfg.adminPort !== cfg.port) {
+    await listenOrExplain("管理界面", cfg.adminPort, () => r.listen(cfg.adminPort, "127.0.0.1"));
+  }
   if (pi) console.log(`Agent : ${sys.registry.list().map((a) => a.id).join(", ")}（内置，默认模型 ${sys.models.defaultRef() || "未配置"}）`);
   else console.log(`Agent : ${cfg.openclaw.defaultAgent}（OpenClaw）`);
-  console.log(`管理界面: http://127.0.0.1:${cfg.port}/admin（只限本机）`);
+  console.log(`管理界面: http://127.0.0.1:${cfg.adminPort || cfg.port}/admin（只限本机）`);
+  if (isWsl()) {
+    console.log("检测到在 WSL 里运行：");
+    console.log(`  · 设备要从局域网连进来，Windows 侧仍需端口转发 ${cfg.port}/${cfg.mqttPort}/${cfg.streamPort} 与 UDP ${cfg.discPort} 发现中继（openclaw-startup.ps1 那套）`);
+    console.log(`  · 管理界面请在 Windows 浏览器打开 http://localhost:${cfg.adminPort || cfg.port}/admin（走 WSL 自带的 localhost 转发；经端口转发进来的请求分不清是不是本机，会被拒绝）`);
+  }
   console.log(`监听 0.0.0.0:${cfg.port}，Ctrl+C 退出`);
   console.log(`监控网页: http://<本机IP>:${cfg.port}/monitor\n`);
   maybeOpenAdmin(cfg, !sys.models.defaultRef());
@@ -82,6 +92,11 @@ async function listenOrExplain<T>(what: string, port: number, fn: () => Promise<
   try { return await fn(); }
   catch (e: any) {
     if (e?.code === "EADDRINUSE") {
+      if (process.platform === "win32" && windowsPortproxyHas(port)) {
+        throw new Error(`${what} 端口 ${port} 被旧的 WSL 端口转发占着（openclaw-startup.ps1 加的 netsh portproxy）。`
+          + `改用 Windows 版就不需要它了：管理员 PowerShell 里运行「openclaw-startup.ps1 -Stop」，`
+          + `或 netsh interface portproxy delete v4tov4 listenport=${port} listenaddress=0.0.0.0`);
+      }
       const hint = port === 1883 ? "多半是 mosquitto 还在运行（新服务端自带 MQTT broker），先停掉它" : "可能已经开着一个 Kagura 或旧的 voice_server.py";
       throw new Error(`${what} 端口 ${port} 被占用：${hint}。也可以在 config.json 里改端口。`);
     }
@@ -89,13 +104,34 @@ async function listenOrExplain<T>(what: string, port: number, fn: () => Promise<
   }
 }
 
+/** Windows 上这个端口是不是被 netsh portproxy（旧的 WSL 转发）占着 */
+function windowsPortproxyHas(port: number): boolean {
+  try {
+    const out = execFileSync("netsh", ["interface", "portproxy", "show", "v4tov4"], { encoding: "utf8", timeout: 5000 });
+    return out.split(/\r?\n/).some((l) => new RegExp(`^\\S+\\s+${port}\\s`).test(l.trim()));
+  } catch { return false; }
+}
+
+/** OpenClaw 大脑；Windows 版配了 openclaw.wsl_distro 就经 wsl.exe 调 WSL 里的 OpenClaw */
+function openclawBrain(cfg: ReturnType<typeof loadConfig>, visionTmp: string) {
+  const oc = cfg.openclaw;
+  if (oc.wslDistro && process.platform === "win32") {
+    const linuxTmp = `${oc.dir}/workspace/tmp`;
+    console.log(`OpenClaw：经 wsl.exe 调用 ${oc.wslDistro} 里的 ${oc.bin}（照片写到 ${visionTmp}）`);
+    return new OpenClawBrain(oc.bin, { distro: oc.wslDistro, toAgentPath: (p) => toLinuxPath(p, visionTmp, linuxTmp) });
+  }
+  return new OpenClawBrain(oc.bin);
+}
+
 /** 首次运行（在终端/桌面双击启动、还没配模型）自动打开管理界面的首次设置向导 */
 function maybeOpenAdmin(cfg: ReturnType<typeof loadConfig>, setupNeeded: boolean) {
   const marker = path.join(cfg.dataDir, ".welcomed");
   if (cfg.fakeProviders || process.argv.includes("--no-browser") || !process.stdout.isTTY || fs.existsSync(marker)) return;
   try { fs.writeFileSync(marker, new Date().toISOString()); } catch { return; }
-  const url = `http://127.0.0.1:${cfg.port}/admin${setupNeeded ? "#/settings/wizard" : ""}`;
-  const [bin, args] = process.platform === "win32" ? ["cmd", ["/c", "start", "", url]] : process.platform === "darwin" ? ["open", [url]] : ["xdg-open", [url]];
+  const url = `http://localhost:${cfg.adminPort || cfg.port}/admin${setupNeeded ? "#/settings/wizard" : ""}`;
+  // WSL 里没有桌面：借 Windows 的 cmd.exe 打开 Windows 浏览器
+  const [bin, args] = process.platform === "win32" || isWsl() ? [process.platform === "win32" ? "cmd" : "cmd.exe", ["/c", "start", "", url]]
+    : process.platform === "darwin" ? ["open", [url]] : ["xdg-open", [url]];
   execFile(bin, args as string[], () => {});
   console.log(`已在浏览器打开 ${url}`);
 }

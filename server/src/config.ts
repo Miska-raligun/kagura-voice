@@ -7,6 +7,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { isWsl, wslUncPath } from "./util/platform.ts";
 
 export interface RoleDef { id?: string; name?: string; agent?: string; per?: number; aliases?: string[] }
 
@@ -22,7 +23,16 @@ export interface Config {
   roles: RoleDef[] | null;
   baidu: { asrKey: string; asrSecret: string; ttsKey: string; ttsSecret: string };
   /** OpenClaw 适配器（可选大脑，作者自用可继续接 OpenClaw） */
-  openclaw: { bin: string; dir: string; defaultAgent: string };
+  openclaw: {
+    bin: string; dir: string; defaultAgent: string;
+    /** Windows 版服务端调用装在 WSL 里的 OpenClaw：发行版名（如 Ubuntu）。此时 bin、dir 都是 WSL 里的 Linux 路径 */
+    wslDistro: string;
+  };
+  /**
+   * 额外的管理界面端口，只绑 127.0.0.1。WSL 里跑时默认 5080：Windows 的端口转发会把局域网和本机浏览器的
+   * 请求一律变成「来自 Windows 主机」，主端口上分不清谁是本机，管理界面只能走 WSL 自带的 localhost 转发进来。
+   */
+  adminPort: number;
   /** 大脑：pi = 内置 agent 系统（M3 起），openclaw = 调 OpenClaw CLI */
   brain: "pi" | "openclaw";
   /** 模型服务商（全部由用户手动配置，不预设），见 server/README.md */
@@ -112,7 +122,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       bin: oc.bin ?? path.join(home, ".npm-global", "bin", "openclaw"),
       dir: env.KAGURA_OPENCLAW_DIR || oc.dir || path.join(home, ".openclaw"),
       defaultAgent: oc.default_agent ?? "main",
+      wslDistro: String(oc.wsl_distro ?? ""),
     },
+    adminPort: int(env.KAGURA_ADMIN_PORT, file.admin_port ?? (isWsl(env) && !fake ? 5080 : 0)),
     brain,
     models,
     embedding: emb && emb.base_url && emb.model ? { baseUrl: String(emb.base_url), apiKey: String(emb.api_key ?? ""), model: String(emb.model) } : null,
@@ -137,7 +149,7 @@ export function dirs(cfg: Config) {
     deviceLogs: d("device_logs"),
     crashReports: d("crash_reports"),
     // 照片临时目录：OpenClaw 要按路径读图，所以沿用它的 workspace/tmp；内置 agent 直接读文件，放数据目录
-    visionTmp: cfg.brain === "pi" ? d("tmp") : (() => { const p = path.join(cfg.openclaw.dir, "workspace", "tmp"); fs.mkdirSync(p, { recursive: true }); return p; })(),
+    visionTmp: cfg.brain === "pi" ? d("tmp") : (() => { const p = openclawTmp(cfg); fs.mkdirSync(p, { recursive: true }); return p; })(),
     agents: d("agents"),
     skills: d("skills"),
     systemDb: path.join(cfg.dataDir, "system.sqlite"),
@@ -147,3 +159,9 @@ export function dirs(cfg: Config) {
   };
 }
 export type Dirs = ReturnType<typeof dirs>;
+
+/** OpenClaw 读图的临时目录（它按路径读图）。Windows 版接 WSL 里的 OpenClaw 时走 \\wsl.localhost 写进去 */
+export function openclawTmp(cfg: Config): string {
+  if (cfg.openclaw.wslDistro && process.platform === "win32") return wslUncPath(cfg.openclaw.wslDistro, `${cfg.openclaw.dir}/workspace/tmp`);
+  return path.join(cfg.openclaw.dir, "workspace", "tmp");
+}

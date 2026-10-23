@@ -30,9 +30,9 @@
 4. **刷设备**：按固件包的烧录说明上传，设备开机、屏幕上连 WiFi，会在局域网里自动找到服务端。
 5. **跟她说话**：点一下屏幕说话。想改她的性格，去「Agents → 人设文件」改 `SOUL.md`。
 
-旧版用户：先停掉 `voice_server.py` 和 mosquitto（新服务端自带 MQTT，占 1883 端口），然后
-`kagura migrate <旧仓库目录>` 把配置、提醒、定时拍照、照片、语音缓存搬过来；
-OpenClaw 的人设、记忆和定时任务在管理界面「定时任务 → 从 OpenClaw 导入」。
+**旧版用户（WSL + OpenClaw）**：看 [docs/migrate-from-wsl.md](docs/migrate-from-wsl.md)——换 Windows 安装版、
+继续在 WSL 里跑、或者 Windows 版调用 WSL 里的 OpenClaw，三种做法的步骤和差异都在里面。
+最要紧的一条：先运行 `openclaw-startup.ps1 -Stop` 删掉旧的端口转发，否则新服务端占不到端口。
 
 ## 能做什么
 

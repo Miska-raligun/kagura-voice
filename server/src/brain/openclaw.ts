@@ -19,7 +19,16 @@ export class OpenClawBrain implements Brain {
   readonly kind = "openclaw";
   private sem = new Semaphore(2);
   private sessionTails = new Map<string, Promise<unknown>>();
-  constructor(private bin: string) {}
+  /**
+   * @param bin openclaw 可执行文件
+   * @param wsl Windows 版服务端调 WSL 里的 OpenClaw：经 wsl.exe 执行，照片路径换成 WSL 里的路径
+   */
+  constructor(private bin: string, private wsl?: { distro: string; toAgentPath: (p: string) => string }) {}
+
+  /** 实际执行的命令行（单测用） */
+  command(args: string[]): [string, string[]] {
+    return this.wsl ? ["wsl.exe", ["-d", this.wsl.distro, "-e", this.bin, ...args]] : [this.bin, args];
+  }
 
   /** 同一 session 串行：排到前一个调用之后 */
   private serial<T>(sid: string, fn: () => Promise<T>): Promise<T> {
@@ -33,12 +42,14 @@ export class OpenClawBrain implements Brain {
   chat(req: ChatRequest): Promise<string> {
     let message = req.message;
     if (req.localTime) message = `[当前时间: ${req.localTime}] ${message}`;
-    if (req.imagePath) message = `${message}\n\n[用户通过CoreS3摄像头拍了一张照片，保存在 ${req.imagePath}，请识别这张图片来回答问题]`;
+    const img = req.imagePath && this.wsl ? this.wsl.toAgentPath(req.imagePath) : req.imagePath;
+    if (img) message = `${message}\n\n[用户通过CoreS3摄像头拍了一张照片，保存在 ${img}，请识别这张图片来回答问题]`;
     const args = ["agent", "--agent", req.agent, "--message", message, "--session-id", req.sessionId, "--json", "--timeout", "120"];
     return this.serial(req.sessionId, async () => {
       await this.sem.acquire();
       try {
-        const { code, stdout, stderr } = await run(this.bin, args, 130_000);
+        const [bin, argv] = this.command(args);
+        const { code, stdout, stderr } = await run(bin, argv, 130_000);
         if (code !== 0) {
           // stderr 开头常是无害的 state-migrations 警告，真实错误在末尾
           const err = stderr.replace(/\x1b\[[0-9;]*m/g, "");

@@ -296,3 +296,17 @@ def test_stream_error_before_audio_is_500(a):
     a.fake_llm({"error": "模型挂了"})
     r = a.post("/chat", data=wav(), headers={"X-Device-Id": "st5", "X-Stream": "1"})
     assert r.status_code == 500 and "模型挂了" in r.json()["error"]
+
+
+def test_admin_loopback_port():
+    """WSL 场景：额外的管理端口只绑 127.0.0.1，管理界面与接口在上面可用（主端口照常）。"""
+    import requests
+    from conftest import _free_port
+    port = _free_port()
+    s = Server(extra_env={"KAGURA_ADMIN_PORT": str(port)}).start()
+    try:
+        assert requests.get(f"http://127.0.0.1:{port}/admin", timeout=5).status_code == 200
+        assert requests.get(f"http://127.0.0.1:{port}/api/admin/agents", timeout=5).status_code == 200
+        assert s.get("/health").status_code == 200
+    finally:
+        s.stop()

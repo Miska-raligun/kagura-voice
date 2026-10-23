@@ -57,7 +57,10 @@ GitHub Releases 下载对应安装包（打 `v*` tag 时由 `.github/workflows/r
 }
 ```
 
-字段含义与旧 `config.py` 一一对应。`roles`、`openclaw` 可省略（默认 `~/.npm-global/bin/openclaw`、`~/.openclaw`；写的话要用绝对路径，不展开 `~`）。
+字段含义与旧 `config.py` 一一对应。Windows 版接 WSL 里的 OpenClaw：`openclaw` 里加 `"wsl_distro": "Ubuntu"`，
+`bin`/`dir` 写 WSL 里的 Linux 路径（见 [docs/migrate-from-wsl.md](../docs/migrate-from-wsl.md) 方案 C）。
+`admin_port`：额外的只绑本机的管理端口，WSL 里默认 5080（端口转发会让主端口分不清本机与局域网）。
+`roles`、`openclaw` 可省略（默认 `~/.npm-global/bin/openclaw`、`~/.openclaw`；写的话要用绝对路径，不展开 `~`）。
 日常用管理界面「设置」页改就行，不用手写。从旧版迁移：
 
 ```bash
