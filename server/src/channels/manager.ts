@@ -165,18 +165,26 @@ export class ChannelManager {
       const photo = r.meta.photos?.[0];
       await this.reply(m, r.text, photo && fs.existsSync(photo) ? fs.readFileSync(photo) : undefined);
       // 跑完再判断一次：主人这条消息里说了「我到家了」（set_presence）也算；模型自己已经 speak 过就不重复
-      if (voiceOn() && !r.meta.spoke?.length) {
-        const dev = before ?? this.voice!.device(agentId);
-        const said = toSpoken(r.text);
-        if (!dev) console.log(`[channel] 🔇 主人在家，但没有在线设备可播`);
-        else if (said) {
-          const ok = await this.voice!.push(said, dev, agentId).catch(() => false);
-          console.log(`[channel] 🔊 回复同时播到 ${dev}${ok ? "" : "（失败）"}`);
-        }
-      }
+      if (voiceOn()) await this.speakAside(agentId, r.text, r.meta.spoke, before, a.voice_push === "always");
     } catch (e: any) {
       await this.reply(m, `（出错了：${String(e.message).slice(0, 100)}）`);
     }
+  }
+
+  /**
+   * 主人这边收到的回复，同时在家里的设备上念一遍（IM 主人私聊、网页聊天共用）。
+   * 由代码判断，不靠模型自觉；模型本轮已经 speak 过就不补播。always = 不在家也播。
+   */
+  async speakAside(agentId: string, text: string, spoke?: string[], dev?: string | null, always = false): Promise<void> {
+    if (!this.voice || !text) return;
+    if (!always && this.voice.presence() !== "home") return;
+    if (spoke?.length) return;
+    const target = dev ?? this.voice.device(agentId);
+    if (!target) { console.log(`[channel] 🔇 在家但没有在线设备可播`); return; }
+    const said = toSpoken(text);
+    if (!said) return;
+    const ok = await this.voice.push(said, target, agentId).catch(() => false);
+    console.log(`[channel] 🔊 回复同时播到 ${target}${ok ? "" : "（失败）"}`);
   }
 
   /**

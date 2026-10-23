@@ -77,6 +77,8 @@ export function registerAdminChat(r: Router, sys: AgentSystem) {
     const reqBase = { agentId: a.id, sessionKey: key, kind, channel: "webchat", text, images: images.map((i: any) => ({ type: "image" as const, data: i.data, mimeType: i.mimeType })) };
     if (req.query.get("stream") !== "1") {
       const res = await runtime.run(reqBase);
+      // 网页聊天也按在家状态同时播语音（和飞书私聊同一套判断）；模型已经 speak 过就不重复
+      void sys.channels.speakAside(a.id, res.text, res.meta.spoke);
       return json({ reply: res.text, tools: res.toolCalls, usage: res.usage, session: key });
     }
     return {
@@ -94,6 +96,8 @@ export function registerAdminChat(r: Router, sys: AgentSystem) {
             },
           });
           send({ type: "done", reply: out.text, tools: out.toolCalls, usage: out.usage, session: key });
+          // 流式回复也一样：在家就同时播语音（模型已 speak 过不补）
+          void sys.channels.speakAside(a.id, out.text, out.meta.spoke);
         } catch (e: any) {
           send({ type: "error", error: String(e.message || e) });
         }

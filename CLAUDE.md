@@ -299,8 +299,8 @@ CoreS3 (MicroPython)  ──HTTP──▶  voice_server.py (Flask :5000)  ──
   **pi 扩展包**（`packages.ts`）：单文件可执行里没有 npm，自带最小安装器（semver + sha512 + 冲突嵌套，不跑安装脚本）；
   依赖也走扩展加载器（`resolveBare` 自己解析 exports，`import.meta` 换成注入的对象），这样纯 ESM 包也能转译加载。
   宿主包（pi-ai / pi-coding-agent / pi-tui / typebox）一律换内置 shim，pi-tui 与 pi-coding-agent 里没实现的导出拿到不报错、调用才报。
-- **IM 回复同时播语音（`channels/manager.ts`，LRN 2026-10-23，症状「飞书聊天时有时播语音有时不播，要提醒才播」）**：
-  以前全靠模型自己决定要不要调 `speak`。现在由代码决定：主人私聊 + 账号 `voice_push`（home/always/off）+ `ctx.presence`，
+- **IM / 网页聊天回复同时播语音（`channels/manager.ts` 的 `speakAside`，LRN 2026-10-23，症状「聊天时有时播语音有时不播，要提醒才播」）**：
+  以前全靠模型自己决定要不要调 `speak`。现在由代码决定：主人私聊 + 账号 `voice_push`（home/always/off）+ `ctx.presence`；网页聊天（`routes/admin-chat.ts`）走同一套，只按在家状态。
   **跑完这一轮再判断一次**（这条消息里说了「我到家了」→ `set_presence` 也算），`toSpoken()` 转成适合念的一段后 `sendPush`。
   在家时 `spokenTo` 设成目标设备，模型再 speak 同一台会被工具挡回（同 /chat），不会播两遍；模型已 speak 过别的就不再补播。
   在家状态统一走 `ctx.setPresence` / `loadPresence`（设备 BLE、`set_presence` 工具、`/home` `/away` 命令三个入口）。
