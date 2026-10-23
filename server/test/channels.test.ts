@@ -326,14 +326,17 @@ describe("主人私聊的回复同时播语音（代码判断，不靠模型）"
     env.store.allow("fs", "ou_owner", "主人", true);
     env.store.allow("fs", "ou_friend", "朋友");
     const st = { presence, policy: "presence" as "presence" | "always" | "never", pushed: [] as any[], online: ["cores3"] as string[] };
-    env.mgr.voice = {
-      allowed: () => st.policy === "always" || (st.policy === "presence" && st.presence !== "away"),
-      device: () => st.online[0] ?? null,
+    // 和 system.ts 一样接真实的出口：文字回复去掉格式后交给它，播不播由策略定
+    const { Outbox } = await import("../src/agent/outbox.ts");
+    const { toSpoken } = await import("../src/util/text.ts");
+    const box = new Outbox({
+      policy: () => st.policy, rolePush: () => "hold", presence: () => st.presence,
+      onlineDevices: () => st.online, knownDevices: () => ["cores3"], roleAgent: () => "main", hasRole: () => true, busy: () => false,
       push: async (text, dev, agentId) => { st.pushed.push({ text, dev, agentId }); return true; },
-    };
+    });
+    env.mgr.voice = { say: async (agentId, text) => { await box.say({ text: toSpoken(text), agentId, mirror: true, source: "im" }); } };
     const { deviceTools } = await import("../src/agent/tools/device.ts");
     env.rt.addTools(deviceTools({
-      say: async (text, _agentId, dev) => { st.pushed.push({ text, dev, via: "speak" }); return { played: true }; },
       captureAndWait: async () => [null, "离线"], presence: () => st.presence ?? "", defaultDevice: () => "cores3",
       setPresence: (s) => { st.presence = s; }, schedules: { list: () => [] } as any,
     }));
@@ -341,7 +344,7 @@ describe("主人私聊的回复同时播语音（代码判断，不靠模型）"
     return { ...env, st };
   };
 
-  it("在家：回复照常发文字，同时把去掉格式的内容推到设备；提示模型不用再 speak", async () => {
+  it("在家：回复照常发文字，同时把去掉格式的内容推到设备", async () => {
     const { mgr, fake, ad, st } = await setup();
     fake.queue.push("**好的**，今天：\n- 晴\n- 25 度");
     await mgr.handle(msg({ sender: "ou_owner", chatId: "oc_owner", text: "天气怎样" }));
@@ -373,13 +376,13 @@ describe("主人私聊的回复同时播语音（代码判断，不靠模型）"
     expect(st.pushed.map((p) => p.text)).toEqual(["总是播"]);
   });
 
-  it("这条消息里说「我到家了」（set_presence）→ 本轮回复就播；模型自己 speak 了不重复播", async () => {
+  it("这条消息里说「我到家了」（set_presence）→ 本轮回复就播；没有 speak 工具，不会播两遍", async () => {
     const { mgr, fake, st } = await setup({}, "away");
     fake.queue.push({ tool_calls: [{ name: "set_presence", args: { status: "home" } }], then: "欢迎回家" });
     await mgr.handle(msg({ sender: "ou_owner", chatId: "oc_owner", text: "我到家了" }));
     expect(st.presence).toBe("home");
     expect(st.pushed).toEqual([{ text: "欢迎回家", dev: "cores3", agentId: "main" }]);
-    // 在家时模型还调 speak 播同一台设备：工具直接说「不用」，不会播两遍
+    // 模型想调 speak：没有这个工具，回复照样只播一遍
     st.pushed.length = 0;
     fake.queue.push({ tool_calls: [{ name: "speak", args: { text: "欢迎" } }], then: "嗯" });
     await mgr.handle(msg({ sender: "ou_owner", chatId: "oc_owner", text: "hi" }));

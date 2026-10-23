@@ -63,8 +63,13 @@ export class Ctx {
   selfUpdater: import("./util/selfupdate.ts").SelfUpdater | null = null;
   /** 出口（内置 agent 模式才有）：所有说给主人听的话经它按 voice_push 策略决定播不播、播到哪 */
   outbox: import("./agent/outbox.ts").Outbox | null = null;
-  /** 换一张角色表（改了 agent 之后） */
-  setRoles(r: Roles) { this.roles = r; }
+  /** 设备换了角色（播留言）。挂在 Ctx 上而不是 Roles 上：改 agent 时角色表会整个重建 */
+  onRoleSwitch: ((dev: string) => void) | null = null;
+  /** 换一张角色表（改了 agent 之后），钩子跟着挂上 */
+  setRoles(r: Roles) {
+    this.roles = r;
+    r.onSwitch = (dev) => this.onRoleSwitch?.(dev);
+  }
 
   constructor(
     public cfg: Config, public dirs: Dirs, public voice: Voice, public brain: Brain,
@@ -73,6 +78,7 @@ export class Ctx {
     roleDefs: RoleDef[] | null = cfg.roles,
   ) {
     this.roles = new Roles(roleDefs, dirs.rolesFile);
+    this.roles.onSwitch = (dev) => this.onRoleSwitch?.(dev);
     this.hb = new Heartbeats(dirs.deviceLogs);
     this.reminders = new Reminders(dirs.remindersFile);
     this.schedules = new PhotoSchedules(dirs.schedulesFile);
@@ -246,7 +252,8 @@ export class Ctx {
     }
     result.snapshot = this.saveSnapshot(imagePath, { ts: started, device_id: dev, time: label, prompt, reply: result.reply, error: result.error });
     if (result.reply) {
-      try { result.spoken = await this.sendPush(result.reply, dev); }
+      // 内置 agent 走出口（按语音推送策略）；OpenClaw 模式直接推
+      try { result.spoken = this.outbox ? (await this.outbox.say({ text: result.reply, agentId: null, device: dev, source: "snapshot" })).played : await this.sendPush(result.reply, dev); }
       catch (e: any) { console.log(`[snapshot] ⚠️  播报失败: ${e.message}`); result.error ||= `播报失败: ${e.message}`; }
     }
     return result;
@@ -277,6 +284,11 @@ export class Ctx {
       const n = (this.activeChats.get(dev) ?? 1) - 1;
       if (n > 0) this.activeChats.set(dev, n); else this.activeChats.delete(dev);
     }
+  }
+
+  /** 主人在设备上做了操作（说话、摇一摇、触摸、按 ROLE 键）：人肯定在家，在家状态不是 home 就改过来 */
+  deviceHere(dev: string) {
+    if (this.presence?.status !== "home") this.setPresence("home", dev, "device");
   }
 
   /**

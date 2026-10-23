@@ -287,8 +287,9 @@ export function importOpenClaw(dir: string, agents: AgentRegistry, sched: Schedu
         sched.add({
           id, agent, name, enabled: false, schedule: convertSchedule(j.schedule), kind,
           session: j.sessionTarget === "main" || kind === "systemEvent" ? "main" : "isolated",
-          // OpenClaw 的任务多半在提示词里让 agent 自己用 cores3-speak 播报——本系统对应 speak 工具，不再额外投递
-          message, delivery: "none", source: "openclaw",
+          // OpenClaw 的任务多半在提示词里让 agent 自己用 cores3-speak 播报；本系统没有 speak，
+          // 投到网页聊天（文字留档），同时由出口按语音推送策略在设备上播
+          message, delivery: "webchat", source: "openclaw",
         });
         report.jobs.imported.push({ id, name, agent });
       } catch (e: any) {

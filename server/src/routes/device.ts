@@ -179,6 +179,7 @@ export function registerDevice(r: Router, ctx: Ctx) {
   r.get("/shake", (req) => {
     const dev = validateDeviceId(req.header("X-Device-Id"));
     if (!ctx.state.checkRate(dev)) return json({ error: "请求过于频繁，请稍后再试" }, 429);
+    ctx.deviceHere(dev);
     const prompt = pi()
       ? "[设备事件] 主人摇了摇你——她现在就在你面前的设备旁。跟她随便聊几句（你的回复会直接播出来）。"
       : "用户摇了摇你——她现在就在你面前的 Cores3 设备旁。"
@@ -193,6 +194,7 @@ export function registerDevice(r: Router, ctx: Ctx) {
   r.get("/touch", (req) => {
     const dev = validateDeviceId(req.header("X-Device-Id"));
     if (!ctx.state.checkRate(dev)) return json({ error: "请求过于频繁，请稍后再试" }, 429);
+    ctx.deviceHere(dev);
     const kind = req.header("X-Touch-Kind");
     const desc = TOUCH_KIND_DESC[kind];
     if (!desc) return json({ error: "unknown touch kind" }, 400);

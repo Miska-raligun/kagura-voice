@@ -13,7 +13,6 @@ function withDevice(rt: Runtime) {
   const pushed: any[] = [];
   const sched: any = { list: () => [], add: () => ({}), update: () => null, remove: () => false };
   rt.addTools(deviceTools({
-    say: async (text, agentId, dev) => { pushed.push({ text, dev, agentId }); return { played: true, device: dev }; },
     captureAndWait: async () => [null, "离线"],
     presence: () => "在家",
     setPresence: () => {},
@@ -49,22 +48,22 @@ describe("内置工具", () => {
     expect(raw).not.toContain("/9j/");
   });
 
-  it("set_volume → meta.volume；speak 对正在说话的设备不重复播、对别的设备推送且用 agent 音色", async () => {
+  it("set_volume → meta.volume；没有 speak 工具（说不说出声由系统决定）", async () => {
     const { rt, fake } = makeRuntime();
-    const pushed = withDevice(rt);
-    fake.queue.push({ tool_calls: [{ name: "set_volume", args: { direction: "up" } }, { name: "speak", args: { text: "嗨" } }, { name: "speak", args: { text: "客厅你好", device: "living" } }], then: "调大了" });
+    withDevice(rt);
+    fake.queue.push({ tool_calls: [{ name: "set_volume", args: { direction: "up" } }, { name: "speak", args: { text: "嗨" } }], then: "调大了" });
     const r = await rt.run({ ...dev, agentId: "mio", sessionKey: "mio:main", text: "大声点" });
     expect(r.text).toBe("调大了");
     expect(r.meta.volume).toBe("up");
-    expect(pushed).toEqual([{ text: "客厅你好", dev: "living", agentId: "mio" }]);
-    expect(r.toolCalls).toEqual(["set_volume", "speak", "speak"]);
+    const tr = rt.store("mio").history("mio:main").map((h) => h.msg).filter((m) => m.role === "toolResult") as any[];
+    expect(tr.find((m) => m.toolName === "speak")?.isError).toBe(true);
   });
 
   it("工具白名单：agent.tools 之外的工具模型看不到也调不了", async () => {
     const { rt, reg, fake } = makeRuntime();
     withDevice(rt);
     reg.update("main", { tools: ["get_presence"] });
-    fake.queue.push({ tool_calls: [{ name: "speak", args: { text: "x" } }], then: "好" });
+    fake.queue.push({ tool_calls: [{ name: "set_volume", args: { direction: "up" } }], then: "好" });
     const r = await rt.run({ ...dev, agentId: "main", sessionKey: "main:main", text: "说话" });
     const tr = rt.store("main").history("main:main").map((h) => h.msg).find((m) => m.role === "toolResult") as any;
     expect(tr.isError).toBe(true);

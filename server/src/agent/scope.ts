@@ -10,7 +10,7 @@ export interface RunScope {
   /** device / webchat / system / a2a / feishu … */
   channel: string;
   deviceId?: string;
-  /** 本轮回复会被直接播报到哪台设备（/chat 里就是说话的那台）：speak 对它不用再播，take_photo 走 X-Need-Photo */
+  /** 本轮回复会被直接播报到哪台设备（/chat 里就是说话的那台）：take_photo 走 X-Need-Photo */
   spokenTo?: string;
   localTime?: string;
   purpose: string;
@@ -18,7 +18,7 @@ export interface RunScope {
   hop: number;
   chain: string[];
   /** 本轮工具对 HTTP 响应的影响（take_photo → X-Need-Photo，set_volume → X-Volume） */
-  meta: { needPhoto?: boolean; volume?: string; spoke?: string[]; photos?: string[] };
+  meta: { needPhoto?: boolean; volume?: string; photos?: string[] };
   /** 这轮消息从哪来、结果该送回哪：device:<id> / feishu:<账号>:<聊天> …（后台子任务完成后按它转达） */
   origin?: string;
   /**

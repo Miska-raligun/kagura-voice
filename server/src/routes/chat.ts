@@ -59,6 +59,7 @@ export function registerChat(r: Router, ctx: Ctx) {
 
     ctx.keepDebugAudio(dev, audio);
     ctx.hb.seen(dev);
+    ctx.deviceHere(dev);
     const t0 = now();
     try {
       let userText = await ctx.voice.transcribe(audio);
@@ -190,6 +191,7 @@ export function registerChat(r: Router, ctx: Ctx) {
       ctx.keepDebugAudio(dev, wav);
     }
     ctx.hb.seen(dev);
+    ctx.deviceHere(dev);
     const t0 = now();
     try {
       const userText = wav ? ((await ctx.voice.transcribe(wav)) || PHOTO_ONLY_PROMPT) : (String(data.text || "").trim() || PHOTO_ONLY_PROMPT);
@@ -221,6 +223,7 @@ export function registerChat(r: Router, ctx: Ctx) {
   r.post("/role/cycle", async (req) => {
     const dev = validateDeviceId(req.header("X-Device-Id"));
     if (!ctx.state.checkRate(dev) || !ctx.ipRateOk(req)) return tooMany();
+    ctx.deviceHere(dev);
     const target = ctx.roles.set(dev, ctx.roles.next(dev).id)!;
     const text = ctx.roles.greeting(target);
     const wavOut = await ctx.voice.synthesize(text, target.per);

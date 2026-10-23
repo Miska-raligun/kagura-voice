@@ -26,6 +26,9 @@ export function Settings({ arg }: { arg: string }) {
   useEffect(() => { if (TABS.some(([t]) => t === arg)) setTab(arg); }, [arg]);   // #/settings/update 等直接打开对应标签
   if (!d) return <Err msg={err} />;
   const cfg = d.config;
+  // 已经配过模型就不再显示「快速开始」（直接打开 #/settings/wizard 仍可用）
+  const configured = (cfg.models?.providers ?? []).length > 0;
+  const tabs = TABS.filter(([t]) => t !== "wizard" || !configured || tab === "wizard");
   const save = async (patch: any) => {
     const r = await api("/config", { method: "PUT", body: patch });
     toast(r.restart_needed.length ? `已保存，${r.restart_needed.join("、")} 重启后生效` : "已保存");
@@ -35,7 +38,7 @@ export function Settings({ arg }: { arg: string }) {
     <>
       {d.fake && <div class="notebox">测试模式：模型设置不生效。</div>}
       {cfg.brain === "openclaw" || (!cfg.brain && !(cfg.models?.providers ?? []).length) ? <div class="notebox">当前大脑为 OpenClaw。切换到内置 agent 并重启后，以下设置才生效。</div> : null}
-      <Tabs value={tab} onChange={(t) => go("settings", t)} tabs={TABS} />
+      <Tabs value={tab} onChange={(t) => go("settings", t)} tabs={tabs} />
       {tab === "wizard" && <Wizard cfg={cfg} save={save} done={() => { setTab("models"); go("overview"); }} />}
       {tab === "models" && <Models cfg={cfg} save={save} />}
       {tab === "tools" && <Tools cfg={cfg} save={save} />}
@@ -189,15 +192,17 @@ function Tools({ cfg, save }: { cfg: any; save: (p: any) => Promise<void> }) {
 function Voice({ cfg, save }: { cfg: any; save: (p: any) => Promise<void> }) {
   const [b, setB] = useState({ asr_key: "", asr_secret: "", tts_key: "", tts_secret: "", ...(cfg.baidu ?? {}) });
   const [tok, setTok] = useState({ api_token: cfg.api_token ?? "", stream_token: cfg.stream_token ?? "" });
-  const [vp, setVp] = useState(cfg.voice_push ?? "presence");
+  const [vp, setVp] = useState({ voice_push: cfg.voice_push ?? "presence", role_push: cfg.role_push ?? "hold" });
   return (
     <>
       <Card title="语音推送">
-        <p class="muted">agent 主动说的话、定时任务、提醒、IM 回复的语音播报。在家状态来自设备蓝牙，或在 IM 中发送 /home、/away。</p>
-        <div class="row">
-          <Select value={vp} onChange={setVp} options={[["presence", "在家时播放"], ["always", "总是播放"], ["never", "从不播放"]]} />
-          <Btn kind="primary" onClick={() => save({ voice_push: vp })}>保存</Btn>
+        <p class="muted">agent 发给你的消息（IM 与网页回复、定时任务、heartbeat、提醒）同时在设备上播报。在家状态来自设备蓝牙、对设备的操作，或 IM 中的 /home、/away。</p>
+        <div class="form">
+          <Field label="播报"><Select value={vp.voice_push} onChange={(v) => setVp({ ...vp, voice_push: v })} options={[["presence", "在家时播放"], ["always", "总是播放"], ["never", "从不播放"]]} /></Field>
+          <Field label="说话的不是设备当前角色时" hint="IM / 网页回复在角色不一致时不播报">
+            <Select value={vp.role_push} onChange={(v) => setVp({ ...vp, role_push: v })} options={[["hold", "留言，切换到该角色后播放"], ["switch", "立即播放，临时显示该角色"]]} /></Field>
         </div>
+        <Btn kind="primary" onClick={() => save(vp)}>保存</Btn>
       </Card>
       <Card title="百度语音">
         <div class="form">

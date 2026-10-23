@@ -27,8 +27,10 @@ export interface Config {
   deviceTrust: "approve" | "all";
   /** 定时查 GitHub 上有没有新版本（只提示，不自动安装） */
   updateCheck: boolean;
-  /** 说给主人听的话（speak、定时任务、提醒、IM 回复同步念）播不播：presence = 在家才播 / always / never。管理界面改了就地生效 */
+  /** agent 说给主人听的话（IM / 网页回复、定时任务、heartbeat、子任务结果、提醒）播不播：presence = 在家才播 / always / never。管理界面改了就地生效 */
   voicePush: "presence" | "always" | "never";
+  /** 设备当前不是说话的角色时：hold = 留着等切到这个角色再播（默认）；switch = 播放期间临时换成那个角色的图和音色 */
+  rolePush: "hold" | "switch";
   streamToken: string;
   roles: RoleDef[] | null;
   baidu: { asrKey: string; asrSecret: string; ttsKey: string; ttsSecret: string; asrMode?: "standard" | "pro" };
@@ -170,6 +172,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     deviceTrust: file.device_trust === "all" ? "all" : "approve",
     updateCheck: file.update_check !== false && !fake,
     voicePush: parseVoicePush(file.voice_push),
+    rolePush: file.role_push === "switch" ? "switch" : "hold",
     streamToken: String(file.stream_token ?? ""),
     roles: Array.isArray(file.roles) ? file.roles : null,
     baidu: {

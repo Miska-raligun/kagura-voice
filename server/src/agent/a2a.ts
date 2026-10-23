@@ -152,7 +152,7 @@ export class A2A {
             const req = {
               agentId: to, sessionKey: subKey, kind: "sub" as const, channel: "a2a", purpose: "spawn", timeoutSecs: SPAWN_TIMEOUT,
               text: `[子任务，来自 ${agent.name}] ${p.task}\n\n完成后直接给出结果（会原样交回给发起方），不要寒暄。`,
-              toolAllow: (n: string) => n !== "sessions_spawn" && n !== "sessions_send" && n !== "speak",
+              toolAllow: (n: string) => n !== "sessions_spawn" && n !== "sessions_send",
             };
             const t0 = Date.now();
             if (p.wait) {

@@ -118,7 +118,7 @@ kagura migrate <旧仓库目录>     # config.py → config.json，并复制提�
 
 ### 内置工具
 
-`speak` `take_photo` `set_volume` `get_presence` `photo_schedule_*` · `memory_search` `memory_get` `memory_write` ·
+`take_photo` `set_volume` `get_presence` `photo_schedule_*` · `memory_search` `memory_get` `memory_write` ·
 `cron_list` `cron_add` `cron_update` `cron_remove` `cron_run` · `sessions_list` `sessions_history` `sessions_send` `sessions_spawn` · `skill_read` ·
 `exec` · `web_search` `web_fetch` · `extension_list` `extension_read` `extension_write` `extension_remove`（自己写工具）·
 `package_search` `package_install` `package_list` `package_remove`（pi 扩展包）· `mcp__<服务器>__<工具>`
@@ -206,14 +206,15 @@ MCP 服务器配置里加 `"allowUntrusted": true` 才给 IM 陌生人 / 群聊�
 私聊默认**配对制**（陌生人收到配对码，在「渠道」页批准）；群里默认只回应 @ 机器人；每账号每日回复上限。
 同一个 agent 的记忆跨渠道共享；定时任务的投递目标可以写 `feishu:<账号id>:<聊天id>`。聊天里发 `/reset` 开新对话。
 
-**语音推送**（`config.json` 的 `voice_push`，管理界面「设置 → 语音」）：`speak`、定时任务 / heartbeat、子任务结果、提醒，
-以及主人私聊 / 网页聊天回复的顺带朗读，播不播统一由代码决定，agent 不用管：`presence`（默认）= 主人在家时播、不在家不播；
-`always` = 总是播；`never` = 从不播。IM 回复照常发文字，同时把去掉格式的开头一段（约 200 字）推到设备上播；模型这轮自己 speak 过就不重复。
-群聊、陌生人的消息一律不播。
+**语音推送**（管理界面「设置 → 语音」）：agent 没有「说话」工具，它发给你的每条消息——主人私聊 / 网页聊天的回复、定时任务、heartbeat、
+子任务结果、提醒——都由系统决定要不要同时在设备上播：`voice_push` = `presence`（默认，在家时播）/ `always` / `never`。
+IM 回复照常发文字，同时把去掉格式的开头一段（约 200 字）推到设备上播。群聊、陌生人的消息一律不播。
+你直接和设备交互（说话、摇一摇、触摸、按 ROLE 键）时照常回应，并自动记为在家。
 
-一台设备可以多个角色共用：某个角色说的话用它自己的音色播，设备播放期间临时换成它的图片，播完换回当前角色。
+一台设备多个角色共用时（`role_push`）：`hold`（默认）= 设备显示的不是说话的那个角色，就先留着，切到那个角色时再播（IM / 网页回复不留）；
+`switch` = 立即用那个角色的音色播，设备播放期间临时换成它的图片，播完换回（需要新版设备代码）。
 
-在家状态来自设备蓝牙；主人在聊天里说「我到家了 / 出门了」时 agent 会调 `set_presence`（只在可信会话里有），
+在家状态来自设备蓝牙和对设备的操作；主人在聊天里说「我到家了 / 出门了」时 agent 会调 `set_presence`（只在可信会话里有），
 也可以直接发 `/home`、`/away`。服务端重启后恢复上次的状态。
 
 ### IM 里的命令

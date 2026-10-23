@@ -176,19 +176,55 @@ def _run_job(a, agent, name, delivery):
     raise AssertionError("定时任务没跑")
 
 
-def test_other_role_message_plays_with_its_role(a):
-    """设备显示的是神乐时，小澪的定时消息照样播：用小澪的音色，推送里带 role，设备播放期间临时换成小澪的图"""
+def test_other_role_message_held_until_switch(a):
+    """默认（role_push=hold）：设备显示的是神乐时，小澪的定时消息先留着；切到小澪（问候之后）再播"""
     d = Device(a, "ag10")
     try:
+        a.request("PUT", "/api/admin/devices/ag10", json={"role": "", "greet": False})
+        a.fake_llm("该喝水啦")
+        assert _run_job(a, "mio", "ct-held", "device:ag10")["delivered"] == "held:ag10"
+        time.sleep(1)
+        assert not d.push, "设备显示的是神乐，小澪的话不该直接播"
+        a.request("PUT", "/api/admin/devices/ag10", json={"role": "mio", "greet": False})
+        assert d.wait("push", timeout=15)["type"] == "push"
+        assert a.fake_log()["tts"][-1]["text"].endswith("该喝水啦")
+        assert a.fake_log()["tts"][-1]["per"] == 4
+    finally:
+        a.request("PUT", "/api/admin/devices/ag10", json={"role": "", "greet": False})
+        d.close()
+
+
+def test_other_role_message_plays_with_its_role(a):
+    """role_push=switch：照样播，用小澪的音色，推送里带 role，设备播放期间临时换成小澪的图"""
+    d = Device(a, "ag10")
+    try:
+        a.request("PUT", "/api/admin/config", json={"role_push": "switch"})
         a.request("PUT", "/api/admin/devices/ag10", json={"role": "", "greet": False})
         a.fake_llm("该喝水啦")
         assert _run_job(a, "mio", "ct-role", "device:ag10")["delivered"] == "device:ag10"
         msg = d.wait("push", timeout=15)
         assert msg["type"] == "push" and msg["role"] == "mio", msg
-        assert a.fake_log()["tts"][-1]["text"].endswith("该喝水啦")
         assert a.fake_log()["tts"][-1]["per"] == 4
         assert a.get("/role", params={"device_id": "ag10"}).json()["role"] == "", "临时换图不改设备的当前角色"
     finally:
+        a.request("PUT", "/api/admin/config", json={"role_push": "hold"})
+        d.close()
+
+
+def test_device_interaction_means_home(a):
+    """对设备说话 = 主人在家：不在家时任务静音，对设备说过话后在家状态自动改回 home、照常播"""
+    d = Device(a, "ag10")
+    try:
+        a.request("PUT", "/api/admin/devices/ag10", json={"role": "", "greet": False})
+        a.post("/presence", json={"status": "away", "device_id": "ag10"})
+        a.fake_llm("出门啦")
+        assert _run_job(a, "main", "ct-away", "device:ag10")["delivered"] == "muted:away"
+        a.fake_llm("嗯")
+        a.post("/chat", data=wav(), headers={"X-Device-Id": "ag10"})
+        a.fake_llm("回来啦")
+        assert _run_job(a, "main", "ct-back", "device:ag10")["delivered"] == "device:ag10"
+    finally:
+        a.post("/presence", json={"status": "home", "device_id": "ag10"})
         d.close()
 
 

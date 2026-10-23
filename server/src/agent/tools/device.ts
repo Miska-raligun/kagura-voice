@@ -1,5 +1,6 @@
-// 设备相关的内置工具（§6.9）：speak / take_photo / set_volume / get_presence / photo_schedule_*。
-// 替代 OpenClaw 的 cores3-speak、cores3-camera skill 和 [PHOTO] 前缀约定。
+// 设备相关的内置工具（§6.9）：take_photo / set_volume / get_presence / photo_schedule_*。
+// 替代 OpenClaw 的 cores3-camera skill 和 [PHOTO] 前缀约定。
+// 没有 speak：agent 说给主人听的话由系统（agent/outbox.ts）统一决定播不播，agent 只管回复。
 import fs from "node:fs";
 import { Type } from "@earendil-works/pi-ai";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
@@ -8,8 +9,6 @@ import type { AgentInfo } from "../registry.ts";
 import type { PhotoSchedules } from "../../jobs/photoSchedules.ts";
 
 export interface DeviceHost {
-  /** 让 agent 开口说一句：经出口（Outbox）按 voice_push 策略决定播不播、播到哪（对 agent 透明） */
-  say(text: string, agentId: string, device?: string): Promise<{ played: boolean; reason?: string }>;
   captureAndWait(dev: string): Promise<[string | null, string | null]>;
   presence(): string;
   /** 主人亲口说的在家 / 出门（设备蓝牙没感知到时补上） */
@@ -29,20 +28,6 @@ export function deviceTools(host: DeviceHost) {
     const spokenTo = scope.spokenTo;
     const target = (d?: string) => (d && DEV_RE.test(d) ? d : scope.deviceId || host.defaultDevice());
     return [
-      {
-        name: "speak", label: "播报",
-        description: "让设备用你的声音说一句话（主动开口、跨渠道传话）。正在和你语音对话时不用调，你的回复本身就会播出来。",
-        parameters: Type.Object({ text: Type.String({ description: "要说的话，口语、简短" }), device: Type.Optional(Type.String()) }),
-        async execute(_id, p: any) {
-          const want = p.device && DEV_RE.test(p.device) ? p.device : undefined;
-          if ((want ?? spokenTo) && (want ?? spokenTo) === spokenTo) return ok("你这轮的回复本身就会在这台设备上播出来，不用再调 speak，直接回复要说的话即可。");
-          // 播不播、播到哪由系统按策略定，对 agent 透明：按策略不播（主人不在家等）也回「已说出」
-          const r = await host.say(String(p.text), agent.id, want);
-          if (r.reason === "no-device" || r.reason === "failed") return fail("设备不在线，没说出去。");
-          (scope.meta.spoke ??= []).push(String(p.text));
-          return ok("已说出。");
-        },
-      },
       {
         name: "take_photo", label: "拍照",
         description: "用设备摄像头拍一张照片来看。主人让你看东西、问「这是什么」「我手里拿的什么」时调用。",

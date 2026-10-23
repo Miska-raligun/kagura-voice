@@ -310,17 +310,17 @@ CoreS3 (MicroPython) ──HTTP──▶ server/（TypeScript 单文件可执行
   托盘用 `Global\\KaguraTrayMutex` 防重复；定时轮询 `/api/admin/meta`，服务端没了就自己消失。
   隐藏进程设 `KAGURA_NO_PROMPT=1`，preflight 和出错后的「按回车」都不再等待（否则没有窗口时会永久卡住）。
 - **出口（`agent/outbox.ts`，LRN 2026-10-23，症状「飞书聊天时有时播语音有时不播，要提醒才播」「设备显示小澪却用神乐的声音说话」）**：
-  所有「用声音说给主人听」的话——`speak` 工具、定时任务 / heartbeat 投到 `device:`、子任务结果、提醒、IM / 网页回复的顺带朗读——
-  都经 `Outbox`，**播不播由代码按全局 `voice_push` 决定，对 agent 透明**：`presence`（默认）在家播、不在家不播（未知按在家）；
-  `always` / `never`。管理界面「设置 → 语音」改了就地生效（`ctx.cfg.voicePush`）。按策略不播时 `speak` 照样回「已说出」，
-  定时任务记 `muted:<原因>`——**别再加「不在家改发 IM」「留言等回家」这类改道**（rc.2 做过，被否：agent 该看不到也不用管这些）。
-  选设备：点名的（除非见过且已掉线）→ 当前角色就是这个 agent 的 → 任意在线。
-  **一台设备多个角色共用**：别的角色的话不扣下，`ctx.sendPush(text, dev, agentId)` 用那个角色的音色合成，MQTT 通知带 `role`；
-  设备 `netsvc._play_push` 播放期间临时 `ui.set_role(role)`，播完换回——播放中途收到 role 命令（`_role_gen` 变了）就不换回。
-  **服务端的设备当前角色不变**（会话、X-Role 都照旧）。老固件不认 `role` 字段，只是图不换。
-  **新加任何「主动说话」的入口都走出口，别直接 `ctx.sendPush`**（直接推的只剩：设备自己发起的对话回复、摇一摇 / 触摸的回应、角色问候、监控页手动推送）。
-  在家时 `spokenTo` 设成目标设备，模型再 speak 同一台会被挡回（不会播两遍）。
-  在家状态统一走 `ctx.setPresence` / `loadPresence`（设备 BLE、`set_presence` 工具、`/home` `/away` 命令三个入口）。
+  **agent 没有 speak 工具**，播不播完全是系统的事：agent 发给主人的每条消息——主人 IM 私聊 / 网页聊天的回复（`mirror`，`toSpoken` 去格式、截断）、
+  定时任务 / heartbeat（投 `device:` 只播；投 IM / webchat 发文字再 mirror）、子任务结果、提醒、定时拍照识别——都经 `Outbox.say()`。
+  ① `voice_push`：`presence`（默认）在家播、不在家不播（未知按在家）；`always` / `never`。管理界面改了就地生效。
+  ② `role_push`（设备当前不是说话的那个角色时）：`hold`（默认）留言，设备切到那个角色时（`ctx.onRoleSwitch`，等设备空闲、问候之后）合成一段播；
+  mirror 的不留（文字已经发过了，切角色时冒出一串聊天回复很怪）。`switch`：照样推，`ctx.sendPush(text, dev, agentId)` 用那个角色的音色、
+  MQTT 通知带 `role`，设备 `netsvc._play_push` 播放期间临时 `ui.set_role(role)`、播完换回（中途收到 role 命令就不换回），服务端的当前角色不变。
+  留言落盘 `held_messages.json`（最多 30 条、24 小时），设备页能看能清。
+  ③ **不经出口的只有设备自己发起的交互**（对设备说话、摇一摇、触摸、ROLE 键）：主人就在设备前，角色也对得上；这几处都调 `ctx.deviceHere(dev)`
+  把在家状态改成 home。**新加任何 agent 主动说话的入口都走出口，别直接 `ctx.sendPush`。**
+  **角色切换钩子挂在 Ctx 上（`setRoles`）**：改 agent 时角色表整个重建，钩子挂在 Roles 实例上会悄悄丢失（契约测试踩过）。
+  在家状态统一走 `ctx.setPresence` / `loadPresence`（设备 BLE、设备交互、`set_presence` 工具、`/home` `/away` 命令）。
 - **管理接口与设备信任（`routes/admin.ts` 的 `isLocal`、`ctx.deviceTrusted`，LRN 2026-10-23 安全检查）**：
   ① 管理接口光看「来源是 127.0.0.1」不够——你电脑上任何网页都能让浏览器往 127.0.0.1 发请求（跨站请求伪造），
   DNS 重绑定还能绕过同源。`isLocal` 同时要求 Host 是本机地址、跨站的 Origin / `Sec-Fetch-Site: cross-site` 一律拒绝

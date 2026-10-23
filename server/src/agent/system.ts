@@ -21,6 +21,7 @@ import { McpManager } from "./mcp.ts";
 import { Extensions, extensionTools, setExtAgentDir } from "./extensions.ts";
 import { PackageManager } from "./packages.ts";
 import { Outbox } from "./outbox.ts";
+import { toSpoken } from "../util/text.ts";
 import { proxiedFetch } from "../util/proxy.ts";
 import { ChannelStore } from "../channels/store.ts";
 import { ChannelManager } from "../channels/manager.ts";
@@ -39,6 +40,8 @@ export interface AgentSystem {
   extensions: Extensions;
   packages: PackageManager;
   outbox?: Outbox;
+  /** 已经以文字发出去的回复顺带念一遍（网页聊天用） */
+  mirror?: (agentId: string, text: string, source: string) => Promise<void>;
 }
 
 export function createAgentSystem(cfg: Config, dirs: Dirs, fake: FakeLlm | null): AgentSystem {
@@ -99,7 +102,7 @@ export function attachAgentSystem(sys: AgentSystem, ctx: Ctx) {
       restartSelf(ctx.cfg.dataDir, { ...n, from: kind });
     },
   };
-  // 出口：所有说给主人听的话都经它（播不播按 voice_push 策略，由代码判断，不靠提示词）
+  // 出口：agent 说给主人听的每一句话都经它，播不播、播到哪由系统定（agent 没有 speak 工具，也不用管）
   const presence = () => (ctx.presence?.status === "home" ? "home" as const : ctx.presence?.status === "away" ? "away" as const : null);
   const online = () => {
     const t = Date.now() / 1000;
@@ -108,27 +111,34 @@ export function attachAgentSystem(sys: AgentSystem, ctx: Ctx) {
   ctx.agentPer = (id) => registry.get(id)?.per;
   const outbox = new Outbox({
     policy: () => ctx.cfg.voicePush ?? "presence",
+    rolePush: () => ctx.cfg.rolePush ?? "hold",
     presence, onlineDevices: online, knownDevices: () => [...ctx.hb.devices.keys()],
     roleAgent: (dev) => ctx.roles.get(dev).agent,
+    hasRole: (agentId) => ctx.roles.all().some((r) => r.agent === agentId),
+    busy: (dev) => (ctx.activeChats.get(dev) ?? 0) > 0,
     push: (text, dev, agentId) => ctx.sendPush(text, dev, agentId),
-  });
+  }, path.join(ctx.cfg.dataDir, "held_messages.json"));
   ctx.outbox = outbox;
   sys.outbox = outbox;
-  // 主人在 IM / 网页里的回复顺带在设备上念（念不念、念到哪都由出口定）
-  sys.channels.voice = {
-    allowed: () => outbox.allowed(),
-    device: (agentId) => outbox.pick(agentId) ?? null,
-    push: (text, dev, agentId) => ctx.sendPush(text, dev, agentId),
+  // 设备切到某个角色（问候之后）：把留给它的话播出来
+  ctx.onRoleSwitch = (dev) => outbox.flush(dev);
+  /** 已经以文字发出去的回复（IM、网页、投到 IM 的任务）顺带念一遍：去掉格式、太长截断 */
+  const mirror = async (agentId: string, text: string, source: string) => {
+    const said = toSpoken(text);
+    if (said) await outbox.say({ text: said, agentId, mirror: true, source }).catch(() => undefined);
   };
+  sys.channels.voice = { say: (agentId, text) => mirror(agentId, text, "im") };
+  sys.mirror = mirror;
   const scheduler = new Scheduler(ctx.dirs.systemDb, runtime, registry, {
     async deliver(agentId, delivery, text) {
       if (delivery.startsWith("device:")) {
-        // 投到设备也要过出口：按策略不播（主人不在家等）记为「静音」，不算失败
+        // 只投设备：按策略不播记为「静音」、角色不对记为「留言」，都不算失败
         const r = await outbox.say({ text, agentId, device: delivery.slice("device:".length), source: "job" });
-        return r.played ? `device:${r.device}` : r.reason === "away" || r.reason === "policy" ? `muted:${r.reason}` : "";
+        return r.played ? `device:${r.device}` : r.held ? `held:${r.device}` : r.reason === "away" || r.reason === "policy" ? `muted:${r.reason}` : "";
       }
-      if (delivery === "webchat") return "webchat";      // 运行记录里就是投递内容；网页聊天页面读取
-      return (await sys.channels.deliver(delivery, text)) ? delivery : "";
+      const ok = delivery === "webchat" || (await sys.channels.deliver(delivery, text));   // webchat：运行记录里就是投递内容
+      if (ok) await mirror(agentId, text, "job");
+      return ok ? delivery : "";
     },
     busy(agentId, delivery) {
       const dev = delivery.startsWith("device:") ? delivery.slice("device:".length) : "";
@@ -136,17 +146,16 @@ export function attachAgentSystem(sys: AgentSystem, ctx: Ctx) {
     },
   });
   sys.scheduler = scheduler;
-  // 后台子任务的结果回到发起方后，按消息来源转达：设备 → 推送语音；IM → 发回原聊天
+  // 后台子任务的结果回到发起方后，按消息来源转达：设备 → 推送语音；IM → 发回原聊天并顺带念
   sys.a2a.announce = async (scope, text) => {
     const o = scope.origin ?? "";
     if (o.startsWith("device:")) await outbox.say({ text, agentId: scope.agentId, device: o.slice("device:".length), source: "subtask" });
-    else if (/^(feishu|qq|onebot):/.test(o)) await sys.channels.deliver(o, text);
+    else if (/^(feishu|qq|onebot):/.test(o) && (await sys.channels.deliver(o, text))) await mirror(scope.agentId, text, "subtask");
   };
   scheduler.syncHeartbeats();
   runtime.addTools(cronTools(scheduler));
   runtime.presence = () => ctx.presenceText();
   runtime.addTools(deviceTools({
-    say: (text, agentId, device) => outbox.say({ text, agentId, device, source: "speak" }),
     captureAndWait: (dev) => ctx.captureAndWait(dev),
     presence: () => ctx.presenceText(),
     setPresence: (status) => ctx.setPresence(status, ctx.presence?.dev ?? "cores3", "chat"),

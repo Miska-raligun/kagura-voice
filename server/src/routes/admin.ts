@@ -286,8 +286,11 @@ export function registerAdmin(r: Router, ctx: Ctx, sys: AgentSystem) {
       id, agent: ctx.roles.get(id).agent, role: ctx.roles.get(id).id, online: t - rec.ts < 200, secs_ago: Math.trunc(t - rec.ts),
       bat: rec.data.bat ?? null, rssi: rec.data.rssi ?? null, heap: rec.data.heap ?? null, wdt: rec.data.wdt ?? null,
       trusted: ctx.cfg.deviceTrust === "all" || !!ctx.trust[id]?.trusted, ip: ctx.trust[id]?.ip ?? "", trust_mode: ctx.cfg.deviceTrust,
+      held: (ctx.outbox?.heldFor(id) ?? []).map((h) => ({ agent: h.agentId, text: h.text, at: h.at })),
     })));
   });
+  /** 清空留给这台设备的话（等切到对应角色才播的） */
+  del("/api/admin/devices/<id>/held", (req) => { ctx.outbox?.clear(req.params.id); return json({ status: "ok" }); });
   post("/api/admin/devices/<id>/trust", (req) => {
     ctx.setDeviceTrusted(req.params.id, !!(req.json() ?? {}).trusted);
     return json({ status: "ok" });
@@ -345,6 +348,7 @@ export function registerAdmin(r: Router, ctx: Ctx, sys: AgentSystem) {
       hot.push("embedding");
     }
     if ("voice_push" in patch) { ctx.cfg.voicePush = parseVoicePush(next.voice_push); hot.push("voice_push"); }
+    if ("role_push" in patch) { ctx.cfg.rolePush = next.role_push === "switch" ? "switch" : "hold"; hot.push("role_push"); }
     if (next.a2a) {
       if ("enabled" in next.a2a) a2a.cfg.enabled = !!next.a2a.enabled;
       if (next.a2a.max_hops) a2a.cfg.maxHops = Number(next.a2a.max_hops);

@@ -12,15 +12,11 @@ import { FeishuAdapter } from "./feishu.ts";
 import { QQAdapter } from "./qq.ts";
 import { OneBotAdapter } from "./onebot.ts";
 import { runCommand, type CommandDeps } from "./commands.ts";
-import { toSpoken } from "../util/text.ts";
 
 /** 渠道回复同时在家里设备上播语音要用的东西（attachAgentSystem 里接上） */
 export interface VoiceBridge {
-  /** 按全局 voice_push 策略（在家才播 / 总是 / 从不）现在该不该出声 */
-  allowed(): boolean;
-  /** 这个 agent 的语音播到哪台设备（优先当前就是它的那台）；没有在线设备返回 null */
-  device(agentId: string): string | null;
-  push(text: string, dev: string, agentId: string): Promise<boolean>;
+  /** 主人这边收到的回复交给出口顺带念一遍（播不播、播到哪由出口按语音推送策略定） */
+  say(agentId: string, text: string): Promise<void>;
 }
 
 
@@ -145,13 +141,10 @@ export class ChannelManager {
     }
     const who = m.chatType === "group" ? `[${m.senderName || m.sender.slice(-6)}] ` : "";
     console.log(`[channel] 💬 ${a.kind}/${a.id} ${m.chatType} ${m.chatId} → ${agentId}: ${m.text.slice(0, 60)}`);
-    // 要不要同时播语音由代码按 voice_push 策略决定，不靠模型自觉。只管主人的私聊：群聊、陌生人的消息不往家里喇叭上念
+    // 主人私聊的回复同时交给出口念（播不播由系统按语音推送策略定）。群聊、陌生人的消息不往家里喇叭上念
     const ownerDm = m.chatType === "dm" && !!allowed?.owner;
-    const voiceOn = () => ownerDm && !!this.voice && this.voice.allowed();
-    const before = voiceOn() ? this.voice!.device(agentId) : null;
     try {
       const r = await this.rt.run({
-        spokenTo: before ?? undefined,
         agentId, sessionKey, kind: ownerMain ? "main" : "chat", channel: m.kind, purpose: "chat",
         text: who + (m.text || "（发来一张图片）"), images: m.images.map((i) => ({ type: "image" as const, ...i })),
         origin: `${m.kind}:${a.id}:${m.chatId}`,
@@ -162,26 +155,11 @@ export class ChannelManager {
       // take_photo 在 IM 里触发时，照片直接发回聊天
       const photo = r.meta.photos?.[0];
       await this.reply(m, r.text, photo && fs.existsSync(photo) ? fs.readFileSync(photo) : undefined);
-      // 跑完再判断一次：主人这条消息里说了「我到家了」（set_presence）也算；模型自己已经 speak 过就不重复
-      if (voiceOn()) await this.speakAside(agentId, r.text, r.meta.spoke, before);
+      // 跑完才判断：主人这条消息里说了「我到家了」（set_presence）也算
+      if (ownerDm) await this.voice?.say(agentId, r.text);
     } catch (e: any) {
       await this.reply(m, `（出错了：${String(e.message).slice(0, 100)}）`);
     }
-  }
-
-  /**
-   * 主人这边收到的回复，同时在家里的设备上念一遍（IM 主人私聊、网页聊天共用）。
-   * 由代码按 voice_push 策略判断，不靠模型自觉；模型本轮已经 speak 过就不补播。
-   */
-  async speakAside(agentId: string, text: string, spoke?: string[], dev?: string | null): Promise<void> {
-    if (!this.voice || !text || !this.voice.allowed()) return;
-    if (spoke?.length) return;
-    const target = dev ?? this.voice.device(agentId);
-    if (!target) { console.log(`[channel] 🔇 没有在线设备可播`); return; }
-    const said = toSpoken(text);
-    if (!said) return;
-    const ok = await this.voice.push(said, target, agentId).catch(() => false);
-    console.log(`[channel] 🔊 回复同时播到 ${target}${ok ? "" : "（失败）"}`);
   }
 
   /**

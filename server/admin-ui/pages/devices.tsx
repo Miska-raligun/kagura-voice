@@ -1,6 +1,6 @@
 // 设备：绑定哪个 agent、在线状态与遥测、设备日志、崩溃报告、最近一条录音试听；监控页（拍照/直播/定时拍照）嵌入
 import { useState } from "preact/hooks";
-import { api, ago, enc } from "../api.ts";
+import { api, ago, enc, fmtTime } from "../api.ts";
 import { DeviceFiles } from "./devicefiles.tsx";
 import { Badge, Btn, Card, Empty, Err, Select, Tabs, toast, useInterval, useLoad } from "../ui.tsx";
 
@@ -35,6 +35,11 @@ export function Devices() {
               </tr>))}</tbody></table> : <Empty>暂无设备</Empty>}
           <p class="muted">首台设备自动受信，之后的新设备需批准才能使用执行命令等功能。</p>
         </Card>
+        {(devs ?? []).filter((d) => d.held?.length).map((d) => (
+          <Card title={`留言 · ${d.id}`} actions={<Btn small kind="ghost" onClick={async () => { try { await api(`/devices/${enc(d.id)}/held`, { method: "DELETE" }); reload(); } catch (e: any) { toast(e.message, "err"); } }}>清空</Btn>}>
+            <p class="muted">切换到对应角色后播放。</p>
+            <table><tbody>{d.held.map((h: any) => <tr><td>{h.agent}</td><td class="muted">{fmtTime(h.at)}</td><td>{h.text.slice(0, 80)}</td></tr>)}</tbody></table>
+          </Card>))}
         {cur && <DeviceLogs id={cur} />}
       </>}
       {tab === "files" && <DeviceFiles />}

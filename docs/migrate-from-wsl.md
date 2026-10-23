@@ -64,10 +64,10 @@ WSL 保持运行，在 Windows 命令行里（把 `Ubuntu`、`你` 换成你的�
 
 ### 5. 收拾人设和任务（重要）
 
-OpenClaw 时代的人设和任务里常写着「用 cores3-speak 播报」「用 cores3-camera 拍照」。新系统里它们是内置工具
-`speak` / `take_photo`，**而且设备对话的回复本来就会播出来**，不需要再叫它播。建议：
+OpenClaw 时代的人设和任务里常写着「用 cores3-speak 播报」「用 cores3-camera 拍照」。新系统里拍照是内置工具 `take_photo`；
+**播报由系统自动处理**（按「设置 → 语音」的推送策略），agent 没有也不需要「说话」工具。建议：
 
-- 「Agents → 人设文件」里搜 `cores3-`，改成「需要主动播报时用 speak 工具」或直接删掉；
+- 「Agents → 人设文件」里搜 `cores3-`，播报相关的直接删掉，拍照改成 `take_photo`；
 - 「定时任务」里逐条打开导入的任务：指令里去掉「用 cores3-speak 播报」，把「投递到」改成你的设备
   （`device:cores3`），确认无误再启用；
 - 依赖联网查资料的任务（新闻、天气……）现在内置 agent 也能做了（`web_search` / `web_fetch`）；

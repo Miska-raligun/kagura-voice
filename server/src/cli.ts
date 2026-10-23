@@ -50,7 +50,7 @@ export async function runCli(argv: string[]): Promise<boolean> {
     const rep = importOpenClaw(dir, sys.registry, sched, { overwrite: force, skillsDir: dirs.skills });
     for (const l of describeImport(rep)) console.log(l);
     if (rep.agents.some((a) => a.created)) console.log("\n新建的 agent 要重启服务端才会加载（开着的话先关掉再开）。");
-    console.log("提示：人设里写着 cores3-speak / cores3-camera 的地方，改成内置的 speak / take_photo 工具，或者直接删掉。");
+    console.log("提示：人设里写着 cores3-speak / cores3-camera 的地方，可以删掉（播报由系统自动处理），拍照改用内置的 take_photo 工具。");
     sys.runtime.close();
     return true;
   }
