@@ -13,6 +13,7 @@ import ui
 import snd
 import cam
 import diag
+import ota
 
 # ── 回调注入：打断 netsvc ↔ stream 的环 ───────────────────────
 # MQTT 收到 stream_start 要交给 stream 跑推流，而推流循环又要回来消费
@@ -183,6 +184,8 @@ def process_mqtt_queue():
         elif action == "stream_start":
             if _stream_runner:
                 _stream_runner(cmd)
+        elif action == "sync":
+            ota.run_sync(cmd.get("scope", "res"))   # 管理界面传了图 / 点了「更新设备代码」
 
 
         # stream_stop：不在直播中收到就没有意义，丢弃即可

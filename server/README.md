@@ -124,7 +124,7 @@ kagura migrate <旧仓库目录>     # config.py → config.json，并复制提�
 在运行服务端的这台电脑上打开 **http://127.0.0.1:5000/admin**（只允许本机访问，局域网其它机器 403）。
 总览、Agents（人设文件带字数预算、音色试听、工具/技能白名单、heartbeat、通信权限）、会话、记忆（编辑与检索测试）、
 定时任务（向导、立即运行、运行历史、从 OpenClaw 导入）、Agent 通信矩阵、渠道（飞书/QQ 账号、配对审批、绑定）、
-设备（绑定、日志、崩溃报告、录音试听、监控页）、网页聊天、用量、设置（模型服务商、嵌入、百度、端口、首次设置向导）。
+设备（绑定、日志、崩溃报告、录音试听、监控页、**传角色图片 / 在线更新设备代码**）、网页聊天、用量、设置（模型服务商、嵌入、百度、端口、首次设置向导）。
 不碰配置文件也能完成全部日常管理。前端在 `admin-ui/`（Preact，esbuild 编译后内联进单文件可执行）。
 
 ### IM 渠道（飞书 / QQ）
@@ -196,6 +196,7 @@ KAGURA_BRAIN=pi KAGURA_SERVER_CMD=server/dist/kagura KAGURA_SERVER_PROVIDES=brok
 | `src/brain/` | 大脑接口；`pi.ts` = 内置 agent，`openclaw.ts` = OpenClaw CLI 适配器 |
 | `src/agent/` | 内置 agent 系统：`registry`（agent 目录）、`runtime`（每轮运行/串行/压缩）、`soul`（系统提示组装）、`models`、`memory`、`scheduler` + `cron`、`a2a`、`skills`、`tools/*` |
 | `src/routes/admin.ts` / `admin-ui.ts` | 管理接口 `/api/admin/*` 与 `/admin` 页面（只许本机） |
+| `src/devicefiles.ts` + `routes/devicefiles.ts` | 设备文件同步：角色图片、设备代码（内置一份 `device/src`，构建时打进来）；设备端见 `device/src/ota.py` |
 | `src/channels/` | IM 渠道：`manager`（配对/绑定/路由/投递）、`store`、`feishu`、`qq`、`onebot` |
 | `admin-ui/` | 管理界面前端（Preact + TSX，`npx tsc -p admin-ui` 类型检查） |
 | `src/fake.ts` | `KAGURA_FAKE_PROVIDERS=1` 时的假 ASR/LLM/TTS（契约测试用） |

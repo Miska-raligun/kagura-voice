@@ -7,3 +7,7 @@ declare module "virtual:admin-ui" {
   export const js: string;
   export const css: string;
 }
+declare module "virtual:device-fw" {
+  /** { "src/app.py": base64 } */
+  export const files: Record<string, string>;
+}

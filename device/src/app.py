@@ -16,6 +16,7 @@ import snd
 import cam
 import feel
 import diag
+import ota
 import netsvc
 import stream
 import chat
@@ -65,6 +66,7 @@ def setup():
 
     netsvc.discover_server()
     netsvc.fetch_role()           # 角色专属背景图：要在第一次 draw_state 前定下来
+    ota.boot()                    # 管理界面离线期间传的图，开机补上（没变化就什么都不下）
     diag._boot_report()
     clock.sync_rtc()
     netsvc.init_mqtt()
@@ -157,6 +159,9 @@ def loop():
 
     # 触觉反射表情到期收回
     feel.feel_reflex_tick()
+
+    # 刚 OTA 装的新代码：心跳成功一次就删掉回滚备份
+    ota.tick()
 
     # ── 自动休眠检查 ──
     now = time.time()

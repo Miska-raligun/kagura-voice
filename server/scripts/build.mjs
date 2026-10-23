@@ -31,6 +31,22 @@ const adminUi = {
   },
 };
 
+// 设备固件：device/src/*.py 原样打进产物，管理界面「设备文件」把它下发给设备（版本 = 服务端版本）
+const deviceFw = {
+  name: "device-fw",
+  setup(b) {
+    b.onResolve({ filter: /^virtual:device-fw$/ }, () => ({ path: "device-fw", namespace: "virtual-fw" }));
+    b.onLoad({ filter: /.*/, namespace: "virtual-fw" }, () => {
+      const src = path.join(here, "..", "..", "device", "src");
+      const files = {};
+      for (const f of fs.readdirSync(src).filter((n) => n.endsWith(".py")).sort()) {
+        files[`src/${f}`] = fs.readFileSync(path.join(src, f)).toString("base64");
+      }
+      return { contents: `export const files = ${JSON.stringify(files)};`, loader: "js", watchFiles: Object.keys(files).map((k) => path.join(src, k.slice(4))) };
+    });
+  },
+};
+
 if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
   const r = await build({
     entryPoints: [entry],
@@ -50,7 +66,7 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.a
     metafile: true,
     legalComments: "none",
     loader: { ".html": "text" },      // web/monitor.html 内联进产物，单文件可执行里没有 web/ 目录
-    plugins: [adminUi],
+    plugins: [adminUi, deviceFw],
   });
   const bytes = Object.values(r.metafile.outputs).reduce((a, o) => a + o.bytes, 0);
   console.log(`built ${outfile} (${(bytes / 1024 / 1024).toFixed(1)} MB)`);

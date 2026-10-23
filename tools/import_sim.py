@@ -59,7 +59,8 @@ stub("machine", WDT=lambda **kw: _Any("WDT"), reset=lambda: None)
 stub("camera", init=lambda: None, capture=lambda: b"\x00" * 100)
 
 import binascii, json, socket, os as _os, struct as _struct
-stub("ubinascii", b2a_base64=binascii.b2a_base64, a2b_base64=binascii.a2b_base64)
+stub("ubinascii", b2a_base64=binascii.b2a_base64, a2b_base64=binascii.a2b_base64,
+     hexlify=binascii.hexlify)
 stub("ujson", loads=json.loads, dumps=json.dumps, load=json.load, dump=json.dump)
 stub("usocket", socket=socket.socket, AF_INET=socket.AF_INET,
      SOCK_DGRAM=socket.SOCK_DGRAM, SOL_SOCKET=socket.SOL_SOCKET,
@@ -70,7 +71,7 @@ stub("requests", get=lambda *a, **kw: _Any("resp"), post=lambda *a, **kw: _Any("
 
 print("=== 按依赖顺序 import ===")
 order = ["cfg", "hw", "clock", "ui", "wifisetup", "snd", "cam",
-         "feel", "diag", "netsvc", "stream", "chat", "app"]
+         "feel", "diag", "ota", "netsvc", "stream", "chat", "app"]
 for name in order:
     __import__(name)
     print("  ✓ import %s" % name)
@@ -502,6 +503,156 @@ print("  ui.img_path / set_role      = 专属图优先 ✓ 缺图回落默认 �
 import cam as _cam
 assert _cam._CAM_ENTRY[2] < ui._ROLE_ENTRY[0], "顶栏 CAM 与 ROLE 命中区不能重叠"
 print("  顶栏命中区                  = CAM %s / ROLE %s 不重叠 ✓" % (_cam._CAM_ENTRY, ui._ROLE_ENTRY))
+
+
+# ── 设备文件同步（ota）：真的在临时目录里跑一遍下载 / 校验 / 确认 / 回滚 ──────
+print("\n=== 设备文件同步（ota）===")
+import ota, diag, hashlib as _hl, tempfile, shutil, ast as _ast
+_otmp = tempfile.mkdtemp(prefix="ota-sim-")
+for _d in ("src", "resource", "data"):
+    os.makedirs(os.path.join(_otmp, _d))
+
+class _RealOs:
+    """真实文件系统版 uos（全局桩里 rename/mkdir 是空操作，这里要真改文件）。"""
+    mkdir = staticmethod(_os.mkdir); remove = staticmethod(_os.remove); rename = staticmethod(_os.rename)
+    stat = staticmethod(_os.stat); listdir = staticmethod(_os.listdir); rmdir = staticmethod(_os.rmdir)
+_saved_ota = (ota.uos, ota.urequests, ota._STATE_PATH, ota._PENDING_PATH, ota._BAK_DIR, ota._abs,
+              ota._confirm, ota.ui.uos, cfg.BASE_DIR)
+ota.uos = _RealOs
+ota._STATE_PATH = os.path.join(_otmp, "data", "ota_state.json")
+ota._PENDING_PATH = os.path.join(_otmp, "data", "ota_pending.json")
+ota._BAK_DIR = os.path.join(_otmp, "src.bak")
+ota._abs = lambda p: os.path.join(_otmp, p)
+ota._state = None
+
+_srv = {}          # 服务端上的文件：p → bytes
+_gets = []
+_reports = []
+def _sha(b): return _hl.sha256(b).hexdigest()
+def _manifest(scope):
+    pre = {"res": ("resource/",), "code": ("src/",), "all": ("resource/", "src/")}[scope]
+    files = [{"p": p, "n": len(b), "h": _sha(b)} for p, b in sorted(_srv.items()) if p.startswith(pre)]
+    return {"scope": scope, "version": "9.9.9", "files": files}
+def _server_rev(prefix):
+    files = [(p, _sha(b)) for p, b in sorted(_srv.items()) if p.startswith(prefix)]
+    return _hl.sha256("\n".join("%s:%s" % f for f in files).encode()).hexdigest()[:12]
+_corrupt = set()
+class _OResp:
+    def __init__(self, status, body=b"", js=None):
+        self.status_code = status; self._js = js; self.content = body
+        import io; self.raw = io.BytesIO(body)
+    def json(self): return self._js
+    def close(self): pass
+def _oget(url, **kw):
+    path = url.split("5000", 1)[1]
+    if path.startswith("/device/files"):
+        return _OResp(200, js=_manifest(path.split("scope=")[1]))
+    p = path.split("p=", 1)[1]
+    _gets.append(p)
+    if p not in _srv:
+        return _OResp(404)
+    b = _srv[p]
+    return _OResp(200, (b[:-1] + b"X") if p in _corrupt else b)
+def _opost(url, data=None, **kw):
+    _reports.append(json.loads(data)); return _OResp(200)
+ota.urequests = types.SimpleNamespace(get=_oget, post=_opost)
+cfg.SERVER_BASE = "http://10.0.0.9:5000"
+_resets = []
+sys.modules["machine"].reset = lambda: _resets.append(True)
+_confirm_answer = [True]
+ota._confirm = lambda n, ver: _confirm_answer[0]
+_rd = lambda p: open(os.path.join(_otmp, p), "rb").read()
+
+# 1. 图片：首次全下，再同步一次一个都不下
+_srv["resource/img_bg.jpg"] = b"\xff\xd8" + b"a" * 5000
+_srv["resource/mio/img_playing.jpg"] = b"\xff\xd8" + b"b" * 9000
+ui._img_missing.add("x"); ui._role_hit["mio/img_playing"] = False
+ota.run_sync("res")
+assert _rd("resource/img_bg.jpg") == _srv["resource/img_bg.jpg"]
+assert _rd("resource/mio/img_playing.jpg") == _srv["resource/mio/img_playing.jpg"]
+assert not ui._img_missing and not ui._role_hit, "换了图必须清图片缓存，否则新图不显示"
+assert _reports[-1]["ok"] and _reports[-1]["changed"] == 2
+assert diag._ota_info["res"] == _server_rev("resource/"), "设备算的指纹必须与服务端一致"
+_gets.clear(); ota.run_sync("res")
+assert not _gets and _reports[-1]["changed"] == 0
+print("  图片同步                    = 首次下 2 张 ✓ 再同步 0 次下载 ✓ 指纹与服务端一致 ✓")
+
+# 2. 手动传的同名同内容文件直接认领；清单里删掉的图设备上也删；不是 ota 装的文件不动
+open(os.path.join(_otmp, "resource", "img_shake.jpg"), "wb").write(b"\xff\xd8shake")
+_srv["resource/img_shake.jpg"] = b"\xff\xd8shake"
+open(os.path.join(_otmp, "resource", "manual.jpg"), "wb").write(b"\xff\xd8m")
+del _srv["resource/mio/img_playing.jpg"]
+_gets.clear(); ota.run_sync("res")
+assert not _gets, "内容一样的手动文件不该重下"
+assert not os.path.exists(os.path.join(_otmp, "resource", "mio", "img_playing.jpg"))
+assert os.path.exists(os.path.join(_otmp, "resource", "manual.jpg")), "不是 ota 装的文件不许删"
+print("  认领 / 删除                 = 同内容手动文件不重下 ✓ 撤下的图删掉 ✓ 手动文件不动 ✓")
+
+# 3. 下载内容被篡改：校验失败，原文件不变，.new 不留
+_srv["resource/img_bg.jpg"] = b"\xff\xd8" + b"c" * 5000
+_corrupt.add("resource/img_bg.jpg")
+ota.run_sync("res")
+assert not _reports[-1]["ok"] and "sha" in _reports[-1]["error"]
+assert _rd("resource/img_bg.jpg") == b"\xff\xd8" + b"a" * 5000
+assert not os.path.exists(os.path.join(_otmp, "resource", "img_bg.jpg.new"))
+_corrupt.clear(); ota.run_sync("res")
+assert _rd("resource/img_bg.jpg") == _srv["resource/img_bg.jpg"]
+print("  校验失败                    = 不替换 ✓ 不留 .new ✓ 修好后重同步成功 ✓")
+
+# 4. 代码：没确认什么都不动；确认了 → 备份旧文件、写回滚标记、复位
+open(os.path.join(_otmp, "src", "app.py"), "wb").write(b"old app")
+open(os.path.join(_otmp, "src", "gone.py"), "wb").write(b"old gone")
+ota._load_state()["files"]["src/gone.py"] = _sha(b"old gone")
+_srv["src/app.py"] = b"new app"
+_srv["src/extra.py"] = b"new module"
+_confirm_answer[0] = False
+ota.run_sync("code")
+assert _rd("src/app.py") == b"old app" and not _resets and not _reports[-1]["ok"]
+assert not [n for n in os.listdir(os.path.join(_otmp, "src")) if n.endswith(".new")]
+_confirm_answer[0] = True
+ota.run_sync("code")
+assert _resets, "装完新代码要复位"
+assert _rd("src/app.py") == b"new app" and _rd("src/extra.py") == b"new module"
+assert not os.path.exists(os.path.join(_otmp, "src", "gone.py"))
+assert open(os.path.join(ota._BAK_DIR, "app.py"), "rb").read() == b"old app"
+_pend = json.load(open(ota._PENDING_PATH))
+assert _pend["added"] == ["extra.py"] and _pend["ver"] == "9.9.9"
+assert diag._ota_info["fw"] == _server_rev("src/") and diag._ota_info["fwv"] == "9.9.9"
+print("  代码同步                    = 未确认不动 ✓ 确认后备份+标记+复位 ✓ 撤下的模块移走 ✓")
+
+# 5. device/main.py 的回滚：前 3 次开机只计数，第 4 次（或起不来）换回旧代码
+_mtree = _ast.parse(open(os.path.join(os.path.dirname(__file__), "..", "device", "main.py")).read())
+_mns = {}
+exec(compile(_ast.Module([n for n in _mtree.body if isinstance(n, _ast.FunctionDef)], []), "main.py", "exec"), _mns)
+sys.modules["uos"].listdir, sys.modules["uos"].rmdir = _os.listdir, _os.rmdir
+_saved_uos = (sys.modules["uos"].rename, sys.modules["uos"].remove)
+sys.modules["uos"].rename, sys.modules["uos"].remove = _os.rename, _os.remove
+for _i in range(3):
+    assert _mns["_ota_guard"](_otmp) is False
+assert json.load(open(ota._PENDING_PATH))["boots"] == 3
+assert _mns["_ota_guard"](_otmp) is True, "第 4 次开机还没跑通就回滚"
+assert _rd("src/app.py") == b"old app" and _rd("src/gone.py") == b"old gone"
+assert not os.path.exists(os.path.join(_otmp, "src", "extra.py")), "新加的模块要删掉"
+assert not os.path.exists(ota._PENDING_PATH) and not os.path.exists(ota._BAK_DIR)
+assert "ota rollback" in open(os.path.join(_otmp, "data", "crash.log")).read()
+assert _mns["_ota_guard"](_otmp) is False, "回滚之后不再回滚"
+print("  main.py 回滚                = 3 次计数 ✓ 第 4 次换回旧代码 ✓ 删新模块 ✓ 留日志 ✓")
+
+# 6. 跑通了：心跳成功一次就删掉标记与备份
+_confirm_answer[0] = True; _resets.clear(); ota._state = None
+ota.run_sync("code")
+assert os.path.exists(ota._PENDING_PATH)
+ota.boot(); diag._hb_ok = True; ota.tick()
+assert not os.path.exists(ota._PENDING_PATH) and not os.path.exists(ota._BAK_DIR)
+assert _mns["_ota_guard"](_otmp) is False
+print("  新代码跑通                  = 心跳成功后删标记与备份 ✓")
+
+sys.modules["uos"].rename, sys.modules["uos"].remove = _saved_uos
+(ota.uos, ota.urequests, ota._STATE_PATH, ota._PENDING_PATH, ota._BAK_DIR, ota._abs,
+ ota._confirm, ota.ui.uos, cfg.BASE_DIR) = _saved_ota
+sys.modules["machine"].reset = lambda: None
+diag._hb_ok = False; ota._state = None; ota._pending = False
+shutil.rmtree(_otmp)
 
 # 可变全局：模拟 discover_server 改写后，其他模块能否看到
 print("\n=== 可变全局跨模块可见性（拆分最大的坑）===")

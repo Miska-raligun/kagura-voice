@@ -1,18 +1,19 @@
 // 设备：绑定哪个 agent、在线状态与遥测、设备日志、崩溃报告、最近一条录音试听；监控页（拍照/直播/定时拍照）嵌入
 import { useState } from "preact/hooks";
 import { api, ago, enc } from "../api.ts";
+import { DeviceFiles } from "./devicefiles.tsx";
 import { Badge, Btn, Card, Empty, Err, Select, Tabs, toast, useInterval, useLoad } from "../ui.tsx";
 
 export function Devices() {
   const [devs, reload, err] = useLoad(() => api<any[]>("/devices"));
   const [agents] = useLoad(() => api<any[]>("/agents"));
-  const [tab, setTab] = useState<"list" | "monitor" | "crash">("list");
+  const [tab, setTab] = useState<"list" | "files" | "monitor" | "crash">("list");
   const [sel, setSel] = useState("");
   useInterval(reload, 10_000);
   const cur = sel || devs?.[0]?.id || "";
   return (
     <>
-      <Tabs value={tab} onChange={setTab} tabs={[["list", "设备与日志"], ["monitor", "监控页（拍照 / 直播）"], ["crash", "崩溃报告"]]} />
+      <Tabs value={tab} onChange={setTab} tabs={[["list", "设备与日志"], ["files", "图片与代码"], ["monitor", "监控页（拍照 / 直播）"], ["crash", "崩溃报告"]]} />
       <Err msg={err} />
       {tab === "list" && <>
         <Card title="设备">
@@ -28,6 +29,7 @@ export function Devices() {
         </Card>
         {cur && <DeviceLogs id={cur} />}
       </>}
+      {tab === "files" && <DeviceFiles />}
       {tab === "monitor" && <iframe class="monitor" src="/monitor" />}
       {tab === "crash" && <Crashes />}
     </>

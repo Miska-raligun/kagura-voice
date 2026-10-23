@@ -60,6 +60,12 @@ _boot_time   = time.time()
 _last_server_ok = time.time()   # 最近一次成功联络服务端（心跳 200）
 
 
+_hb_ok = False       # 开机以来心跳成功过没有（ota 用它判定新代码「跑通了」）
+
+
+_ota_info = {}       # 设备文件同步状态，由 ota 写入、随心跳上报（ota → diag 单向依赖）
+
+
 _net_fix_stage  = 0             # 0=正常 1=已做过 WiFi 栈重建
 
 
@@ -234,6 +240,7 @@ def heartbeat_tick():
         # 录音门槛：[底噪, 说话阈值, 唤醒阈值]。"说话不触发"先看这三个数
         "vad": [cfg.NOISE_FLOOR, cfg.SILENCE_THRESHOLD, cfg.WAKE_THRESHOLD],
     }
+    payload.update(_ota_info)    # fw / res / fwv：管理界面据此判断设备文件是不是最新
     try:
         payload["rssi"] = wifisetup._wlan.status("rssi")
     except Exception:
@@ -258,6 +265,7 @@ def heartbeat_tick():
         if ok:
             _dbg_sent = len(_dbg_buf)
             globals()["_last_server_ok"] = now
+            globals()["_hb_ok"] = True
             cfg.St.last_ok_ms = time.ticks_ms()   # 死人开关的判据，见 hw._deadman_check
             globals()["_net_fix_stage"] = 0
             if not clock._rtc_synced:

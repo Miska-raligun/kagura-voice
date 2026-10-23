@@ -7,9 +7,9 @@ name: server
 on:
   push:
     branches: [feat/kagura-agent-server]
-    paths: ["server/**", "contract-tests/**", "web/**", ".github/workflows/server.yml"]
+    paths: ["server/**", "contract-tests/**", "web/**", "device/**", ".github/workflows/server.yml"]
   pull_request:
-    paths: ["server/**", "contract-tests/**", "web/**", ".github/workflows/server.yml"]
+    paths: ["server/**", "contract-tests/**", "web/**", "device/**", ".github/workflows/server.yml"]
   workflow_dispatch:
 
 jobs:

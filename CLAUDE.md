@@ -73,7 +73,7 @@ CoreS3 (MicroPython)  ──HTTP──▶  voice_server.py (Flask :5000)  ──
   （取景模式手动拍照，服务端用 `_PHOTO_ONLY_PROMPT` 当提问）、`text`+`image`
   （无 wav 时以 text 为提问）。`wav`/`image` 至少要有一个，否则 400。
 - **MQTT topic**：`kagura/push/{device_id}`（播报通知）、`kagura/cmd/{device_id}`
-  （`capture` / `stream_start` / `stream_stop`）。
+  （`capture` / `stream_start` / `stream_stop` / `role` / `sync`）。
 - **直播链路**：MQTT 下发 `stream_start` → 设备连 TCP :5002 → 每帧 `4 字节大端长度
   + RGB565 裸字节`（0 长度=结束）→ 服务端只留最新一帧 → 网页长轮询
   `/stream/<dev>/frame.jpg?after=<seq>`。三个别踩的点：
@@ -275,6 +275,16 @@ CoreS3 (MicroPython)  ──HTTP──▶  voice_server.py (Flask :5000)  ──
   才发——`take_photo`/`set_volume` 往往跟在「我看看。」后面，早发头 `X-Need-Photo` 就丢了；
   ② 落盘播放路径（`save_stream`）遇到长度未知的流，写完要回填真实长度，否则 `playWavFile`
   按占位长度读到文件外。老固件不带头、快捷指令短路，都照旧整段返回。
+- **设备文件同步（`ota.py`，管理界面「设备 → 图片与代码」）**：服务端 `server/src/devicefiles.ts` 存
+  `<数据目录>/device_files/`（自定义）+ 构建时打进来的 `device/src`（`virtual:device-fw`，版本 = 服务端版本）；
+  MQTT `{"action":"sync","scope":"res|code|all"}` → 设备空闲时 `GET /device/files` 拿清单（路径/大小/sha256）
+  → 只下变了的 → `POST /device/sync-result` 回报；指纹 `rev` 随心跳 `fw`/`res`/`fwv` 上报。别改坏的点：
+  ① 路径白名单两边一致（`src/<名>.py`、`resource/[角色/]<名>.jpg`），`main.py` **故意不能在线更新**——它坏了只能接 USB；
+  ② 代码**先全部下载校验成 .new，屏幕确认后**才先写 `data/ota_pending.json` 再换文件（顺序反了中途断电就回滚不了）；
+  ③ 回滚在 `device/main.py` 的 `_ota_guard`：起不来或第 4 次开机标记还在就从 `src.bak/` 换回，`ota.tick()` 等心跳成功一次
+  才删标记——别提前到 `setup()` 结束，那时还不知道新代码能不能跟服务端说上话；
+  ④ `ota_state.json` 只记自己装过的文件，删除只删这些（手动传的文件不碰）；换了图要清 `ui._role_hit`/`_img_missing`；
+  ⑤ `rev` 算法两边必须一致（`DeviceFiles.rev` ↔ `ota._rev`），`import_sim` 里专门对过。
 - **`global` 声明必须有主**（LRN 2026-08-25）：`netsvc.mqtt_check` 里写过
   `global _mqtt_ok`，但本模块从来没有这个名字（状态在 `diag`）。后果是
   **任何一次 MQTT 掉线都变成 NameError 逃出 `mqtt_check`**，主循环连吃 10 次
@@ -372,7 +382,7 @@ CoreS3 (MicroPython)  ──HTTP──▶  voice_server.py (Flask :5000)  ──
 
 ```
 cfg → hw → clock → ui → {wifisetup, snd} → cam → feel
-    → diag → netsvc → stream → chat → app
+    → diag → ota → netsvc → stream → chat → app
 ```
 
 | 模块 | 职责 |
@@ -386,6 +396,7 @@ cfg → hw → clock → ui → {wifisetup, snd} → cam → feel
 | `cam` | 抓帧/预览/取景模式/拍照上传。**不能叫 camera**——MicroPython 的摄像头驱动就叫这名，同名会 import 到自己 |
 | `feel` | 触觉三层 + IMU 本体感觉 |
 | `diag` | 事件环形日志、崩溃上报、心跳遥测、网络分级自愈、画布探测 |
+| `ota` | 设备文件同步：管理界面传的图 / 代码，校验、屏幕确认、回滚标记 |
 | `netsvc` | MQTT、BLE 感知、UDP 发现 |
 | `stream` | 摄像头直播推流与直播中插拍 |
 | `chat` | 主对话、模式切换、IMU 摇晃彩蛋 |

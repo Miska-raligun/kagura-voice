@@ -78,3 +78,8 @@ iframe.monitor { width:100%; height:calc(100vh - 150px); border:1px solid var(--
   .grid { grid-template-columns:1fr; } table { display:block; overflow-x:auto; }
 }
 .small { font-size:12px; }
+.slots { display:grid; grid-template-columns:repeat(auto-fill,minmax(220px,1fr)); gap:12px; }
+.slot { border:1px solid var(--line); border-radius:8px; padding:8px; min-width:0; }
+.slot img, .slot .ph { width:100%; aspect-ratio:4/3; object-fit:cover; border-radius:6px; display:block; background:#0002; }
+.slot .ph { position:relative; display:flex; align-items:center; justify-content:center; color:var(--muted); }
+.slot .ph img { position:absolute; inset:0; height:100%; } .slot .ph img.dim { opacity:.35; } .slot .ph span { position:relative; }
