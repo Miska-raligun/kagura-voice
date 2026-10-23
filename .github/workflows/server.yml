@@ -1,0 +1,57 @@
+name: server
+
+# 新服务端（server/，TypeScript）的 CI：验证脚本 + 三平台单文件打包冒烟。
+# M0 阶段只验证可行性；发布用的 release.yml 在 M10 再加。
+on:
+  push:
+    branches: [feat/kagura-agent-server]
+    paths: ["server/**", ".github/workflows/server.yml"]
+  pull_request:
+    paths: ["server/**", ".github/workflows/server.yml"]
+  workflow_dispatch:
+
+jobs:
+  sea:
+    name: ${{ matrix.os }} / node ${{ matrix.node }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-latest, macos-14]
+        node: ["22", "24"]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+      - run: npm ci
+      - name: Spikes（pi agent / OpenAI 兼容接口 / 存储·MQTT·JPEG / 中文检索）
+        shell: bash
+        run: |
+          for f in spikes/pi-agent.ts spikes/pi-openai-compat.ts spikes/infra.ts spikes/fts-cjk.ts; do
+            echo "::group::$f"
+            node --experimental-strip-types --no-warnings "$f"
+            echo "::endgroup::"
+          done
+      - name: Bundle（esbuild → 单个 CJS）
+        run: node scripts/build.mjs spikes/sea-smoke.ts dist/sea-smoke.cjs
+      - name: SEA（注入 node 可执行）
+        run: node scripts/sea.mjs dist/sea-smoke.cjs dist/kagura-smoke
+      - name: 运行单文件可执行
+        shell: bash
+        run: |
+          exe=dist/kagura-smoke; [ -f dist/kagura-smoke.exe ] && exe=dist/kagura-smoke.exe
+          ls -la dist
+          "./$exe" | tee smoke.log
+          grep -q SEA-SMOKE-OK smoke.log
+      - uses: actions/upload-artifact@v4
+        if: matrix.node == '24'
+        with:
+          name: kagura-smoke-${{ matrix.os }}
+          path: server/dist/kagura-smoke*
+          retention-days: 3
