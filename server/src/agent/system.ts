@@ -21,7 +21,6 @@ import { McpManager } from "./mcp.ts";
 import { Extensions, extensionTools, setExtAgentDir } from "./extensions.ts";
 import { PackageManager } from "./packages.ts";
 import { Outbox } from "./outbox.ts";
-import { toSpoken } from "../util/text.ts";
 import { proxiedFetch } from "../util/proxy.ts";
 import { ChannelStore } from "../channels/store.ts";
 import { ChannelManager } from "../channels/manager.ts";
@@ -41,7 +40,7 @@ export interface AgentSystem {
   packages: PackageManager;
   outbox?: Outbox;
   /** 已经以文字发出去的回复顺带念一遍（网页聊天用） */
-  mirror?: (agentId: string, text: string, source: string) => Promise<void>;
+  mirror?: (agentId: string, text: string, source: string, meta?: { announced?: boolean }) => Promise<void>;
 }
 
 export function createAgentSystem(cfg: Config, dirs: Dirs, fake: FakeLlm | null): AgentSystem {
@@ -122,22 +121,28 @@ export function attachAgentSystem(sys: AgentSystem, ctx: Ctx) {
   sys.outbox = outbox;
   // 设备切到某个角色（问候之后）：把留给它的话播出来
   ctx.onRoleSwitch = (dev) => outbox.flush(dev);
-  /** 已经以文字发出去的回复（IM、网页、投到 IM 的任务）顺带念一遍：去掉格式、太长截断 */
-  const mirror = async (agentId: string, text: string, source: string) => {
-    const said = toSpoken(text);
-    if (said) await outbox.say({ text: said, agentId, mirror: true, source }).catch(() => undefined);
+  /**
+   * 已经以文字发出去的回复（IM、网页、投到 IM 的任务）顺带念一遍：短的去掉格式直接念，长的用便宜模型压成口语（按 agent 的语音字数）。
+   * 这一轮已经用 announce 传过话的不再念，免得播两遍；按策略本来就不播的不去调模型。
+   */
+  const mirror = async (agentId: string, text: string, source: string, meta?: { announced?: boolean }) => {
+    if (meta?.announced || !text || !outbox.allowed()) return;
+    try {
+      const said = await runtime.spoken(agentId, text);
+      if (said) await outbox.say({ text: said, agentId, mirror: true, source });
+    } catch (e: any) { console.log(`[outbox] ⚠️  顺带朗读失败: ${e.message}`); }
   };
-  sys.channels.voice = { say: (agentId, text) => mirror(agentId, text, "im") };
+  sys.channels.voice = { say: (agentId, text, meta) => mirror(agentId, text, "im", meta) };
   sys.mirror = mirror;
   const scheduler = new Scheduler(ctx.dirs.systemDb, runtime, registry, {
-    async deliver(agentId, delivery, text) {
+    async deliver(agentId, delivery, text, meta) {
       if (delivery.startsWith("device:")) {
         // 只投设备：按策略不播记为「静音」、角色不对记为「留言」，都不算失败
         const r = await outbox.say({ text, agentId, device: delivery.slice("device:".length), source: "job" });
         return r.played ? `device:${r.device}` : r.held ? `held:${r.device}` : r.reason === "away" || r.reason === "policy" ? `muted:${r.reason}` : "";
       }
       const ok = delivery === "webchat" || (await sys.channels.deliver(delivery, text));   // webchat：运行记录里就是投递内容
-      if (ok) await mirror(agentId, text, "job");
+      if (ok) await mirror(agentId, text, "job", meta);
       return ok ? delivery : "";
     },
     busy(agentId, delivery) {
@@ -156,6 +161,7 @@ export function attachAgentSystem(sys: AgentSystem, ctx: Ctx) {
   runtime.addTools(cronTools(scheduler));
   runtime.presence = () => ctx.presenceText();
   runtime.addTools(deviceTools({
+    announce: (text, agentId, device) => outbox.say({ text, agentId, device, relay: true, source: "announce" }),
     captureAndWait: (dev) => ctx.captureAndWait(dev),
     presence: () => ctx.presenceText(),
     setPresence: (status) => ctx.setPresence(status, ctx.presence?.dev ?? "cores3", "chat"),

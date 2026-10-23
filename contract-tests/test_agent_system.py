@@ -228,6 +228,23 @@ def test_device_interaction_means_home(a):
         d.close()
 
 
+def test_saying_going_out_to_device_means_away(a):
+    """对设备说「我要去上班了」：先因为在说话记为在家，这一轮里 agent 调 set_presence 改成不在家——以后者为准"""
+    d = Device(a, "ag10")
+    try:
+        a.request("PUT", "/api/admin/devices/ag10", json={"role": "", "greet": False})
+        a.post("/presence", json={"status": "home", "device_id": "ag10"})
+        a.fake_asr("我要去上班了")
+        a.fake_llm(tool("set_presence", _then="路上小心", status="away"))
+        r = a.post("/chat", data=wav(), headers={"X-Device-Id": "ag10"})
+        assert b64text(r.headers["X-Reply-Text"]) == "路上小心"
+        a.fake_llm("该喝水啦")
+        assert _run_job(a, "main", "ct-left", "device:ag10")["delivered"] == "muted:away"
+    finally:
+        a.post("/presence", json={"status": "home", "device_id": "ag10"})
+        d.close()
+
+
 def test_voice_push_policy(a):
     """voice_push = never：说给主人听的话一律不播（对 agent 透明，任务照常算成功）"""
     d = Device(a, "ag10")

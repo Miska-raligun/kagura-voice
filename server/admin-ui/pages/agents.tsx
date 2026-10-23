@@ -88,7 +88,7 @@ function Basic({ a, save }: { a: any; save: (p: any) => Promise<void> }) {
         <Field label="模型"><Select value={f.model} onChange={(v) => set({ ...f, model: v })} options={opts} /></Field>
         <Field label="便宜模型" hint="用于压缩、记忆整理、heartbeat"><Select value={f.cheap_model} onChange={(v) => set({ ...f, cheap_model: v })} options={cheapOpts} /></Field>
         <Field label="排序" hint="角色切换顺序，最小者为默认"><Input type="number" value={f.order} onInput={(v) => set({ ...f, order: v })} /></Field>
-        <Field label="语音回复字数" hint="设备语音回复的字数上限"><Input type="number" value={f.voice_max_chars} onInput={(v) => set({ ...f, voice_max_chars: v })} /></Field>
+        <Field label="语音回复字数" hint="设备语音回复、IM 回复朗读的字数上限"><Input type="number" value={f.voice_max_chars} onInput={(v) => set({ ...f, voice_max_chars: v })} /></Field>
         <Field label="压缩阈值（token）" hint="历史超出后压缩为摘要"><Input type="number" value={f.compaction.max_tokens} onInput={(v) => set({ ...f, compaction: { ...f.compaction, max_tokens: v } })} /></Field>
         <Field label="压缩后保留条数"><Input type="number" value={f.compaction.keep_messages} onInput={(v) => set({ ...f, compaction: { ...f.compaction, keep_messages: v } })} /></Field>
         <Field label="会话" wide><Toggle checked={f.device_in_main} onChange={(v) => set({ ...f, device_in_main: v })} label="设备对话并入 main 会话" /></Field>

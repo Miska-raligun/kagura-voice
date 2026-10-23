@@ -45,7 +45,7 @@ export interface RunRecord {
 
 export interface SchedulerHost {
   /** 投递回复。返回实际投递到哪（空串 = 没投递） */
-  deliver(agentId: string, delivery: string, text: string): Promise<string>;
+  deliver(agentId: string, delivery: string, text: string, meta?: { announced?: boolean }): Promise<string>;
   /** 设备或会话正忙（idleOnly 用） */
   busy(agentId: string, delivery: string): boolean;
 }
@@ -287,7 +287,7 @@ export class Scheduler {
       const r = await this.runAgent(j);
       const silent = SILENT_RE.test(r.text) || !r.text;
       let delivered = "";
-      if (!silent && j.delivery !== "none") delivered = await this.host.deliver(j.agent, j.delivery, r.text);
+      if (!silent && j.delivery !== "none") delivered = await this.host.deliver(j.agent, j.delivery, r.text, r.meta);
       if (trigger === "schedule") this.reschedule(j, t, silent ? "silent" : "ok");
       else this.mark(j.id, { last_run: t, last_status: silent ? "silent" : "ok" });
       return finish(silent ? "silent" : "ok", { output: r.text, tokens_in: r.usage.input, tokens_out: r.usage.output, cost: r.usage.cost, delivered });

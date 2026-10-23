@@ -13,6 +13,7 @@ function withDevice(rt: Runtime) {
   const pushed: any[] = [];
   const sched: any = { list: () => [], add: () => ({}), update: () => null, remove: () => false };
   rt.addTools(deviceTools({
+    announce: async (text, agentId, dev) => { pushed.push({ text, dev, agentId }); return { played: true }; },
     captureAndWait: async () => [null, "离线"],
     presence: () => "在家",
     setPresence: () => {},
@@ -68,6 +69,29 @@ describe("内置工具", () => {
     const tr = rt.store("main").history("main:main").map((h) => h.msg).find((m) => m.role === "toolResult") as any;
     expect(tr.isError).toBe(true);
     expect(r.text).toBe("好");
+  });
+});
+
+describe("顺带朗读的语音版本", () => {
+  it("短回复去掉格式直接念，不调模型；长回复用便宜模型压到 agent 的语音字数", async () => {
+    const { rt, reg, fake } = makeRuntime();
+    reg.update("main", { voice_max_chars: 20 });
+    expect(await rt.spoken("main", "**好的**，明天晴")).toBe("好的，明天晴");
+    expect(fake.calls.length).toBe(0);
+    fake.queue.push("明天晴，二十五度，适合出门。");
+    const long = "## 天气\n" + "- 明天晴，最高二十五度，最低十五度，东南风二级\n".repeat(5);
+    expect(await rt.spoken("main", long)).toBe("明天晴，二十五度，适合出门");
+    expect(fake.calls.at(-1)!.purpose).toBe("voice");
+    expect(fake.calls.at(-1)!.system).toContain("不超过 20 字");
+  });
+
+  it("模型失败时退回截断", async () => {
+    const { rt, reg, fake } = makeRuntime();
+    reg.update("main", { voice_max_chars: 10 });
+    fake.queue.push({ error: "boom" } as any);
+    const out = await rt.spoken("main", "第一句话很长很长很长。第二句话也很长很长。第三句。");
+    expect(Array.from(out).length).toBeLessThan(30);
+    expect(out.endsWith("详细的我发在消息里了。")).toBe(true);
   });
 });
 

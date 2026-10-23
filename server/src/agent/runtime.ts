@@ -12,6 +12,7 @@ import type { AssistantMessage, ImageContent, Message } from "@earendil-works/pi
 import type { AgentRegistry, AgentInfo } from "./registry.ts";
 import type { ModelRegistry } from "./models.ts";
 import { AgentStore } from "./store.ts";
+import { toSpoken } from "../util/text.ts";
 import { buildSystemPrompt, turnContext, type SessionKind } from "./soul.ts";
 import { runScope, withScope, type RunScope } from "./scope.ts";
 
@@ -350,6 +351,39 @@ export class Runtime {
     store.compact(key, old.at(-1)!.id, summary);
     console.log(`[agent] 🗜️  ${agent.id} ${key} 压缩 ${old.length} 条 → 摘要 ${Array.from(summary).length} 字`);
     return true;
+  }
+
+  /**
+   * 已经以文字发出去的回复（IM、网页、投到 IM 的任务）要顺带念时，转成适合朗读的一段。
+   * 去掉格式后不超过 agent 的语音字数（voice_max_chars，留两成余量）就直接念；更长的交给便宜模型压成口语，
+   * 失败或超时退回截断。
+   */
+  async spoken(agentId: string, text: string): Promise<string> {
+    const agent = this.agents.get(agentId);
+    const max = agent?.voice_max_chars || 80;
+    const plain = toSpoken(text, 100_000);
+    if (!plain || Array.from(plain).length <= max * 1.2 || !agent) return plain;
+    try {
+      const model = this.models.resolve(agent.cheap_model || this.models.cheapRef() || agent.model);
+      const res = await Promise.race([
+        withScope({ agentId, sessionKey: `${agentId}:voice`, kind: "isolated", channel: "system", purpose: "voice", hop: 0, chain: [], meta: {}, trusted: false },
+          () => this.models.models.completeSimple(model, {
+            systemPrompt: `你是${agent.name}。下面是你刚用文字发给主人的回复，现在要在家里的设备上用语音念出来。`
+              + `把它改写成适合朗读的口语，不超过 ${max} 字：保留结论和关键数字，省略细节、列表、代码和网址；`
+              + "不要用 markdown、表情符号；内容放不下时最后说一句「详细的我发在消息里了」。只输出要念的话本身。",
+            messages: [{ role: "user", content: text.slice(0, 6000), timestamp: Date.now() }],
+          })),
+        new Promise<never>((_, rej) => setTimeout(() => rej(new Error("超时")), 20_000)),
+      ]);
+      if (res.stopReason === "error" || res.stopReason === "aborted") throw new Error(res.errorMessage || "模型调用失败");
+      const out = toSpoken(res.content.filter((c: any) => c.type === "text").map((c: any) => c.text).join(""), max * 2);
+      const u = res.usage;
+      if (u) this.store(agentId).recordUsage(`${agentId}:voice`, "voice", { model: `${res.provider}/${res.model}`, input: u.input, output: u.output, cacheRead: u.cacheRead, cacheWrite: u.cacheWrite, cost: u.cost?.total ?? 0 });
+      if (out) return out;
+    } catch (e: any) {
+      console.log(`[agent] ⚠️  ${agentId} 语音摘要失败，改为截断: ${e.message}`);
+    }
+    return toSpoken(text, max);
   }
 
   /** 冲刷等内部运行：不加锁（调用方已在会话锁里） */

@@ -310,7 +310,9 @@ CoreS3 (MicroPython) ──HTTP──▶ server/（TypeScript 单文件可执行
   托盘用 `Global\\KaguraTrayMutex` 防重复；定时轮询 `/api/admin/meta`，服务端没了就自己消失。
   隐藏进程设 `KAGURA_NO_PROMPT=1`，preflight 和出错后的「按回车」都不再等待（否则没有窗口时会永久卡住）。
 - **出口（`agent/outbox.ts`，LRN 2026-10-23，症状「飞书聊天时有时播语音有时不播，要提醒才播」「设备显示小澪却用神乐的声音说话」）**：
-  **agent 没有 speak 工具**，播不播完全是系统的事：agent 发给主人的每条消息——主人 IM 私聊 / 网页聊天的回复（`mirror`，`toSpoken` 去格式、截断）、
+  **agent 没有 speak 工具**（只有 `announce`：主人明确让「跟家里说一声」时用，只在可信的非设备会话里有，`relay` 不看在家状态、角色不对也立即播、`never` 仍不播；
+  这一轮调过就不再 mirror，免得播两遍），播不播完全是系统的事：agent 发给主人的每条消息——主人 IM 私聊 / 网页聊天的回复（`mirror`：`Runtime.spoken` 去格式后不超过 agent 的 `voice_max_chars`×1.2 直接念，
+  更长的用便宜模型压成口语，失败退回截断；按策略不播时不去调模型）、
   定时任务 / heartbeat（投 `device:` 只播；投 IM / webchat 发文字再 mirror）、子任务结果、提醒、定时拍照识别——都经 `Outbox.say()`。
   ① `voice_push`：`presence`（默认）在家播、不在家不播（未知按在家）；`always` / `never`。管理界面改了就地生效。
   ② `role_push`（设备当前不是说话的那个角色时）：`hold`（默认）留言，设备切到那个角色时（`ctx.onRoleSwitch`，等设备空闲、问候之后）合成一段播；
@@ -318,7 +320,7 @@ CoreS3 (MicroPython) ──HTTP──▶ server/（TypeScript 单文件可执行
   MQTT 通知带 `role`，设备 `netsvc._play_push` 播放期间临时 `ui.set_role(role)`、播完换回（中途收到 role 命令就不换回），服务端的当前角色不变。
   留言落盘 `held_messages.json`（最多 30 条、24 小时），设备页能看能清。
   ③ **不经出口的只有设备自己发起的交互**（对设备说话、摇一摇、触摸、ROLE 键）：主人就在设备前，角色也对得上；这几处都调 `ctx.deviceHere(dev)`
-  把在家状态改成 home。**新加任何 agent 主动说话的入口都走出口，别直接 `ctx.sendPush`。**
+  把在家状态改成 home——`/chat` 里放在 ASR 有结果之后（免手模式的环境声不算）、大脑之前，这样「我出门了」里 agent 调的 `set_presence(away)` 后到、以它为准。**新加任何 agent 主动说话的入口都走出口，别直接 `ctx.sendPush`。**
   **角色切换钩子挂在 Ctx 上（`setRoles`）**：改 agent 时角色表整个重建，钩子挂在 Roles 实例上会悄悄丢失（契约测试踩过）。
   在家状态统一走 `ctx.setPresence` / `loadPresence`（设备 BLE、设备交互、`set_presence` 工具、`/home` `/away` 命令）。
 - **管理接口与设备信任（`routes/admin.ts` 的 `isLocal`、`ctx.deviceTrusted`，LRN 2026-10-23 安全检查）**：

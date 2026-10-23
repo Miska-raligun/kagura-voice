@@ -1,6 +1,7 @@
 // 设备相关的内置工具（§6.9）：take_photo / set_volume / get_presence / photo_schedule_*。
 // 替代 OpenClaw 的 cores3-camera skill 和 [PHOTO] 前缀约定。
 // 没有 speak：agent 说给主人听的话由系统（agent/outbox.ts）统一决定播不播，agent 只管回复。
+// announce 只用于「替主人给家里人传话」，只在可信会话里有。
 import fs from "node:fs";
 import { Type } from "@earendil-works/pi-ai";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
@@ -9,6 +10,8 @@ import type { AgentInfo } from "../registry.ts";
 import type { PhotoSchedules } from "../../jobs/photoSchedules.ts";
 
 export interface DeviceHost {
+  /** 传话：在家里设备上播一句给家里人听（经出口，不看主人在不在家） */
+  announce(text: string, agentId: string, device?: string): Promise<{ played: boolean; reason?: string }>;
   captureAndWait(dev: string): Promise<[string | null, string | null]>;
   presence(): string;
   /** 主人亲口说的在家 / 出门（设备蓝牙没感知到时补上） */
@@ -63,11 +66,23 @@ export function deviceTools(host: DeviceHost) {
         parameters: Type.Object({}),
         async execute() { return ok(host.presence() || "不知道（设备还没上报过）"); },
       },
+      // 只在可信会话里有：陌生人不能让家里的设备开口
+      ...(scope.trusted && scope.channel !== "device" ? [{
+        name: "announce", label: "传话",
+        description: "只在主人明确要你「跟家里说一声 / 在家里播一下 / 告诉家里人」时调用：在家里的设备上把这句话播给家里的人听。"
+          + "平时的回复不要用它——你的回复会不会在设备上念由系统决定。",
+        parameters: Type.Object({ text: Type.String({ description: "要播的话，口语、简短，用传话的口吻（如「主人说他今晚晚点回」）" }), device: Type.Optional(Type.String()) }),
+        async execute(_id: string, p: any) {
+          const r = await host.announce(String(p.text), agent.id, p.device && DEV_RE.test(p.device) ? p.device : undefined);
+          if (r.played) { scope.meta.announced = true; return ok("已在家里的设备上播出。"); }
+          return fail(r.reason === "policy" ? "语音推送已关闭，没有播出。" : "家里的设备不在线，没有播出。");
+        },
+      } as AgentTool<any>] : []),
       // 只在可信会话（主人本人）里有：陌生人说一句「主人到家了」不能改掉状态
       ...(scope.trusted ? [{
         name: "set_presence", label: "记下在家状态",
         description: "主人明确说自己到家了 / 出门了（「我到家了」「我出门了」）时调用，更新在家状态。"
-          + "在家时主人在聊天软件里的消息，你的回复会自动同时在家里设备上用语音播出来。只凭主人本人明确的说法，别猜。",
+          + "只凭主人本人明确的说法，别猜。",
         parameters: Type.Object({ status: Type.Union([Type.Literal("home"), Type.Literal("away")]) }),
         async execute(_id: string, p: any) {
           host.setPresence(p.status);

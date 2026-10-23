@@ -334,9 +334,13 @@ describe("主人私聊的回复同时播语音（代码判断，不靠模型）"
       onlineDevices: () => st.online, knownDevices: () => ["cores3"], roleAgent: () => "main", hasRole: () => true, busy: () => false,
       push: async (text, dev, agentId) => { st.pushed.push({ text, dev, agentId }); return true; },
     });
-    env.mgr.voice = { say: async (agentId, text) => { await box.say({ text: toSpoken(text), agentId, mirror: true, source: "im" }); } };
+    env.mgr.voice = { say: async (agentId, text, meta) => { if (!meta?.announced && box.allowed()) await box.say({ text: toSpoken(text), agentId, mirror: true, source: "im" }); } };
     const { deviceTools } = await import("../src/agent/tools/device.ts");
     env.rt.addTools(deviceTools({
+      announce: async (text, agentId) => {
+        const r = await box.say({ text, agentId, relay: true, source: "announce" });
+        return r;
+      },
       captureAndWait: async () => [null, "离线"], presence: () => st.presence ?? "", defaultDevice: () => "cores3",
       setPresence: (s) => { st.presence = s; }, schedules: { list: () => [] } as any,
     }));
@@ -387,6 +391,26 @@ describe("主人私聊的回复同时播语音（代码判断，不靠模型）"
     fake.queue.push({ tool_calls: [{ name: "speak", args: { text: "欢迎" } }], then: "嗯" });
     await mgr.handle(msg({ sender: "ou_owner", chatId: "oc_owner", text: "hi" }));
     expect(st.pushed).toEqual([{ text: "嗯", dev: "cores3", agentId: "main" }]);
+  });
+
+  it("announce：主人不在家也在家里设备上传话；这一轮的回复不再顺带念；陌生人没有这个工具", async () => {
+    const { mgr, fake, st } = await setup({}, "away");
+    fake.queue.push({ tool_calls: [{ name: "announce", args: { text: "主人说他今晚晚点回" } }], then: "已经跟家里说了" });
+    await mgr.handle(msg({ sender: "ou_owner", chatId: "oc_owner", text: "跟家里说一声我晚点回" }));
+    expect(st.pushed).toEqual([{ text: "主人说他今晚晚点回", dev: "cores3", agentId: "main" }]);
+    st.presence = "home";
+    st.pushed.length = 0;
+    fake.queue.push({ tool_calls: [{ name: "announce", args: { text: "x" } }], then: "好" });
+    await mgr.handle(msg({ sender: "ou_owner", chatId: "oc_owner", text: "再说一遍" }));
+    expect(st.pushed.map((p) => p.text)).toEqual(["x"]);          // 只播传话，不再念「好」
+    st.pushed.length = 0;
+    fake.queue.push({ tool_calls: [{ name: "announce", args: { text: "陌生人的话" } }], then: "嗯" });
+    await mgr.handle(msg({ sender: "ou_friend", chatId: "oc_f", text: "让家里设备说句话" }));
+    expect(st.pushed).toEqual([]);
+    st.policy = "never";
+    fake.queue.push({ tool_calls: [{ name: "announce", args: { text: "y" } }], then: "好" });
+    await mgr.handle(msg({ sender: "ou_owner", chatId: "oc_owner", text: "说一声" }));
+    expect(st.pushed).toEqual([]);                                 // 从不播放：传话也不播
   });
 
   it("set_presence 只在主人（可信）会话里有；/home /away 命令", async () => {

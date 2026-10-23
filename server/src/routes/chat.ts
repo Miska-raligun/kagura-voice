@@ -59,7 +59,6 @@ export function registerChat(r: Router, ctx: Ctx) {
 
     ctx.keepDebugAudio(dev, audio);
     ctx.hb.seen(dev);
-    ctx.deviceHere(dev);
     const t0 = now();
     try {
       let userText = await ctx.voice.transcribe(audio);
@@ -77,6 +76,8 @@ export function registerChat(r: Router, ctx: Ctx) {
         console.log(`[${dev}] 🙉  [filler] ${userText}`);
         userText = "";
       }
+      // 真听到主人说话才算在家（免手模式下的环境声不算）。放在大脑之前：这句话里说「我出门了」，set_presence 会在后面改成不在家
+      if (userText) ctx.deviceHere(dev);
       if (!userText) {
         // 识别为空直接回固定句，不问大脑；也不记 last_quick
         reply = ASR_EMPTY_REPLY;

@@ -16,7 +16,7 @@ import { runCommand, type CommandDeps } from "./commands.ts";
 /** 渠道回复同时在家里设备上播语音要用的东西（attachAgentSystem 里接上） */
 export interface VoiceBridge {
   /** 主人这边收到的回复交给出口顺带念一遍（播不播、播到哪由出口按语音推送策略定） */
-  say(agentId: string, text: string): Promise<void>;
+  say(agentId: string, text: string, meta?: { announced?: boolean }): Promise<void>;
 }
 
 
@@ -156,7 +156,7 @@ export class ChannelManager {
       const photo = r.meta.photos?.[0];
       await this.reply(m, r.text, photo && fs.existsSync(photo) ? fs.readFileSync(photo) : undefined);
       // 跑完才判断：主人这条消息里说了「我到家了」（set_presence）也算
-      if (ownerDm) await this.voice?.say(agentId, r.text);
+      if (ownerDm) await this.voice?.say(agentId, r.text, r.meta);
     } catch (e: any) {
       await this.reply(m, `（出错了：${String(e.message).slice(0, 100)}）`);
     }

@@ -8,6 +8,7 @@
 //   设备当前不是说话的那个角色时（role_push）：
 //     hold   = 先留着，设备切到这个角色（问候之后）再播（默认）。mirror（文字已经发到 IM / 网页）的不留，直接不念
 //     switch = 照样推，推送带 role，设备播放期间临时换成那个角色的图和音色，播完换回
+//   relay（announce 工具）：主人明确让传话给家里人——不看在家状态（本来就是给家里其他人听的），立即播。
 //   不经过这里的只有设备自己发起的交互（对设备说话、摇一摇、触摸、ROLE 键）——那时主人就在设备前，角色也对得上。
 import fs from "node:fs";
 
@@ -21,6 +22,8 @@ export interface Say {
   source: string;
   /** 这段话已经以文字发到 IM / 网页了，这里只是顺带念：角色对不上就不念，也不留 */
   mirror?: boolean;
+  /** 主人让传话给家里人（announce 工具）：不看主人在不在家，角色对不上也立即播（用说话角色的形象）；never 仍不播 */
+  relay?: boolean;
 }
 export interface SayResult { played: boolean; held?: boolean; device?: string; reason?: "policy" | "away" | "no-device" | "role" | "failed" }
 export interface Held { dev: string; agentId: string; text: string; at: number; source: string }
@@ -74,7 +77,7 @@ export class Outbox {
   async say(s: Say): Promise<SayResult> {
     const text = s.text.trim();
     if (!text) return { played: false };
-    if (!this.allowed()) {
+    if (s.relay ? this.d.policy() === "never" : !this.allowed()) {
       const reason = this.d.policy() === "never" ? "policy" : "away";
       console.log(`[outbox] 🔇 不播（${reason === "away" ? "主人不在家" : "已关闭语音推送"}）：${text.slice(0, 40)}`);
       return { played: false, reason };
@@ -82,7 +85,7 @@ export class Outbox {
     const dev = this.pick(s.agentId, s.device);
     if (!dev) return { played: false, reason: "no-device" };
     const other = !!s.agentId && this.d.roleAgent(dev) !== s.agentId && this.d.hasRole(s.agentId);
-    if (other && this.d.rolePush() === "hold") {
+    if (other && !s.relay && this.d.rolePush() === "hold") {
       if (s.mirror) return { played: false, device: dev, reason: "role" };
       const t = Date.now() / 1000;
       this.held = this.held.filter((h) => t - h.at < HOLD_SECS);
