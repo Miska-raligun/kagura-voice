@@ -5,11 +5,14 @@ import { AgentRegistry } from "./registry.ts";
 import { ModelRegistry, FAKE_MODEL, type FakeLlm } from "./models.ts";
 import { Runtime } from "./runtime.ts";
 import { deviceTools } from "./tools/device.ts";
+import { Memories } from "./tools/memory.ts";
+import { OpenAIEmbedder } from "./memory.ts";
 
 export interface AgentSystem {
   registry: AgentRegistry;
   models: ModelRegistry;
   runtime: Runtime;
+  memories: Memories;
 }
 
 export function createAgentSystem(cfg: Config, dirs: Dirs, fake: FakeLlm | null): AgentSystem {
@@ -22,7 +25,10 @@ export function createAgentSystem(cfg: Config, dirs: Dirs, fake: FakeLlm | null)
     for (const a of registry.list()) if (a.model) registry.update(a.id, { model: "" });
   }
   const runtime = new Runtime(registry, models, cfg.runtime);
-  return { registry, models, runtime };
+  const memories = new Memories(runtime, cfg.embedding && !fake ? new OpenAIEmbedder(cfg.embedding) : null);
+  runtime.addTools(memories.tools());
+  runtime.beforeCompact = (agent, key) => memories.flush(agent, key);
+  return { registry, models, runtime, memories };
 }
 
 /** 依赖 Ctx 的部分（设备工具要推送、拍照）在 Ctx 建好之后接上 */
