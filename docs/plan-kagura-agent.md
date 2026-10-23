@@ -1,6 +1,6 @@
 # Kagura 自研 Agent 系统与安装包 —— 开发计划
 
-> 状态：v3（2026-10-23）。**M0–M8 代码已完成**：M0 结论见 [m0-report.md](m0-report.md)；契约测试在
+> 状态：v3（2026-10-23）。**M0–M9 代码已完成**：M0 结论见 [m0-report.md](m0-report.md)；契约测试在
 > [contract-tests/](../contract-tests/README.md)（84 例通用 + 13 例内置 agent 专用），Python 版、TS 版（OpenClaw 模式 /
 > 内置 agent 模式）、三平台单文件可执行全绿。服务端说明见 [server/README.md](../server/README.md)。
 > 待作者真机验收（M2 起各阶段的「真机试用」以及飞书/QQ 真账号联调一起做），之后 M9 边生成边播、M10 打包发布。

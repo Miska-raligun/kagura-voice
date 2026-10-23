@@ -266,6 +266,15 @@ CoreS3 (MicroPython)  ──HTTP──▶  voice_server.py (Flask :5000)  ──
   下载到出声，`gaps>0` = 网络跟不上、扬声器断过粮，`mode=fallback` = 固件不支持。
   服务端 `/chat` 也会刷新心跳时刻（`_hb_seen`）：设备对话期间不发心跳，
   长对话会被误报「心跳中断」。
+- **边生成边播（M9，新服务端 + 内置 agent 才有，LRN 2026-10-23）**：设备请求带 `X-Stream: 1`
+  （`chat._want_stream`，只在内存流式播放可用时带；`cfg.STREAM_REPLY=False` 关掉）→ 服务端
+  `server/src/speech/stream-reply.ts` 边收模型逐字输出边切句、每句合成、立刻写进响应：一个 WAV 头
+  （长度是占位值）+ 各句 PCM 依次追加，**不带 Content-Length、不用 chunked**（设备 requests 不认），
+  读到连接关闭。`X-Reply-Text` 只有首句并带 `X-Reply-Partial: 1`，设备播完 `GET /chat/last`
+  取全文刷新屏显。两个别改坏的点：① 响应头要等「首句之后又来了字，或这条助手消息结束且它的工具都执行完」
+  才发——`take_photo`/`set_volume` 往往跟在「我看看。」后面，早发头 `X-Need-Photo` 就丢了；
+  ② 落盘播放路径（`save_stream`）遇到长度未知的流，写完要回填真实长度，否则 `playWavFile`
+  按占位长度读到文件外。老固件不带头、快捷指令短路，都照旧整段返回。
 - **`global` 声明必须有主**（LRN 2026-08-25）：`netsvc.mqtt_check` 里写过
   `global _mqtt_ok`，但本模块从来没有这个名字（状态在 `diag`）。后果是
   **任何一次 MQTT 掉线都变成 NameError 逃出 `mqtt_check`**，主循环连吃 10 次

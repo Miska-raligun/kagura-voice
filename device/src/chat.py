@@ -88,6 +88,27 @@ def toggle_wake_mode():
 _post_mv_ok = True    # 固件 requests 能直接发 memoryview（不能就退回 bytes 复制一份）
 
 
+def _want_stream(hdrs):
+    """边生成边播：只在内存流式播放可用时请求（见 cfg.STREAM_REPLY）"""
+    if cfg.STREAM_REPLY and cfg.PLAY_STREAMING and not snd._stream_bad:
+        hdrs["X-Stream"] = "1"
+
+
+def _fetch_full_text(partial):
+    """边生成边播时屏幕上只有首句：播完取全文刷新。失败无所谓，只是屏显少几个字"""
+    if not partial:
+        return
+    try:
+        r = urequests.get(cfg.SERVER_BASE + "/chat/last", headers={"X-Device-Id": cfg.DEVICE_ID},
+                          timeout=cfg.REQUEST_TIMEOUT_SHORT)
+        if r.status_code == 200:
+            j = r.json()
+            ui._update_chat_text(j.get("user_b64", ""), j.get("reply_b64", ""))
+        r.close()
+    except Exception as e:
+        print("chat/last err:", e)
+
+
 def _post_wav(wav, hdrs):
     """上传录音。wav 是共享录音缓冲的 memoryview：socket.write 认缓冲协议，
     直接发就不用为 30 秒录音再复制近 1MB。固件的 requests 万一只认 bytes/str
@@ -159,6 +180,7 @@ def record_and_send():
                 if lt:
                     hdrs["X-Local-Time"] = lt
                 feel._feel_headers(hdrs)      # 体感层：把"刚才被摸过"随对话一起捎过去
+                _want_stream(hdrs)
                 netsvc.mqtt_ping()            # 下面最多阻塞 60 秒，先保活
                 resp = _post_wav(wav, hdrs)
                 if resp.status_code != 200:
@@ -191,10 +213,12 @@ def record_and_send():
                     hw._volume_adjust(vol_cmd)    # 先调音量，这条回复就按新音量播
                 # 边下边播：收到 2 秒就出声，播放期间 MQTT 照常保活。
                 # 不用 resp.content（整段进堆 + 读完前喂不上狗，见 snd.py 播放段口径）
+                partial = resp.headers.get("X-Reply-Partial", "") == "1"
                 ui.draw_state("playing")
                 n = snd.stream_play(resp)
                 resp.close()
                 diag.dbg(snd.stream_summary())
+                _fetch_full_text(partial)
             except OSError as e:
                 print("network err:", e)
                 ui.draw_state("error")
@@ -237,6 +261,7 @@ def record_and_send():
                     if lt2:
                         v_hdrs["X-Local-Time"] = lt2
                     feel._feel_headers(v_hdrs)
+                    _want_stream(v_hdrs)
                     netsvc.mqtt_ping()
                     resp2 = urequests.post(
                         cfg.VISION_URL,
@@ -245,9 +270,12 @@ def record_and_send():
                         timeout=cfg.REQUEST_TIMEOUT_CHAT,
                     )
                     if resp2.status_code == 200:
+                        partial2 = resp2.headers.get("X-Reply-Partial", "") == "1"
+                        ui._update_chat_text(resp2.headers.get("X-User-Text", ""), resp2.headers.get("X-Reply-Text", ""))
                         ui.draw_state("playing")
                         n2 = snd.stream_play(resp2)
                         resp2.close()
+                        _fetch_full_text(partial2)
                         if n2 <= 0:
                             ui.draw_state("error")
                             time.sleep(2)

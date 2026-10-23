@@ -241,3 +241,58 @@ def test_admin_channels_pairing_flow(a):
     d = a.get("/api/admin/channels").json()
     assert d["accounts"][0]["status"]["state"] == "stopped"
     assert a.request("DELETE", "/api/admin/channels/ob1").status_code == 200
+
+
+# ── 边生成边播（M9）──────────────────────────────────────────────────────────
+
+FAKE_BYTES_PER_CHAR = 1600   # 假 TTS：每个字 50ms 静音
+
+
+def _clean_len(s):
+    import re
+    return len(re.sub(r"\s", "", s))
+
+
+def test_stream_reply_first_sentence_then_rest(a):
+    """新固件带 X-Stream: 1：首句先出头（X-Reply-Partial），音频是一个 WAV 头 + 各句 PCM 依次拼接，读到连接关闭。"""
+    text = "你好呀！今天天气很好。我们出去走走吧，顺便买点水果。"
+    a.fake_llm({"text": text, "tps": 30})
+    r = a.post("/chat", data=wav(), headers={"X-Device-Id": "st1", "X-Stream": "1"}, stream=True)
+    assert r.status_code == 200
+    assert "Content-Length" not in r.headers and r.headers.get("Transfer-Encoding") != "chunked"
+    assert r.headers.get("X-Reply-Partial") == "1"
+    assert b64text(r.headers["X-Reply-Text"]) == "你好呀！"
+    body = r.raw.read()
+    assert body[:4] == b"RIFF" and body[36:40] == b"data"
+    sentences = [t["text"] for t in a.fake_log()["tts"]]
+    assert sentences == ["你好呀！", "今天天气很好。", "我们出去走走吧，顺便买点水果。"]
+    assert len(body) == 44 + sum(len(s) * FAKE_BYTES_PER_CHAR for s in sentences)
+    last = a.get("/chat/last", headers={"X-Device-Id": "st1"}).json()
+    assert last["reply"] == text and b64text(last["reply_b64"]) == text
+
+
+def test_stream_take_photo_header_not_lost(a):
+    """首句「我看看。」之后才调 take_photo：响应头必须等工具执行完再发，X-Need-Photo 不能丢。"""
+    a.fake_llm({"text": "我看看。", "tool_calls": [{"name": "take_photo", "args": {"question": "这是什么"}}], "tps": 20})
+    r = a.post("/chat", data=wav(), headers={"X-Device-Id": "st2", "X-Stream": "1"})
+    assert r.headers.get("X-Need-Photo") == "1"
+    assert r.content[:4] == b"RIFF" and len(r.content) > 44
+
+
+def test_stream_short_reply_not_partial(a):
+    a.fake_llm("好的。")
+    r = a.post("/chat", data=wav(), headers={"X-Device-Id": "st3", "X-Stream": "1"})
+    assert r.headers.get("X-Reply-Partial") is None and b64text(r.headers["X-Reply-Text"]) == "好的。"
+
+
+def test_stream_ignored_for_short_circuit(a):
+    """快捷指令不走大脑：照旧整段返回（带 Content-Length）。"""
+    a.fake_asr("现在几点")
+    r = a.post("/chat", data=wav(), headers={"X-Device-Id": "st4", "X-Stream": "1"})
+    assert r.headers.get("Content-Length") and a.fake_log()["llm"] == []
+
+
+def test_stream_error_before_audio_is_500(a):
+    a.fake_llm({"error": "模型挂了"})
+    r = a.post("/chat", data=wav(), headers={"X-Device-Id": "st5", "X-Stream": "1"})
+    assert r.status_code == 500 and "模型挂了" in r.json()["error"]

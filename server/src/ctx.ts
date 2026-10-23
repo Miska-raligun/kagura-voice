@@ -51,6 +51,8 @@ export class Ctx {
   reminders: Reminders;
   schedules: PhotoSchedules;
 
+  /** 每台设备最近一轮对话的完整文本（边生成边播时 X-Reply-Text 只有首句，设备播完来取全文） */
+  lastReply = new Map<string, { user: string; reply: string; ts: number }>();
   /** 正在进行中的设备对话数（调度器 idleOnly：设备正在对话时延后执行） */
   activeChats = new Map<string, number>();
   /** 最近一次在家状态（BLE 上报），内置 agent 每轮带上 */

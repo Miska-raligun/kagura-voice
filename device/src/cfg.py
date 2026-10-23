@@ -187,6 +187,13 @@ PLAY_SEG_BYTES   = 800000   # 切段后每段的音频字节数（约 25 秒）
 PLAY_STREAMING   = True
 
 
+# 边生成边播（LRN 2026-10-23，新服务端的内置 agent 才支持）：请求带 X-Stream: 1，服务端
+# 首句合成好就开始回音频，后面的句子边生成边追加，读到连接关闭为止；X-Reply-Text 只有首句
+# （带 X-Reply-Partial: 1），播完再 GET /chat/last 取全文刷新屏幕。老服务端不认这个头，照旧整段返回。
+# 只在内存流式播放可用时才请求（落盘播放要预知长度）。出问题改 False 即恢复整段返回。
+STREAM_REPLY     = True
+
+
 STREAM_BLOCK_BYTES = 32000  # 每块 1 秒（16k×16bit）。三块轮转共 96KB 堆
 
 

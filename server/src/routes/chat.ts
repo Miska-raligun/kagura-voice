@@ -1,6 +1,8 @@
 // 对话路由：/chat、/chat-vision、/role/cycle（设备上行，不要 token，靠限流兜底）。
 import fs from "node:fs";
-import { bytes, json, type Router } from "../http/router.ts";
+import { bytes, json, type Req, type Res, type Router } from "../http/router.ts";
+import type { Role } from "../roles.ts";
+import { streamReply, type StreamReplyOpts } from "../speech/stream-reply.ts";
 import {
   type Ctx, validateDeviceId, preview, MAX_AUDIO_BYTES, ASR_EMPTY_REPLY, CONT_EXIT_REPLY, PHOTO_ONLY_PROMPT,
 } from "../ctx.ts";
@@ -13,6 +15,33 @@ import { now } from "../util/time.ts";
 const tooMany = () => json({ error: "请求过于频繁，请稍后再试" }, 429);
 
 export function registerChat(r: Router, ctx: Ctx) {
+  /** 只有内置 agent 能逐字输出；OpenClaw / 假大脑照旧整段返回 */
+  const wantsStream = (req: Req) => req.header("X-Stream") === "1" && ctx.brain.kind === "pi";
+
+  const streamed = (dev: string, role: Role, userText: string, headers: Record<string, string>, t0: number, tAsr: number,
+    run: StreamReplyOpts["run"]): Res => ({
+    status: 200, headers: {}, body: "",
+    raw: (res) => streamReply(res, {
+      voice: ctx.voice, per: role.per, userText, headers, run,
+      log: (s) => console.log(`[${dev}] ${s}`),
+      done: (r) => {
+        ctx.hb.seen(dev);
+        ctx.lastReply.set(dev, { user: userText, reply: r.reply || (r.error ? "（出错了）" : ""), ts: now() });
+        const total = now() - t0;
+        console.log(`[${dev}] 💬  ${preview(r.reply)}`);
+        console.log(`[${dev}] ⏱️  asr=${(tAsr - t0).toFixed(1)}s 首声=${r.firstAudioMs === null ? "—" : ((tAsr - t0) + r.firstAudioMs / 1000).toFixed(1) + "s"} 总=${total.toFixed(1)}s ${r.sentences} 句（边生成边播）${r.error ? `  ⚠️ ${r.error}` : ""}`);
+      },
+    }),
+  });
+
+  /** 边生成边播时 X-Reply-Text 只有首句：设备播完来取完整文本更新屏幕 */
+  r.get("/chat/last", (req) => {
+    const dev = validateDeviceId(req.header("X-Device-Id") || req.query.get("device_id"));
+    const last = ctx.lastReply.get(dev);
+    // *_b64 与响应头 X-User-Text / X-Reply-Text 同口径（设备直接交给 ui._update_chat_text）
+    return last ? json({ user: last.user, reply: last.reply, ts: last.ts, user_b64: b64Header(last.user), reply_b64: b64Header(last.reply) }) : json({ error: "还没有对话" }, 404);
+  });
+
   /**
    * 接收 WAV，返回 WAV。请求头：X-Device-Id、X-Local-Time、X-Touch、X-Mode。
    * 短路链：没听清 → 免手退出 → 角色列表/切换 → 提醒 → 音量 → 快捷指令 → 大脑。
@@ -101,6 +130,11 @@ export function registerChat(r: Router, ctx: Ctx) {
         const prev = ctx.state.popLastQuick(sid);
         if (prev) llmText = `[背景：用户刚才问「${prev[0]}」，快捷指令已回复「${prev[1]}」]\n${userText}`;
         llmText = withTouch(llmText, req.header("X-Touch"));
+        if (wantsStream(req)) {
+          // 边生成边播：新固件带 X-Stream: 1，首句合成好就开始出声
+          return streamed(dev, role, userText, { ...extra, "X-Role": role.id }, t0, tAsr, (onEvent, meta) =>
+            ctx.inChat(dev, () => ctx.brain.chat({ message: llmText, sessionId: sid, localTime, agent: role.agent, deviceId: dev, spoken: true, meta, onEvent })));
+        }
         const meta: { needPhoto?: boolean; volume?: string } = {};
         reply = await ctx.inChat(dev, () => ctx.brain.chat({ message: llmText, sessionId: sid, localTime, agent: role.agent, deviceId: dev, spoken: true, meta }));
         if (reply.startsWith("[PHOTO]")) {
@@ -119,6 +153,7 @@ export function registerChat(r: Router, ctx: Ctx) {
       ctx.hb.seen(dev);
       const data = fs.readFileSync(wavOut);
       console.log(`[${dev}] 📤  WAV ${data.length} bytes`);
+      ctx.lastReply.set(dev, { user: userText, reply, ts: now() });
       const headers: Record<string, string> = { ...extra };
       if (needPhoto) headers["X-Need-Photo"] = "1";
       headers["X-User-Text"] = b64Header(userText);
@@ -161,6 +196,10 @@ export function registerChat(r: Router, ctx: Ctx) {
       const tAsr = now();
       console.log(`[${dev}] 🗣️  ${userText}`);
       const imagePath = imageB64 ? ctx.decodeImageB64(imageB64, dev, "vision") : null;
+      if (wantsStream(req)) {
+        return streamed(dev, role, userText, { "X-Role": role.id }, t0, tAsr, (onEvent, meta) =>
+          ctx.inChat(dev, () => ctx.brain.chat({ message: withTouch(userText, req.header("X-Touch")), sessionId: sid, imagePath, localTime, agent: role.agent, deviceId: dev, spoken: true, meta, onEvent })));
+      }
       const reply = await ctx.inChat(dev, () => ctx.brain.chat({ message: withTouch(userText, req.header("X-Touch")), sessionId: sid, imagePath, localTime, agent: role.agent, deviceId: dev, spoken: true }));
       console.log(`[${dev}] 💬  ${preview(reply)}`);
       const tLlm = now();
@@ -170,6 +209,7 @@ export function registerChat(r: Router, ctx: Ctx) {
       ctx.hb.seen(dev);
       const out = fs.readFileSync(wavOut);
       console.log(`[${dev}] 📤  WAV ${out.length} bytes`);
+      ctx.lastReply.set(dev, { user: userText, reply, ts: now() });
       return bytes(out, "audio/wav", { "X-User-Text": b64Header(userText), "X-Reply-Text": b64Header(reply), "X-Role": role.id });
     } catch (e: any) {
       console.log(`[${dev}] ⚠️  vision 错误: ${e.message}`);

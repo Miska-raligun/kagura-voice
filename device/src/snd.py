@@ -454,6 +454,11 @@ def save_stream(resp, path=None):
                     print("save stream: flash full at", total)
                     return -1
                 total += w
+            if size == 0 and total > 44:
+                # 长度未知（边生成边播的流，头里的长度是占位值）：写完回填真实长度，
+                # 否则 playWavFile 会按占位长度读到文件外
+                f.seek(0)
+                f.write(hw.make_wav_header(total - 44))
     except OSError as e:
         print("save stream err:", e)
         return -1

@@ -16,6 +16,8 @@ export interface ChatRequest {
   spoken?: boolean;
   /** 出参：工具对 HTTP 响应的影响（take_photo → X-Need-Photo，set_volume → X-Volume） */
   meta?: { needPhoto?: boolean; volume?: string };
+  /** 边生成边播：逐字输出与工具事件（只有内置 agent 会调） */
+  onEvent?: (e: import("../agent/runtime.ts").AgentStreamEvent) => void;
 }
 export interface Brain {
   /** pi / openclaw / fake —— 路由据此选提示词（OpenClaw 用 cores3-speak skill，内置 agent 不用） */

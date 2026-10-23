@@ -35,6 +35,8 @@ export interface Res {
   body: Buffer | string;
   /** 响应发完后执行（例如推送音频下载即删） */
   after?: () => void;
+  /** 自己接管原始响应（边生成边播：先发头、再一段段写音频）。设了它就忽略 status/headers/body */
+  raw?: (res: http.ServerResponse) => Promise<void>;
 }
 
 export const json = (obj: unknown, status = 200): Res => ({
@@ -98,6 +100,15 @@ export class Router {
             console.log(`[http] ⚠️  ${rawReq.method} ${rawReq.url} 未处理异常: ${e?.stack || e}`);
             res = json({ error: String(e?.message || e) }, 500);
           }
+        }
+        if (res.raw) {
+          try { await res.raw(rawRes); }
+          catch (e: any) {
+            console.log(`[http] ⚠️  ${rawReq.method} ${rawReq.url} 流式响应出错: ${e?.message || e}`);
+            if (!rawRes.headersSent) rawRes.writeHead(500, { "Content-Type": "application/json" }).end(JSON.stringify({ error: String(e?.message || e) }));
+            else rawRes.end();
+          }
+          return;
         }
         rawRes.writeHead(res.status, res.headers);
         rawRes.end(res.body, () => res.after?.());

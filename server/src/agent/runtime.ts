@@ -41,9 +41,19 @@ export interface RunRequest {
   model?: string;
   /** 脱离调用方运行（后台子任务）时显式带上跳数与调用链，防循环 */
   lineage?: { hop: number; chain: string[] };
+  /** 直接用调用方给的对象当本轮 meta（边生成边播要在运行中途读到 needPhoto/volume） */
+  meta?: RunScope["meta"];
+  /** 逐字输出等事件（边生成边播用） */
+  onEvent?: (e: AgentStreamEvent) => void;
   /** 落盘前最后一道判断：返回 false 就不落盘（heartbeat 回 HEARTBEAT_OK 时不让它撑大历史） */
   keepIf?: (text: string) => boolean;
 }
+
+/** 给边生成边播的事件：文本增量；一条助手消息结束（带不带工具调用）；一次工具执行结束 */
+export type AgentStreamEvent =
+  | { type: "text"; delta: string }
+  | { type: "message_end"; toolCalls: number }
+  | { type: "tool_end"; name: string };
 
 export interface RunResult {
   text: string;
@@ -170,7 +180,7 @@ export class Runtime {
       deviceId: req.deviceId, spokenTo: req.spokenTo, origin: req.origin ?? (req.channel === "device" && req.deviceId ? `device:${req.deviceId}` : parent?.origin), localTime: req.localTime, purpose: req.purpose ?? "chat",
       hop: parent ? parent.hop + (parent.agentId !== agent.id ? 1 : 0) : (req.lineage?.hop ?? 0),
       chain: [...(parent?.chain ?? req.lineage?.chain ?? []), `${agent.id}|${req.sessionKey}`],
-      meta: {},
+      meta: req.meta ?? {},
     };
     const model = this.models.resolve(req.model || agent.model);
     const history = store.history(req.sessionKey).map((h) => h.msg);
@@ -199,7 +209,15 @@ export class Runtime {
     });
     const start = pi.state.messages.length;
     const toolCalls: string[] = [];
-    pi.subscribe((e: any) => { if (e.type === "tool_execution_start") toolCalls.push(e.toolName); });
+    pi.subscribe((e: any) => {
+      if (e.type === "tool_execution_start") toolCalls.push(e.toolName);
+      if (!req.onEvent) return;
+      try {
+        if (e.type === "message_update" && e.assistantMessageEvent?.type === "text_delta") req.onEvent({ type: "text", delta: e.assistantMessageEvent.delta });
+        else if (e.type === "message_end" && e.message?.role === "assistant") req.onEvent({ type: "message_end", toolCalls: (e.message.content ?? []).filter((c: any) => c.type === "toolCall").length });
+        else if (e.type === "tool_execution_end") req.onEvent({ type: "tool_end", name: e.toolName });
+      } catch (err: any) { console.log(`[agent] ⚠️  onEvent 出错: ${err.message}`); }
+    });
 
     const timeout = (req.timeoutSecs ?? this.opts.timeoutSecs) * 1000;
     let timedOut = false;

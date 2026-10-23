@@ -18,6 +18,7 @@ export class PiBrain implements Brain {
     const r = await this.rt.run({
       agentId, sessionKey: key, kind: key.endsWith(":main") ? "main" : "chat", channel: "device",
       deviceId: dev, spokenTo: req.spoken ? dev : undefined, text: req.message, images, localTime: req.localTime,
+      onEvent: req.onEvent, meta: req.meta,
     });
     if (req.meta) {
       if (r.meta.needPhoto) req.meta.needPhoto = true;

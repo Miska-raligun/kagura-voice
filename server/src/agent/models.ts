@@ -24,7 +24,7 @@ export const FAKE_MODEL = "fake/fake";
 export type FakeStep =
   | string
   | { error: string }
-  | { text?: string; tool_calls?: { name: string; args?: Record<string, any> }[]; then?: FakeStep };
+  | { text?: string; tool_calls?: { name: string; args?: Record<string, any> }[]; then?: FakeStep; /** 逐字输出速度（token/秒），测边生成边播用 */ tps?: number };
 
 /** 假模型的控制面：脚本队列 + 调用日志。FakeProviders 实现它 */
 export interface FakeLlm {
@@ -87,7 +87,8 @@ export class ModelRegistry {
       });
     }
     const step: FakeStep = afterTool ? (scope?.fakeAfterTool ?? "") : this.fake!.nextStep();
-    const core = createFauxCore({ provider: "fake", api: "fake", models: [{ id: "fake" }], tokensPerSecond: 1e6 });
+    const tps = typeof step === "object" && "tps" in step && step.tps ? step.tps : 1e6;
+    const core = createFauxCore({ provider: "fake", api: "fake", models: [{ id: "fake" }], tokensPerSecond: tps });
     let reply;
     if (typeof step === "object" && "error" in step) reply = fauxAssistantMessage("", { stopReason: "error", errorMessage: step.error });
     else if (typeof step === "object") {
