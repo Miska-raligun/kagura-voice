@@ -100,5 +100,6 @@ cd ../contract-tests && KAGURA_SERVER_CMD="node server/dist/kagura.cjs" KAGURA_S
 python3 tools/check_split.py && python3 tools/import_sim.py                # 固件静态检查
 ```
 
-发布：打 `v*` tag，GitHub Actions 会构建安装包、在 Windows / Linux 上真装一遍并跑完整契约测试，通过后发 Release。
-带 `-` 的版本（如 `v0.1.0-beta.1`）发成预发布。
+发布：打 `v*` tag，或者改 `server/packaging/release-version.txt` 里的版本号并推送（工作流会在该提交上建 tag）。
+GitHub Actions 会构建安装包、在 Windows / Linux 上真装一遍并跑完整契约测试，通过后才发 Release。
+带 `-` 的版本（如 `0.1.0-beta.1`）发成预发布。

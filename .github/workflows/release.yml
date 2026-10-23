@@ -1,13 +1,16 @@
 name: release
 
 # 打安装包并发布（§9）。本期只发 Windows + Linux（没有 Apple 开发者账号，macOS 只在 server.yml 里编译测试）。
-#   - 打 v* tag：构建 → 装上安装包跑契约测试 → 发 GitHub Release
-#   - 改了打包相关文件 / 手动触发：只构建和验证，不发布（产物在 Actions artifact 里）
+# 两种发布方式（都会先构建 → 在 CI 上装上安装包跑完整契约测试 → 通过才发布）：
+#   - 推 v* tag
+#   - 改 server/packaging/release-version.txt 并推到分支：由本工作流在该提交上创建 v<版本> tag 并发布
+#     （给不能直接推 tag 的环境用，例如只允许推分支的自动化会话）
+# 其它情况（改了打包相关文件 / 手动触发）只构建和验证，产物在 Actions artifact 里。
 # 产物：Kagura-Setup-<版本>.exe、Kagura-<版本>-x86_64.AppImage、kagura_<版本>_amd64.deb、kagura-device-<版本>.zip、SHA256SUMS
 on:
   push:
     tags: ["v*"]
-    branches: [feat/kagura-agent-server]
+    branches: [feat/kagura-agent-server, main]
     paths: ["server/packaging/**", "server/scripts/**", "tools/pack_device.py", ".github/workflows/release.yml"]
   workflow_dispatch:
 
@@ -15,7 +18,33 @@ permissions:
   contents: write
 
 jobs:
+  meta:
+    runs-on: ubuntu-22.04
+    outputs:
+      ver: ${{ steps.v.outputs.ver }}
+      publish: ${{ steps.v.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 2 }
+      - name: 版本号与是否发布
+        id: v
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "ver=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT; echo "publish=true" >> $GITHUB_OUTPUT
+          elif [[ "$GITHUB_EVENT_NAME" == push ]] && git diff --name-only HEAD^ HEAD | grep -qx server/packaging/release-version.txt; then
+            ver=$(tr -d ' \r\n' < server/packaging/release-version.txt)
+            if git ls-remote --exit-code --tags origin "refs/tags/v$ver" >/dev/null; then
+              echo "v$ver 已经发布过，只构建不发布"; echo "ver=$ver" >> $GITHUB_OUTPUT; echo "publish=false" >> $GITHUB_OUTPUT
+            else
+              echo "ver=$ver" >> $GITHUB_OUTPUT; echo "publish=true" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "ver=0.0.0-dev.${GITHUB_RUN_NUMBER}" >> $GITHUB_OUTPUT; echo "publish=false" >> $GITHUB_OUTPUT
+          fi
+          cat $GITHUB_OUTPUT
+
   linux:
+    needs: meta
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -23,14 +52,9 @@ jobs:
         with: { node-version: "24", cache: npm, cache-dependency-path: server/package-lock.json }
       - uses: actions/setup-python@v5
         with: { python-version: "3.11" }
-      - name: 版本号
-        id: v
-        run: |
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then echo "ver=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
-          else echo "ver=0.0.0-dev.${GITHUB_RUN_NUMBER}" >> $GITHUB_OUTPUT; fi
       - name: 构建单文件可执行
         working-directory: server
-        env: { KAGURA_VERSION: "${{ steps.v.outputs.ver }}" }
+        env: { KAGURA_VERSION: "${{ needs.meta.outputs.ver }}" }
         run: |
           npm ci
           node scripts/build.mjs src/main.ts dist/kagura.cjs
@@ -39,9 +63,9 @@ jobs:
           test "$(./dist/kagura --version)" = "$KAGURA_VERSION"
       - name: 打 deb 与 AppImage
         working-directory: server
-        run: bash packaging/linux/build.sh "${{ steps.v.outputs.ver }}"
+        run: bash packaging/linux/build.sh "${{ needs.meta.outputs.ver }}"
       - name: 打固件包
-        run: python tools/pack_device.py "${{ steps.v.outputs.ver }}" server/dist
+        run: python tools/pack_device.py "${{ needs.meta.outputs.ver }}" server/dist
       - name: 装上 deb，对安装好的程序跑契约测试（OpenClaw 模式 + 内置 agent 模式）
         run: |
           sudo dpkg -i server/dist/kagura_*_amd64.deb
@@ -69,6 +93,7 @@ jobs:
           retention-days: 14
 
   windows:
+    needs: meta
     runs-on: windows-latest
     defaults:
       run: { shell: bash }
@@ -78,14 +103,9 @@ jobs:
         with: { node-version: "24", cache: npm, cache-dependency-path: server/package-lock.json }
       - uses: actions/setup-python@v5
         with: { python-version: "3.11" }
-      - name: 版本号
-        id: v
-        run: |
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then echo "ver=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
-          else echo "ver=0.0.0-dev.${GITHUB_RUN_NUMBER}" >> $GITHUB_OUTPUT; fi
       - name: 构建单文件可执行
         working-directory: server
-        env: { KAGURA_VERSION: "${{ steps.v.outputs.ver }}" }
+        env: { KAGURA_VERSION: "${{ needs.meta.outputs.ver }}" }
         run: |
           npm ci
           node scripts/build.mjs src/main.ts dist/kagura.cjs
@@ -97,7 +117,7 @@ jobs:
         run: |
           $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
           if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress; }
-          & $iscc "/DAppVersion=${{ steps.v.outputs.ver }}" server\packaging\windows\kagura.iss
+          & $iscc "/DAppVersion=${{ needs.meta.outputs.ver }}" server\packaging\windows\kagura.iss
           if ($LASTEXITCODE -ne 0) { exit 1 }
           Get-ChildItem server\dist\Kagura-Setup-*.exe
       - name: 静默安装，检查防火墙规则与快捷方式
@@ -132,8 +152,8 @@ jobs:
           retention-days: 14
 
   publish:
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: [linux, windows]
+    if: needs.meta.outputs.publish == 'true'
+    needs: [meta, linux, windows]
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -143,6 +163,10 @@ jobs:
         run: cd out && sha256sum * > SHA256SUMS && cat SHA256SUMS
       - uses: softprops/action-gh-release@v2
         with:
+          # tag 不存在时（release-version.txt 方式）在本次提交上创建
+          tag_name: v${{ needs.meta.outputs.ver }}
+          target_commitish: ${{ github.sha }}
+          name: Kagura ${{ needs.meta.outputs.ver }}
           files: out/*
           body_path: server/packaging/RELEASE_NOTES.md
-          prerelease: ${{ contains(github.ref, '-') }}
+          prerelease: ${{ contains(needs.meta.outputs.ver, '-') }}
