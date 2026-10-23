@@ -226,6 +226,19 @@ function Misc({ cfg, dataDir, save }: { cfg: any; dataDir: string; save: (p: any
         </div>
         <Btn kind="primary" onClick={() => save({ runtime: rt })}>保存</Btn>
       </Card>
+      <Card title="重启服务端">
+        <p class="muted">改了端口、百度 Key、大脑类型这类要重启才生效的设置后用。也可以在飞书 / QQ 里给她发 <code>/restart</code>（只有主人能用），发 <code>/help</code> 看全部命令。</p>
+        <Btn kind="danger" onClick={async () => {
+          if (!window.confirm("现在重启服务端？正在进行的对话会中断，大约 10 秒后恢复。")) return;
+          await api("/restart", { body: {} });
+          toast("正在重启…");
+          for (let i = 0; i < 40; i++) {
+            await new Promise((r) => setTimeout(r, 1000));
+            try { const r = await fetch("/health"); if (r.ok && i > 2) { toast("重启好了"); location.reload(); return; } } catch { /* 还没起来 */ }
+          }
+          toast("还没连上，过一会儿刷新页面看看", "err");
+        }}>重启服务端</Btn>
+      </Card>
       <Card title="从 OpenClaw 导入"><p class="muted">在「定时任务」页点「从 OpenClaw 导入」：人设、记忆、定时任务一起搬过来。</p><Btn onClick={() => go("jobs")}>去导入</Btn></Card>
     </>
   );

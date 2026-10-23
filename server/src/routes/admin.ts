@@ -15,6 +15,7 @@ import { Roles } from "../roles.ts";
 import { parseToolsConfig } from "../config.ts";
 import { GLOBAL_OWNER } from "../agent/skills.ts";
 import { registerAdminChat } from "./admin-chat.ts";
+import { restartSelf } from "../util/restart.ts";
 import { unzip } from "../util/zip.ts";
 import { resolveInside } from "../agent/paths.ts";
 import { applyProxy, activeProxy } from "../util/proxy.ts";
@@ -328,6 +329,11 @@ export function registerAdmin(r: Router, ctx: Ctx, sys: AgentSystem) {
     if ("prompt_budgets" in patch) { applyBudgets(next.prompt_budgets); hot.push("prompt_budgets"); }
     const restart = ["port", "mqtt_port", "stream_port", "disc_port", "baidu", "api_token", "stream_token", "brain", "runtime", "openclaw"].filter((k) => k in patch);
     return json({ status: "ok", applied: hot, restart_needed: restart });
+  });
+  /** 重启服务端（设置页按钮；IM 里是 /restart） */
+  post("/api/admin/restart", () => {
+    setTimeout(() => restartSelf(ctx.cfg.dataDir, { account: "", chatId: "", from: "" }), 200);
+    return json({ status: "restarting" });
   });
   /** 试一下联网搜索（按当前设置） */
   post("/api/admin/tools/test-search", async (req) => {

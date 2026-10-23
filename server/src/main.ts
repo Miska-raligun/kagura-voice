@@ -26,6 +26,7 @@ import path from "node:path";
 import { execFile, execFileSync } from "node:child_process";
 import { isWsl, toLinuxPath } from "./util/platform.ts";
 import { applyProxy } from "./util/proxy.ts";
+import { waitForOldProcess, takeRestartNotice } from "./util/restart.ts";
 import { preflight, realIO, closeAsk, pauseBeforeExit, type PortNeed } from "./startup/preflight.ts";
 
 // Node 22 下 node:sqlite 等会打实验特性警告，对用户只是噪声
@@ -33,6 +34,7 @@ process.removeAllListeners("warning");
 
 async function main() {
   const cfg = loadConfig();
+  await waitForOldProcess();      // IM 里 /restart 拉起的新进程：等旧进程把端口放出来
 
   // 端口体检：被占了就说清楚是谁、问用户怎么处理（以前是报一行错就退出，Windows 窗口一闪就关）
   const needs: PortNeed[] = [
@@ -88,7 +90,11 @@ async function main() {
   await listenOrExplain("UDP 发现", cfg.discPort, () => startDiscovery(cfg.discPort));
   ctx.reminders.start((text, dev) => ctx.sendPush(text, dev));
   sys.scheduler?.start(cfg.schedulerTick);
-  sys.channels.startAll().catch((e) => console.log(`[channel] ⚠️  ${e.message}`));
+  sys.channels.startAll().then(async () => {
+    // /restart 之前在哪个聊天里发的，回来在那说一声
+    const n = takeRestartNotice(cfg.dataDir);
+    if (n?.from) await sys.channels.deliver(`${n.from}:${n.account}:${n.chatId}`, `✅ 重启好了（${VERSION}，用时 ${Math.round(Date.now() / 1000 - n.at)} 秒）`);
+  }).catch((e) => console.log(`[channel] ⚠️  ${e.message}`));
   ctx.schedules.start((s) => ctx.runScheduledCapture(s));
   setInterval(() => ctx.cleanupPhotoResults(), 300_000).unref();
   setInterval(() => ctx.hb.watch(), 30_000).unref();

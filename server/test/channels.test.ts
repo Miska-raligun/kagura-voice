@@ -264,3 +264,58 @@ describe("渠道路由", () => {
     expect(store.account("fs")!.credentials).toEqual({ app_id: "b", app_secret: "s" });
   });
 });
+
+describe("IM 斜杠命令", () => {
+  const setup = async () => {
+    const env = setupMgr();
+    env.store.allow("fs", "ou_owner", "主人", true);
+    env.store.allow("fs", "ou_friend", "朋友");
+    const restarts: any[] = [];
+    env.mgr.commands = {
+      version: "9.9.9", scheduler: () => null, devices: () => ["cores3 在线，电量 80%"],
+      channelStatus: () => env.mgr.status(), restart: (n) => restarts.push(n),
+    };
+    await env.mgr.startAll();
+    const say = async (text: string, sender = "ou_owner", chatId = "oc_owner") => {
+      env.ad().sent.length = 0;
+      await env.mgr.handle(msg({ text, sender, chatId }));
+      return env.ad().sent.map((s) => s.text).join("\n");
+    };
+    return { ...env, restarts, say };
+  };
+
+  it("主人：/help /status /model（列表、序号切换、默认）/agent /restart 都不经过模型", async () => {
+    const { say, fake, reg, models, restarts, store } = await setup();
+    expect(await say("/help")).toContain("/restart");
+    const st = await say("/status");
+    expect(st).toContain("Kagura 9.9.9");
+    expect(st).toContain("cores3 在线");
+    expect(st).toContain("神乐（main）");
+    // 再配一个模型，切过去
+    models.enableFake({ nextStep: () => "x", logCall: () => {} } as any);
+    const list = await say("/model");
+    expect(list).toContain("1. ");
+    expect(await say("/model 不存在/模型")).toContain("找不到模型");
+    expect(await say("/model 1")).toContain("之后用");
+    expect(reg.get("main")!.model).toBe(models.list()[0].ref);
+    expect(await say("/model default")).toContain("全局默认");
+    expect(reg.get("main")!.model).toBe("");
+    expect(await say("/agent mio")).toContain("小澪");
+    expect(store.binding("fs", "oc_owner")?.agent).toBe("mio");
+    expect(await say("/restart")).toContain("正在重启");
+    expect(restarts).toEqual([{ account: "fs", chatId: "oc_owner" }]);
+    expect(fake.calls.length).toBe(0);
+  });
+
+  it("非主人只能 /help /reset；管理命令被拒；不认识的 /xxx 照常交给 agent", async () => {
+    const { say, fake, restarts, reg } = await setup();
+    expect(await say("/help", "ou_friend", "oc_f")).not.toContain("/restart");
+    expect(await say("/restart", "ou_friend", "oc_f")).toContain("只有主人");
+    expect(await say("/model 1", "ou_friend", "oc_f")).toContain("只有主人");
+    expect(restarts).toEqual([]);
+    expect(reg.get("main")!.model).toBe("");
+    expect(await say("/reset", "ou_friend", "oc_f")).toContain("重新开始");
+    fake.queue.push("这是 agent 的回答");
+    expect(await say("/天气 杭州", "ou_friend", "oc_f")).toContain("agent 的回答");
+  });
+});

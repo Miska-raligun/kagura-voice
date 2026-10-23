@@ -38,3 +38,15 @@ describe("会话标题与删除", () => {
     expect(st.remove("main:webchat:x1")).toBe(false);
   });
 });
+
+describe("重启后说一声", () => {
+  it("留的通知取一次就删；太久以前的不说", async () => {
+    const { takeRestartNotice } = await import("../src/util/restart.ts");
+    const dir = tmpdir("rs");
+    fs.writeFileSync(path.join(dir, "restart-notice.json"), JSON.stringify({ account: "fs", chatId: "c1", from: "feishu", at: Date.now() / 1000 - 5 }));
+    expect(takeRestartNotice(dir)).toMatchObject({ account: "fs", chatId: "c1", from: "feishu" });
+    expect(takeRestartNotice(dir)).toBeNull();
+    fs.writeFileSync(path.join(dir, "restart-notice.json"), JSON.stringify({ account: "fs", chatId: "c1", from: "feishu", at: Date.now() / 1000 - 3600 }));
+    expect(takeRestartNotice(dir)).toBeNull();
+  });
+});

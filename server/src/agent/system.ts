@@ -1,5 +1,7 @@
 // 内置 agent 系统的装配：注册表 + 模型 + 运行时 + 各工具模块。main.ts 只调这里。
 import { applyBudgets } from "./soul.ts";
+import { VERSION } from "../cli.ts";
+import { restartSelf } from "../util/restart.ts";
 import type { Config, Dirs } from "../config.ts";
 import type { Ctx } from "../ctx.ts";
 import { AgentRegistry } from "./registry.ts";
@@ -58,6 +60,20 @@ export function createAgentSystem(cfg: Config, dirs: Dirs, fake: FakeLlm | null)
 /** 依赖 Ctx 的部分（设备工具要推送、拍照；调度器要投递）在 Ctx 建好之后接上 */
 export function attachAgentSystem(sys: AgentSystem, ctx: Ctx) {
   const { runtime, registry } = sys;
+  // IM 斜杠命令（/status /model /restart …）要用到的东西
+  sys.channels.commands = {
+    version: VERSION,
+    scheduler: () => sys.scheduler,
+    devices: () => [...ctx.hb.devices.entries()].map(([id, rec]) => {
+      const ago = Date.now() / 1000 - rec.ts;
+      return `${id} ${ago < 200 ? "在线" : `离线 ${Math.round(ago / 60)} 分钟`}${rec.data.bat != null ? `，电量 ${rec.data.bat}%` : ""}`;
+    }),
+    channelStatus: () => sys.channels.status(),
+    restart: (n) => {
+      const kind = sys.channels.store.account(n.account)?.kind ?? "";
+      restartSelf(ctx.cfg.dataDir, { ...n, from: kind });
+    },
+  };
   const scheduler = new Scheduler(ctx.dirs.systemDb, runtime, registry, {
     async deliver(agentId, delivery, text) {
       if (delivery.startsWith("device:")) {

@@ -6,6 +6,7 @@ After=network-online.target
 
 [Service]
 ExecStart=/opt/kagura/kagura --no-browser
+# IM 里发 /restart 时服务端以退出码 75 退出，靠这条拉起来
 Restart=on-failure
 RestartSec=5
 

@@ -11,6 +11,7 @@ import type { AccountConfig, ChannelAdapter, ChannelKind, InboundMessage } from 
 import { FeishuAdapter } from "./feishu.ts";
 import { QQAdapter } from "./qq.ts";
 import { OneBotAdapter } from "./onebot.ts";
+import { runCommand, type CommandDeps } from "./commands.ts";
 
 export type AdapterFactory = (a: AccountConfig) => ChannelAdapter;
 
@@ -27,6 +28,9 @@ export class ChannelManager {
   private errors = new Map<string, string>();
   private daily = new Map<string, { day: string; n: number; warned: boolean }>();
   private reminded = new Map<string, number>();
+
+  /** 斜杠命令的依赖，attachAgentSystem 里接上（没接就只认 /reset /new） */
+  commands: Omit<CommandDeps, "rt" | "agents" | "store"> | null = null;
 
   constructor(public store: ChannelStore, private rt: Runtime, private agents: AgentRegistry, private factory: AdapterFactory = defaultFactory) {}
 
@@ -109,10 +113,17 @@ export class ChannelManager {
     const agentId = [this.store.binding(a.id, m.chatId)?.agent, a.agent].find((x) => x && this.agents.get(x)) ?? this.agents.default().id;
     const ownerMain = a.owner_main && m.chatType === "dm" && !!allowed?.owner;
     const sessionKey = ownerMain ? `${agentId}:main` : `${agentId}:${m.kind}:${m.chatId}`;
-    if (/^\/(reset|new)\s*$/i.test(m.text)) {
-      this.rt.store(agentId).reset(sessionKey);
-      await this.reply(m, "好，我们重新开始吧。");
-      return;
+    if (m.text.trim().startsWith("/")) {
+      const owner = !!allowed?.owner;
+      const deps: CommandDeps = { rt: this.rt, agents: this.agents, store: this.store, version: "", scheduler: () => null, devices: () => [], channelStatus: () => this.status(), restart: () => {}, ...(this.commands ?? {}) };
+      try {
+        const out = await runCommand(m.text, { m, owner, agentId, sessionKey }, deps);
+        if (out !== null) {
+          console.log(`[channel] ⌨️  ${a.kind}/${a.id} ${m.sender}${owner ? "（主人）" : ""}: ${m.text.trim().slice(0, 60)}`);
+          await this.reply(m, out);
+          return;
+        }
+      } catch (e: any) { await this.reply(m, `命令出错：${e.message}`); return; }
     }
     if (!this.quota(a)) {
       const c = this.daily.get(a.id)!;
