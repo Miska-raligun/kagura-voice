@@ -1,9 +1,7 @@
-"""网络服务：MQTT 推送/命令、BLE 在家感知、UDP 服务端发现。
-
-MQTT 回调只入队，耗时操作（下载播放/拍照上传）在主循环
-process_mqtt_queue() 里消费——否则长播放会阻塞心跳导致断连。
+"""Kagura Voice 设备端 —— 网络服务：MQTT 推送/命令、BLE 在家感知、UDP 服务端发现。
 """
 
+from M5 import *
 import time
 import ujson
 import usocket
@@ -12,19 +10,44 @@ import requests as urequests
 import cfg
 import hw
 import ui
-import audio
-import clock
+import snd
+import cam
+import diag
+import ota
 
-# ── BLE 状态 ──────────────────────────────────────────────────
+# ── 回调注入：打断 netsvc ↔ stream 的环 ───────────────────────
+# MQTT 收到 stream_start 要交给 stream 跑推流，而推流循环又要回来消费
+# MQTT 命令队列。由 app.setup() 注入：
+#     netsvc.set_stream_runner(stream._run_stream_cmd)
+_stream_runner = None
+
+
+def set_stream_runner(fn):
+    global _stream_runner
+    _stream_runner = fn
+
+_mqtt_last_ping  = 0         # 上次 MQTT ping 时间
+
+
 _ble = None
-_ble_phone_found = False    # 本次扫描是否找到目标手机
-_ble_last_scan   = 0        # 上次扫描时间
-_ble_last_seen   = 0        # 上次检测到手机的时间
-_ble_seen_count  = 0        # 连续检测到的次数
-_user_home       = False    # 当前在家状态
-_ble_status_sent = None     # 上次发送给服务端的状态（避免重复发送）
 
-_mqtt_last_ping = 0         # 上次 MQTT ping 时间
+
+_ble_phone_found  = False    # 本次扫描是否找到目标手机
+
+
+_ble_last_scan    = 0        # 上次扫描时间
+
+
+_ble_last_seen    = 0        # 上次检测到手机的时间
+
+
+_ble_seen_count   = 0        # 连续检测到的次数
+
+
+_user_home        = False    # 当前在家状态
+
+
+_ble_status_sent  = None     # 上次发送给服务端的状态（避免重复发送）
 
 
 # ── MQTT 推送订阅 ─────────────────────────────────────────────
@@ -33,18 +56,29 @@ _mqtt_last_ping = 0         # 上次 MQTT ping 时间
 # 好处：长任务不再阻塞 MQTT 心跳（之前 30s+ 播放会触发 keepalive 超时断连）。
 
 _mqtt = None
+
+
 _MQTT_TOPICS = []
+
+
 _pending_push = []   # 待播放的 push 音频 URL
+
+
 _pending_cmd  = []   # 待执行的远程命令 dict
+
+
+_role_redraw  = False  # MQTT 换了角色、还没重画
 
 
 def _mqtt_callback(topic, msg):
     """MQTT 消息回调：只入队，不做任何耗时操作。"""
+    global _role_redraw
     topic_str = topic.decode("utf-8") if isinstance(topic, bytes) else topic
 
     if "/push/" in topic_str:
-        if cfg.St.busy:
-            # 保留去重语义：对话期间 OpenClaw 触发的重复 push 直接丢弃
+        if cfg.St.busy and not cfg.St.streaming:
+            # 保留去重语义：对话期间 OpenClaw 触发的重复 push 直接丢弃。
+            # 直播期间不算"对话中"，照收——由推流循环负责播出来。
             print("push skipped: device busy")
             return
         try:
@@ -62,6 +96,12 @@ def _mqtt_callback(topic, msg):
         except Exception as e:
             print("[mqtt] cmd parse error:", e)
             return
+        if cmd.get("action") == "role":
+            # 就地换角色：只改一个变量、作废重绘缓存，不碰屏幕不碰网络，回调里做得起。
+            # 不入队——队列里 push 优先，网页切角色后紧跟的问候会先用旧图播出来
+            if ui.set_role(cmd.get("role", "")):
+                _role_redraw = True      # 空闲时由 process_mqtt_queue 重画（主循环不会自己画）
+            return
         _pending_cmd.append(cmd)
 
 
@@ -70,16 +110,43 @@ def _play_push(url):
     if cfg.St.sleeping:
         ui.wake_up()
     cfg.St.last_activity = time.time()
+    diag.dbg("push recv")
     ui.draw_state("broadcast")
     try:
         resp = urequests.get(cfg.SERVER_BASE + url, timeout=cfg.REQUEST_TIMEOUT_SHORT)
         if resp.status_code == 200:
-            audio.play_wav(resp.content)
-        resp.close()
+            _play_streamed(resp)
+            resp.close()
+        else:
+            resp.close()
     except OSError as e:
         print("push download err:", e)
     ui.draw_state("idle")
     hw._set_led(0, 0, 0)
+
+
+def _play_streamed(resp):
+    """边下边播一条 push 音频。长音频前后各留一条持久化面包屑。
+
+    这两条是给下一次「播到一半黑屏」准备的证据：重启后 crash.log 里
+    只有 `play` 没有 `played` = 死在播放中。大小按 Content-Length 判断
+    （边下边播时没有"下载完的字节数"可看）；只给大音频写 flash，
+    短播报不值得为它磨损闪存。
+    """
+    try:
+        size = int(resp.headers.get("Content-Length", 0) or 0)
+    except (ValueError, TypeError, AttributeError):
+        size = 0
+    big = size >= cfg.PLAY_BIG_BYTES
+    if big:
+        diag.dbg("play {}KB".format(size >> 10))
+        diag._persist_dbg("play-big")
+    n = snd.stream_play(resp)
+    diag.dbg(snd.stream_summary())
+    if n <= 0:
+        diag.dbg("push play failed")
+    if big:
+        diag._persist_dbg("play-big-done")
 
 
 def _run_capture_cmd(cmd):
@@ -90,23 +157,9 @@ def _run_capture_cmd(cmd):
     cfg.St.busy = True
     try:
         ui.draw_state("camera")
-        image_b64 = hw.capture_photo()
+        image_b64 = cam.capture_photo()
         ui.draw_state("processing")
-        payload = ujson.dumps({
-            "request_id": cmd.get("request_id", ""),
-            "image": image_b64 or "",
-            "device_id": cfg.DEVICE_ID,
-        })
-        try:
-            resp = urequests.post(
-                cfg.UPLOAD_URL,
-                data=payload.encode("utf-8"),
-                headers={"Content-Type": "application/json"},
-                timeout=cfg.REQUEST_TIMEOUT_UPLOAD,
-            )
-            resp.close()
-        except OSError as e:
-            print("upload err:", e)
+        cam._upload_photo(cmd.get("request_id", ""), image_b64)
     finally:
         ui.draw_state("idle")
         cfg.St.busy = False
@@ -114,14 +167,29 @@ def _run_capture_cmd(cmd):
 
 def process_mqtt_queue():
     """主循环调用：每 tick 最多消费一项，空闲时才执行。"""
+    global _role_redraw
     if cfg.St.busy:
         return
+    if _role_redraw:
+        _role_redraw = False
+        if not _pending_push:            # 有 push 的话它自己会画（broadcast 态）
+            ui.draw_state("idle")
     if _pending_push:
         _play_push(_pending_push.pop(0))
     elif _pending_cmd:
         cmd = _pending_cmd.pop(0)
-        if cmd.get("action") == "capture":
+        action = cmd.get("action")
+        if action == "capture":
             _run_capture_cmd(cmd)
+        elif action == "stream_start":
+            if _stream_runner:
+                _stream_runner(cmd)
+        elif action == "sync":
+            ota.run_sync(cmd.get("scope", "res"))   # 管理界面传了图 / 点了「更新设备代码」
+
+
+        # stream_stop：不在直播中收到就没有意义，丢弃即可
+        #（直播中的续期/停止由 _stream_drain_cmds 自己消费）
 
 
 def _reconnect_mqtt():
@@ -131,8 +199,10 @@ def _reconnect_mqtt():
         _mqtt.connect(clean_session=False)
         for t in _MQTT_TOPICS:
             _mqtt.subscribe(t, 1)
-        print("MQTT reconnected")
+        diag._mqtt_ok = True
+        diag.dbg("mqtt reconnected")
     except Exception as e:
+        diag._mqtt_ok = False
         print("MQTT reconnect failed:", e)
 
 
@@ -151,15 +221,31 @@ def init_mqtt():
         for t in _MQTT_TOPICS:
             client.subscribe(t, 1)
         _mqtt = client
+        diag._mqtt_ok = True
         print("MQTT connected:", cfg.MQTT_BROKER)
     except Exception as e:
         print("MQTT init error:", e)
         _mqtt = None
 
 
+_mqtt_last_reconnect = 0     # 重连退避：WiFi 长时间断开时避免每 20ms 重连一次打爆 socket 池
+
+
+_mqtt_init_last = 0
+
+
 def mqtt_check():
-    """主循环调用：非阻塞检查 MQTT 消息，定期 ping 保活，断连时自动重连。"""
-    global _mqtt_last_ping
+    """主循环调用：非阻塞检查 MQTT 消息，定期 ping 保活，断连时自动重连（5s 退避）。"""
+    global _mqtt_last_ping, _mqtt_last_reconnect, _mqtt_init_last
+    if _mqtt is None:
+        # 开机时网络未就绪导致 init 失败的话，之前永远不会再试 → 补 60s 重试
+        now = time.time()
+        if diag._wifi_ok() and now - _mqtt_init_last >= 60:
+            _mqtt_init_last = now
+            init_mqtt()
+            if _mqtt:
+                diag.dbg("mqtt late-init ok")
+        return
     if _mqtt:
         try:
             _mqtt.check_msg()
@@ -169,9 +255,47 @@ def mqtt_check():
                 _mqtt.ping()
                 _mqtt_last_ping = now
         except OSError as e:
-            print("MQTT disconnected:", e)
-            _reconnect_mqtt()
+            # LRN 2026-08-25：这里原来写的是 `global _mqtt_ok` + `if _mqtt_ok`，
+            # 但本模块根本没有这个名字（状态在 diag 里，模块头注释也这么写的）。
+            # 于是**任何一次 MQTT 掉线都被翻译成 NameError 逃出 mqtt_check**，
+            # 主循环连吃 10 次 → loop-error-storm → machine.reset()。
+            # 症状就是「毫无征兆黑屏重启」，crash_reports 里 4 份日志全是它。
+            # 别再引入模块级 _mqtt_ok：一份状态只能有一个家。
+            if diag._mqtt_ok:
+                diag._mqtt_ok = False
+                diag.dbg("mqtt disconnected: {}".format(e))
+            now = time.time()
+            if now - _mqtt_last_reconnect >= 5:
+                _mqtt_last_reconnect = now
+                _reconnect_mqtt()
+                _mqtt_last_ping = time.time()
+
+
+def fetch_role():
+    """开机问服务端当前角色（角色状态落在服务端，设备重启不丢）。失败就用默认图。"""
+    try:
+        resp = urequests.get(cfg.SERVER_BASE + "/role?device_id=" + cfg.DEVICE_ID,
+                             timeout=cfg.REQUEST_TIMEOUT_SHORT)
+        if resp.status_code == 200:
+            info = resp.json()
+            ui.role_count = len(info.get("roles", []))
+            ui.set_role(info.get("role", ""))
+        resp.close()
+    except Exception as e:
+        print("fetch role err:", e)
+
+
+def mqtt_ping():
+    """立刻补一次 MQTT ping。长阻塞（/chat 最多等 REQUEST_TIMEOUT_CHAT）前调用：
+    阻塞期间主循环不转、发不了保活包，先把计时清零，免得等回复时被 broker 踢掉。"""
+    global _mqtt_last_ping
+    if _mqtt:
+        try:
+            _mqtt.ping()
             _mqtt_last_ping = time.time()
+        except OSError:
+            pass          # 掉线交给 mqtt_check 的重连逻辑，这里不抢
+
 
 # ── BLE 扫描 ─────────────────────────────────────────────────
 
@@ -234,7 +358,7 @@ def init_ble():
     """初始化 BLE 扫描器（仅当配置了手机名称时启用）。"""
     global _ble
     if not cfg.BLE_PHONE_NAME:
-        print("BLE: disabled (cfg.BLE_PHONE_NAME is empty)")
+        print("BLE: disabled (BLE_PHONE_NAME is empty)")
         return
     try:
         import bluetooth
@@ -311,13 +435,13 @@ def _notify_presence(status):
     except Exception as e:
         print("BLE presence notify error:", e)
 
-# ── UDP 自动发现服务端 ────────────────────────────────────────
 
 def discover_server():
     """
-    广播 KAGURA_DISCOVER，从回包源地址更新 cfg.SERVER_BASE 等全局变量。
+    广播 KAGURA_DISCOVER，从回包源地址更新 SERVER_BASE 等全局变量。
     失败则保留硬编码 fallback 地址（最多等待 6 秒）。
     """
+    # 这五个是 cfg 的可变量，必须 cfg.X = ... 才能让其他模块看到
 
     ui.draw_state("discovering")
 
@@ -328,12 +452,12 @@ def discover_server():
         except Exception:
             pass   # 部分固件无此常量，ESP32 lwIP 默认允许广播
 
-        sock.settimeout(cfg.DISC_TIMEOUT)
+        sock.settimeout(cfg._DISC_TIMEOUT)
 
-        for attempt in range(1, cfg.DISC_RETRIES + 1):
+        for attempt in range(1, cfg._DISC_RETRIES + 1):
             print("discovery attempt", attempt)
             try:
-                sock.sendto(cfg.DISC_MSG, ("255.255.255.255", cfg.DISC_PORT))
+                sock.sendto(cfg._DISC_MSG, ("255.255.255.255", cfg._DISC_PORT))
                 data, addr = sock.recvfrom(32)
                 if data.strip() == b"KAGURA_HERE":
                     ip = addr[0]

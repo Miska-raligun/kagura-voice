@@ -169,7 +169,59 @@ if dangling:
 else:
     print("  \u2713 所有 mod.attr 引用都命中")
 
-print("\n=== 5. 函数完整性（对比单文件基线）===")
+print("\n=== 5. global 声明有主 ===")
+# `global X` 会让 binds_of 把 X 当成"已定义"，检查 1 就再也看不见它了。
+# netsvc.mqtt_check 的 `global _mqtt_ok` 正是这么蒙混过关的：本模块从没有
+# 这个名字（状态在 diag 里），于是每次 MQTT 掉线都变成 NameError 逃出函数，
+# 主循环连吃 10 次直接 machine.reset()——表现为"毫无征兆黑屏重启"。
+# 判据：被 global 声明的名字，必须在模块级有赋值，或在某个同样声明了它
+# global 的函数里被赋值。两者都没有 = 只读一个不存在的全局。
+def _global_owners(tree):
+    mod_level = set()
+    for n in tree.body:
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            mod_level.add(n.name)
+        else:
+            for st in ast.walk(n):
+                if isinstance(st, ast.Name) and isinstance(st.ctx, ast.Store):
+                    mod_level.add(st.id)
+                elif isinstance(st, (ast.Import, ast.ImportFrom)):
+                    mod_level |= {(a.asname or a.name).split(".")[0] for a in st.names}
+    for st in ast.walk(tree):   # globals()["x"] = ... 也算赋值
+        if (isinstance(st, ast.Subscript) and isinstance(st.ctx, ast.Store)
+                and isinstance(st.value, ast.Call)
+                and isinstance(st.value.func, ast.Name)
+                and st.value.func.id == "globals"
+                and isinstance(st.slice, ast.Constant)):
+            mod_level.add(st.slice.value)
+    fns = [n for n in ast.walk(tree)
+           if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    owned = set()
+    for fn in fns:
+        decl = {nm for g in ast.walk(fn) if isinstance(g, ast.Global) for nm in g.names}
+        store = {st.id for st in ast.walk(fn)
+                 if isinstance(st, ast.Name) and isinstance(st.ctx, ast.Store)}
+        owned |= decl & store
+    return mod_level | owned, fns
+
+orphan = 0
+for m in mods:
+    t = ast.parse(open(os.path.join(SRC, m + ".py")).read())
+    have, fns = _global_owners(t)
+    for fn in fns:
+        for g in ast.walk(fn):
+            if isinstance(g, ast.Global):
+                for nm in g.names:
+                    if nm not in have:
+                        print("  ✗ %s:%d  %s() 里 `global %s` 无人赋值" % (
+                            m, g.lineno, fn.name, nm))
+                        orphan += 1
+if orphan:
+    fail += 1
+else:
+    print("  ✓ 所有 global 声明都有对应的赋值")
+
+print("\n=== 6. 函数完整性（对比单文件基线）===")
 if legacy_fns:
     new_fns = set()
     for m in mods:

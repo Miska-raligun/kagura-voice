@@ -40,5 +40,9 @@ def strip_markdown(text: str) -> str:
     text = re.sub(r"!\[[^\]]*\]\([^)]+\)", "", text)
     text = re.sub(r"^\s*[-*+]\s+", "", text, flags=re.MULTILINE)
     text = re.sub(r"^\s*\d+\.\s+", "", text, flags=re.MULTILINE)
+    # 分隔线整行删除（=== / --- / ___ / ～～～ 等），否则 TTS 会念"等于等于…"
+    text = re.sub(r"^[\s=\-_*~─═—×#]{3,}$", "", text, flags=re.MULTILINE)
+    # 行内残留的连续符号串（如 "====" 尾巴）压成一个空格
+    text = re.sub(r"[=─═]{2,}", " ", text)
     text = re.sub(r"\n{2,}", "\n", text)
     return text.strip()

@@ -44,27 +44,39 @@ for n in ("Lcd", "Mic", "Rgb", "Speaker"):
 _M5.__all__ = ["Widgets", "Lcd", "Mic", "Rgb", "Speaker"]
 # 注意：不给 M5.Rtc，模拟 CoreS3 SE 无 RTC 硬件的分支
 
+# MicroPython 的 time 比 CPython 多几个 ticks_* ——diag 在模块级就调
+# time.ticks_ms() 记开机时刻，不补上会 import 不起来。直接给真 time 模块
+# 挂属性，比整个替换 sys.modules["time"] 安全（socket/json 等已持有引用）。
+import time as _time
+_time.ticks_ms   = lambda: int(_time.monotonic() * 1000)
+_time.ticks_diff = lambda a, b: a - b
+_time.ticks_add  = lambda a, b: a + b
+_time.sleep_ms   = lambda ms: _time.sleep(ms / 1000.0)
+
 stub("hardware")
 stub("network", WLAN=lambda *a: _Any("WLAN"), STA_IF=1)
 stub("machine", WDT=lambda **kw: _Any("WDT"), reset=lambda: None)
 stub("camera", init=lambda: None, capture=lambda: b"\x00" * 100)
 
 import binascii, json, socket, os as _os, struct as _struct
-stub("ubinascii", b2a_base64=binascii.b2a_base64, a2b_base64=binascii.a2b_base64)
+stub("ubinascii", b2a_base64=binascii.b2a_base64, a2b_base64=binascii.a2b_base64,
+     hexlify=binascii.hexlify)
 stub("ujson", loads=json.loads, dumps=json.dumps, load=json.load, dump=json.dump)
 stub("usocket", socket=socket.socket, AF_INET=socket.AF_INET,
      SOCK_DGRAM=socket.SOCK_DGRAM, SOL_SOCKET=socket.SOL_SOCKET,
      SO_BROADCAST=socket.SO_BROADCAST)
-stub("uos", mkdir=lambda p: None, remove=lambda p: None, rename=lambda a, b: None)
+stub("uos", mkdir=lambda p: None, remove=_os.remove, rename=lambda a, b: None,
+     stat=_os.stat)
 stub("requests", get=lambda *a, **kw: _Any("resp"), post=lambda *a, **kw: _Any("resp"))
 
 print("=== 按依赖顺序 import ===")
-order = ["cfg", "hw", "clock", "ui", "wifisetup", "audio", "netsvc", "chat", "app"]
+order = ["cfg", "hw", "clock", "ui", "wifisetup", "snd", "cam",
+         "feel", "diag", "ota", "netsvc", "stream", "chat", "app"]
 for name in order:
     __import__(name)
     print("  ✓ import %s" % name)
 
-import cfg, hw, ui, audio, clock
+import cfg, hw, ui, snd, clock
 
 print("\n=== 模块级代码执行结果抽查 ===")
 print("  cfg.res('img_bg.jpg')      =", cfg.res("img_bg.jpg"))
@@ -92,16 +104,555 @@ hdr = hw.make_wav_header(1000)
 assert len(hdr) == 44 and hdr[:4] == b'RIFF' and hdr[8:12] == b'WAVE'
 print("  hw.make_wav_header(1000)   = 44 字节 RIFF/WAVE ✓")
 
-# 包络（audio._wav_envelope 依赖 44 字节头约定）
+# 包络（snd._wav_envelope 依赖 44 字节头约定）
 pcm = bytearray()
 for i in range(16000):
     amp = 12000 if i < 8000 else 1200
     pcm += _struct.pack('<h', int(amp * math.sin(2 * math.pi * 440 * i / 16000)))
-env = audio._wav_envelope(b'R' * 44 + bytes(pcm))
-print("  audio._wav_envelope 桶数    =", len(env), "响段均值 %.2f 轻段均值 %.2f"
+env = snd._wav_envelope(b'R' * 44 + bytes(pcm))
+print("  snd._wav_envelope 桶数      =", len(env), "响段均值 %.2f 轻段均值 %.2f"
       % (sum(env[:5]) / 5, sum(env[-5:]) / 5))
 assert all(0.0 <= v <= 1.0 for v in env)
 assert sum(env[:5]) / 5 > sum(env[-5:]) / 5 * 2
+
+# 落盘：分块写 + 短写（文件系统满）必须被发现，不能当成功
+class _FakeFile:
+    """write 只肯写 limit 字节的文件——模拟 flash 写满时的短写。"""
+    def __init__(self, limit=None):
+        self.data = bytearray()
+        self.limit = limit
+    def write(self, b):
+        room = len(b) if self.limit is None else max(0, self.limit - len(self.data))
+        n = min(len(b), room)
+        self.data += bytes(b[:n])
+        return n
+
+payload = bytes(range(256)) * 200        # 51200 字节，跨多个 PLAY_CHUNK
+f = _FakeFile()
+assert snd._write_chunked(f, payload) == len(payload) and f.data == payload
+short = _FakeFile(limit=10000)
+assert snd._write_chunked(short, payload) == 10000, "短写必须如实返回已写字节数"
+print("  snd._write_chunked         = 全写 %d ✓ / 写满时返回 %d（不静默成功）✓"
+      % (len(payload), 10000))
+
+class _FakeRaw:
+    """按块吐数据的 socket 桩：readinto 到 EOF 返回 0。"""
+    def __init__(self, data, step=1500):
+        self.data, self.step, self.off = data, step, 0
+    def readinto(self, buf):
+        n = min(len(buf), self.step, len(self.data) - self.off)
+        buf[:n] = self.data[self.off:self.off + n]
+        self.off += n
+        return n
+
+class _FakeResp:
+    def __init__(self, data, raw=True):
+        self.raw = _FakeRaw(data) if raw else None
+        self.content = data
+        self.headers = {"Content-Length": str(len(data))}
+
+_tmp = os.path.join(os.path.dirname(__file__), "..", "device", "_sim_play.wav")
+assert snd.save_stream(_FakeResp(payload), _tmp) == len(payload)
+assert open(_tmp, "rb").read() == payload, "分块搬运不能丢字节/错位"
+assert snd.save_stream(_FakeResp(payload, raw=False), _tmp) == len(payload), \
+    "固件不给 raw 时要能退回 resp.content"
+print("  snd.save_stream            = 分块落盘字节一致 ✓ / 无 raw 时回退 ✓")
+
+# 切段：超长音频才切，每段自带正确的 WAV 头，拼回去要和原音频逐字节相同
+_seg_max, _seg_bytes, _fade = cfg.PLAY_SEG_MAX, cfg.PLAY_SEG_BYTES, cfg.PLAY_FADE_BYTES
+cfg.PLAY_SEG_MAX, cfg.PLAY_SEG_BYTES, cfg.PLAY_FADE_BYTES = 8000, 4000, 0
+body = bytes(bytearray((i * 7) % 256 for i in range(10000)))   # 10000 = 2 整段 + 尾巴
+src = hw.make_wav_header(len(body)) + body
+assert snd.save_stream(_FakeResp(src), _tmp) == len(body), "返回值应是音频字节数（不含头）"
+assert len(snd._segs) == 3, "10000/4000 应切成 3 段"
+rebuilt = b""
+for _p, _n in snd._segs:
+    raw_seg = open(_p, "rb").read()
+    assert raw_seg[:44] == hw.make_wav_header(_n), "每段必须自带回填好的 WAV 头"
+    assert len(raw_seg) - 44 == _n
+    rebuilt += raw_seg[44:]
+assert rebuilt == body, "切段拼回去必须与原音频逐字节相同"
+print("  snd.save_stream 切段        = %d 段 %s ✓ 拼回逐字节相同 ✓"
+      % (len(snd._segs), [n for _p, n in snd._segs]))
+
+# 换一条短音频：不切段，且上一条留下的分段文件要被删掉
+_stale = [p for p, _n in snd._segs[1:]]
+assert snd.save_stream(_FakeResp(src[:2000]), _tmp) == 2000
+assert len(snd._segs) == 1 and snd._segs[0][0] == _tmp, "短音频必须一段到底（零缝隙）"
+assert not any(os.path.exists(p) for p in _stale), "上一条的分段文件必须清掉，否则占满 flash"
+print("  短音频                      = 不切段 ✓ 旧分段文件已清理 ✓")
+# 淡入淡出：接缝两头必须被拉到零，否则波形硬台阶就是那声"咔嚓"
+cfg.PLAY_FADE_BYTES = 160
+FLAT = 10000
+flat_body = _struct.pack('<h', FLAT) * 5000        # 恒定幅度，斜坡一眼可见
+assert snd.save_stream(_FakeResp(hw.make_wav_header(len(flat_body)) + flat_body),
+                       _tmp) == len(flat_body)
+assert len(snd._segs) == 3
+half = cfg.PLAY_FADE_BYTES // 2
+for si, (_p, _n) in enumerate(snd._segs):
+    body_seg = open(_p, "rb").read()[44:]
+    head = [_struct.unpack_from('<h', body_seg, 2 * i)[0] for i in range(half)]
+    assert head == [FLAT * i // half for i in range(half)], "段首必须是从 0 起的斜坡"
+    mid = _struct.unpack_from('<h', body_seg, 2 * half + 200)[0]
+    assert mid == FLAT, "斜坡以外的采样一个都不许动"
+    if si < len(snd._segs) - 1:       # 末段的结尾是音频真正的结尾，不淡出
+        tail = [_struct.unpack_from('<h', body_seg, len(body_seg) - 2 * (half - i))[0]
+                for i in range(half)]
+        assert tail == [FLAT * (half - i) // half for i in range(half)], "段尾必须淡到零"
+print("  snd._fade_edges            = 段首淡入/段尾淡出各 %d 采样 ✓ 区外零改动 ✓" % half)
+
+cfg.PLAY_SEG_MAX, cfg.PLAY_SEG_BYTES, cfg.PLAY_FADE_BYTES = _seg_max, _seg_bytes, _fade
+for _p, _n in snd._segs:      # 分段文件全清，别在仓库里留垃圾
+    if os.path.exists(_p):
+        os.remove(_p)
+
+# 看门狗武装：固件拒绝配置值时必须回退，并且结果要能被远程看见
+_wdt_calls = []
+def _picky_wdt(timeout=0):
+    """模拟一个只接受 <=120s 的固件。"""
+    _wdt_calls.append(timeout)
+    if timeout > 120000:
+        raise ValueError("WDT timeout too long")
+    return _Any("WDT")
+sys.modules["machine"].WDT = _picky_wdt
+_saved_to = cfg.WATCHDOG_TIMEOUT_MS
+cfg.WATCHDOG_TIMEOUT_MS = 180000
+hw._wdt, hw._wdt_ms = None, 0
+hw._wdt_init()
+assert _wdt_calls == [180000, 120000], "配置值失败后必须回退到 120000"
+assert hw._wdt is not None and hw._wdt_ms == 120000, "回退成功要如实记进 _wdt_ms"
+print("  hw._wdt_init 回退           = 180000 被拒 → 120000 武装成功，_wdt_ms=%d ✓" % hw._wdt_ms)
+
+sys.modules["machine"].WDT = lambda timeout=0: (_ for _ in ()).throw(OSError("no wdt"))
+hw._wdt, hw._wdt_ms = None, 0
+hw._wdt_init()
+assert hw._wdt is None and hw._wdt_ms == 0, "全失败必须留下 _wdt_ms=0，别假装有看门狗"
+print("  hw._wdt_init 全失败         = _wdt_ms=0（心跳会报⚠️未武装）✓")
+cfg.WATCHDOG_TIMEOUT_MS = _saved_to
+sys.modules["machine"].WDT = lambda **kw: _Any("WDT")
+hw._wdt, hw._wdt_ms = None, 0
+
+# drain_touch：触摸永远不抬起时必须超时退出，不能把主循环拖死
+class _StuckTouch:
+    getCount = staticmethod(lambda: 1)
+_saved_touch = _M5.Touch
+_M5.Touch = _StuckTouch
+_t0 = _time.monotonic()
+assert hw.drain_touch(timeout_ms=200) is False, "卡住的触摸必须超时返回 False"
+assert _time.monotonic() - _t0 < 2, "超时要按 timeout_ms 生效，不能傻等"
+_M5.Touch = _saved_touch
+print("  hw.drain_touch 卡死         = 200ms 超时退出 ✓（旧版在这里永远转下去）")
+
+# 死人开关：主循环停摆时，喂狗点是唯一还在转的地方
+_reset_calls = []
+sys.modules["machine"].reset = lambda: _reset_calls.append(True)
+_dm_log = os.path.join(os.path.dirname(__file__), "..", "device", "_sim_crash.log")
+_saved_data, cfg.data = cfg.data, (lambda name: _dm_log)
+_saved_dm = (cfg.DEADMAN_SECS, cfg.DEADMAN_MIN_UPTIME_MS)
+cfg.DEADMAN_SECS, cfg.DEADMAN_MIN_UPTIME_MS = 60, 0
+cfg.St.stage = "play"
+cfg.St.last_ok_ms = _time.ticks_ms() - 120000      # 装作 2 分钟没联系上服务端
+hw._deadman_last = _time.ticks_ms() - 999999       # 绕过 10s 节流
+hw._wdt_feed()
+assert _reset_calls == [True], "失联超过阈值必须复位"
+assert "stuck at play" in open(_dm_log).read(), "复位前必须留下卡在哪一步的临终留言"
+os.remove(_dm_log)
+print("  hw._deadman_check 触发      = 失联超阈值 → 复位 + 留言\"stuck at play\" ✓")
+
+_reset_calls.clear()
+cfg.St.last_ok_ms = _time.ticks_ms()               # 刚联系过
+hw._deadman_last = _time.ticks_ms() - 999999
+hw._wdt_feed()
+cfg.DEADMAN_MIN_UPTIME_MS = 3600000                # 开机不久
+hw._deadman_armed = False                          # 闩锁复位，重新走门槛判断
+cfg.St.last_ok_ms = _time.ticks_ms() - 120000
+hw._deadman_last = _time.ticks_ms() - 999999
+hw._wdt_feed()
+assert _reset_calls == [], "刚联系过 / 开机不久都不许复位"
+print("  hw._deadman_check 不误伤    = 刚联系过 ✓ 开机 1 小时内 ✓")
+cfg.DEADMAN_SECS, cfg.DEADMAN_MIN_UPTIME_MS = _saved_dm
+cfg.data = _saved_data
+cfg.St.last_ok_ms = _time.ticks_ms()
+
+# ── 录音 VAD：去直流 / 字头预录 / 无缝双缓冲 / 开机校准 ─────────────
+print("\n=== 录音 VAD ===")
+_dc = bytearray()
+for i in range(1000):
+    _dc += _struct.pack('<h', 3000 + int(100 * math.sin(i / 3.0)))
+assert hw.rms(_dc) < 120, "直流偏置不能算进电平（旧版这里是 ~3000）"
+_sub, _whole = hw.rms_slices(_dc)
+assert abs(_whole - hw.rms(_dc)) <= 1 and max(_sub) < 120
+print("  hw.rms 去直流               = 偏置 3000 + 抖动 100 → %d ✓" % hw.rms(_dc))
+
+def _tone(amp, n, dc=500):
+    b = bytearray()
+    for i in range(n):
+        b += _struct.pack('<h', dc + int(amp * math.sin(i / 2.0)))
+    return bytes(b)
+
+class _FakeMic:
+    """按 record() 的调用顺序依次填入脚本里的块（硬件也是按排队顺序录的）。"""
+    def __init__(self, script):
+        self.script = list(script); self.calls = 0
+    def begin(self): pass
+    def end(self): pass
+    def record(self, buf, rate):
+        self.calls += 1
+        seg = self.script.pop(0) if self.script else _tone(0, len(buf) // 2)
+        buf[:] = seg[:len(buf)]
+    def isRecording(self):
+        return 1
+
+_saved_rec = (cfg.CHUNK_SEC, cfg.CHUNK_SIZE, cfg.SILENCE_THRESHOLD, snd.Mic, hw.Mic)
+cfg.CHUNK_SEC = 0.02
+cfg.CHUNK_SIZE = 640                    # 320 采样 = 20ms，测试跑得快
+cfg.SILENCE_THRESHOLD = 500
+_saved_touch = hw.check_touch
+hw.check_touch = lambda *a, **k: (None, None)
+_n = 320
+_script = ([_tone(9000, _n)] +          # 开麦爆音：必须丢掉，不能触发起说
+           [_tone(50, _n)] * 6 +        # 安静
+           [_tone(300, _n, dc=2500)] +  # 字头：低于门槛但该被预录带上
+           [_tone(4000, _n)] * 4 +      # 说话
+           [_tone(50, _n)] * 6)         # 句尾静音 → 收尾
+snd.Mic = hw.Mic = _FakeMic(_script)
+hw._mic_active = False
+snd._rec_buf = None                     # 按测试的块大小重新分配
+_wav = snd._record_audio()
+assert _wav is not None and bytes(_wav[:4]) == b"RIFF"
+assert _struct.unpack_from('<I', bytes(_wav[:44]), 40)[0] == len(_wav) - 44, "WAV 头长度要与数据一致"
+_pcm_rec = bytes(_wav[44:])
+_chunks = [_pcm_rec[i:i + 640] for i in range(0, len(_pcm_rec), 640)]
+_onset = _tone(300, _n, dc=2500)
+assert len(_chunks) == 2 + 4 + cfg.SILENCE_CHUNKS, len(_chunks)
+assert _chunks[1] == _onset, "起说前一块（字头）必须被预录带上"
+assert _chunks[2] == _tone(4000, _n), "块与块之间不能错位"
+assert _tone(9000, _n) not in _chunks, "开麦第一块（爆音）必须丢掉"
+assert snd.last_rec.get("late", 0) == 0 and snd.last_rec.get("tmo", 0) == 0
+print("  snd._record_audio           = 爆音丢弃 ✓ 字头预录 ✓ 共 %d 块 ✓" % len(_chunks))
+print("  " + snd.rec_summary())
+
+# 一直在说：录满缓冲上限就截断，标 CUT
+snd.Mic = hw.Mic = _FakeMic([_tone(50, _n)] + [_tone(4000, _n)] * 200)
+hw._mic_active = False
+_wav = snd._record_audio()
+assert len(_wav) == 44 + snd.rec_max_chunks * 640 and snd.last_rec.get("cut")
+assert "CUT" in snd.rec_summary()
+print("  snd._record_audio 说满上限  = %d 块截断，标 CUT ✓" % snd.rec_max_chunks)
+
+# 只响一下（拍桌子/关门）：开口后够响的只有 1 块 → 当噪声丢掉，不上传
+snd.Mic = hw.Mic = _FakeMic([_tone(50, _n), _tone(6000, _n)] + [_tone(50, _n)] * 8)
+hw._mic_active = False
+assert len(snd._record_audio()) == 0 and snd.last_rec.get("noise")
+print("  snd._record_audio 单响噪声  = 丢弃不上传 ✓  " + snd.rec_summary())
+
+# 触摸：连续模式下轻点 = 退出（旧版只认长按）；单次模式下轻点 = 说完了立刻发
+_taps = iter([None, None, None, 'short'])
+hw.check_touch = lambda *a, **k: (next(_taps, None), (0, 0))
+snd.Mic = hw.Mic = _FakeMic([_tone(50, _n)] + [_tone(4000, _n)] * 20)
+hw._mic_active = False
+cfg.St.continuous = True
+assert snd._record_audio() is None, "连续模式下轻点必须退出"
+cfg.St.continuous = False
+_taps = iter([None, None, None, None, 'short'])
+snd.Mic = hw.Mic = _FakeMic([_tone(50, _n)] + [_tone(4000, _n)] * 20)
+hw._mic_active = False
+_wav = snd._record_audio()
+assert _wav is not None and len(_wav) == 44 + 3 * 640 and snd.last_rec.get("tap")
+hw.check_touch = lambda *a, **k: (None, None)
+print("  snd._record_audio 轻点      = 连续模式退出 ✓ 单次模式立刻发送（3 块）✓")
+
+# 一直没人说话：等满 MAX_WAIT_CHUNKS 返回空
+snd.Mic = hw.Mic = _FakeMic([])
+hw._mic_active = False
+_saved_wait = cfg.MAX_WAIT_CHUNKS
+cfg.MAX_WAIT_CHUNKS = 5
+assert len(snd._record_audio()) == 0
+cfg.MAX_WAIT_CHUNKS = _saved_wait
+print("  snd._record_audio 无人说话  = 返回 [] ✓")
+
+# 校准：前 3 段（含开麦爆音）丢掉、取中位数，不再被一段尖峰带飞
+_cal = [_tone(20000, 1600)] * 3 + [_tone(80, 1600)] * 9 + [_tone(15000, 1600)]
+snd.Mic = hw.Mic = _FakeMic(_cal)
+hw._mic_active = False
+snd.calibrate_noise()
+assert cfg.NOISE_FLOOR < 120 and cfg.SILENCE_THRESHOLD == 200, (cfg.NOISE_FLOOR, cfg.SILENCE_THRESHOLD)
+assert cfg.WAKE_THRESHOLD > cfg.SILENCE_THRESHOLD
+print("  snd.calibrate_noise         = 底噪 %d 说话 %d 唤醒 %d（爆音/偶发尖峰不抬门槛）✓"
+      % (cfg.NOISE_FLOOR, cfg.SILENCE_THRESHOLD, cfg.WAKE_THRESHOLD))
+# 一直很吵也要封顶，免得门槛高到说话够不着
+snd.Mic = hw.Mic = _FakeMic([_tone(3000, 1600)] * 13)
+hw._mic_active = False
+snd.calibrate_noise()
+assert cfg.SILENCE_THRESHOLD == cfg.VAD_MAX_THRESHOLD
+print("  snd.calibrate_noise 很吵    = 门槛封顶 %d ✓" % cfg.SILENCE_THRESHOLD)
+
+(cfg.CHUNK_SEC, cfg.CHUNK_SIZE, cfg.SILENCE_THRESHOLD, snd.Mic, hw.Mic) = _saved_rec
+snd._rec_buf = None
+hw.check_touch = _saved_touch
+hw._mic_active = False
+
+# ── 边下边播：顺序完整、在播的缓冲不被覆盖、固件不支持时退回落盘 ─────
+print("\n=== 边下边播 ===")
+class _NoTouch:
+    @staticmethod
+    def getCount(): return 0
+
+class _QSpeaker:
+    """两槽队列的扬声器桩：挂进去的缓冲按时长依次"播完"。
+
+    播完那一刻才取缓冲内容，与挂入时的快照比对——真机上扬声器是播放时
+    才读缓冲的，挂进去之后被改写就会播出下一块的声音。
+    """
+    def __init__(self, depth_ok=True, silent=False):
+        self.q, self.out, self.overwritten = [], bytearray(), 0
+        self.depth_ok, self.silent = depth_ok, silent
+    def _tick(self):
+        now = _time.monotonic()
+        while self.q and self.q[0][2] <= now:
+            ref, snap, _ = self.q.pop(0)
+            if bytes(ref) != snap:
+                self.overwritten += 1
+            n = _struct.unpack_from('<I', snap, 40)[0]
+            self.out += snap[44:44 + n]
+            if self.q:   # 下一块从此刻开始播
+                r2, s2, _ = self.q[0]
+                self.q[0] = (r2, s2, now + self._dur(s2))
+    def _dur(self, snap):
+        return _struct.unpack_from('<I', snap, 40)[0] / 32000.0
+    def begin(self): pass
+    def end(self): pass
+    def stop(self): self.q = []
+    def setVolumePercentage(self, v): pass
+    def playWav(self, buf, repeat=1, ch=-1, stop=False):
+        if self.silent:
+            return False
+        self._tick()
+        assert len(self.q) < 2, "队列满了还往里塞：缓冲复用的前提被破坏"
+        snap = bytes(buf)
+        start = self.q[-1][2] if self.q else _time.monotonic()
+        self.q.append((buf, snap, start + self._dur(snap)))
+        return True
+    def isPlaying(self, ch=None):
+        self._tick()
+        if ch is not None and not self.depth_ok:
+            raise TypeError("no channel arg")
+        return len(self.q) if ch is not None else bool(self.q)
+    def playWavFile(self, p): pass
+
+_saved_play = (snd.Speaker, snd.M5.Touch, cfg.STREAM_BLOCK_BYTES, cfg.PLAY_PATH)
+snd.M5.Touch = _NoTouch
+cfg.STREAM_BLOCK_BYTES = 320            # 10ms 一块，测试跑得快
+_pcm = bytes((i * 7) & 0xff for i in range(320 * 23 + 100))   # 不整块的尾巴
+_wav = hw.make_wav_header(len(_pcm)) + _pcm
+for _depth_ok in (True, False):
+    snd.Speaker = _QSpeaker(depth_ok=_depth_ok)
+    snd._stream_bad = False
+    _n = snd.stream_play(_FakeResp(_wav))
+    assert _n == len(_wav), (_n, len(_wav))
+    assert bytes(snd.Speaker.out) == _pcm, "播出的 PCM 必须与源逐字节一致、顺序不乱"
+    assert snd.Speaker.overwritten == 0, "在播/排队中的缓冲被下一块覆盖了"
+    if _depth_ok:   # 按时间估时测试块只有 10ms，20ms 余量必然断粮；真机 1 秒一块无此问题
+        assert snd.last_play["gaps"] == 0, "能查队列深度时不该断粮"
+    print("  snd.stream_play %-12s = %d 块按序播完 ✓ 缓冲零覆盖 ✓  %s"
+          % ("(按通道查深度)" if _depth_ok else "(按时间估)", len(_pcm) // 320 + 1,
+             snd.stream_summary()))
+
+# 固件内存 playWav 不出声：自动退回落盘，文件要与源 WAV 一致，之后不再尝试
+cfg.PLAY_PATH = _tmp
+snd.Speaker = _QSpeaker(silent=True)
+snd._stream_bad = False
+assert snd.stream_play(_FakeResp(_wav)) == len(_wav)
+assert open(_tmp, "rb").read() == _wav, "退回落盘时已读出的那几块必须接回去"
+assert snd._stream_bad and snd.last_play["mode"] == "fallback"
+print("  snd.stream_play 不出声      = 退回落盘，文件逐字节一致 ✓ 本次开机不再尝试 ✓")
+# 签名不符直接抛 TypeError：同样退回，不能把异常甩给只接 OSError 的调用方
+class _BadSigSpeaker(_QSpeaker):
+    def playWav(self, buf, *a):
+        if a:
+            raise TypeError("function takes 2 positional arguments")
+snd.Speaker = _BadSigSpeaker()
+snd._stream_bad = False
+assert snd.stream_play(_FakeResp(_wav)) == len(_wav)
+assert open(_tmp, "rb").read() == _wav and snd.last_play["mode"] == "fallback"
+print("  snd.stream_play 签名不符    = 不抛异常，退回落盘 ✓")
+if os.path.exists(_tmp):
+    os.remove(_tmp)           # 别在仓库里留垃圾
+snd._stream_bad = False
+(snd.Speaker, snd.M5.Touch, cfg.STREAM_BLOCK_BYTES, cfg.PLAY_PATH) = _saved_play
+
+# ── 角色图：有专属图用专属图，没有就沿用默认；换角色必须作废重绘缓存 ──────
+print("\n=== 角色背景图 ===")
+_saved_stat = ui.uos.stat
+_have = {cfg.res("mio/img_playing.jpg")}
+def _fake_stat(p):
+    if p in _have:
+        return (0,) * 10
+    raise OSError(2)
+ui.uos.stat = _fake_stat
+ui._role_hit.clear()
+assert ui.set_role("mio") is True and cfg.St.role == "mio" and ui._drawn_key is None
+assert ui.img_path("img_playing") == cfg.res("mio/img_playing.jpg")
+assert ui.img_path("img_bg") == cfg.res("img_bg.jpg"), "角色缺的图沿用默认"
+ui._drawn_key = ("x",)
+assert ui.set_role("mio") is False and ui._drawn_key == ("x",), "同一角色不许作废缓存（会闪屏）"
+ui.set_role("")
+assert ui.img_path("img_playing") == cfg.res("img_playing.jpg")
+ui.uos.stat = _saved_stat
+print("  ui.img_path / set_role      = 专属图优先 ✓ 缺图回落默认 ✓ 同角色不重画 ✓")
+import cam as _cam
+assert _cam._CAM_ENTRY[2] < ui._ROLE_ENTRY[0], "顶栏 CAM 与 ROLE 命中区不能重叠"
+print("  顶栏命中区                  = CAM %s / ROLE %s 不重叠 ✓" % (_cam._CAM_ENTRY, ui._ROLE_ENTRY))
+
+
+# ── 设备文件同步（ota）：真的在临时目录里跑一遍下载 / 校验 / 确认 / 回滚 ──────
+print("\n=== 设备文件同步（ota）===")
+import ota, diag, hashlib as _hl, tempfile, shutil, ast as _ast
+_otmp = tempfile.mkdtemp(prefix="ota-sim-")
+for _d in ("src", "resource", "data"):
+    os.makedirs(os.path.join(_otmp, _d))
+
+class _RealOs:
+    """真实文件系统版 uos（全局桩里 rename/mkdir 是空操作，这里要真改文件）。"""
+    mkdir = staticmethod(_os.mkdir); remove = staticmethod(_os.remove); rename = staticmethod(_os.rename)
+    stat = staticmethod(_os.stat); listdir = staticmethod(_os.listdir); rmdir = staticmethod(_os.rmdir)
+_saved_ota = (ota.uos, ota.urequests, ota._STATE_PATH, ota._PENDING_PATH, ota._BAK_DIR, ota._abs,
+              ota._confirm, ota.ui.uos, cfg.BASE_DIR)
+ota.uos = _RealOs
+ota._STATE_PATH = os.path.join(_otmp, "data", "ota_state.json")
+ota._PENDING_PATH = os.path.join(_otmp, "data", "ota_pending.json")
+ota._BAK_DIR = os.path.join(_otmp, "src.bak")
+ota._abs = lambda p: os.path.join(_otmp, p)
+ota._state = None
+
+_srv = {}          # 服务端上的文件：p → bytes
+_gets = []
+_reports = []
+def _sha(b): return _hl.sha256(b).hexdigest()
+def _manifest(scope):
+    pre = {"res": ("resource/",), "code": ("src/",), "all": ("resource/", "src/")}[scope]
+    files = [{"p": p, "n": len(b), "h": _sha(b)} for p, b in sorted(_srv.items()) if p.startswith(pre)]
+    return {"scope": scope, "version": "9.9.9", "files": files}
+def _server_rev(prefix):
+    files = [(p, _sha(b)) for p, b in sorted(_srv.items()) if p.startswith(prefix)]
+    return _hl.sha256("\n".join("%s:%s" % f for f in files).encode()).hexdigest()[:12]
+_corrupt = set()
+class _OResp:
+    def __init__(self, status, body=b"", js=None):
+        self.status_code = status; self._js = js; self.content = body
+        import io; self.raw = io.BytesIO(body)
+    def json(self): return self._js
+    def close(self): pass
+def _oget(url, **kw):
+    path = url.split("5000", 1)[1]
+    if path.startswith("/device/files"):
+        return _OResp(200, js=_manifest(path.split("scope=")[1]))
+    p = path.split("p=", 1)[1]
+    _gets.append(p)
+    if p not in _srv:
+        return _OResp(404)
+    b = _srv[p]
+    return _OResp(200, (b[:-1] + b"X") if p in _corrupt else b)
+def _opost(url, data=None, **kw):
+    _reports.append(json.loads(data)); return _OResp(200)
+ota.urequests = types.SimpleNamespace(get=_oget, post=_opost)
+cfg.SERVER_BASE = "http://10.0.0.9:5000"
+_resets = []
+sys.modules["machine"].reset = lambda: _resets.append(True)
+_confirm_answer = [True]
+ota._confirm = lambda n, ver: _confirm_answer[0]
+_rd = lambda p: open(os.path.join(_otmp, p), "rb").read()
+
+# 1. 图片：首次全下，再同步一次一个都不下
+_srv["resource/img_bg.jpg"] = b"\xff\xd8" + b"a" * 5000
+_srv["resource/mio/img_playing.jpg"] = b"\xff\xd8" + b"b" * 9000
+ui._img_missing.add("x"); ui._role_hit["mio/img_playing"] = False
+ota.run_sync("res")
+assert _rd("resource/img_bg.jpg") == _srv["resource/img_bg.jpg"]
+assert _rd("resource/mio/img_playing.jpg") == _srv["resource/mio/img_playing.jpg"]
+assert not ui._img_missing and not ui._role_hit, "换了图必须清图片缓存，否则新图不显示"
+assert _reports[-1]["ok"] and _reports[-1]["changed"] == 2
+assert diag._ota_info["res"] == _server_rev("resource/"), "设备算的指纹必须与服务端一致"
+_gets.clear(); ota.run_sync("res")
+assert not _gets and _reports[-1]["changed"] == 0
+print("  图片同步                    = 首次下 2 张 ✓ 再同步 0 次下载 ✓ 指纹与服务端一致 ✓")
+
+# 2. 手动传的同名同内容文件直接认领；清单里删掉的图设备上也删；不是 ota 装的文件不动
+open(os.path.join(_otmp, "resource", "img_shake.jpg"), "wb").write(b"\xff\xd8shake")
+_srv["resource/img_shake.jpg"] = b"\xff\xd8shake"
+open(os.path.join(_otmp, "resource", "manual.jpg"), "wb").write(b"\xff\xd8m")
+del _srv["resource/mio/img_playing.jpg"]
+_gets.clear(); ota.run_sync("res")
+assert not _gets, "内容一样的手动文件不该重下"
+assert not os.path.exists(os.path.join(_otmp, "resource", "mio", "img_playing.jpg"))
+assert os.path.exists(os.path.join(_otmp, "resource", "manual.jpg")), "不是 ota 装的文件不许删"
+print("  认领 / 删除                 = 同内容手动文件不重下 ✓ 撤下的图删掉 ✓ 手动文件不动 ✓")
+
+# 3. 下载内容被篡改：校验失败，原文件不变，.new 不留
+_srv["resource/img_bg.jpg"] = b"\xff\xd8" + b"c" * 5000
+_corrupt.add("resource/img_bg.jpg")
+ota.run_sync("res")
+assert not _reports[-1]["ok"] and "sha" in _reports[-1]["error"]
+assert _rd("resource/img_bg.jpg") == b"\xff\xd8" + b"a" * 5000
+assert not os.path.exists(os.path.join(_otmp, "resource", "img_bg.jpg.new"))
+_corrupt.clear(); ota.run_sync("res")
+assert _rd("resource/img_bg.jpg") == _srv["resource/img_bg.jpg"]
+print("  校验失败                    = 不替换 ✓ 不留 .new ✓ 修好后重同步成功 ✓")
+
+# 4. 代码：没确认什么都不动；确认了 → 备份旧文件、写回滚标记、复位
+open(os.path.join(_otmp, "src", "app.py"), "wb").write(b"old app")
+open(os.path.join(_otmp, "src", "gone.py"), "wb").write(b"old gone")
+ota._load_state()["files"]["src/gone.py"] = _sha(b"old gone")
+_srv["src/app.py"] = b"new app"
+_srv["src/extra.py"] = b"new module"
+_confirm_answer[0] = False
+ota.run_sync("code")
+assert _rd("src/app.py") == b"old app" and not _resets and not _reports[-1]["ok"]
+assert not [n for n in os.listdir(os.path.join(_otmp, "src")) if n.endswith(".new")]
+_confirm_answer[0] = True
+ota.run_sync("code")
+assert _resets, "装完新代码要复位"
+assert _rd("src/app.py") == b"new app" and _rd("src/extra.py") == b"new module"
+assert not os.path.exists(os.path.join(_otmp, "src", "gone.py"))
+assert open(os.path.join(ota._BAK_DIR, "app.py"), "rb").read() == b"old app"
+_pend = json.load(open(ota._PENDING_PATH))
+assert _pend["added"] == ["extra.py"] and _pend["ver"] == "9.9.9"
+assert diag._ota_info["fw"] == _server_rev("src/") and diag._ota_info["fwv"] == "9.9.9"
+print("  代码同步                    = 未确认不动 ✓ 确认后备份+标记+复位 ✓ 撤下的模块移走 ✓")
+
+# 5. device/main.py 的回滚：前 3 次开机只计数，第 4 次（或起不来）换回旧代码
+_mtree = _ast.parse(open(os.path.join(os.path.dirname(__file__), "..", "device", "main.py")).read())
+_mns = {}
+exec(compile(_ast.Module([n for n in _mtree.body if isinstance(n, _ast.FunctionDef)], []), "main.py", "exec"), _mns)
+sys.modules["uos"].listdir, sys.modules["uos"].rmdir = _os.listdir, _os.rmdir
+_saved_uos = (sys.modules["uos"].rename, sys.modules["uos"].remove)
+sys.modules["uos"].rename, sys.modules["uos"].remove = _os.rename, _os.remove
+for _i in range(3):
+    assert _mns["_ota_guard"](_otmp) is False
+assert json.load(open(ota._PENDING_PATH))["boots"] == 3
+assert _mns["_ota_guard"](_otmp) is True, "第 4 次开机还没跑通就回滚"
+assert _rd("src/app.py") == b"old app" and _rd("src/gone.py") == b"old gone"
+assert not os.path.exists(os.path.join(_otmp, "src", "extra.py")), "新加的模块要删掉"
+assert not os.path.exists(ota._PENDING_PATH) and not os.path.exists(ota._BAK_DIR)
+assert "ota rollback" in open(os.path.join(_otmp, "data", "crash.log")).read()
+assert _mns["_ota_guard"](_otmp) is False, "回滚之后不再回滚"
+print("  main.py 回滚                = 3 次计数 ✓ 第 4 次换回旧代码 ✓ 删新模块 ✓ 留日志 ✓")
+
+# 6. 跑通了：心跳成功一次就删掉标记与备份
+_confirm_answer[0] = True; _resets.clear(); ota._state = None
+ota.run_sync("code")
+assert os.path.exists(ota._PENDING_PATH)
+ota.boot(); diag._hb_ok = True; ota.tick()
+assert not os.path.exists(ota._PENDING_PATH) and not os.path.exists(ota._BAK_DIR)
+assert _mns["_ota_guard"](_otmp) is False
+print("  新代码跑通                  = 心跳成功后删标记与备份 ✓")
+
+sys.modules["uos"].rename, sys.modules["uos"].remove = _saved_uos
+(ota.uos, ota.urequests, ota._STATE_PATH, ota._PENDING_PATH, ota._BAK_DIR, ota._abs,
+ ota._confirm, ota.ui.uos, cfg.BASE_DIR) = _saved_ota
+sys.modules["machine"].reset = lambda: None
+diag._hb_ok = False; ota._state = None; ota._pending = False
+shutil.rmtree(_otmp)
 
 # 可变全局：模拟 discover_server 改写后，其他模块能否看到
 print("\n=== 可变全局跨模块可见性（拆分最大的坑）===")

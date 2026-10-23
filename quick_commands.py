@@ -211,3 +211,28 @@ if __name__ == "__main__":
     for s in samples:
         r = match(s, local_time="2026-05-15 14:23")
         print(f"{s!r:30s} → {r!r}")
+
+
+# ── 免手模式（连续对话 / 声控唤醒）专用 ────────────────────────────────────────
+
+_PUNCT_RE = re.compile(r"[\s，。！？、,.!?~～…]+")
+_FILLER = set("嗯啊哦呃额唉哎噢喔哈呀诶欸嘿喂唔")
+_EXIT_SHORT = ("不聊了", "先这样", "再见", "拜拜", "没事了", "退下吧", "退下", "停", "别说了", "就这样")
+_EXIT_RE = re.compile(r"(退出|结束|关闭|停止|关掉)(连续)?(对话|聊天|模式)")
+
+
+def is_filler(text: str) -> bool:
+    """「嗯」「啊」「哦哦」这类：免手模式下多半是环境声被认成了字，不值得问 LLM。"""
+    t = _PUNCT_RE.sub("", text or "")
+    return not t or len(t) <= 1 or all(c in _FILLER for c in t)
+
+
+def match_cont_exit(text: str) -> bool:
+    """「退出连续对话」「不聊了」「拜拜」→ 结束免手模式。
+
+    短句才认「再见/不聊了」——长句里带一句「先这样」不等于要走。
+    """
+    t = _PUNCT_RE.sub("", text or "")
+    if _EXIT_RE.search(t):
+        return True
+    return len(t) <= 6 and any(k in t for k in _EXIT_SHORT)

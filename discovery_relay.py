@@ -4,10 +4,11 @@ Windows 侧 UDP 发现中继：接收 M5Stack 的广播，回复本机 IP。
 使用方法：python discovery_relay.py
 （需要在 Windows 防火墙放行 UDP 5001 入站）
 """
+import os
 import socket
 import sys
 
-DISC_PORT = 5001
+DISC_PORT = int(os.environ.get("KAGURA_DISC_PORT", "5001"))
 
 def main():
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)

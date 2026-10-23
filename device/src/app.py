@@ -1,34 +1,48 @@
-"""应用入口：setup() 初始化、loop() 主循环。
-
-模块加载顺序（无环）：
-    cfg → hw → clock → ui → {wifisetup, audio} → netsvc → chat → app
+"""Kagura Voice 设备端 —— 启动与主循环。
 """
 
-import time
-import machine
 import M5
 from M5 import *
+from hardware import *
+import time
+import gc
 
 import cfg
 import hw
 import clock
 import ui
 import wifisetup
-import audio
+import snd
+import cam
+import feel
+import diag
+import ota
 import netsvc
+import stream
 import chat
 
-# ── 声控唤醒检测状态 ──────────────────────────────────────────
+# ── 唤醒词检测状态 ─────────────────────────────────────────────
+
 _wake_buf        = bytearray(cfg.WAKE_CHUNK_SIZE)
+
+
 _wake_last_ms    = 0
+
+
 _wake_loud_count = 0
 
 
 def setup():
-    cfg.ensure_dirs()
-    audio.set_pump(netsvc.mqtt_check)   # 打断 audio ↔ netsvc 循环依赖
     M5.begin()
     Widgets.setRotation(1)
+
+    # ── 拆分后的接线：目录 + 打断依赖环的回调注入 ──────────────
+    # 单文件时代这些都是直接调用；拆成模块后 snd→netsvc、netsvc→stream
+    # 会成环（tools/check_split.py 直接拦），所以改成在这里注入。
+    cfg.ensure_dirs()
+    snd.set_pump(netsvc.mqtt_check)              # 播放/取景期间维持 MQTT
+    netsvc.set_stream_runner(stream._run_stream_cmd)   # MQTT 收到直播命令时回调
+
     hw._set_led(0, 0, 0)
     ui.draw_state("idle")
 
@@ -51,40 +65,64 @@ def setup():
         machine.reset()
 
     netsvc.discover_server()
+    netsvc.fetch_role()           # 角色专属背景图：要在第一次 draw_state 前定下来
+    ota.boot()                    # 管理界面离线期间传的图，开机补上（没变化就什么都不下）
+    diag._boot_report()
     clock.sync_rtc()
     netsvc.init_mqtt()
     netsvc.init_ble()
     chat.init_imu()
-    hw.volume_load()
+    hw._volume_load()
+    diag.canvas_probe()           # 一次性诊断；CANVAS_PROBE=False 即整段跳过
     ui.draw_state("idle")       # 发现完成后恢复空闲界面
-    audio.calibrate_noise()
+    snd.alloc_rec_buf()           # 开机堆还没碎时一次性预留录音缓冲（约 960KB）
+    snd.calibrate_noise()
+    diag.dbg("vad floor={} th={} wake={} max={}s".format(
+        cfg.NOISE_FLOOR, cfg.SILENCE_THRESHOLD, cfg.WAKE_THRESHOLD,
+        snd.rec_max_chunks * cfg.CHUNK_SIZE // (cfg.SAMPLE_RATE * 2)))
     cfg.St.last_activity = time.time()
+    hw._wdt_init()   # 最后再武装看门狗：WiFi 配置 UI 等交互流程不受 2 分钟窗口限制
 
 
 def loop():
     global _wake_last_ms, _wake_loud_count
 
-    touch, pos = hw.check_touch()
+    cfg.St.stage = "loop"    # 死人开关的临终留言用；长循环各自改写它
+
+    # feel=True 只在这里传：主循环是唯一把屏幕当皮肤的地方
+    touch, pos = hw.check_touch(feel=True)
 
     # ── 休眠中：触摸仅唤醒，不执行其他操作 ──
     if cfg.St.sleeping:
         if touch is not None:
             ui.wake_up()
             hw.drain_touch()
+            hw.touch_reset()      # 抚摸在按住期间就唤醒了，别让抬手再触发一次结算
     elif not cfg.St.busy:
         if touch is not None:
             cfg.St.last_activity = time.time()
-        if touch == 'long':
+        if touch in ('stroking', 'cradling'):
+            # 反射层：摸到的当下就换表情，不过网。draw_state 的键比对保证
+            # 抚摸全程只重画第一帧
+            feel.feel_reflex("petted")
+        elif touch in ('stroke', 'cradle'):
+            feel.feel_on_touch_end(touch)     # 抬手：结算体感，够显著才惊动 agent
+        elif touch == 'long':
             chat.toggle_wake_mode()           # 长按：切换声控唤醒模式
         elif touch == 'short':
-            chat.record_and_send()            # 短按：直接录音
+            if cfg.CAMERA_MODE_ENABLED and hw._hit(pos[0], pos[1], cam._CAM_ENTRY):
+                cam.camera_mode()            # 短按顶栏 CAM 键：手动取景拍照
+            elif ui.role_count >= 2 and hw._hit(pos[0], pos[1], ui._ROLE_ENTRY):
+                chat.cycle_role()            # 短按顶栏 ROLE 键：切到下一个角色
+            else:
+                chat.record_and_send()        # 短按其他位置：直接录音
         elif cfg.St.wake:
             # 简化的声控唤醒：连续 N×100ms 音量超阈值 → 触发录音
             now_ms = time.ticks_ms()
             if time.ticks_diff(now_ms, _wake_last_ms) >= 100:
                 _wake_last_ms = now_ms
                 if cfg.WAKE_MIC_PERSISTENT:
-                    hw.mic_on()            # 幂等：常开，播放时由 play_wav 释放
+                    hw._mic_on()            # 幂等：常开，播放时由 play_wav 释放
                     Mic.record(_wake_buf, 16000)
                     time.sleep(0.05)
                 else:
@@ -109,11 +147,21 @@ def loop():
     netsvc.mqtt_check()
     netsvc.process_mqtt_queue()
 
+    # 网络自检（WiFi 掉线自动重连）+ 心跳上报
+    diag.net_watch_tick()
+    diag.heartbeat_tick()
+
     # BLE 在家感知（非阻塞定期扫描）
     netsvc.ble_scan_tick()
 
-    # IMU 摇晃彩蛋检测
-    chat.imu_shake_tick()
+    # IMU：摇晃彩蛋 + 本体感觉（被拿起/被轻拍/被抱着走）
+    chat.imu_tick()
+
+    # 触觉反射表情到期收回
+    feel.feel_reflex_tick()
+
+    # 刚 OTA 装的新代码：心跳成功一次就删掉回滚备份
+    ota.tick()
 
     # ── 自动休眠检查 ──
     now = time.time()
@@ -123,16 +171,27 @@ def loop():
 
 
 def main():
-    """引导：初始化 → arm 看门狗 → 主循环（异常不致设备假死）。"""
+    """入口：装配 + 带崩溃守护的主循环。由 /flash/main.py 调用。
+
+    单文件时代这段是文件末尾的 `if __name__ == "__main__":`，拆分后
+    收成函数——引导文件 device/main.py 只负责加 sys.path 再调它。
+    """
     setup()
-    # 看门狗在 setup 之后启动：配网界面等待用户输入不受超时限制
-    hw.wdt_arm()
+    last_gc = time.time()
+    err_count = 0
     while True:
         try:
             loop()
-            hw.wdt_feed()
+            hw._wdt_feed()
+            err_count = 0
+            if time.time() - last_gc > 30:   # 空闲期定期 GC，缓解长时间运行的堆碎片化
+                gc.collect()
+                last_gc = time.time()
         except Exception as e:
-            # 未捕获异常不再让设备假死：报错后继续跑；连喂狗都做不到则 WDT 复位
+            # 单次异常不复位：记录现场后继续跑（复位会丢失上下文且中断服务）。
+            # 连续 10 次说明陷入了出不来的坏状态 → 复位自愈；真卡死则 WDT 兜底。
+            err_count += 1
+            diag._log_crash(e)
             print("[loop] uncaught:", e)
             try:
                 ui.draw_state("error")
@@ -140,4 +199,8 @@ def main():
                 ui.draw_state("idle")
             except Exception:
                 pass
-        time.sleep(0.02)   # 空闲不再全速自旋；触摸按抬起时长判定，20ms 粒度无感
+            if err_count >= 10:
+                diag._persist_dbg("loop-error-storm")
+                time.sleep(1)
+                import machine
+                machine.reset()

@@ -1,61 +1,190 @@
 # CLAUDE.md
 
-Kagura Voice：基于 OpenClaw 的中文语音助手。本地麦克风模式 + M5Stack CoreS3 硬件终端模式。
+Kagura Voice：中文语音助手。M5Stack CoreS3 硬件终端 + 服务端（内置 agent 系统，也可接 OpenClaw）。
 
 ## 架构
 
 ```
-CoreS3 (MicroPython)  ──HTTP──▶  voice_server.py (Flask :5000)  ──subprocess──▶  openclaw CLI
-        ▲                              │
-        └────MQTT (localhost:1883)◀────┘         百度 ASR/TTS (requests.Session)
+CoreS3 (MicroPython) ──HTTP──▶ server/（TypeScript 单文件可执行 :5000）──▶ 内置 agent（pi）或 openclaw CLI
+        ▲                         │  内置 MQTT broker :1883 · UDP 发现 :5001 · 直播 TCP :5002
+        └──────MQTT───────────────┘  百度 ASR/TTS · 飞书/QQ 渠道 · 本机管理界面 /admin
 ```
 
-- 设备录音上传 `/chat` → 服务端 ASR → （短路链 或 OpenClaw）→ TTS → 返回 WAV
+- 设备录音上传 `/chat` → 服务端 ASR → （短路链 或 agent）→ TTS → 返回 WAV（新固件边生成边播）
 - 服务端主动推送：TTS 存 `push_audio/` → MQTT 发 JSON 通知 → 设备 HTTP 下载播放
 - UDP :5001 广播 `KAGURA_DISCOVER`/`KAGURA_HERE` 自动发现服务端 IP
+- **当前主线是 `server/`**。根目录的 Python 版（`voice_server.py` 等）已冻结，只修严重 bug；
+  契约测试仍对两版都跑，等 1.0 正式版稳定后删除（见 `docs/legacy-python.md`）。
 
 ## 文件
 
 | 文件 | 说明 |
 |---|---|
-| `voice_server.py` | Flask 服务端：路由、ASR/TTS、`ServerState`（会话/限流/拍照）、`_send_push` |
+| `server/` | **服务端（主线）**：单文件可执行、内置 MQTT broker、内置 agent 系统（基于 pi：记忆、定时任务、heartbeat、agent 间通信、技能、扩展 / 扩展包 / MCP）、IM 渠道（飞书/QQ）、本机管理界面 `/admin`、Windows 托盘版。见 `server/README.md`、`docs/plan-kagura-agent.md`。`contract-tests/` 新旧两版共用（`KAGURA_BRAIN=pi` 再跑一轮内置 agent） |
+| `voice_server.py` | 旧版 Flask 服务端（**已冻结**）：路由、ASR/TTS、`ServerState`、`_send_push`。改设备协议时契约测试还会跑它 |
 | `device/src/*.py` | CoreS3 固件（**MicroPython**，不能用 CPython 特性/typing；改后需真机烧录验证） |
 | `device/main.py` | 烧成 `/flash/main.py` 的引导：把 `/flash/kagura/src` 加进 sys.path |
 | `cores3_client.py` | 旧单文件版，**已弃用勿改**，真机验证通过后删除 |
 | `voice_assistant.py` | 本地 CLI 模式（ffmpeg 录音 + edge-tts），与服务端独立 |
 | `quick_commands.py` | 短路规则：时间/日期/星期 `match`、音量 `match_volume`、提醒解析 `match_reminder` |
 | `reminders.py` | 提醒调度：`schedule`/`fire_due`，落盘 `reminders.json`，线程 `init(send_fn)` |
+| `photo_schedules.py` | 每日定时拍照：`add`/`update`/`fire_due`，落盘 `photo_schedules.json`，`init(run_fn)` |
+| `stream_server.py` | 直播流接收（TCP :5002）。`_Reader` 带缓冲，`latest`/`stats`/`drop` 给路由用 |
+| `web/monitor.html` | Web 监控页（单文件，无外部依赖）。由 `/monitor` 路由 `send_file` 直出 |
+| `roles.py` | 角色（多 agent）：`get`/`set_role`/`session_key`/`match_switch`，落盘 `roles_state.json`，表来自 `config.ROLES` |
 | `baidu_tokens.py` | 百度 token 缓存（`BaiduTokenCache`，线程安全） |
 | `oc_utils.py` | `_extract_json`（raw_decode 提取 CLI stdout 里的 JSON）、`strip_markdown` |
 | `config.py` | 不提交。`config.example.py` 为模板；`API_TOKEN` 可选（留空=开放） |
 
 ## 关键机制（改动前必读）
 
-- **短路链**（`/chat` 内）：提醒 → 音量 → 快捷指令 → OpenClaw。短路命中存
-  `state.set_last_quick`，下次 LLM 对话作为背景注入（`pop_last_quick`）。
+- **短路链**（`/chat` 内）：没听清 → （免手模式）口头退出 → 角色列表/切换 → 提醒 →
+  音量 → 快捷指令 → OpenClaw。短路命中存 `state.set_last_quick`，下次 LLM 对话作为
+  背景注入（`pop_last_quick`）；没听清/退出/切角色不记（`remember=False`）。
+- **角色切换**（`roles.py`，LRN 2026-10-19）：角色 = OpenClaw agent + 百度音色 `per` +
+  设备上一套图。**所有调 `chat()` 的地方都必须走 `_role_ctx(device_id)`** 拿
+  `(role, session_id)` 并传 `agent=role["agent"]`——漏一处，切了角色之后摇一摇/定时
+  拍照还在找原来那个 agent。`synthesize(text, per=...)` 同理（推送走设备当前角色音色）。
+  第一个角色是默认：会话 key 就是 `device_id`（老会话不丢），其余是 `device_id~role_id`。
+  角色 id 只许 ASCII（要进 `X-Role` 头、当设备目录名）。设备端 `cfg.St.role` 只经
+  `ui.set_role()` 改（变了才作废 `_drawn_key`，同角色重复设置不能重画）；
+  `ui.img_path(base)` 先找 `resource/<role>/<base>.jpg`、没有就用默认那张，
+  `_img_missing` 按路径记。图片各角色分目录常驻 flash，切换只改读哪个目录，不用重传。
+  切换入口：语音（`/chat` 短路）、设备顶栏 **ROLE 键**（`chat.cycle_role` →
+  `POST /role/cycle`，设备上行不要 token，直接回新角色问候 WAV）、网页顶部下拉
+  （`POST /role`，要 token；先 MQTT `{"action":"role"}` 再推问候）。设备拿角色的三处：
+  `X-Role` 响应头、开机 `netsvc.fetch_role()`（`GET /role`，顺带填 `ui.role_count`，
+  ≥2 才画 ROLE 键）、MQTT role 命令——**这条在回调里就地 `set_role`、不入队**
+  （队列里 push 优先，入队的话紧跟的问候会先用旧图播），空闲时靠 `_role_redraw` 重画。
+  顶栏坐标 CONT 6 / WAKE 60 / CAM 114 / ROLE 158 / 时间 ≥206，改了要同步
+  `cam._CAM_ENTRY` 与 `ui._ROLE_ENTRY`（`import_sim` 查两者不重叠）。
+- **免手模式（连续对话/声控唤醒）防误触与退出**（LRN 2026-10-19，症状「一有点声音就
+  触发，退不出去只能关机」）：设备起说门槛 ×`HANDS_FREE_TH_RATIO`；开口后够响的块
+  不到 `MIN_VOICED_CHUNKS` 当噪声丢弃不上传；请求带 `X-Mode`，服务端在免手模式下把
+  「嗯/啊」当没听清。退出四条路：听的时候**轻点**或长按（旧版只认长按，且只在"正在听"
+  那几秒有效）；说「不聊了/退出对话」（服务端回 `X-Cont-Exit`）；连续
+  `CONT_EMPTY_EXIT` 次 `X-Asr-Empty`（连续模式下没听清**不播**"没听清"，悄悄接着听）；
+  `CONT_IDLE_EXIT_SECS` 没有一轮有效对话。单次模式下录音中轻点 = 说完了立刻发送。
 - **TTS 缓存**：`synthesize()` 按 md5(文本+音色参数) 缓存于 `tts_cache/`；
   改音色参数必须同步改 cache key。
 - **响应头协议**（设备读取）：`X-Need-Photo`、`X-Volume: up/down`、
-  `X-User-Text`/`X-Reply-Text`（b64 UTF-8，屏显用）。请求头：`X-Device-Id`、
-  `X-Local-Time`、（可选）`X-Api-Token`。
-- **MQTT topic**：`kagura/push/{device_id}`（播报通知）、`kagura/cmd/{device_id}`（拍照命令）。
+  `X-User-Text`/`X-Reply-Text`（b64 UTF-8，屏显用；`/chat` 与 `/chat-vision`
+  都会带）。请求头：`X-Device-Id`、`X-Local-Time`、`X-Touch`（体感摘要）、
+  （可选）`X-Api-Token`。
+- **`/chat-vision` 三种入参形态**：`wav`+`image`（语音触发拍照）、仅 `image`
+  （取景模式手动拍照，服务端用 `_PHOTO_ONLY_PROMPT` 当提问）、`text`+`image`
+  （无 wav 时以 text 为提问）。`wav`/`image` 至少要有一个，否则 400。
+- **MQTT topic**：`kagura/push/{device_id}`（播报通知）、`kagura/cmd/{device_id}`
+  （`capture` / `stream_start` / `stream_stop` / `role` / `sync`）。
+- **直播链路**：MQTT 下发 `stream_start` → 设备连 TCP :5002 → 每帧 `4 字节大端长度
+  + RGB565 裸字节`（0 长度=结束）→ 服务端只留最新一帧 → 网页长轮询
+  `/stream/<dev>/frame.jpg?after=<seq>`。三个别踩的点：
+  ① 握手行和第一帧会被 TCP 合并进同一个 segment，必须用 `_Reader` 的缓冲接着读，
+  丢掉剩余字节会让整条流错位；② 网页每 20s 续期、设备端 45s 超时收摊，
+  这是「关掉网页摄像头别一直开着」的唯一保障，改续期周期要同步改 `_STREAM_RENEW_SECS`；
+  ③ 直播中按快门默认走 `_capture_from_stream`（取服务端最新帧，瞬时但只有
+  160×120）；带 `hires=true` 才发 MQTT capture，由 `_stream_hires_capture`
+  在推流循环里临时切回 QVGA 拍一张（画面停几秒）。**capture 命令必须在
+  `_stream_drain_cmds` 里就地消费**——压回队列就要等直播结束才执行，
+  用户按下快门就成了「没反应」。插拍耗时要补回 `_stream_deadline`，
+  且 `stream_server.SOCKET_TIMEOUT` 必须大于插拍总耗时（现 45s），
+  否则正常插拍会被当成掉线断开。
+- **推流必须复制帧**：`raw = bytes(raw)` 那行别删。发一帧 38KB 期间驱动可能往
+  同一块 framebuffer 写下一帧，取景模式定格处有同样的复制与注释。
+- **网页画面「频闪」查过一次，不在设备端**：实测 226 帧亮度 120.5±0.3、连续帧
+  无撕裂——设备送出的帧是干净的。真凶是 `setStage()` 把还没解码的 `<img>`
+  换上屏。**必须 `await next.decode()` 之后再换 src，并复用同一个 `<img>`**；
+  改回「新建 img → appendChild → 删旧 img」就会重现。
+- **直播分辨率**：`_cam_set_framesize` 切 QQVGA，退出时切回 QVGA。固件没有
+  `camera.deinit()` 就返回 False 照常推流（只是慢），别把这条回退路径删掉。
+- **WSL 端口转发**：设备走 Windows 侧进来，新开任何端口都必须同步加进
+  `openclaw-startup.ps1` 的 portproxy + 防火墙列表（现有 5000/1883/5001/5002），
+  否则表现是「其它功能都正常、唯独新功能连不上」。加端口时别忘了这一步。
+- **拍照两条路径**：HTTP 路由用 `_issue_capture` 下发后让调用方轮询 `/capture-result`；
+  后台线程（定时任务/试跑）用 `_capture_and_wait` 同步等，**别在 Flask 路由里调它**——
+  设备离线时会阻塞 45 秒。`/capture-result` 的 `image_path` 字段 cores3-camera skill
+  依赖，只能加字段不能改。
+- **定时拍照**（`_run_scheduled_capture`）：拍照 → `chat()` 识别 → 存 `snapshots/` →
+  `_send_push` 播报。发给 agent 的 prompt 必须带 `_SCHEDULE_SPEAK_HINT` 拦住
+  cores3-speak，否则服务端和 agent 各播一遍。当天去重靠 `last_fired`；
+  `MISS_WINDOW=900` 保证服务端晚启动时不补拍白天错过的计划。
 - **设备端状态**：跨子系统 flag 全在 `St` 类（busy/continuous/wake/sleeping/last_activity）；
   模式转移只走 `toggle_continuous/toggle_wake_mode/enter_sleep/wake_up`。
+  触觉的累积量在 `Feel` 类，同样只走 `feel_*` 函数改。
 - **图片资源**：`ui.draw_image(basename)` 不带扩展名调用，按
   `.jpg/.jpeg/.png/.bmp` 顺序查找，并对 `drawPng`/`drawBmp` 做能力探测
   （固件没有就跳过该格式）。缺图返回 False，调用方降级到纯色/kaomoji。
   照片类资源建议转 JPG：File Manager 单文件上传上限约 100KB，320×240 照片
   的 PNG 常达 150~250KB，且 PNG 解码峰值内存明显更高。
-- **屏幕分层重绘**：`draw_state(state, force=False)` 拆成 6 层（背景/顶栏/表情面板/
-  状态条/对话带/环形动画），各层用 `_drawn_*` 缓存键比对，只在内容真变时重绘。
-  **顶栏与文字条带必须是实心底色**（`CHROME_BG`/`BAND_BG`）——局部擦除的前提。
-  改动前提醒：别退回"每次全屏重绘 JPEG"，那是之前闪烁的根因（单次 ~100ms）。
-- **环形可视化**（`visual_tick`）：24 段圆环在**同一批预计算矩形上原地重绘**，
+- **触觉三层**（设备端 `TOUCH_FEEL_ENABLED`）：**别把三层混成一层**——
+  ① 反射层 `feel_reflex()` 设备端立刻换表情，**不过网、不阻塞**（走一趟
+  OpenClaw 是 3~10s，那不叫触觉叫事后转述）；② 体感层 `Feel` 聚合成
+  "被摸了多久 / 多久没人碰"，`feel_header()` 打包成 `X-Touch: k=v,k=v` 随
+  下次 `/chat` 捎走，服务端 `_touch_background()` 翻成中文注入 prompt，
+  **零额外 LLM 调用**；③ 惊动层 `feel_notify()` → `/touch`，链路同 `/shake`。
+  - **反射层的屏幕闪烁踩过两次，两条判据缺一不可**（症状都是「摸的时候
+    画面在表情图和背景图之间一直切」，每切一次都是整屏 JPEG 重解码约 100ms）：
+    ① `feel_reflex` **同一状态重复调用绝不重画**，自己挡，别指望 `draw_state`
+    的 `_drawn_key`——那个 key 里含电量百分比，`(v-3000)*100//1200` 里 12mV
+    就是 1%，ADC 抖动足以让它每轮都判定「内容变了」；
+    ② `feel_reflex_tick` **按「屏幕上还有没有手」(`_touch_seen_ms`) 收回，
+    不按倒计时**。抚摸是「划一下—停一下—再划一下」，倒计时会在停顿里掉回
+    idle、下一划再切回来；触摸驱动偶发漏报一帧也走同一条老路。
+    IMU 触发的 poked/held 屏幕上没有手，自然落到时间判据，两条路各走各的。
+  - 定位这类问题打开 `FEEL_DEBUG`：反射层每次真正重画都打一行，
+    正常一整段抚摸只该有两行（进 petted、回 idle），刷屏就是判据还有漏。
+  - `feel_header()` **取走即清空**，所以 `/touch` 故意不带 `X-Touch`——带上
+    等于把窗口白白清掉，下次真对话就没得注入了。
+  - 惊动层的冷却（`FEEL_NOTIFY_COOLDOWN=90s`）和显著性筛选是刚需，不是保守：
+    每次触摸都惊动 LLM 会让她变成话痨玩具，而且很贵。放宽前先想清楚。
+- **触摸屏的双重身份**：`check_touch(feel=False)` 默认行为与加触觉前逐字节等价，
+  **只有主循环 `loop()` 传 `feel=True`**——取景模式/配网/播放中断要的是纯按钮，
+  别让一次手滑变成抚摸把点击吞掉。分工定死：点按=录音、长按不动=切唤醒，
+  **只有手指位移 ≥ `STROKE_MIN_DIST` 才判抚摸**并吞掉这次 short/long。
+  位移用"离起点最大曼哈顿距离"而非累计路径：累计会把长按抖动攒过阈值。
+  抚摸在**按住期间**就判定（不等抬手），所以拿它当触发器的地方必须
+  `touch_reset()` 作废这次按下，否则抬手还会再吐一个事件（休眠唤醒踩过）。
+- **IMU 一次采样喂两个检测器**（`imu_tick`）：摇晃彩蛋和本体感觉必须看同一个
+  样本，分开读会出现"一次摇晃被同时算成三次轻拍"。轻拍靠延后
+  `IMU_TAP_CONFIRM_MS` 确认 + 尖峰计数与摇晃互斥；被端着时一律不算轻拍
+  （走动本身就在制造 1.5g 尖峰）。**IMU 阈值全是拍脑袋起点值，必须真机调。**
+- **屏幕渲染**：`draw_state(state, force=False)` 整屏背景图 + 透明文字直接压在
+  图上。**别再加实心条带**——曾试过"分层增量重绘 + 顶栏/文字实心底"，
+  局部擦除是省了，但照片被上下黑边夹住、表情压一块黑面板，观感被否掉了。
+  现在靠 `_drawn_key`（全屏内容的元组键）比对：**内容没变就整个跳过**，
+  一轮对话里 6~8 次调用只有真正变化的那几次会重画。这才是治闪烁的关键，
+  不是分层——旧实现是每次调用都无条件全屏重解码 JPEG（实测 58ms）。
+- **离屏画布合成**（`USE_CANVAS`，`_get_canvas()`）：draw_state 的所有绘制
+  指向 `tgt`（画布或 Lcd），最后 `push(0,0)` 一次上屏，中间过程不可见。
+  真机实测（2026-08）：直接上屏 58ms ┊ 画进 PSRAM 画布 54ms ┊ 整屏 push 35ms
+  ——**总耗时 58→89ms，反而慢 50%**，买的是"瞬间完成"而非"看着它画"。
+  觉得不值就把开关改 False。两个必读结论：
+  ① PSRAM 带宽不是瓶颈（54 vs 58ms），JPEG 解码是 CPU 密集，写哪块内存无所谓；
+  ② **整屏画布必须 `psram=True`**——内部 SRAM 凑不出 150KB 连续空间，分配会
+  "成功"但没有缓冲区，之后绘制全部静默 no-op（症状：drawJpg 耗时 0ms、
+  屏幕纹丝不动）。探测脚本留在 `canvas_probe()`，`CANVAS_PROBE=True` 可重测。
+  - 画布暴露的方法名与 Lcd 一致，所以只换 `tgt` 不分叉代码；释放用 `delete()`
+    （无 `deleteSprite`）。`_vis_set_state` 必须留在 push **之后**——它直接画屏。
+  - **分层局部更新目前做不了**：顶栏那条 320×26 的 push 只要 4ms（推屏是纯带宽
+    限制，4.4MB/s，严格按面积），但画布之间没有 blit 方法，要局部改字就得先把
+    背景恢复回来，而唯一途径是重解 JPEG（54ms），4ms 的优势当场吃光。
+    绕过去要 PC 端预生成背景块的 raw RGB565——留到做角色动画时一起搭。
+  时钟只在 `draw_state` 被调用时刷新，主循环没有周期性调用（历来如此）。
+- **`_ui_invalidate()`**：取景预览 / 摇晃彩蛋 / WiFi 配网会直接 `fillScreen`
+  或 `drawJpg` 铺满屏幕，绕过 `draw_state`。它们**在接管前**必须调这个作废
+  `_drawn_key`，否则下次 `draw_state` 判定"内容没变"跳过重绘，上一屏残留。
+  在接管处调用，别改成逐个补返回路径——出口太多会漏。
+- **环形可视化**（`visual_tick`，默认 `VISUAL_ENABLED = False`）：
+  待机时一直转的圈像"卡在加载中"，已关闭；代码保留，改回 `True` 即恢复
+  （录音跟音量、播放跟包络的反馈是有价值的，只是待机那圈不要）。
+  实现上，24 段圆环在**同一批预计算矩形上原地重绘**，
   因此无需擦除、不关心背景是照片还是纯色，只用 `fillRect`（不依赖
   `fillCircle`/canvas 等未验证 API）。差分渲染：只重画亮度档位变化的段
   （实测 comet 模式平均 5.9/24 段每帧）。亮度档位恒在 `0..7`，否则
   `_vis_shades[k]` 越界——改公式后务必重验边界。
   - 驱动点：主循环（idle 彗星）、`_vis_wait`（录音电平）、`play_wav`（播放包络）
+    ——包络只有内存路径 `play_wav` 有；落盘路径 `play_file` 为了不把整段 WAV
+    拉回堆，故意不回读文件算包络。
   - `processing` 态是静态帧：单线程下 HTTP 阻塞期间主循环不转。**这是成本
     取舍，不是能力限制**——设备支持线程，详见下条。
 - **音频响应**：`rms_slices()` 单次遍历同时给出 5 个子片电平（动画用）和整体
@@ -72,35 +201,265 @@ CoreS3 (MicroPython)  ──HTTP──▶  voice_server.py (Flask :5000)  ──
   - 真要做的路径：复用一个长驻线程（`_thread` 退出不干净，见 micropython
     issue #4303，切勿每次请求新建）；请求前后用"标志位 + 确认位"严格交接
     LCD 所有权——请求期间主线程整个卡在 lwip 里不碰 SPI，交接干净就无需互斥锁。
-- **push 去重 hack**：对话期间（`St.busy`）收到的 MQTT push 直接丢弃——OpenClaw
-  用 cores3-speak 回复时会同时触发 push，不丢会播两遍。改播放逻辑时务必保留。
+- **push 去重 hack**：对话期间（`St.busy` 且非 `St.streaming`）收到的 MQTT push
+  直接丢弃——OpenClaw 用 cores3-speak 回复时会同时触发 push，不丢会播两遍。
+  改播放逻辑时务必保留。**直播必须走 `St.streaming` 豁免**：推流整段都置 `busy`，
+  不豁免的话网页抓拍后的播报会被静默丢掉（症状：服务端日志有 `[push] →`，设备没声音），
+  推流循环里自己消费 `_pending_push` 并在播完切回 `draw_state("streaming")`。
 - **MQTT 回调只入队**：耗时操作（播放/拍照）在主循环 `process_mqtt_queue()` 消费，
   否则长播放阻塞心跳导致断连。
-- **看门狗**：`WATCHDOG_TIMEOUT_MS=120s` 必须大于最长合法阻塞（HTTP 30s+余量）；
-  长循环里要 `hw.wdt_feed()`。ESP32 WDT 创建后无法关闭。
+- **看门狗**：`WATCHDOG_TIMEOUT_MS=180s` 必须大于最长合法阻塞。
+  长循环里要 `hw._wdt_feed()`。ESP32 WDT 创建后无法关闭。
+  **"最长合法阻塞"里包含整段播放**，不只是 HTTP 30s——早报推送 74 秒，
+  加上下载与写盘就顶到了原来的 120s 窗口（见下条）。
+- **长音频播放：整条链路都得喂狗，别再用 `resp.content`**
+  （LRN 2026-08-25，症状是"语音一长就播到一半黑屏"）。
+  一条早报推送可达 **2.4MB / 74 秒**。原来的链路
+  「`resp.content` 整段进堆 → 一次 `f.write` 全写 flash → `playWavFile`」
+  从头到尾没有一次 `_wdt_feed()`，而 WDT 窗口只有 120 秒——
+  服务端日志留下了完整现场：2026-08-11 08:10:49 推送 2.38MB，08:11/08:12
+  两次心跳全丢，08:13:00 带着「**看门狗复位⚠️**」重启上报。现在的口径：
+  ① 下载走 `snd.save_stream(resp)`：分块 `readinto` 直接落盘，每块喂狗，
+  堆里不再出现整段 WAV（`/chat`、`/chat-vision`、push 四处调用点都换了）；
+  ② 写盘走 `snd._write_chunked`，同样每块喂狗；
+  ③ **短写必须自己查**——flash 写满时 MicroPython 的 `f.write` 只返回少写的
+  字节数、不抛异常，放着不管就是"WAV 头写着完整长度、文件只有一半"，
+  症状同样是"播到一半没了"，极易和本条混淆；
+  ④ 超过 `PLAY_SEG_MAX`（约 50 秒）的音频**边下边切**成 10 秒一段
+  （`_save_segmented`，跳掉源 44 字节头、每段回填自己的头，不多读写一遍），
+  `play_file()` 按清单连播。这样无论 `playWavFile` 阻塞与否，最长不喂狗
+  窗口都钉死在 10 秒量级。**日常回复（< 50 秒）一段到底，一条缝都没有。**
+  三个别改坏的点：段间**不 end/begin 扬声器**（收尾那 150ms 消 pop 静音会
+  把缝隙从几十毫秒拖成两百多毫秒）；收尾处轮询从 50ms 收紧到 5ms；
+  **接缝两头各做 5ms 淡入淡出**（`_fade_edges`）——切点处波形是硬台阶
+  （上一段停在某个幅度、夹几十毫秒静音、下一段又从另一个幅度起步），
+  那声"咔嚓"就是它，2026-08-25 真机首测 10 段听出了 9 次。
+  **淡化后残余的那一点咔嚓已经查过，是功放启停的物理声，软件治不了**
+  （同一条 96 秒音频：10 段→4 段、加 5ms 淡化后"轻了但还在"）。
+  别再往淡化时长/切点对齐上使劲了，唯一有效的旋钮是把 `PLAY_SEG_BYTES`
+  加长、减少启停次数——上限 60 秒/段（再长 MQTT keepalive 就掉线），
+  代价是"按屏幕停播"要等一段播完。
+  段长同时决定三件事，别只盯着一件调：接缝次数（咔嚓）、
+  "按屏幕停播"的响应粒度（阻塞期间主循环不转）、喂狗与 MQTT ping 的间隔
+  （只能在段间做，所以段长不能超过 keepalive 60s 的一半量级）。
+  **为什么不让服务端拆成多条推送**：每段之间要重走「MQTT 通知 → HTTP GET
+  → 下载几百 KB」，缝隙是秒级的，还各自多两次全屏重绘。
+  另外 `_drop_stale_segs` 必须留着——上一条长音频的分段不删就一直占 flash，
+  而 flash 满的后果恰恰是"写出半个 WAV、播到一半没了"，跟本条症状撞车。
+  ⑤ `snd.play_file()` 返回播放等待循环的轮数 `iters`，长音频前后各持久化一条
+  面包屑（`play …KB` / `played …s iters=…`）。下次再黑屏，crash.log 里
+  **只有 play 没有 played = 死在播放中**；**`iters=0` = `playWavFile` 是阻塞
+  实现**（整段播放期间主循环没转，喂狗只靠进函数前那一次）——这一条没在
+  真机上确认过，是留给下次的判据。
+- **边下边播**（`snd.stream_play`，`PLAY_STREAMING`，LRN 2026-10-18，症状「长回复
+  生成完还要等很久才出声，播完 MQTT/心跳断连重连」）。两个根因：
+  ① 旧链路先把整段 WAV 写进 flash 再播，60 秒回复约 1.9MB，光写盘就十几秒；
+  ② **本固件 `playWavFile` 是阻塞实现**（iters≈每段 1 轮），一段 25~60 秒播放
+  期间主循环不转，`play_file` 里那个泵 MQTT 的循环形同虚设。现在 `/chat`、
+  `/chat-vision`、取景拍照、push 四处都走 `stream_play`：每收 1 秒
+  （`STREAM_BLOCK_BYTES`）加迷你 WAV 头，`Speaker.playWav(内存)` 挂进固定通道
+  `STREAM_CH` 的两槽队列（非阻塞），三块缓冲轮转，收满 `STREAM_PREBUF` 块开播。
+  **别改坏的点**：往一块缓冲写数据前，它必须已播完——靠「队列有空位才挂下一块」
+  保证（在播的只剩上一块），`isPlaying(ch)` 查不了深度时按预计播完时刻估；
+  `import_sim` 用两槽队列桩专门验了「播出逐字节一致 + 在播缓冲零覆盖」。
+  第一块挂进去 100ms 内不在播（或 `playWav` 签名不符抛异常）就把已读字节接回
+  流前面、退回落盘 `save_stream + play_file`，本次开机不再尝试。
+  每次播放写一条 `play stream kb= first= ms= gaps=` 诊断日志：`first` 是从开始
+  下载到出声，`gaps>0` = 网络跟不上、扬声器断过粮，`mode=fallback` = 固件不支持。
+  服务端 `/chat` 也会刷新心跳时刻（`_hb_seen`）：设备对话期间不发心跳，
+  长对话会被误报「心跳中断」。
+- **边生成边播（M9，新服务端 + 内置 agent 才有，LRN 2026-10-23）**：设备请求带 `X-Stream: 1`
+  （`chat._want_stream`，只在内存流式播放可用时带；`cfg.STREAM_REPLY=False` 关掉）→ 服务端
+  `server/src/speech/stream-reply.ts` 边收模型逐字输出边切句、每句合成、立刻写进响应：一个 WAV 头
+  （长度是占位值）+ 各句 PCM 依次追加，**不带 Content-Length、不用 chunked**（设备 requests 不认），
+  读到连接关闭。`X-Reply-Text` 只有首句并带 `X-Reply-Partial: 1`，设备播完 `GET /chat/last`
+  取全文刷新屏显。两个别改坏的点：① 响应头要等「首句之后又来了字，或这条助手消息结束且它的工具都执行完」
+  才发——`take_photo`/`set_volume` 往往跟在「我看看。」后面，早发头 `X-Need-Photo` 就丢了；
+  ② 落盘播放路径（`save_stream`）遇到长度未知的流，写完要回填真实长度，否则 `playWavFile`
+  按占位长度读到文件外。老固件不带头、快捷指令短路，都照旧整段返回。
+- **设备文件同步（`ota.py`，管理界面「设备 → 图片与代码」）**：服务端 `server/src/devicefiles.ts` 存
+  `<数据目录>/device_files/`（自定义）+ 构建时打进来的 `device/src`（`virtual:device-fw`，版本 = 服务端版本）；
+  MQTT `{"action":"sync","scope":"res|code|all"}` → 设备空闲时 `GET /device/files` 拿清单（路径/大小/sha256）
+  → 只下变了的 → `POST /device/sync-result` 回报；指纹 `rev` 随心跳 `fw`/`res`/`fwv` 上报。别改坏的点：
+  ① 路径白名单两边一致（`src/<名>.py`、`resource/[角色/]<名>.jpg`），`main.py` **故意不能在线更新**——它坏了只能接 USB；
+  ② 代码**先全部下载校验成 .new，屏幕确认后**才先写 `data/ota_pending.json` 再换文件（顺序反了中途断电就回滚不了）；
+  ③ 回滚在 `device/main.py` 的 `_ota_guard`：起不来或第 4 次开机标记还在就从 `src.bak/` 换回，`ota.tick()` 等心跳成功一次
+  才删标记——别提前到 `setup()` 结束，那时还不知道新代码能不能跟服务端说上话；
+  ④ `ota_state.json` 只记自己装过的文件，删除只删这些（手动传的文件不碰）；换了图要清 `ui._role_hit`/`_img_missing`；
+  ⑤ `rev` 算法两边必须一致（`DeviceFiles.rev` ↔ `ota._rev`），`import_sim` 里专门对过。
+- **执行命令 / 联网（新服务端内置 agent，`server/src/agent/tools/exec.ts`、`web.ts`）**：`exec` 只在
+  `RunScope.trusted` 的会话里出现。可信度的来源：IM 渠道默认不可信，只有渠道白名单里 owner 的私聊显式可信；
+  其它渠道可信；嵌套调用（a2a）沿用上层，后台派出的经 `lineage.trusted` 带过去；**不可信会话里 cron_add / cron_update
+  的任务标 `untrusted`，跑起来也不可信**（管理界面改过才清掉）——新加任何「替别人跑一轮」的入口都要把可信度带上，
+  漏一处就是让陌生人借道执行命令。联网走 `util/proxy.ts`：配了代理就换全局 dispatcher（含调模型），本机地址直连。
+- **扩展 / MCP（`server/src/agent/extensions.ts`、`mcp.ts`）**：扩展是 pi 格式（`export default (pi) => pi.registerTool(...)`），
+  运行时 sucrase 转译 + `vm.compileFunction`，`@earendil-works/pi-ai`/`typebox` 走内置 shim（打包后没有 node_modules）。
+  扩展工具、MCP 工具、`extension_*` 自写工具**都按 `exec` 同一条可信度规则**——它们本质上就是任意代码执行；
+  只有工具自己标 `allowUntrusted` / 服务器配置 `allowUntrusted` 才放给不可信会话。`toolsFor` 按名字去重、内置优先，
+  别让扩展覆盖 `exec` 之类的内置工具——扩展 / MCP 的提供者用 `addTools(p, { plugin: true })` 注册，
+  永远排在内置之后（设备工具是后注册的，不分开排的话扩展里的 `speak` 会盖掉内置的）。新工具从下一轮对话起生效。
+  **pi 扩展包**（`packages.ts`）：单文件可执行里没有 npm，自带最小安装器（semver + sha512 + 冲突嵌套，不跑安装脚本）；
+  依赖也走扩展加载器（`resolveBare` 自己解析 exports，`import.meta` 换成注入的对象），这样纯 ESM 包也能转译加载。
+  宿主包（pi-ai / pi-coding-agent / pi-tui / typebox）一律换内置 shim，pi-tui 与 pi-coding-agent 里没实现的导出拿到不报错、调用才报。
+- **日志与 Windows 托盘（`util/logfile.ts` / `tray.ts`）**：控制台照常输出，同时 tee 到 `<数据目录>/logs/kagura.log`，5MB 滚动、留 3 份。
+  `--tray` 用 `Start-Process -WindowStyle Hidden` 起隐藏子进程（**别直接 spawn**：子进程会挂在父控制台上，父进程一退就被关掉；
+  且 SEA 的 `process.argv` 有时会多带一次 exe 路径，必须过滤，否则会被当子命令报错）。
+  子进程起服务端后用 PowerShell NotifyIcon 出托盘：打开管理页面 / 打开日志 / 重启 / 退出；退出走 `POST /api/admin/quit`。
+  托盘脚本写成 `<数据目录>/logs/tray.ps1`（UTF-16 带 BOM），再用 `Start-Process -File` 起独立隐藏进程——
+  **别用 spawn + -EncodedCommand**：实测子进程秒退 code=0、什么都不做；脚本里 `[ref]$created` 前必须先 `$created = $false`，否则 PowerShell 报「无法将 [ref] 应用于不存在的变量」。
+  托盘用 `Global\\KaguraTrayMutex` 防重复；定时轮询 `/api/admin/meta`，服务端没了就自己消失。
+  隐藏进程设 `KAGURA_NO_PROMPT=1`，preflight 和出错后的「按回车」都不再等待（否则没有窗口时会永久卡住）。
+- **IM / 网页聊天回复同时播语音（`channels/manager.ts` 的 `speakAside`，LRN 2026-10-23，症状「聊天时有时播语音有时不播，要提醒才播」）**：
+  以前全靠模型自己决定要不要调 `speak`。现在由代码决定：主人私聊 + 账号 `voice_push`（home/always/off）+ `ctx.presence`；网页聊天（`routes/admin-chat.ts`）走同一套，只按在家状态。
+  **跑完这一轮再判断一次**（这条消息里说了「我到家了」→ `set_presence` 也算），`toSpoken()` 转成适合念的一段后 `sendPush`。
+  在家时 `spokenTo` 设成目标设备，模型再 speak 同一台会被工具挡回（同 /chat），不会播两遍；模型已 speak 过别的就不再补播。
+  在家状态统一走 `ctx.setPresence` / `loadPresence`（设备 BLE、`set_presence` 工具、`/home` `/away` 命令三个入口）。
+- **管理接口与设备信任（`routes/admin.ts` 的 `isLocal`、`ctx.deviceTrusted`，LRN 2026-10-23 安全检查）**：
+  ① 管理接口光看「来源是 127.0.0.1」不够——你电脑上任何网页都能让浏览器往 127.0.0.1 发请求（跨站请求伪造），
+  DNS 重绑定还能绕过同源。`isLocal` 同时要求 Host 是本机地址、跨站的 Origin / `Sec-Fetch-Site: cross-site` 一律拒绝
+  （顶层导航 GET 例外）。**新加管理接口一律走 guard，别自己判断来源**——漏了就是网页一键装扩展包、执行命令。
+  ② 设备上行接口（/chat 等）固件不带口令，同一 WiFi 谁都能冒充设备；而设备对话是可信的（能 exec）。所以
+  `deviceTrusted`：第一台心跳的设备自动受信，之后的新设备要在管理界面批准，且请求 IP 必须是它心跳的 IP；
+  带 Origin / Sec-Fetch-* 的（浏览器发的）一律不受信。新加「设备触发 agent」的入口要把 `trusted: ctx.deviceTrusted(req, dev)` 传进去。
+  WSL + portproxy 下所有局域网请求看起来都来自同一个 Windows 地址，IP 绑定在那里形同虚设（已在 README 说明）。
+- **Windows 托盘版（`kagura-tray.exe`）**：和 `kagura.exe` 是同一个文件，只把 PE 头的子系统改成「图形界面」
+  （`scripts/gui-exe.mjs`），启动根本不建控制台窗口。别再回到「先开窗口、PowerShell 拉起隐藏进程」的做法——
+  Windows 11 默认用 Windows Terminal 托管控制台，隐藏参数经常被无视（beta.17/18 就栽在这）。托盘版里 console 看不见
+  （Node 自动丢弃输出，日志靠 `logs/kagura.log`），不能停下来问人（`KAGURA_NO_PROMPT`），出错要 `messageBox` 弹框；
+  它派生的子进程都要 `windowsHide: true`，否则每跑一次命令就闪一个黑窗口。CI（server.yml / release.yml）有托盘版冒烟。
+- **导出 / 导入（`backup.ts`）与在线更新（`util/selfupdate.ts`）**：导入**绝不能在运行中直接覆盖数据库**——
+  写到 `.import-pending/`，重启后 `main()` 第一件事 `applyPending()`（在 loadConfig 之后、任何 DatabaseSync 之前）。
+  导出数据库用 `VACUUM INTO` 拍快照（WAL 里的也在），不用停服务。新加数据目录里的东西时记得在 `catalog`/`filesOf`/`itemOf`
+  三处登记，不然导出时就悄悄漏掉；带密钥的文件要在 `stripFile` 里清空、在 `applyPending` 里「空着就保留本机的」。
+  在线更新：Windows 由一个独立的隐藏 PowerShell 跑安装包再拉起托盘版（本进程先退出，安装包会强制结束它）；
+  装失败也要把原来的拉起来，不然用户点一下更新服务就没了。大请求体只对本机来源放宽（`Router.bigBodyPaths`）。
+- **新版本提醒（`util/update.ts`）**：启动 30 秒后、之后每 12 小时查一次 GitHub Releases，只提示不安装；
+  预览版连预览版一起比，正式版只看正式版。`update_check: false` 关掉。
+- **`global` 声明必须有主**（LRN 2026-08-25）：`netsvc.mqtt_check` 里写过
+  `global _mqtt_ok`，但本模块从来没有这个名字（状态在 `diag`）。后果是
+  **任何一次 MQTT 掉线都变成 NameError 逃出 `mqtt_check`**，主循环连吃 10 次
+  就 `machine.reset()`——同样表现为"毫无征兆黑屏重启"，crash_reports 里
+  4 份日志全是它。`global X` 会让静态检查把 X 当成已定义，所以
+  `tools/check_split.py` 第 5 项专门查这个：被 global 声明却无人赋值 = 报错。
+- **崩溃日志取尾不取头**：`crash.log` 是追加的，死因永远在末尾，
+  `_boot_report` 却只上传前 8KB——2026-08-11 那份 8KB 日志里一行堆栈都没有，
+  全是几天前的 `power-change`。满电涓流会让 `isCharging()` 每几十秒翻一次，
+  条条持久化就是拿噪声把证据挤出去，现在只有"电量没满却停充"才写 flash。
+- **"设备僵死但没复位"的排查判据**（LRN 2026-08-26，那次停摆 4 小时 51 分，
+  从完全空闲的状态僵住，全靠手动上电才回来）：
+  ① `crash.log` 里**有没有 `netfix1`**——失联满 10 分钟必写一条，没有就说明
+  `net_watch_tick` 压根没执行到，即主循环停摆（不是网络问题）；
+  ② 有没有堆栈 = 有没有未捕获异常；③ 崩溃日志的时间跨度能证明中间**有没有
+  重启过**（重启会上传并删除它）。三条都空 = 主循环卡死且看门狗没救它。
+- **看门狗武装失败必须回退，而且必须能被远程看见**：`_wdt_init` 旧实现构造
+  失败只 print 一行就把 `_wdt` 留成 `None`——整台设备失去硬件自愈能力，
+  远程完全看不出来。现在依次试 `WATCHDOG_TIMEOUT_MS` 和 120000（8 月上旬
+  真机产生过"看门狗复位"的已知可用值），结果记进 `hw._wdt_ms` 随心跳上报，
+  服务端日志与 `/device-status` 直接显示 `wdt=180s` / `wdt=⚠️未武装`。
+  **改 `WATCHDOG_TIMEOUT_MS` 之后务必看一眼心跳里的 wdt**——固件对上限
+  有没有自己的限制无从预知，改大了却被拒 = 悄悄卸掉了看门狗。
+- **死人开关（`hw._deadman_check`，判据放在喂狗点上）**：失联超过
+  `DEADMAN_SECS`（30 分钟，故意大于 netfix2 的 25 分钟，主循环还活着时优先
+  走正常分级自愈）就自己复位，复位前往 `crash.log` 写一行
+  `deadman (stuck at <阶段>, dead=<秒>)`。**为什么判据在 `_wdt_feed()` 里**：
+  8/26 那次僵死，看门狗武装着 180 秒却一次没响——卡住的循环一边转一边喂狗，
+  而 netfix1/netfix2 都要主循环跑到 `net_watch_tick` 才有机会执行，三道自愈
+  全都够不着。`_wdt_feed()` 是唯一一个在每个这种循环里都还在转的函数，
+  判据放这儿，以后新写的"喂狗死循环"也自动被兜住。两个实现要点：
+  ① 必须用 `ticks_ms` 而非 `time.time()`——`clock.sync_rtc()` 会把墙钟往前跳
+  好几年，拿墙钟算年龄一开机就判超时；② 开机门槛用**一次性闩锁**
+  （`_deadman_armed`），不是每次比对开机时刻——`ticks_diff` 只在约 6.2 天内
+  有效，连续跑一周后拿它算 uptime 会翻负，兜底就悄悄失效了。
+  阶段标记 `cfg.St.stage` 由主循环每轮复位成 `loop`，各长循环入口自己改写
+  （`rec`/`dl`/`play`/`cam`/`stream`/`chat`）——卡住时主循环轮不到复位，
+  标记正好停在卡住的那一段上。
+- **纯硬件条件的等待一律要有上限并喂狗**：`drain_touch()` 曾是
+  `while M5.Touch.getCount() > 0` 死等且一次不喂狗——屏上压个东西、驱动漏报
+  一次抬手，就是"主循环停摆 + 看门狗饿不死它"的配方。写这类循环前先问一句
+  "硬件永远不给我想要的状态会怎样"。
+- **网络自愈的判据只看 `dead_for`（多久没成功联系上服务端），绝不能加
+  `wifi_ok` / `_mqtt_ok` 前置条件**。曾经加过，结果 2026-08-21 那次失联
+  79 分钟自愈一次都没触发：WiFi 驱动 wedge 的典型表现就是 `isconnected()`
+  仍返回 True、MQTT socket 也还在，设备自认为健康，可包一个都出不去
+  （服务端记的正是 `mqtt=True`）。**"自己看起来好不好"不可信，
+  "服务端还认不认得我"才是唯一可信的判据。**
+  看门狗也救不了这种情况——主循环活得好好的，一直在喂狗。
+- **录音 VAD**（`snd._record_audio`，LRN 2026-10-18，症状「连续模式说话几乎不触发、
+  单次对话识别也差」）。四条别改回去：
+  ① **无缝双缓冲**（`MIC_GAPLESS`）：两块缓冲始终排在 `Mic.record` 队列里，
+  队首录满（按时间算 + `isRecording()<2` 确认）才取出处理并重新排队。旧版
+  「录一块 → sleep(块长+50ms) → 算 RMS → 再录」每 250ms 丢约 80ms，上传的
+  语音断断续续；② **字头预录** `PREROLL_CHUNKS`：只从过门槛那块开始存会把
+  "你好"的"你"切掉；③ **开机校准取中位数**、丢开麦前 3 段、封顶
+  `VAD_MAX_THRESHOLD`，`rms()` 去直流——旧版取最大值×3，一段开麦爆音就能
+  把门槛抬到说话够不着；④ 连续模式播完**直接进下一轮录音**，旧版 1.5 秒
+  长按退出窗口期间麦克风是关的（录音循环本身就认长按退出）。
+  排查口径：心跳带 `vad=[底噪,说话,唤醒]`；每次录音写一条 `rec n=… peak=… th=…
+  tmo=… late=…` 诊断日志（`late>0` = 处理跟不上出了缝，`tmo` 多 = 固件
+  `isRecording` 语义不符、退回按时间判）；服务端每条录音打印 `🎙️ rms/peak/clip/dc`，
+  百度报错打印 `err_no`，最近一条录音存 `debug_audio/<dev>_last.wav`，
+  `GET /debug-audio/<dev>`（设了 API_TOKEN 就带 `?token=`）直接在浏览器试听——
+  **先听这条录音，糊 = 设备端问题，清楚却认不出 = ASR 问题。**
+  识别为空时 `/chat` 直接回 `_ASR_EMPTY_REPLY`，不走 OpenClaw。
+  **录音上限 30 秒**（`MAX_CHUNKS=120`，原 10 秒说一半就被截断），停顿 1.5 秒收尾
+  （`SILENCE_CHUNKS=6`）。录音直接写进开机预留的整块缓冲 `snd._rec_buf`
+  （`alloc_rec_buf()`，分配不到降级 20/10 秒），`_record_audio` 返回指向它的
+  WAV memoryview，**下一次录音会覆盖**——上传/转 base64 之后才能再录。
+  别改回逐块 `bytes()` + `join` + 拼头：30 秒录音那样要三份近 1MB。上传直接传
+  memoryview（`chat._post_wav`，固件不认就退回 bytes）。说满上限时 rec 日志带 `CUT`。
+- **`/chat` 超时**（LRN 2026-10-18，症状「回答一长就不播，设备 `network err: ETIMEDOUT`，
+  服务端却打印了 `📤 WAV`」）：设备 `REQUEST_TIMEOUT_CHAT` 原为 30s，而 OpenClaw
+  允许 120s，长回答 LLM + TTS 轻松超 30s——服务端照常发、设备早已放弃。现为 60s，
+  服务端 `_DEVICE_CHAT_TIMEOUT` 要同步改；每条回复打印 `⏱️ asr/llm/tts/总`，
+  超时会标 ⚠️。别随手再加大：阻塞期间发不了 MQTT ping（发请求前已
+  `netsvc.mqtt_ping()` 清零计时），broker 约 90s 收不到包就断。
 - **openclaw 并发**：`chat()` 有全局 Semaphore(2) + 每 session 串行锁。
+- **摄像头固件差异**：抓帧走 `_cam_grab()`（优先 `camera.capture()`→bytes，
+  回退 `camera.snapshot()`→`image.Image`），预览走 `_cam_show()`（优先
+  `Lcd.drawRawBuf`，回退 `Lcd.show`，探测一次后固定）。帧是 raw RGB565，
+  分辨率靠字节数反查 `_CAM_SIZES`——改这张表要同步服务端 `RGB565_SIZES`。
 - **回退开关**（设备端顶部常量）：`WAKE_MIC_PERSISTENT`、`WATCHDOG_ENABLED`、
-  `SHOW_CHAT_TEXT`、`VISUAL_ENABLED`、`USE_STATE_IMAGES`——真机出问题先关开关再排查。
+  `SHOW_CHAT_TEXT`、`VISUAL_ENABLED`、`USE_STATE_IMAGES`、`CAMERA_MODE_ENABLED`、
+  `CAMERA_QVGA`、`PREVIEW_SWAP`、`MIC_GAPLESS`、`PLAY_STREAMING`、
+  `HANDS_FREE_TH_RATIO`（改 1.0 = 免手模式不加门槛）、`STREAM_ENABLED`、`STREAM_QQVGA`、
+  `TOUCH_FEEL_ENABLED`（整个触觉）、`FEEL_NOTIFY_ENABLED`（只关"主动开口"，
+  保留反射层和体感层）、`FEEL_WAKE_ON_PICKUP`
+  ——真机出问题先关开关再排查。
 
 ## 设备端模块结构（device/src）
 
 依赖分层，**必须保持无环**（`tools/check_split.py` 会检查）：
 
 ```
-cfg → hw → clock → ui → {wifisetup, audio} → netsvc → chat → app
+cfg → hw → clock → ui → {wifisetup, snd} → cam → feel
+    → diag → ota → netsvc → stream → chat → app
 ```
 
 | 模块 | 职责 |
 |---|---|
-| `cfg` | 常量、回退开关、路径、`St` 状态类。不 import 任何 kagura 模块 |
-| `hw` | LED/看门狗/麦克风/音量/摄像头/RMS/触摸/绘图原语 |
+| `cfg` | 常量、回退开关、目录助手、`St`/`Feel` 状态类。不 import 任何 kagura 模块 |
+| `hw` | LED/看门狗/麦克风/音量/RMS/触摸（含抚摸轨迹）/绘图原语 |
 | `clock` | RTC 同步与读取。单独成模块是为打断 ui ↔ netsvc 环 |
-| `ui` | 字体、环形可视化、分层重绘 `draw_state`、息屏唤醒 |
+| `ui` | 字体、环形可视化、离屏画布合成 `draw_state`、息屏唤醒 |
 | `wifisetup` | 屏上配网（SSID 选择 + 软键盘），最自洽的一块 |
-| `audio` | 录音 VAD、播放、包络、噪声校准 |
+| `snd` | 录音 VAD、播放、包络、噪声校准。**不能叫 audio**——UIFlow2 固件里有同名冻结模块，冻结模块优先级在 sys.path 之前，我们的文件根本加载不到 |
+| `cam` | 抓帧/预览/取景模式/拍照上传。**不能叫 camera**——MicroPython 的摄像头驱动就叫这名，同名会 import 到自己 |
+| `feel` | 触觉三层 + IMU 本体感觉 |
+| `diag` | 事件环形日志、崩溃上报、心跳遥测、网络分级自愈、画布探测 |
+| `ota` | 设备文件同步：管理界面传的图 / 代码，校验、屏幕确认、回滚标记 |
 | `netsvc` | MQTT、BLE 感知、UDP 发现 |
+| `stream` | 摄像头直播推流与直播中插拍 |
 | `chat` | 主对话、模式切换、IMU 摇晃彩蛋 |
-| `app` | `setup()` / `loop()` / `main()` |
+| `app` | `setup()` / `loop()` / `main()`（含崩溃守护循环） |
+
+> **模块命名踩过两次**（`camera` 撞驱动、`audio` 撞固件冻结模块），症状一模一样：
+> **代码明明改了、也确实传上去了，设备行为却还是旧的**——因为固件里的冻结模块
+> 优先级在 `sys.path` 之前，磁盘上那份根本没被加载，而且不报任何错。
+> 新增模块取名前先在 REPL 验一句：
+> `import 名字 as m; print(getattr(m, "__file__", "FROZEN——换个名字"))`
+
+设备端由 `tools/` 下的生成器从单文件版拆出，**注释逐行保留**（顶层语句之间的
+独立注释块会随下一条语句一起被抽走，否则段头和踩坑记录会全部丢失）。
 
 **三条铁律**：
 
@@ -114,16 +473,27 @@ cfg → hw → clock → ui → {wifisetup, audio} → netsvc → chat → app
 3. **别拿模块名当局部变量**。原代码 `ensure_wifi()` 里有个局部 `cfg = _wifi_load()`
    会遮蔽 cfg 模块，拆分时已改名为 `saved`。
 
-`audio ↔ netsvc` 的循环（`play_wav` 要 `mqtt_check` 维持心跳、push 又要回调
-`play_wav`）用回调注入打断：`app.setup()` 里 `audio.set_pump(netsvc.mqtt_check)`。
+**两处循环依赖用回调注入打断**，注入点都在 `app.setup()`：
+
+- `snd ↔ netsvc`（`play_wav` 要 `mqtt_check` 维持心跳、push 又要回调
+  `play_wav`）→ `snd.set_pump(netsvc.mqtt_check)`。取景循环也要泵 MQTT，
+  走同一个注入点（`snd._pump_safe()`），别再开第二个。
+- `netsvc ↔ stream`（MQTT 收到 `stream_start` 要跑推流、推流循环又要回来消费
+  命令队列）→ `netsvc.set_stream_runner(stream._run_stream_cmd)`。
+
+`_mqtt_ok` 放在 `diag` 而不是 `netsvc`：心跳要读它，netsvc 要写它，
+放 netsvc 就成环。netsvc 写 `diag._mqtt_ok = ...`，单向依赖。
 
 ## 测试与验证
 
 ```bash
 pip install -r requirements.txt
-pytest tests/ -q                 # 82+ 例，外部依赖全打桩（conftest 注入 config/paho 桩）
+pytest tests/ -q                 # 200+ 例，外部依赖全打桩（conftest 注入 config/paho 桩）
 python3 tools/check_split.py     # 设备端拆分静态校验（5 项）
 python3 tools/import_sim.py      # 桩件环境下真的 import 一遍设备模块
+# 监控页 JS 语法检查（node --check 只认真实文件，不能用进程替换）
+python3 -c "import re;open('/tmp/m.js','w').write(re.search(r'<script>(.*)</script>', \
+  open('web/monitor.html').read(), re.S).group(1))" && node --check /tmp/m.js
 ```
 
 - 服务端改动必须跑 pytest；`tests/conftest.py` 的 `vs` fixture 每测试重置 `ServerState`。
@@ -139,7 +509,8 @@ python3 tools/import_sim.py      # 桩件环境下真的 import 一遍设备模�
 
 - 提交信息中文，格式 `类型: 摘要`（feat/fix/perf/refactor/docs/chore）。
 - 注释中文为主；服务端有 type hints，设备端（MicroPython）没有。
-- 运行时产物（`push_audio/`、`tts_cache/`、`reminders.json`）已 gitignore，勿提交。
+- 运行时产物（`push_audio/`、`tts_cache/`、`snapshots/`、`debug_audio/`、`roles_state.json`、`reminders.json`、
+  `photo_schedules.json`）已 gitignore，勿提交。
 - 设备目录：`/flash/kagura/src`（代码）、`/flash/kagura/resource`（图片，
   用 `cfg.res()` 取路径）、`/flash/kagura/data`（运行时状态，`cfg.data()`，
   `cfg.ensure_dirs()` 自动创建）。新增文件路径一律走这两个助手，别硬编码。

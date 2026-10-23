@@ -48,9 +48,10 @@ import voice_server  # noqa: E402
 
 
 @pytest.fixture()
-def vs():
+def vs(tmp_path):
     """每个测试独立的 ServerState，避免限流/会话状态串测。"""
     voice_server.state = voice_server.ServerState()
+    voice_server.DEBUG_AUDIO_DIR = tmp_path / "debug_audio"
     voice_server.app.config["TESTING"] = True
     return voice_server
 
@@ -60,10 +61,37 @@ def client(vs):
     return vs.app.test_client()
 
 
+class FakeMqtt:
+    """记录 publish 的假客户端，供需要断言 MQTT 下发的测试用。"""
+
+    def __init__(self):
+        self.published = []
+
+    def publish(self, topic, payload, qos=0):
+        import json
+        self.published.append((topic, json.loads(payload), qos))
+
+
+@pytest.fixture()
+def mqtt(monkeypatch, vs):
+    fake = FakeMqtt()
+    monkeypatch.setattr(vs, "_mqtt_client", fake)
+    return fake
+
+
+@pytest.fixture()
+def snap_dir(tmp_path, monkeypatch, vs):
+    """快照留档指向临时目录，别把测试图片写进工作区的 snapshots/。"""
+    d = tmp_path / "snapshots"
+    d.mkdir()
+    monkeypatch.setattr(vs, "SNAPSHOT_DIR", d)
+    return d
+
+
 @pytest.fixture()
 def fake_wav(tmp_path, monkeypatch, vs):
     """把 synthesize 替换为写一个假 WAV 文件，返回其路径。"""
     wav = tmp_path / "out.wav"
     wav.write_bytes(b"RIFF....WAVEfake-audio")
-    monkeypatch.setattr(vs, "synthesize", lambda text: str(wav))
+    monkeypatch.setattr(vs, "synthesize", lambda text, **k: str(wav))
     return wav

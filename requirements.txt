@@ -1,5 +1,6 @@
 # 服务端（voice_server.py）
 flask>=2.3,<4
+requests>=2.28         # 百度 ASR/TTS 调用（Session 连接池 + 退避重试）
 paho-mqtt>=1.6,<2      # 代码使用 1.x Client() 构造函数，勿升 2.x
 numpy>=1.24            # RGB565→JPEG 转换（/chat-vision、/upload-photo）
 pillow>=10.0           # 同上

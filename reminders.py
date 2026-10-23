@@ -8,12 +8,13 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 from pathlib import Path
 from typing import Callable, Optional
 
-STORE_PATH = Path(__file__).parent / "reminders.json"
+STORE_PATH = Path(os.environ.get("KAGURA_DATA_DIR") or Path(__file__).parent) / "reminders.json"
 MAX_ATTEMPTS = 3
 RETRY_DELAY = 60
 

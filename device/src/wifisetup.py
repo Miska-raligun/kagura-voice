@@ -1,21 +1,27 @@
-"""屏上 WiFi 配网：扫描 → 选择 SSID → 软键盘输密码 → 连接 → 存档。
-
-凭据持久化到 cfg.data("wifi.json")，下次开机自动连接。
-开机前 2 秒内按住屏幕可强制进入配置界面（app.setup() 入口检测）。
+"""Kagura Voice 设备端 —— 屏上 WiFi 配网：SSID 扫描选择 + 软键盘输入 + 凭据落盘。
 """
 
+from M5 import *
 import time
 import ujson
 import uos
 import network
-from M5 import *
 
 import cfg
 import hw
 import ui
 
+# ── WiFi 配置 ─────────────────────────────────────────────────
+#
+# 在设备屏幕上完成 WiFi 配置：扫描 → 选择 → 键盘输入密码 → 连接 → 保存。
+# 凭据持久化到 /flash/wifi.json，下次开机自动连接。
+# 开机前 2 秒内按住屏幕可强制进入配置界面（setup() 入口检测）。
+
 _WIFI_CONF_PATH = cfg.data("wifi.json")
+
+
 _WIFI_CONF_TMP  = cfg.data("wifi.json.tmp")
+
 
 _wlan = None
 
@@ -70,7 +76,7 @@ def _wifi_save(ssid, pwd, is_open):
 def _wifi_connect(ssid, pwd, timeout=None):
     """同步连接 WiFi。成功返回 True，超时/失败返回 False。"""
     if timeout is None:
-        timeout = cfg.WIFI_CONNECT_TIMEOUT
+        timeout = cfg._WIFI_CONNECT_TIMEOUT
     wlan = _wlan_if()
     try:
         try:
@@ -131,18 +137,29 @@ def _wifi_scan():
     nets.sort(key=lambda e: e[1], reverse=True)
     return nets
 
+
 # ── SSID 选择页 ──────────────────────────────────────────────
 
 _PICKER_ROW_H    = 28
+
+
 _PICKER_PER_PAGE = 6
+
+
 _PICKER_Y0       = 30
 
+
 _PICKER_RESCAN = (6,   208, 100, 234)
+
+
 _PICKER_MANUAL = (106, 208, 206, 234)
+
+
 _PICKER_PAGE   = (212, 208, 314, 234)
 
 
 def _draw_picker(nets, page):
+    ui._ui_invalidate()   # 配网界面整屏接管
     Widgets.fillScreen(0x000000)
     # 顶部状态栏
     Widgets.Line(0, 0, 320, 0, 0x00aaff)
@@ -241,6 +258,7 @@ def _pick_ssid(nets):
                     ssid, _rssi, auth = nets[i]
                     return (ssid, auth == 0)
 
+
 # ── 软键盘 ──────────────────────────────────────────────────
 
 _KBD_LAYOUTS = [
@@ -258,15 +276,31 @@ _KBD_LAYOUTS = [
      "-_=+[]{};:"],
 ]
 
+
 _KBD_KEY_W = 30
+
+
 _KBD_KEY_H = 34
+
+
 _KBD_X0    = 6
+
+
 _KBD_Y0    = 58
 
+
 _KBD_SHIFT = (6,   172, 70,  212)
+
+
 _KBD_SPACE = (74,  172, 182, 212)
+
+
 _KBD_BKSP  = (186, 172, 226, 212)
+
+
 _KBD_OK    = (230, 172, 274, 212)
+
+
 _KBD_CX    = (278, 172, 318, 212)
 
 
@@ -277,6 +311,7 @@ def _kbd_key_rect(row, col):
 
 
 def _draw_kbd(title, buf, shift_mode, masked, reveal_until):
+    ui._ui_invalidate()   # 配网界面整屏接管
     Widgets.fillScreen(0x000000)
     Widgets.Line(0, 0, 320, 0, 0x00aaff)
     Widgets.Line(0, 1, 320, 1, 0x00aaff)
@@ -395,7 +430,8 @@ def _prompt_text(title, masked=False):
             if hit:
                 break
 
-# ── 配网主流程 ──────────────────────────────────────────────
+
+# ── 配置主流程 ──────────────────────────────────────────────
 
 def wifi_setup_flow():
     """显示 WiFi 配置界面，循环直到连接成功返回 True。
@@ -458,15 +494,22 @@ def ensure_wifi(force_setup=False):
     except Exception:
         pass
 
-    saved = _wifi_load()          # 注意：不能叫 cfg，会遮蔽 cfg 模块
+    saved = _wifi_load()
     if saved:
         ssid = saved.get("ssid", "")
         pwd  = saved.get("password", "")
         if ssid:
             ui.draw_state("wifi_connect")
-            if _wifi_connect(ssid, pwd):
-                print("wifi restored from file:", ssid)
-                return True
-            print("stored wifi failed, entering setup")
+            # 无人值守设备：存档凭据连不上时循环重试（≈15 分钟）后整机复位
+            # 刷新 WiFi 栈，绝不停在配置 UI 等人——那会失联到有人来按键为止。
+            # 凭据真的变了时：开机 2 秒内按住屏幕仍可强制进入配置界面。
+            for attempt in range(20):
+                if _wifi_connect(ssid, pwd):
+                    print("wifi restored from file:", ssid)
+                    return True
+                print("wifi retry {}/20".format(attempt + 1))
+                time.sleep(30)
+            import machine
+            machine.reset()
 
     return wifi_setup_flow()
