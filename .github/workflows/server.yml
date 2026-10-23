@@ -65,6 +65,23 @@ jobs:
           node scripts/build.mjs src/main.ts dist/kagura.cjs
           node scripts/sea.mjs dist/kagura.cjs dist/kagura
           ls -la dist
+      - name: 托盘版冒烟（Windows：图形界面子系统，不开控制台也能起服务、写日志、退出）
+        if: runner.os == 'Windows'
+        working-directory: server
+        shell: pwsh
+        run: |
+          node scripts/gui-exe.mjs dist/kagura.exe dist/kagura-tray.exe
+          $data = Join-Path $env:RUNNER_TEMP "kagura-tray-smoke"
+          $env:KAGURA_DATA_DIR = $data; $env:KAGURA_PORT = "5390"; $env:KAGURA_MQTT_PORT = "11390"; $env:KAGURA_STREAM_PORT = "15390"
+          $env:KAGURA_DISC_PORT = "15391"; $env:KAGURA_FAKE_PROVIDERS = "1"; $env:KAGURA_NO_TRAY = "1"
+          $p = Start-Process (Resolve-Path dist\kagura-tray.exe) -ArgumentList '--tray','--no-browser' -PassThru
+          $ok = $false
+          for ($i = 0; $i -lt 30; $i++) { Start-Sleep 1; try { $h = Invoke-RestMethod http://127.0.0.1:5390/health -TimeoutSec 2; if ($h.app -eq 'kagura') { $ok = $true; break } } catch {} }
+          if (-not $ok) { Get-Content "$data\logs\kagura.log" -ErrorAction SilentlyContinue; throw "托盘版没起来" }
+          if (-not (Select-String -Path "$data\logs\kagura.log" -Pattern "管理界面" -Quiet)) { throw "托盘版没写日志" }
+          Invoke-RestMethod -Method Post http://127.0.0.1:5390/api/admin/quit -TimeoutSec 5 | Out-Null
+          Start-Sleep 3
+          if (-not $p.HasExited) { Stop-Process $p -Force; throw "退出命令没生效" }
       - name: Install contract test deps
         run: pip install "paho-mqtt==1.6.1" pytest requests
       - name: Contract tests（对单文件可执行）

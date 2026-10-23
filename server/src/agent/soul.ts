@@ -49,7 +49,8 @@ export function dailyNotePath(ws: string, d = new Date()) {
 
 export const CHANNEL_HINTS: Record<string, string> = {
   device: "你正在通过桌上的 CoreS3 设备用语音和主人说话：回复会被合成语音播放。要口语化、简短（一般不超过 {max} 字），"
-    + "不要用 markdown、列表、表情符号、括号注释，不要念网址。",
+    + "不要用 markdown、列表、表情符号、括号注释，不要念网址。"
+    + "主人的话是语音识别转的文字，可能有同音错字、漏字：按上下文理解本意，实在拿不准再简短确认一句。",
   webchat: "你正在网页聊天窗口里和主人打字聊天，可以用 markdown，可以长一点。",
   system: "这是一次后台任务，没有人在实时等你回复。",
   a2a: "这条消息来自另一个 agent，不是主人。回复会原样交给对方。",

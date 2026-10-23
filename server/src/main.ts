@@ -23,33 +23,35 @@ import { files as deviceFw } from "virtual:device-fw";
 import { runCli, VERSION } from "./cli.ts";
 import fs from "node:fs";
 import path from "node:path";
-import { execFile, execFileSync } from "node:child_process";
+import { execFile, execFileSync, spawn } from "node:child_process";
 import { isWsl, toLinuxPath } from "./util/platform.ts";
-import { applyProxy } from "./util/proxy.ts";
+import { applyProxy, proxiedFetch } from "./util/proxy.ts";
+import { UpdateChecker } from "./util/update.ts";
 import { initLogFile } from "./util/logfile.ts";
 import { startTray } from "./tray.ts";
+import { isGuiProcess, messageBox } from "./util/wingui.ts";
 import { waitForOldProcess, takeRestartNotice } from "./util/restart.ts";
 import { preflight, realIO, closeAsk, pauseBeforeExit, type PortNeed } from "./startup/preflight.ts";
 
 // Node 22 下 node:sqlite 等会打实验特性警告，对用户只是噪声
 process.removeAllListeners("warning");
 
-// --tray：托盘模式。用 Start-Process -WindowStyle Hidden 换成一个隐藏进程（CREATE_NO_WINDOW 由它保证），
-// 再由那个进程起服务端 + 托盘图标。直接 spawn 的话子进程会挂到父进程的控制台上，父进程一退就被一起关掉。
-const TRAY_FLAG = process.argv.includes("--tray");
-if (process.platform === "win32" && TRAY_FLAG && process.env.KAGURA_TRAY_CHILD !== "1") {
-  // SEA 下 argv 有时会把可执行文件自己再带一遍；别把它当子命令传给子进程
-  const args = process.argv.slice(1).filter((a) => a !== "--tray" && a !== process.execPath && a !== process.argv[0]);
-  const ps = (s: string) => `'${s.replace(/'/g, "''")}'`;
-  const argPart = args.length ? ` -ArgumentList @(${args.map(ps).join(",")})` : "";
-  const cmd = `$env:KAGURA_TRAY_CHILD='1'; $env:KAGURA_NO_PROMPT='1'; Start-Process -FilePath ${ps(process.execPath)}${argPart} -WindowStyle Hidden`;
-  try {
-    execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", cmd], { windowsHide: true, timeout: 15000 });
-  } catch (e: any) {
-    console.log(`[tray] ⚠️  拉起隐藏进程失败: ${e.message}`);
+// 托盘模式（Windows）：开始菜单 / 开机自启打开的是 kagura-tray.exe——和 kagura.exe 是同一个程序，只是可执行文件头标成
+// 「图形界面」，启动时根本不建控制台窗口（以前「先开窗口、再用 PowerShell 拉起隐藏进程」在 Windows 11 默认的
+// Windows Terminal 下经常不生效，窗口照样出来）。托盘版里 console 输出看不见（日志照常写文件），也不能停下来问人。
+const GUI = isGuiProcess();
+if (process.platform === "win32" && process.argv.includes("--tray") && !GUI) {
+  // 用控制台版加 --tray 启动（老的快捷方式）：交给旁边的托盘版，自己退出
+  const trayExe = path.join(path.dirname(process.execPath), "kagura-tray.exe");
+  const args = process.argv.slice(1).filter((a) => a !== process.execPath && a !== process.argv[0]);
+  if (fs.existsSync(trayExe)) {
+    try { spawn(trayExe, args, { detached: true, stdio: "ignore", windowsHide: true }).unref(); }
+    catch (e: any) { console.log(`[tray] ⚠️  拉起托盘版失败: ${e.message}`); }
+    process.exit(0);
   }
-  process.exit(0);
+  console.log("[tray] 没找到 kagura-tray.exe，按普通窗口运行");
 }
+if (GUI) { process.env.KAGURA_NO_PROMPT = "1"; process.env.KAGURA_TRAY_CHILD = "1"; }
 
 async function main() {
   const cfg = loadConfig();
@@ -65,7 +67,11 @@ async function main() {
   if (cfg.adminPort && cfg.adminPort !== cfg.port) needs.push({ what: "本机管理端口", port: cfg.adminPort, proto: "tcp", host: "127.0.0.1", required: true });
   const pf = await preflight(needs, cfg.port, `http://localhost:${cfg.adminPort || cfg.port}/admin`, realIO());
   closeAsk();
-  if (pf === "already-running") process.exit(0);
+  if (pf === "already-running") {
+    // 托盘版：多半是已经在跑的时候又点了开始菜单——那就把管理界面打开
+    if (GUI && !process.argv.includes("--no-browser")) openUrl(`http://localhost:${cfg.adminPort || cfg.port}/admin`);
+    process.exit(0);
+  }
   if (pf === "exit") throw new Error("端口被占用，没有启动。");
 
   const dirs = makeDirs(cfg);
@@ -87,6 +93,8 @@ async function main() {
 
   // 重启恢复「在家/出门」（设备 BLE 只在状态变化时上报，不恢复的话一重启就成了「不知道」）
   ctx.loadPresence();
+  ctx.loadTrust();
+  if (cfg.updateCheck) { ctx.updates = new UpdateChecker(VERSION, proxiedFetch); ctx.updates.start(); }
 
   console.log("=".repeat(50));
   console.log(`  Kagura 语音服务端 ${VERSION}` + (fake ? "（假服务商模式）" : ""));
@@ -164,7 +172,7 @@ async function listenOrExplain<T>(what: string, port: number, fn: () => Promise<
 /** Windows 上这个端口是不是被 netsh portproxy（旧的 WSL 转发）占着 */
 function windowsPortproxyHas(port: number): boolean {
   try {
-    const out = execFileSync("netsh", ["interface", "portproxy", "show", "v4tov4"], { encoding: "utf8", timeout: 5000 });
+    const out = execFileSync("netsh", ["interface", "portproxy", "show", "v4tov4"], { encoding: "utf8", timeout: 5000, windowsHide: true });
     return out.split(/\r?\n/).some((l) => new RegExp(`^\\S+\\s+${port}\\s`).test(l.trim()));
   } catch { return false; }
 }
@@ -183,13 +191,17 @@ function openclawBrain(cfg: ReturnType<typeof loadConfig>, visionTmp: string) {
 /** 首次运行（在终端/桌面双击启动、还没配模型）自动打开管理界面的首次设置向导 */
 function maybeOpenAdmin(cfg: ReturnType<typeof loadConfig>, setupNeeded: boolean) {
   const marker = path.join(cfg.dataDir, ".welcomed");
-  if (cfg.fakeProviders || process.argv.includes("--no-browser") || !process.stdout.isTTY || fs.existsSync(marker)) return;
+  // 托盘版没有终端（stdout 不是 TTY）也要能在第一次启动时打开管理界面
+  if (cfg.fakeProviders || process.argv.includes("--no-browser") || (!process.stdout.isTTY && !GUI) || fs.existsSync(marker)) return;
   try { fs.writeFileSync(marker, new Date().toISOString()); } catch { return; }
-  const url = `http://localhost:${cfg.adminPort || cfg.port}/admin${setupNeeded ? "#/settings/wizard" : ""}`;
-  // WSL 里没有桌面：借 Windows 的 cmd.exe 打开 Windows 浏览器
+  openUrl(`http://localhost:${cfg.adminPort || cfg.port}/admin${setupNeeded ? "#/settings/wizard" : ""}`);
+}
+
+/** 用系统浏览器打开（WSL 里借 Windows 的 cmd.exe） */
+function openUrl(url: string) {
   const [bin, args] = process.platform === "win32" || isWsl() ? [process.platform === "win32" ? "cmd" : "cmd.exe", ["/c", "start", "", url]]
     : process.platform === "darwin" ? ["open", [url]] : ["xdg-open", [url]];
-  execFile(bin, args as string[], () => {});
+  execFile(bin, args as string[], { windowsHide: true }, () => {});
   console.log(`已在浏览器打开 ${url}`);
 }
 
@@ -197,6 +209,8 @@ runCli(process.argv.slice(2))
   .then((handled) => (handled ? undefined : main()))
   .catch(async (e) => {
     console.error("启动失败:", e?.message ?? e);
+    // 托盘版没有窗口：弹个框，不然用户只看到「点了没反应」
+    if (GUI) messageBox("Kagura 没能启动", `${e?.message ?? e}\n\n可能是端口被别的程序占用（比如旧版服务端、mosquitto）。\n详细日志：%APPDATA%\\Kagura\\logs\\kagura.log`);
     await pauseBeforeExit();     // Windows 双击启动：不停一下窗口就直接关了，用户什么都看不到
     process.exit(1);
   });

@@ -7,6 +7,13 @@ export function Overview() {
   if (!d) return <Err msg={err} />;
   return (
     <div class="grid">
+      {d.update?.newer && (
+        <Card title={`有新版本 ${d.update.latest}`} class="warn">
+          <p>你现在用的是 {d.update.current}。到发布页下载新的安装包装上就行（数据、设置都会保留）。</p>
+          {d.update.notes ? <details><summary class="muted">更新内容</summary><pre>{d.update.notes}</pre></details> : null}
+          <a class="btn primary" href={d.update.url} target="_blank">打开下载页 ↗</a>
+        </Card>
+      )}
       {d.setup_needed && (
         <Card title="还没配置模型" class="warn">
           <p>内置 agent 需要你自己填一个模型服务商（DeepSeek、通义、Kimi、本地 Ollama 等 OpenAI 兼容接口都行）。</p>

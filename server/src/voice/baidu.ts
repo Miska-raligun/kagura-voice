@@ -11,10 +11,11 @@ export const TTS_CACHE_MAX_FILES = 200;
 
 /** 百度 OAuth access token 缓存，过期前自动刷新；并发请求共用同一次刷新 */
 /** 百度接口地址。测试用本地假服务器替换 */
-export interface BaiduEndpoints { token: string; asr: string; tts: string }
+export interface BaiduEndpoints { token: string; asr: string; asrPro?: string; tts: string }
 export const BAIDU_ENDPOINTS: BaiduEndpoints = {
   token: "https://aip.baidubce.com/oauth/2.0/token",
   asr: "https://vop.baidu.com/server_api",
+  asrPro: "https://vop.baidu.com/pro_api",
   tts: "https://tsn.baidu.com/text2audio",
 };
 
@@ -69,8 +70,10 @@ export const ttsCacheKey = (clean: string, per: number) =>
 export class BaiduVoice implements Voice {
   private asrTok: BaiduToken;
   private ttsTok: BaiduToken;
-  constructor(keys: { asrKey: string; asrSecret: string; ttsKey: string; ttsSecret: string }, private cacheDir: string,
+  private pro: boolean;
+  constructor(keys: { asrKey: string; asrSecret: string; ttsKey: string; ttsSecret: string; asrMode?: "standard" | "pro" }, private cacheDir: string,
               private ep: BaiduEndpoints = BAIDU_ENDPOINTS) {
+    this.pro = keys.asrMode === "pro";
     this.asrTok = new BaiduToken(keys.asrKey, keys.asrSecret, "ASR", ep.token);
     this.ttsTok = new BaiduToken(keys.ttsKey, keys.ttsSecret, "TTS", ep.token);
   }
@@ -78,18 +81,19 @@ export class BaiduVoice implements Voice {
   warmup() { return this.asrTok.get(); }
 
   async transcribe(wav: Buffer): Promise<string> {
-    const r = await postWithRetry(this.ep.asr, {
+    // 标准版不指定 dev_pid（默认 1537 普通话）；极速版走 pro_api、dev_pid 80001
+    const r = await postWithRetry(this.pro ? (this.ep.asrPro ?? BAIDU_ENDPOINTS.asrPro!) : this.ep.asr, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        format: "wav", rate: SAMPLE_RATE, channel: 1, cuid: "core2_client",
+        format: "wav", rate: SAMPLE_RATE, channel: 1, cuid: "core2_client", ...(this.pro ? { dev_pid: 80001 } : {}),
         token: await this.asrTok.get(), speech: wav.toString("base64"), len: wav.length,
       }),
     });
     const result: any = await r.json();
     if (result.err_no !== 0) {
       // 别静默吞掉：3301=音质差/无有效语音、3302=鉴权、3308=音频过长……
-      console.log(`[asr] ❌ err_no=${result.err_no} ${result.err_msg ?? ""}`);
+      console.log(`[asr] ❌ err_no=${result.err_no} ${result.err_msg ?? ""}${this.pro && /^(3302|3304|3305|6)$/.test(String(result.err_no)) ? "（极速版要先在百度智能云控制台开通「短语音识别极速版」）" : ""}`);
       return "";
     }
     const res = result.result ?? [];

@@ -14,6 +14,8 @@ export interface ChatRequest {
    * 是的话 speak 工具对同一台设备就不该再播一遍。
    */
   spoken?: boolean;
+  /** 发请求的是不是受信设备（见 Ctx.deviceTrusted）；不是的话本轮拿不到执行命令、扩展等高风险工具 */
+  trusted?: boolean;
   /** 出参：工具对 HTTP 响应的影响（take_photo → X-Need-Photo，set_volume → X-Volume） */
   meta?: { needPhoto?: boolean; volume?: string };
   /** 边生成边播：逐字输出与工具事件（只有内置 agent 会调） */

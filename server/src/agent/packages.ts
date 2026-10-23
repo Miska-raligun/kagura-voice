@@ -300,7 +300,7 @@ export class PackageManager {
   }
 
   private fromGit(url: string, ref: string, dest: string) {
-    const r = spawnSync("git", ["clone", "--depth", "1", ...(ref ? ["--branch", ref] : []), url, dest], { encoding: "utf8", timeout: 180_000 });
+    const r = spawnSync("git", ["clone", "--depth", "1", ...(ref ? ["--branch", ref] : []), url, dest], { encoding: "utf8", timeout: 180_000, windowsHide: true });
     if (r.error) throw new Error(`这台电脑上没有 git，只能直接安装 GitHub 上的仓库（${url}）`);
     if (r.status !== 0) throw new Error(`git clone 失败：${(r.stderr || "").trim().split("\n").pop()}`);
     fs.rmSync(path.join(dest, ".git"), { recursive: true, force: true });

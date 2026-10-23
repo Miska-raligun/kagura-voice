@@ -25,7 +25,11 @@ $exe = ${psQuote(exe)}
 $url = ${psQuote(url)}
 $logDir = ${psQuote(logDir)}
 $port = ${port}
-$icon = [System.Drawing.Icon]::ExtractAssociatedIcon($exe)
+# 安装目录里的 icon.ico（神乐的图标）优先；没有再取 exe 自己的图标
+$icoFile = Join-Path (Split-Path $exe) 'icon.ico'
+$icon = $null
+if (Test-Path $icoFile) { try { $icon = New-Object System.Drawing.Icon($icoFile) } catch { L ('ico err: ' + $_.Exception.Message) } }
+if (-not $icon) { $icon = [System.Drawing.Icon]::ExtractAssociatedIcon($exe) }
 L ('icon=' + ($null -ne $icon))
 if (-not $icon) { $icon = [System.Drawing.SystemIcons]::Application }
 $ni = New-Object System.Windows.Forms.NotifyIcon

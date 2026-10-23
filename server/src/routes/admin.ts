@@ -1,5 +1,6 @@
 // 管理接口 /api/admin/*（§7 的后端；页面在 M8）。**只允许本机访问**：来源不是 127.0.0.1 / ::1 一律 403。
 // 设备接口照常监听局域网，/monitor 保持原样（局域网 + API_TOKEN）。
+import { VERSION } from "../cli.ts";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -26,7 +27,24 @@ import { ModelRegistry } from "../agent/models.ts";
 import { OpenAIEmbedder } from "../agent/memory.ts";
 
 const LOCAL = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"]);
-export const isLocal = (req: Req) => LOCAL.has(req.remoteAddr);
+const LOCAL_HOST = /^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i;
+/**
+ * 管理接口只许本机浏览器（或本机的 curl）用。光看来源地址不够：
+ *   · 你电脑上打开的任何网页都能往 127.0.0.1 发请求（跨站请求伪造）——带 Origin / Sec-Fetch-Site 的跨站请求一律拒绝；
+ *   · DNS 重绑定能让恶意域名指向 127.0.0.1——Host 头必须是本机地址。
+ * 这两条不挡住，恶意网页就能借管理接口装扩展包、执行命令。
+ */
+export const isLocal = (req: Req) => {
+  if (!LOCAL.has(req.remoteAddr)) return false;
+  if (!LOCAL_HOST.test(req.header("Host"))) return false;
+  // 从别的网站点链接打开管理界面（顶层导航、GET）可以；跨站的其它请求不行
+  if (req.header("Sec-Fetch-Site") === "cross-site" && !(req.method === "GET" && req.header("Sec-Fetch-Mode") === "navigate")) return false;
+  const origin = req.header("Origin");
+  if (origin && origin !== "null" && !(req.method === "GET" && req.header("Sec-Fetch-Mode") === "navigate")) {
+    try { if (!LOCAL_HOST.test(new URL(origin).host)) return false; } catch { return false; }
+  } else if (origin === "null") return false;
+  return true;
+};
 
 type H = (req: Req) => Res | Promise<Res>;
 
@@ -71,6 +89,7 @@ export function registerAdmin(r: Router, ctx: Ctx, sys: AgentSystem) {
       heartbeats: sched().list().filter((j) => j.kind === "heartbeat").map((j) => ({ agent: j.agent, enabled: j.enabled, last_status: j.last_status, last_run: j.last_run })),
       models: models.list(),
       setup_needed: !models.defaultRef(),
+      version: VERSION, update: ctx.updates?.info ?? null,
       channels: sys.channels.status(),
     });
   });
@@ -266,15 +285,27 @@ export function registerAdmin(r: Router, ctx: Ctx, sys: AgentSystem) {
     return json([...ctx.hb.devices.entries()].map(([id, rec]) => ({
       id, agent: ctx.roles.get(id).agent, role: ctx.roles.get(id).id, online: t - rec.ts < 200, secs_ago: Math.trunc(t - rec.ts),
       bat: rec.data.bat ?? null, rssi: rec.data.rssi ?? null, heap: rec.data.heap ?? null, wdt: rec.data.wdt ?? null,
+      trusted: ctx.cfg.deviceTrust === "all" || !!ctx.trust[id]?.trusted, ip: ctx.trust[id]?.ip ?? "", trust_mode: ctx.cfg.deviceTrust,
     })));
   });
-  put("/api/admin/devices/<id>", (req) => {
-    const a = agentOr404(String((req.json() ?? {}).agent));
-    const role = ctx.roles.set(req.params.id, a.device_role);
-    if (!role) return json({ error: "这个 agent 没有对应的设备角色" }, 400);
-    if (ctx.mqtt.ok) ctx.mqtt.publish(`kagura/cmd/${req.params.id}`, { action: "role", role: role.id });
-    return json({ id: req.params.id, agent: a.id, role: role.id });
+  post("/api/admin/devices/<id>/trust", (req) => {
+    ctx.setDeviceTrusted(req.params.id, !!(req.json() ?? {}).trusted);
+    return json({ status: "ok" });
   });
+  /** 切换设备角色：传 role（角色 id）或 agent。设备换图，并用新角色的声音问一声好（同监控页） */
+  put("/api/admin/devices/<id>", async (req) => {
+    const d = req.json() ?? {};
+    const roleId = d.role !== undefined ? String(d.role) : agentOr404(String(d.agent)).device_role;
+    const role = ctx.roles.set(req.params.id, roleId);
+    if (!role) return json({ error: "没有这个角色" }, 400);
+    if (ctx.mqtt.ok) {
+      ctx.mqtt.publish(`kagura/cmd/${req.params.id}`, { action: "role", role: role.id });
+      if (d.greet ?? true) await ctx.sendPush(ctx.roles.greeting(role), req.params.id).catch(() => false);
+    }
+    console.log(`[${req.params.id}] 🎭  [role/admin] → ${role.name} (${role.agent})`);
+    return json({ id: req.params.id, agent: role.agent, role: role.id });
+  });
+  get("/api/admin/roles", () => json(ctx.roles.all().map((r) => ({ id: r.id, name: r.name, agent: r.agent }))));
 
   // ── 设置（config.json）──
   const cfgFile = path.join(ctx.cfg.dataDir, "config.json");

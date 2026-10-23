@@ -70,7 +70,7 @@ export class OpenClawBrain implements Brain {
 
 function run(bin: string, args: string[], timeoutMs: number): Promise<{ code: number; stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
-    const p = spawn(bin, args, { stdio: ["ignore", "pipe", "pipe"] });
+    const p = spawn(bin, args, { stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
     let stdout = "", stderr = "";
     p.stdout.on("data", (d) => (stdout += d));
     p.stderr.on("data", (d) => (stderr += d));

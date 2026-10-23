@@ -47,6 +47,8 @@ Name: "firewall"; Description: "允许局域网里的设备连接（添加 Windo
 
 [Files]
 Source: "{#Root}\dist\kagura.exe"; DestDir: "{app}"; Flags: ignoreversion
+; 托盘版：同一个程序，可执行文件头标成「图形界面」，启动不开控制台窗口（scripts/gui-exe.mjs 生成）
+Source: "{#Root}\dist\kagura-tray.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#Root}\dist\icon.ico"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#Root}\packaging\windows\使用说明.txt"; DestDir: "{app}"; Flags: ignoreversion isreadme
 
@@ -56,20 +58,25 @@ Filename: "{app}\管理界面.url"; Section: "InternetShortcut"; Key: "IconFile"
 Filename: "{app}\管理界面.url"; Section: "InternetShortcut"; Key: "IconIndex"; String: "0"
 
 [Icons]
-Name: "{group}\Kagura 服务端"; Filename: "{app}\kagura.exe"; Parameters: "--tray"; IconFilename: "{app}\icon.ico"
+Name: "{group}\Kagura 服务端"; Filename: "{app}\kagura-tray.exe"; Parameters: "--tray"; IconFilename: "{app}\icon.ico"
+Name: "{group}\Kagura 服务端（显示窗口，排障用）"; Filename: "{app}\kagura.exe"; IconFilename: "{app}\icon.ico"
 Name: "{group}\Kagura 管理界面"; Filename: "{app}\管理界面.url"; IconFilename: "{app}\icon.ico"
 Name: "{group}\使用说明"; Filename: "{app}\使用说明.txt"
 Name: "{group}\卸载 Kagura"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\Kagura 管理界面"; Filename: "{app}\管理界面.url"; IconFilename: "{app}\icon.ico"
-Name: "{userstartup}\Kagura"; Filename: "{app}\kagura.exe"; Parameters: "--tray --no-browser"; IconFilename: "{app}\icon.ico"; Flags: runminimized; Tasks: autostart
+Name: "{userstartup}\Kagura"; Filename: "{app}\kagura-tray.exe"; Parameters: "--tray --no-browser"; IconFilename: "{app}\icon.ico"; Tasks: autostart
 
 [Run]
 ; 防火墙：按程序放行（TCP 5000/1883/5002、UDP 5001 都是它开的）；所有网络类型——
 ; Windows 11 默认把新连的 WiFi 当「公用网络」，只放行专用网络的话设备会连不上
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""Kagura"""; Flags: runhidden; Tasks: firewall
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""Kagura"" dir=in action=allow program=""{app}\kagura.exe"" enable=yes profile=any"; Flags: runhidden; Tasks: firewall
-Filename: "{app}\kagura.exe"; Description: "现在启动 Kagura（会打开管理界面）"; Flags: nowait postinstall skipifsilent
+Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""Kagura Tray"""; Flags: runhidden; Tasks: firewall
+Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""Kagura Tray"" dir=in action=allow program=""{app}\kagura-tray.exe"" enable=yes profile=any"; Flags: runhidden; Tasks: firewall
+Filename: "{app}\kagura-tray.exe"; Parameters: "--tray"; Description: "现在启动 Kagura（在右下角托盘，会打开管理界面）"; Flags: nowait postinstall skipifsilent
 
 [UninstallRun]
 Filename: "{sys}\taskkill.exe"; Parameters: "/IM kagura.exe /F"; Flags: runhidden; RunOnceId: "StopKagura"
+Filename: "{sys}\taskkill.exe"; Parameters: "/IM kagura-tray.exe /F"; Flags: runhidden; RunOnceId: "StopKaguraTray"
+Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""Kagura Tray"""; Flags: runhidden; RunOnceId: "DelFirewallTray"
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""Kagura"""; Flags: runhidden; RunOnceId: "DelFirewall"

@@ -104,6 +104,7 @@ export function registerDevice(r: Router, ctx: Ctx) {
     const logs = Array.isArray(d.logs) ? d.logs : [];
     delete d.logs;
     ctx.hb.beat(dev, d, logs);
+    ctx.noteDevice(dev, req.remoteAddr);
     return json({ status: "ok" });
   });
 
@@ -157,12 +158,12 @@ export function registerDevice(r: Router, ctx: Ctx) {
   // ── 摇一摇 / 触摸：立即返回，后台问大脑 ──
   // OpenClaw：agent 自己用 cores3-speak 推送语音；内置 agent：回复由服务端推送播报（spoken）
   const pi = () => ctx.brain.kind === "pi";
-  const background = (dev: string, label: string, prompt: string, localTime: string) => {
+  const background = (dev: string, label: string, prompt: string, localTime: string, trusted: boolean) => {
     const [role, sid] = ctx.roleCtx(dev);
     (async () => {
       for (const attempt of [1, 2]) {   // CLI 偶发瞬态失败（升级迁移、gateway 忙等），重试一次
         try {
-          const reply = await ctx.brain.chat({ message: prompt, sessionId: sid, localTime, agent: role.agent, deviceId: dev, spoken: pi() });
+          const reply = await ctx.brain.chat({ message: prompt, sessionId: sid, localTime, agent: role.agent, deviceId: dev, spoken: pi(), trusted });
           console.log(`[${dev}] ${label} → ${preview(reply)}`);
           if (pi() && reply && !/^(NO_REPLY|HEARTBEAT_OK)$/.test(reply.trim())) await ctx.sendPush(reply, dev);
           return;
@@ -184,7 +185,7 @@ export function registerDevice(r: Router, ctx: Ctx) {
         + "你必须用 cores3-speak skill 把语音说出来，跟她随便聊几句。"
         + "这是硬性要求：收到摇一摇必须用 Cores3 语音回复，"
         + "不要只回文字（纯文字她根本听不到）。";
-    background(dev, "🫨  shake", prompt, req.header("X-Local-Time"));
+    background(dev, "🫨  shake", prompt, req.header("X-Local-Time"), ctx.deviceTrusted(req, dev));
     return json({ status: "ok" });
   });
 
@@ -200,7 +201,7 @@ export function registerDevice(r: Router, ctx: Ctx) {
     const body = `${desc}${extra}。她现在就在你面前的 CoreS3 设备旁。`
       + "这是身体接触，不是提问——用一句话回应被碰到的感觉就好，别开启新话题，"
       + "也别追问她想干什么。";
-    background(dev, `🖐️  touch/${kind}`, pi() ? `[设备事件] ${body}（你的回复会直接播出来）` : body + SPEAK_REQ_OC("话"), req.header("X-Local-Time"));
+    background(dev, `🖐️  touch/${kind}`, pi() ? `[设备事件] ${body}（你的回复会直接播出来）` : body + SPEAK_REQ_OC("话"), req.header("X-Local-Time"), ctx.deviceTrusted(req, dev));
     return json({ status: "ok" });
   });
 }

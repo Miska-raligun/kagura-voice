@@ -133,10 +133,10 @@ export function registerChat(r: Router, ctx: Ctx) {
         if (wantsStream(req)) {
           // 边生成边播：新固件带 X-Stream: 1，首句合成好就开始出声
           return streamed(dev, role, userText, { ...extra, "X-Role": role.id }, t0, tAsr, (onEvent, meta) =>
-            ctx.inChat(dev, () => ctx.brain.chat({ message: llmText, sessionId: sid, localTime, agent: role.agent, deviceId: dev, spoken: true, meta, onEvent })));
+            ctx.inChat(dev, () => ctx.brain.chat({ message: llmText, sessionId: sid, localTime, agent: role.agent, deviceId: dev, spoken: true, trusted: ctx.deviceTrusted(req, dev), meta, onEvent })));
         }
         const meta: { needPhoto?: boolean; volume?: string } = {};
-        reply = await ctx.inChat(dev, () => ctx.brain.chat({ message: llmText, sessionId: sid, localTime, agent: role.agent, deviceId: dev, spoken: true, meta }));
+        reply = await ctx.inChat(dev, () => ctx.brain.chat({ message: llmText, sessionId: sid, localTime, agent: role.agent, deviceId: dev, spoken: true, trusted: ctx.deviceTrusted(req, dev), meta }));
         if (reply.startsWith("[PHOTO]")) {
           meta.needPhoto = true;
           reply = reply.slice("[PHOTO]".length).trim();
@@ -198,9 +198,9 @@ export function registerChat(r: Router, ctx: Ctx) {
       const imagePath = imageB64 ? ctx.decodeImageB64(imageB64, dev, "vision") : null;
       if (wantsStream(req)) {
         return streamed(dev, role, userText, { "X-Role": role.id }, t0, tAsr, (onEvent, meta) =>
-          ctx.inChat(dev, () => ctx.brain.chat({ message: withTouch(userText, req.header("X-Touch")), sessionId: sid, imagePath, localTime, agent: role.agent, deviceId: dev, spoken: true, meta, onEvent })));
+          ctx.inChat(dev, () => ctx.brain.chat({ message: withTouch(userText, req.header("X-Touch")), sessionId: sid, imagePath, localTime, agent: role.agent, deviceId: dev, spoken: true, trusted: ctx.deviceTrusted(req, dev), meta, onEvent })));
       }
-      const reply = await ctx.inChat(dev, () => ctx.brain.chat({ message: withTouch(userText, req.header("X-Touch")), sessionId: sid, imagePath, localTime, agent: role.agent, deviceId: dev, spoken: true }));
+      const reply = await ctx.inChat(dev, () => ctx.brain.chat({ message: withTouch(userText, req.header("X-Touch")), sessionId: sid, imagePath, localTime, agent: role.agent, deviceId: dev, spoken: true, trusted: ctx.deviceTrusted(req, dev) }));
       console.log(`[${dev}] 💬  ${preview(reply)}`);
       const tLlm = now();
       const wavOut = await ctx.voice.synthesize(reply, role.per);

@@ -1,25 +1,27 @@
 # CLAUDE.md
 
-Kagura Voice：基于 OpenClaw 的中文语音助手。本地麦克风模式 + M5Stack CoreS3 硬件终端模式。
+Kagura Voice：中文语音助手。M5Stack CoreS3 硬件终端 + 服务端（内置 agent 系统，也可接 OpenClaw）。
 
 ## 架构
 
 ```
-CoreS3 (MicroPython)  ──HTTP──▶  voice_server.py (Flask :5000)  ──subprocess──▶  openclaw CLI
-        ▲                              │
-        └────MQTT (localhost:1883)◀────┘         百度 ASR/TTS (requests.Session)
+CoreS3 (MicroPython) ──HTTP──▶ server/（TypeScript 单文件可执行 :5000）──▶ 内置 agent（pi）或 openclaw CLI
+        ▲                         │  内置 MQTT broker :1883 · UDP 发现 :5001 · 直播 TCP :5002
+        └──────MQTT───────────────┘  百度 ASR/TTS · 飞书/QQ 渠道 · 本机管理界面 /admin
 ```
 
-- 设备录音上传 `/chat` → 服务端 ASR → （短路链 或 OpenClaw）→ TTS → 返回 WAV
+- 设备录音上传 `/chat` → 服务端 ASR → （短路链 或 agent）→ TTS → 返回 WAV（新固件边生成边播）
 - 服务端主动推送：TTS 存 `push_audio/` → MQTT 发 JSON 通知 → 设备 HTTP 下载播放
 - UDP :5001 广播 `KAGURA_DISCOVER`/`KAGURA_HERE` 自动发现服务端 IP
+- **当前主线是 `server/`**。根目录的 Python 版（`voice_server.py` 等）已冻结，只修严重 bug；
+  契约测试仍对两版都跑，等 1.0 正式版稳定后删除（见 `docs/legacy-python.md`）。
 
 ## 文件
 
 | 文件 | 说明 |
 |---|---|
-| `voice_server.py` | Flask 服务端：路由、ASR/TTS、`ServerState`（会话/限流/拍照）、`_send_push` |
-| `server/` | **新服务端（TypeScript，替代 voice_server.py，迁移中）**：单文件可执行、内置 MQTT broker、内置 agent 系统（基于 pi：记忆、定时任务、heartbeat、agent 间通信、技能）、IM 渠道（飞书/QQ）、本机管理界面 `/admin`。见 `server/README.md`、`docs/plan-kagura-agent.md`。改设备协议相关行为要两边同步，直到旧版删除；`contract-tests/` 两版共用（`KAGURA_BRAIN=pi` 再跑一轮内置 agent） |
+| `server/` | **服务端（主线）**：单文件可执行、内置 MQTT broker、内置 agent 系统（基于 pi：记忆、定时任务、heartbeat、agent 间通信、技能、扩展 / 扩展包 / MCP）、IM 渠道（飞书/QQ）、本机管理界面 `/admin`、Windows 托盘版。见 `server/README.md`、`docs/plan-kagura-agent.md`。`contract-tests/` 新旧两版共用（`KAGURA_BRAIN=pi` 再跑一轮内置 agent） |
+| `voice_server.py` | 旧版 Flask 服务端（**已冻结**）：路由、ASR/TTS、`ServerState`、`_send_push`。改设备协议时契约测试还会跑它 |
 | `device/src/*.py` | CoreS3 固件（**MicroPython**，不能用 CPython 特性/typing；改后需真机烧录验证） |
 | `device/main.py` | 烧成 `/flash/main.py` 的引导：把 `/flash/kagura/src` 加进 sys.path |
 | `cores3_client.py` | 旧单文件版，**已弃用勿改**，真机验证通过后删除 |
@@ -312,6 +314,21 @@ CoreS3 (MicroPython)  ──HTTP──▶  voice_server.py (Flask :5000)  ──
   **跑完这一轮再判断一次**（这条消息里说了「我到家了」→ `set_presence` 也算），`toSpoken()` 转成适合念的一段后 `sendPush`。
   在家时 `spokenTo` 设成目标设备，模型再 speak 同一台会被工具挡回（同 /chat），不会播两遍；模型已 speak 过别的就不再补播。
   在家状态统一走 `ctx.setPresence` / `loadPresence`（设备 BLE、`set_presence` 工具、`/home` `/away` 命令三个入口）。
+- **管理接口与设备信任（`routes/admin.ts` 的 `isLocal`、`ctx.deviceTrusted`，LRN 2026-10-23 安全检查）**：
+  ① 管理接口光看「来源是 127.0.0.1」不够——你电脑上任何网页都能让浏览器往 127.0.0.1 发请求（跨站请求伪造），
+  DNS 重绑定还能绕过同源。`isLocal` 同时要求 Host 是本机地址、跨站的 Origin / `Sec-Fetch-Site: cross-site` 一律拒绝
+  （顶层导航 GET 例外）。**新加管理接口一律走 guard，别自己判断来源**——漏了就是网页一键装扩展包、执行命令。
+  ② 设备上行接口（/chat 等）固件不带口令，同一 WiFi 谁都能冒充设备；而设备对话是可信的（能 exec）。所以
+  `deviceTrusted`：第一台心跳的设备自动受信，之后的新设备要在管理界面批准，且请求 IP 必须是它心跳的 IP；
+  带 Origin / Sec-Fetch-* 的（浏览器发的）一律不受信。新加「设备触发 agent」的入口要把 `trusted: ctx.deviceTrusted(req, dev)` 传进去。
+  WSL + portproxy 下所有局域网请求看起来都来自同一个 Windows 地址，IP 绑定在那里形同虚设（已在 README 说明）。
+- **Windows 托盘版（`kagura-tray.exe`）**：和 `kagura.exe` 是同一个文件，只把 PE 头的子系统改成「图形界面」
+  （`scripts/gui-exe.mjs`），启动根本不建控制台窗口。别再回到「先开窗口、PowerShell 拉起隐藏进程」的做法——
+  Windows 11 默认用 Windows Terminal 托管控制台，隐藏参数经常被无视（beta.17/18 就栽在这）。托盘版里 console 看不见
+  （Node 自动丢弃输出，日志靠 `logs/kagura.log`），不能停下来问人（`KAGURA_NO_PROMPT`），出错要 `messageBox` 弹框；
+  它派生的子进程都要 `windowsHide: true`，否则每跑一次命令就闪一个黑窗口。CI（server.yml / release.yml）有托盘版冒烟。
+- **新版本提醒（`util/update.ts`）**：启动 30 秒后、之后每 12 小时查一次 GitHub Releases，只提示不安装；
+  预览版连预览版一起比，正式版只看正式版。`update_check: false` 关掉。
 - **`global` 声明必须有主**（LRN 2026-08-25）：`netsvc.mqtt_check` 里写过
   `global _mqtt_ok`，但本模块从来没有这个名字（状态在 `diag`）。后果是
   **任何一次 MQTT 掉线都变成 NameError 逃出 `mqtt_check`**，主循环连吃 10 次

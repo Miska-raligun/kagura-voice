@@ -28,6 +28,8 @@ export interface CommandDeps {
   channelStatus: () => { id: string; kind: string; state: string; detail?: string }[];
   /** 安排重启（先回复再重启）；notice = 重启后在哪说一声 */
   restart: (notice: { account: string; chatId: string }) => void;
+  /** 有新版本时的一行提示（没有返回空串） */
+  update?: () => string;
   /** 在家状态：读 / 写（主人手动纠正设备蓝牙没感知到的情况） */
   presence?: { text(): string; set(status: "home" | "away"): void };
   /** 角色表要跟着 agent 变（换绑 agent 后设备角色不受影响，这里不用；换模型不影响角色） */
@@ -79,6 +81,8 @@ export async function runCommand(text: string, c: CommandCtx, d: CommandDeps): P
       const dev = d.devices();
       lines.push(dev.length ? `设备：${dev.join("；")}` : "设备：还没连上来过");
       if (d.presence) lines.push(`在家状态：${d.presence.text() || "不知道"}`);
+      const up = d.update?.() ?? "";
+      if (up) lines.push(`🆕 ${up}`);
       lines.push(`渠道：${d.channelStatus().map((s) => `${s.id}(${s.kind}) ${s.state}`).join("；") || "无"}`);
       const jobs = d.scheduler()?.list() ?? [];
       const bad = jobs.filter((j) => j.last_status === "error");

@@ -225,6 +225,24 @@ def test_admin_rejects_non_local(a):
     assert requests.get(base + "/health", timeout=5).status_code == 200
 
 
+def test_admin_rejects_cross_site_and_rebinding(a):
+    """恶意网页借浏览器往本机管理接口发请求（跨站请求伪造 / DNS 重绑定）一律拒绝"""
+    evil = {"Origin": "https://evil.example", "Sec-Fetch-Site": "cross-site", "Content-Type": "text/plain"}
+    assert a.post("/api/admin/tools/test-exec", data='{"command":"echo pwned"}', headers=evil).status_code == 403
+    assert a.post("/api/admin/packages/install", data='{"source":"npm:x"}', headers={"Origin": "https://evil.example"}).status_code == 403
+    assert a.get("/api/admin/agents", headers={"Host": "evil.example"}).status_code == 403
+    # 本机页面自己发的照常可以
+    ok = a.post("/api/admin/tools/test-exec", json={"command": "echo hi"}, headers={"Origin": a.base, "Sec-Fetch-Site": "same-origin"})
+    assert ok.status_code == 200 and ok.json()["ok"]
+
+
+def test_device_chat_from_browser_not_trusted(a):
+    """浏览器跨站发到 /chat 的请求不当受信设备：本轮没有执行命令工具"""
+    a.fake_llm(tool("exec", _then="完成", command="echo should-not-run > pwned.txt"))
+    a.post("/chat", data=wav(), headers={"X-Device-Id": "ag_csrf", "Origin": "https://evil.example"})
+    assert not (a.data / "agents" / "main" / "workspace" / "pwned.txt").exists()
+
+
 def test_admin_config_masks_secrets_and_keeps_them(a):
     a.request("PUT", "/api/admin/config", json={"baidu": {"asr_key": "k1", "asr_secret": "s1"}, "a2a": {"enabled": True}})
     cfg = a.get("/api/admin/config").json()["config"]

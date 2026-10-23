@@ -20,7 +20,7 @@ beforeAll(async () => {
       const u = new URL(req.url!, "http://x");
       seen.push({ path: u.pathname, body, query: u.search });
       if (u.pathname === "/token") { tokenCalls++; res.end(JSON.stringify({ access_token: "tok-" + tokenCalls, expires_in: 3600 })); }
-      else if (u.pathname === "/asr") res.end(JSON.stringify(asrReply));
+      else if (u.pathname === "/asr" || u.pathname === "/asr-pro") res.end(JSON.stringify(asrReply));
       else if (ttsJsonError) { res.setHeader("content-type", "application/json"); res.end('{"err_msg":"bad"}'); }
       else { res.setHeader("content-type", "audio/basic"); res.end(Buffer.alloc(3200, 1)); }
     });
@@ -42,6 +42,15 @@ describe("百度语音", () => {
     expect(req).toMatchObject({ format: "wav", rate: 16000, channel: 1, cuid: "core2_client", len: wav.length, speech: wav.toString("base64") });
     expect(req.token).toMatch(/^tok-/);
     expect(seen.find((s) => s.path === "/token")!.query).toContain("client_id=ak");
+  });
+
+  it("极速版：走 pro_api、带 dev_pid 80001；标准版不带 dev_pid", async () => {
+    const v = new BaiduVoice({ asrKey: "ak", asrSecret: "as", ttsKey: "tk", ttsSecret: "ts", asrMode: "pro" },
+      fs.mkdtempSync(path.join(os.tmpdir(), "tts-")), { token: base + "/token", asr: base + "/asr", asrPro: base + "/asr-pro", tts: base + "/tts" });
+    expect(await v.transcribe(Buffer.from("RIFF"))).toBe("你好呀");
+    expect(JSON.parse(seen.filter((s) => s.path === "/asr-pro").at(-1)!.body).dev_pid).toBe(80001);
+    await mk().transcribe(Buffer.from("RIFF"));
+    expect(JSON.parse(seen.filter((s) => s.path === "/asr").at(-1)!.body).dev_pid).toBeUndefined();
   });
 
   it("ASR 报错返回空串", async () => {

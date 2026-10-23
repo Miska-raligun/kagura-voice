@@ -53,7 +53,6 @@ function App() {
       <nav class={`side ${menu ? "open" : ""}`}>
         <div class="brand">Kagura<small>管理</small></div>
         {PAGES.map(([id, label]) => <a class={id === cur[0] ? "on" : ""} href={`#/${id}`}>{label}</a>)}
-        <a class="ext" href="/monitor" target="_blank">监控页 ↗</a>
       </nav>
       <main>
         <header class="top"><button class="menu" onClick={() => setMenu(!menu)}>☰</button><h2>{cur[1]}</h2></header>

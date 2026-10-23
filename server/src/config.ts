@@ -19,9 +19,13 @@ export interface Config {
   discPort: number;
   fakeProviders: boolean;
   apiToken: string;
+  /** 设备对话的可信度：approve = 只有批准过、且从它心跳的 IP 发来的才可信（默认）；all = 所有设备请求都可信（旧行为） */
+  deviceTrust: "approve" | "all";
+  /** 定时查 GitHub 上有没有新版本（只提示，不自动安装） */
+  updateCheck: boolean;
   streamToken: string;
   roles: RoleDef[] | null;
-  baidu: { asrKey: string; asrSecret: string; ttsKey: string; ttsSecret: string };
+  baidu: { asrKey: string; asrSecret: string; ttsKey: string; ttsSecret: string; asrMode?: "standard" | "pro" };
   /** OpenClaw 适配器（可选大脑，作者自用可继续接 OpenClaw） */
   openclaw: {
     bin: string; dir: string; defaultAgent: string;
@@ -157,11 +161,15 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     discPort: int(env.KAGURA_DISC_PORT, file.disc_port ?? 5001),
     fakeProviders: fake,
     apiToken: String(file.api_token ?? ""),
+    deviceTrust: file.device_trust === "all" ? "all" : "approve",
+    updateCheck: file.update_check !== false && !fake,
     streamToken: String(file.stream_token ?? ""),
     roles: Array.isArray(file.roles) ? file.roles : null,
     baidu: {
       asrKey: baidu.asr_key ?? "", asrSecret: baidu.asr_secret ?? "",
       ttsKey: baidu.tts_key ?? "", ttsSecret: baidu.tts_secret ?? "",
+      // 识别档位：standard = 标准版（免费额度多）；pro = 极速版（更准更快，要在百度控制台开通，按次计费）
+      asrMode: baidu.asr_mode === "pro" ? "pro" : "standard",
     },
     openclaw: {
       bin: oc.bin ?? path.join(home, ".npm-global", "bin", "openclaw"),

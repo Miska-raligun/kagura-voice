@@ -90,6 +90,7 @@ export function attachAgentSystem(sys: AgentSystem, ctx: Ctx) {
       return `${id} ${ago < 200 ? "在线" : `离线 ${Math.round(ago / 60)} 分钟`}${rec.data.bat != null ? `，电量 ${rec.data.bat}%` : ""}`;
     }),
     channelStatus: () => sys.channels.status(),
+    update: () => ctx.updates?.line() ?? "",
     presence: { text: () => ctx.presenceText(), set: (s) => ctx.setPresence(s, ctx.presence?.dev ?? "cores3", "chat") },
     restart: (n) => {
       const kind = sys.channels.store.account(n.account)?.kind ?? "";

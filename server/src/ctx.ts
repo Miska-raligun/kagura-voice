@@ -57,6 +57,8 @@ export class Ctx {
   activeChats = new Map<string, number>();
   /** 最近一次在家状态（BLE 上报），内置 agent 每轮带上 */
   presence: { status: string; ts: string; dev: string } | null = null;
+  /** 新版本提醒（main 里建好；没开就是 null） */
+  updates: import("./util/update.ts").UpdateChecker | null = null;
 
   constructor(
     public cfg: Config, public dirs: Dirs, public voice: Voice, public brain: Brain,
@@ -293,6 +295,57 @@ export class Ctx {
     } catch (e: any) {
       console.log(`[presence] ⚠️  恢复状态失败: ${e.message}`);
     }
+  }
+
+  // ── 受信设备 ──
+  // 设备上行接口（/chat 等）不带口令（固件不支持），同一 WiFi 下谁都能冒充设备说话。设备对话又是可信的
+  // （能让 agent 执行命令、装扩展），所以：第一台发心跳的设备自动受信，之后新设备要在管理界面批准；
+  // 请求还必须从这台设备心跳的 IP 发来。不受信的照样能聊天，只是拿不到高风险工具。
+  private trustFile() { return path.join(this.cfg.dataDir, "trusted_devices.json"); }
+  trust: Record<string, { trusted: boolean; ip: string; first: number; last: number }> = {};
+  loadTrust() { try { this.trust = JSON.parse(fs.readFileSync(this.trustFile(), "utf8")); } catch { this.trust = {}; } }
+  private saveTrust() { try { fs.writeFileSync(this.trustFile(), JSON.stringify(this.trust, null, 2)); } catch (e: any) { console.log(`[trust] 保存失败：${e.message}`); } }
+  static normIp(ip: string) { return ip.replace(/^::ffff:/, ""); }
+
+  /** 心跳时调：记下设备的 IP；第一台设备自动受信 */
+  noteDevice(dev: string, remote: string) {
+    const ip = Ctx.normIp(remote), t = now();
+    const rec = this.trust[dev];
+    if (!rec) {
+      const first = !Object.values(this.trust).some((r) => r.trusted);
+      this.trust[dev] = { trusted: first, ip, first: t, last: t };
+      console.log(first ? `[trust] 🔐 ${dev}（${ip}）是第一台设备，自动设为受信` : `[trust] 🔐 新设备 ${dev}（${ip}）：在管理界面「设备」里批准后才能用执行命令等高风险功能`);
+      this.saveTrust();
+      return;
+    }
+    if (rec.ip !== ip) {
+      // IP 变了（DHCP 换地址、重新联网）：原 IP 已经十分钟没心跳才跟着换，防止别人冒充它的 id 把绑定抢走
+      if (t - rec.last < 600) { console.log(`[trust] ⚠️  ${dev} 的心跳从新地址 ${ip} 发来，但原地址 ${rec.ip} 还在活动，不更新`); return; }
+      console.log(`[trust] ${dev} 的地址变了：${rec.ip} → ${ip}`);
+      rec.ip = ip;
+      rec.last = t;
+      this.saveTrust();
+      return;
+    }
+    rec.last = t;
+  }
+
+  setDeviceTrusted(dev: string, trusted: boolean) {
+    const rec = this.trust[dev];
+    if (!rec) throw Object.assign(new Error(`没见过设备 ${dev}（等它发过心跳再批准）`), { status: 404 });
+    rec.trusted = trusted;
+    this.saveTrust();
+    console.log(`[trust] ${dev} → ${trusted ? "受信" : "不受信"}`);
+  }
+
+  /** 这个请求能不能当作受信设备：批准过、从它心跳的 IP 来、不是浏览器跨站发来的。本机进程发的算可信 */
+  deviceTrusted(req: Req, dev: string): boolean {
+    if (this.cfg.deviceTrust === "all") return true;
+    if (req.hasHeader("Origin") || req.hasHeader("Sec-Fetch-Site")) return false;   // 设备不会带这两个头，浏览器才会
+    const ip = Ctx.normIp(req.remoteAddr);
+    if (ip === "127.0.0.1" || ip === "::1") return true;
+    const rec = this.trust[dev];
+    return !!rec?.trusted && rec.ip === ip;
   }
 
   presenceText(): string {

@@ -193,6 +193,7 @@ function Voice({ cfg, save }: { cfg: any; save: (p: any) => Promise<void> }) {
           <Field label="识别 Secret Key"><Input type="password" value={b.asr_secret} onInput={(v) => setB({ ...b, asr_secret: v })} /></Field>
           <Field label="合成 API Key"><Input value={b.tts_key} onInput={(v) => setB({ ...b, tts_key: v })} /></Field>
           <Field label="合成 Secret Key"><Input type="password" value={b.tts_secret} onInput={(v) => setB({ ...b, tts_secret: v })} /></Field>
+          <Field label="识别档位" hint="极速版对口语、人名、专有名词更准，也更快；要先在百度智能云控制台开通「短语音识别极速版」，按次计费（有免费额度）"><Select value={b.asr_mode ?? "standard"} onChange={(v) => setB({ ...b, asr_mode: v })} options={[["standard", "标准版（默认）"], ["pro", "极速版（更准）"]]} /></Field>
         </div>
         <Btn kind="primary" onClick={() => save({ baidu: b })}>保存（重启生效）</Btn>
       </Card>

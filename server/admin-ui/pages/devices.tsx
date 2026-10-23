@@ -6,7 +6,7 @@ import { Badge, Btn, Card, Empty, Err, Select, Tabs, toast, useInterval, useLoad
 
 export function Devices() {
   const [devs, reload, err] = useLoad(() => api<any[]>("/devices"));
-  const [agents] = useLoad(() => api<any[]>("/agents"));
+  const [roles] = useLoad(() => api<any[]>("/roles"));
   const [tab, setTab] = useState<"list" | "files" | "monitor" | "crash">("list");
   const [sel, setSel] = useState("");
   useInterval(reload, 10_000);
@@ -17,15 +17,23 @@ export function Devices() {
       <Err msg={err} />
       {tab === "list" && <>
         <Card title="设备">
-          {devs?.length ? <table class="hover"><thead><tr><th>设备</th><th>状态</th><th>电量</th><th>信号</th><th>看门狗</th><th>绑定 agent</th></tr></thead>
+          {devs?.length ? <table class="hover"><thead><tr><th>设备</th><th>状态</th><th>电量</th><th>信号</th><th>看门狗</th><th title="受信设备的对话才能用执行命令、扩展等高风险功能">受信</th><th>当前角色</th></tr></thead>
             <tbody>{devs.map((d) => (
               <tr class={d.id === cur ? "on" : ""} onClick={() => setSel(d.id)}>
                 <td>{d.id}</td><td><Badge s={d.online ? "online" : "stopped"} text={d.online ? "在线" : "离线"} /> <small class="muted">{ago(d.secs_ago)}</small></td>
                 <td>{d.bat ?? "—"}%</td><td>{d.rssi ?? "—"}</td><td>{d.wdt ?? "—"}</td>
-                <td onClick={(e) => e.stopPropagation()}><Select value={d.agent} onChange={async (v) => {
-                  try { await api(`/devices/${enc(d.id)}`, { method: "PUT", body: { agent: v } }); toast("已切换（设备会换图）"); reload(); } catch (e: any) { toast(e.message, "err"); }
-                }} options={(agents ?? []).map((a) => [a.id, a.name] as [string, string])} /></td>
+                <td onClick={(e) => e.stopPropagation()}>{d.trust_mode === "all" ? <span class="muted">全部受信</span> : <>
+                  <Badge s={d.trusted ? "ok" : "deferred"} text={d.trusted ? "受信" : "待批准"} /> <small class="muted">{d.ip}</small>{" "}
+                  <Btn small kind={d.trusted ? "ghost" : "primary"} onClick={async () => {
+                    if (!d.trusted && !window.confirm(`批准 ${d.id}（${d.ip}）？\n受信设备的对话能让 agent 执行命令、装扩展。确认这是你自己的设备。`)) return;
+                    try { await api(`/devices/${enc(d.id)}/trust`, { body: { trusted: !d.trusted } }); reload(); } catch (e: any) { toast(e.message, "err"); }
+                  }}>{d.trusted ? "取消" : "批准"}</Btn></>}</td>
+                <td onClick={(e) => e.stopPropagation()}>{(roles ?? []).length > 1 ? <Select value={d.role} onChange={async (v) => {
+                  try { await api(`/devices/${enc(d.id)}`, { method: "PUT", body: { role: v } }); toast("已切换：设备会换图，并用新角色的声音问好"); reload(); } catch (e: any) { toast(e.message, "err"); }
+                }} options={(roles ?? []).map((r) => [r.id, `${r.name}（${r.agent}）`] as [string, string])} />
+                  : <span>{(roles ?? [])[0]?.name ?? d.agent}</span>}</td>
               </tr>))}</tbody></table> : <Empty>还没收到设备心跳。设备开机、连上 WiFi 后会自动出现。</Empty>}
+          <p class="muted">第一台连上来的设备自动受信；之后新出现的设备要在这里批准，它的语音对话才能用执行命令、扩展这些高风险功能（防止同一 WiFi 下有人冒充设备）。没批准的设备照常能聊天。</p>
         </Card>
         {cur && <DeviceLogs id={cur} />}
       </>}
