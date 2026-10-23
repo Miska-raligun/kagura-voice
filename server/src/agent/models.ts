@@ -41,7 +41,11 @@ export class ModelRegistry {
 
   constructor(private cfg: ModelsConfig) {
     this.models = createModels();
-    for (const p of cfg.providers) {
+    for (const raw of cfg.providers) {
+      // 手填的 id / 模型名常带首尾空格（从网页复制过来），去掉，不然「服务商/模型」对不上
+      const p = { ...raw, id: String(raw.id ?? "").trim(), base_url: String(raw.base_url ?? "").trim(),
+        models: (raw.models ?? []).map((m) => ({ ...m, id: String(m.id ?? "").trim() })).filter((m) => m.id) };
+      if (!p.id) continue;
       const api = APIS[p.api];
       if (!api) { console.log(`[models] ⚠️  服务商 ${p.id}: 不支持的 api「${p.api}」（可用：${Object.keys(APIS).join(", ")}）`); continue; }
       const models = (p.models ?? []).map((m) => ({
@@ -105,11 +109,14 @@ export class ModelRegistry {
 
   /** "provider/model" → Model。找不到抛错，错误信息直接给用户看 */
   resolve(ref: string): Model<any> {
-    const r = ref || this.cfg.default;
+    const r = (ref || this.cfg.default || "").trim();
     if (!r) throw new Error("还没有配置模型：在 config.json 的 models.default 填 \"服务商/模型\"");
     const i = r.indexOf("/");
     const m = i > 0 ? this.models.getModel(r.slice(0, i), r.slice(i + 1)) : undefined;
-    if (!m) throw new Error(`找不到模型 ${r}（检查 config.json 的 models.providers）`);
+    if (!m) {
+      const have = this.list().map((x) => x.ref);
+      throw new Error(`找不到模型 ${r}。${have.length ? `已配置的有：${have.join("、")}` : "还没有配置任何模型"}（写法是「服务商 id/模型名」；刚改的配置要先保存）`);
+    }
     return m;
   }
 

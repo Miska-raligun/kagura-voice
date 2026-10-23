@@ -75,9 +75,13 @@ function Models({ cfg, save }: { cfg: any; save: (p: any) => Promise<void> }) {
   const [m, set] = useState(() => JSON.parse(JSON.stringify(cfg.models ?? { providers: [], default: "", cheap: "" })));
   const [emb, setEmb] = useState(() => ({ base_url: "", api_key: "", model: "", ...(cfg.embedding ?? {}) }));
   const [brain, setBrain] = useState(cfg.brain ?? "");
-  const refs: [string, string][] = m.providers.flatMap((p: any) => (p.models ?? []).map((x: any) => [`${p.id}/${x.id}`, `${p.id}/${x.id}`] as [string, string]));
+  const ref = (p: any, x: any) => `${String(p.id ?? "").trim()}/${String(x.id ?? "").trim()}`;
+  const refs: [string, string][] = m.providers.flatMap((p: any) => (p.models ?? []).map((x: any) => [ref(p, x), ref(p, x)] as [string, string]));
+  /** 保存前去掉 id / 模型名首尾空格（从网页复制常带上） */
+  const clean = (c: any) => ({ ...c, providers: c.providers.map((p: any) => ({ ...p, id: String(p.id ?? "").trim(), base_url: String(p.base_url ?? "").trim(),
+    models: (p.models ?? []).map((x: any) => ({ ...x, id: String(x.id ?? "").trim() })) })) });
   const up = (fn: (x: any) => void) => { const c = JSON.parse(JSON.stringify(m)); fn(c); set(c); };
-  const testRef = async (ref: string) => { const r = await api("/models/test", { body: { ref } }); toast(r.ok ? `✓ ${ref}（${r.ms}ms）：${r.reply}` : `✗ ${ref}：${r.error}`, r.ok ? "ok" : "err"); };
+  const testRef = async (ref: string) => { const r = await api("/models/test", { body: { ref, models: clean(m) } }); toast(r.ok ? `✓ ${ref}（${r.ms}ms）：${r.reply}` : `✗ ${ref}：${r.error}`, r.ok ? "ok" : "err"); };
   return (
     <>
       <Card title="大脑">
@@ -102,7 +106,7 @@ function Models({ cfg, save }: { cfg: any; save: (p: any) => Promise<void> }) {
                 <td><Input type="number" value={x.max_tokens ?? ""} placeholder="4096" onInput={(v) => mm((o) => (o.max_tokens = v ? Number(v) : undefined))} /></td>
                 <td><Input type="number" value={x.cost?.input ?? ""} placeholder="¥/百万" onInput={(v) => mm((o) => (o.cost = { ...(o.cost ?? {}), input: Number(v) }))} /></td>
                 <td><Input type="number" value={x.cost?.output ?? ""} placeholder="¥/百万" onInput={(v) => mm((o) => (o.cost = { ...(o.cost ?? {}), output: Number(v) }))} /></td>
-                <td><Btn small onClick={() => testRef(`${p.id}/${x.id}`)}>测试</Btn><Btn small kind="ghost" onClick={() => up((c) => c.providers[i].models.splice(j, 1))}>✕</Btn></td>
+                <td><Btn small onClick={() => testRef(ref(p, x))}>测试</Btn><Btn small kind="ghost" onClick={() => up((c) => c.providers[i].models.splice(j, 1))}>✕</Btn></td>
               </tr>;
             })}</tbody></table>
           <Btn small onClick={() => up((c) => (c.providers[i].models = [...(c.providers[i].models ?? []), { id: "", input: ["text"] }]))}>＋ 模型</Btn>
@@ -123,7 +127,7 @@ function Models({ cfg, save }: { cfg: any; save: (p: any) => Promise<void> }) {
           <Field label="模型名"><Input value={emb.model} onInput={(v) => setEmb({ ...emb, model: v })} /></Field>
         </div>
       </Card>
-      <Btn kind="primary" onClick={() => save({ models: m, embedding: emb.base_url && emb.model ? emb : null, ...(brain ? { brain } : {}) })}>保存</Btn>
+      <Btn kind="primary" onClick={() => save({ models: clean(m), embedding: emb.base_url && emb.model ? emb : null, ...(brain ? { brain } : {}) })}>保存</Btn>
     </>
   );
 }

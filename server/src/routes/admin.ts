@@ -355,8 +355,13 @@ export function registerAdmin(r: Router, ctx: Ctx, sys: AgentSystem) {
     const ref = String((req.json() ?? {}).ref ?? "");
     const t0 = Date.now();
     try {
-      const m = sys.models.resolve(ref);
-      const r = await sys.models.models.completeSimple(m, { systemPrompt: "用一句话回答。", messages: [{ role: "user", content: "你好，报一下你是什么模型", timestamp: Date.now() }] });
+      // 带了 models（管理界面里还没保存的配置）就拿它临时建一份来测，没带就测已保存的
+      const draft = (req.json() ?? {}).models;
+      const reg = draft && typeof draft === "object" && !ctx.cfg.fakeProviders
+        ? new ModelRegistry({ providers: unmask(draft, readCfg().models ?? {}).providers ?? [], default: "", cheap: "" })
+        : sys.models;
+      const m = reg.resolve(ref);
+      const r = await reg.models.completeSimple(m, { systemPrompt: "用一句话回答。", messages: [{ role: "user", content: "你好，报一下你是什么模型", timestamp: Date.now() }] });
       if (r.stopReason === "error" || r.stopReason === "aborted") return json({ ok: false, error: r.errorMessage, ms: Date.now() - t0 });
       return json({ ok: true, reply: r.content.filter((c: any) => c.type === "text").map((c: any) => c.text).join(""), ms: Date.now() - t0, usage: r.usage });
     } catch (e: any) { return json({ ok: false, error: e.message, ms: Date.now() - t0 }); }

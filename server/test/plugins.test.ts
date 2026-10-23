@@ -158,3 +158,16 @@ describe("扩展（pi 格式）", () => {
     expect(got).toMatchObject([{ name: "from_ext", source: "扩展 withmcp" }]);
   });
 });
+
+describe("模型表", () => {
+  it("id / 模型名首尾空格去掉；模型名里带 / 也能找到；找不到时列出已配置的", async () => {
+    const { ModelRegistry } = await import("../src/agent/models.ts");
+    const r = new ModelRegistry({ providers: [
+      { id: "minimax", api: "openai-completions", base_url: "https://x/v1", api_key: "k", models: [{ id: "MiniMax-M2" }] },
+      { id: " sf ", api: "openai-completions", base_url: " https://api.siliconflow.cn/v1 ", api_key: "k", models: [{ id: "deepseek-ai/DeepSeek-V3 " }, { id: "" }] },
+    ], default: "minimax/MiniMax-M2", cheap: "" });
+    expect(r.resolve("sf/deepseek-ai/DeepSeek-V3").provider).toBe("sf");
+    expect(r.resolve(" sf/deepseek-ai/DeepSeek-V3 ").id).toBe("deepseek-ai/DeepSeek-V3");
+    expect(() => r.resolve("sf/nope")).toThrow(/已配置的有：minimax\/MiniMax-M2、sf\/deepseek-ai\/DeepSeek-V3/);
+  });
+});
