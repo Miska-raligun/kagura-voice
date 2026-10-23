@@ -500,6 +500,29 @@ ui.set_role("")
 assert ui.img_path("img_playing") == cfg.res("img_playing.jpg")
 ui.uos.stat = _saved_stat
 print("  ui.img_path / set_role      = 专属图优先 ✓ 缺图回落默认 ✓ 同角色不重画 ✓")
+# push 带角色：播放期间临时换成说话那个角色的图，播完换回；播放中途来了 role 命令就以命令为准
+import netsvc as _ns
+_seen = []
+_saved_pp, _saved_ds = _ns._play_push_url, ui.draw_state
+ui.draw_state = lambda st, force=False: _seen.append(("draw", st, cfg.St.role))
+cfg.St.role = ""
+_ns._play_push_url = lambda url: _seen.append(("play", url, cfg.St.role))
+_ns._mqtt_callback(b"kagura/push/x", b'{"type":"push","url":"/a","role":"mio"}')
+_ns._play_push(_ns._pending_push.pop(0))
+assert ("play", "/a", "mio") in _seen and cfg.St.role == "", _seen
+assert _seen[-1] == ("draw", "idle", ""), "换回原角色之后再画待机图"
+_ns._mqtt_callback(b"kagura/push/x", b'{"type":"push","url":"/b"}')
+_ns._play_push(_ns._pending_push.pop(0))
+assert ("play", "/b", "") in _seen, "不带 role 的老格式照旧"
+def _switch_mid(url):
+    _ns._mqtt_callback(b"kagura/cmd/x", b'{"action":"role","role":"kai"}')
+_ns._play_push_url = _switch_mid
+_ns._mqtt_callback(b"kagura/push/x", b'{"type":"push","url":"/c","role":"mio"}')
+_ns._play_push(_ns._pending_push.pop(0))
+assert cfg.St.role == "kai", "播放中途切了角色，不能换回去"
+_ns._play_push_url, ui.draw_state = _saved_pp, _saved_ds
+cfg.St.role = ""; _ns._role_redraw = False
+print("  push 带角色                 = 播放时临时换图 ✓ 播完换回 ✓ 中途切角色以命令为准 ✓")
 import cam as _cam
 assert _cam._CAM_ENTRY[2] < ui._ROLE_ENTRY[0], "顶栏 CAM 与 ROLE 命中区不能重叠"
 print("  顶栏命中区                  = CAM %s / ROLE %s 不重叠 ✓" % (_cam._CAM_ENTRY, ui._ROLE_ENTRY))

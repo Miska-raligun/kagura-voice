@@ -52,14 +52,10 @@ export class Roles {
     return (id !== undefined && this.find(id)) || this.default();
   }
 
-  /** 设备换了角色时回调（留言箱：切到某个角色就把留给它的话播出来） */
-  onSwitch: ((dev: string, role: Role) => void) | null = null;
-
   /** 切换设备角色并落盘。role_id 不存在返回 null。 */
   set(dev: string, id: string): Role | null {
     const role = this.find(id);
     if (!role) return null;
-    const changed = this.get(dev).id !== id;
     if (id === this.default().id) this.current.delete(dev);
     else this.current.set(dev, id);
     try {
@@ -69,7 +65,6 @@ export class Roles {
     } catch (e: any) {
       console.log(`[role] 状态落盘失败: ${e.message}`);
     }
-    if (changed) this.onSwitch?.(dev, role);
     return role;
   }
 

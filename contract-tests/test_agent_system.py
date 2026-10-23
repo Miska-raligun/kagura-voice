@@ -165,28 +165,44 @@ def test_heartbeat_silent_then_delivered(a):
         d.close()
 
 
-def test_other_role_message_held_until_switch(a):
-    """设备显示的是神乐时，小澪的定时消息先留着；切到小澪（问候之后）再播"""
+def _run_job(a, agent, name, delivery):
+    jid = a.post("/api/admin/jobs", json={"agent": agent, "name": name, "schedule_kind": "at", "schedule_value": "+1s",
+                                          "message": "提醒主人喝水", "delivery": delivery}).json()["id"]
+    for _ in range(40):
+        runs = a.get(f"/api/admin/jobs/{jid}/runs").json()
+        if runs:
+            return runs[0]
+        time.sleep(0.25)
+    raise AssertionError("定时任务没跑")
+
+
+def test_other_role_message_plays_with_its_role(a):
+    """设备显示的是神乐时，小澪的定时消息照样播：用小澪的音色，推送里带 role，设备播放期间临时换成小澪的图"""
     d = Device(a, "ag10")
     try:
         a.request("PUT", "/api/admin/devices/ag10", json={"role": "", "greet": False})
         a.fake_llm("该喝水啦")
-        jid = a.post("/api/admin/jobs", json={"agent": "mio", "name": "ct-held", "schedule_kind": "at", "schedule_value": "+1s",
-                                              "message": "提醒主人喝水", "delivery": "device:ag10"}).json()["id"]
-        for _ in range(40):
-            runs = a.get(f"/api/admin/jobs/{jid}/runs").json()
-            if runs:
-                break
-            time.sleep(0.25)
-        assert runs[0]["delivered"] == "held:ag10", runs
-        time.sleep(1)
-        assert not d.push, "设备显示的是神乐，小澪的话不该直接播"
-        a.request("PUT", "/api/admin/devices/ag10", json={"role": "mio", "greet": False})
-        assert d.wait("push", timeout=15)["type"] == "push"
+        assert _run_job(a, "mio", "ct-role", "device:ag10")["delivered"] == "device:ag10"
+        msg = d.wait("push", timeout=15)
+        assert msg["type"] == "push" and msg["role"] == "mio", msg
         assert a.fake_log()["tts"][-1]["text"].endswith("该喝水啦")
         assert a.fake_log()["tts"][-1]["per"] == 4
+        assert a.get("/role", params={"device_id": "ag10"}).json()["role"] == "", "临时换图不改设备的当前角色"
     finally:
-        a.request("PUT", "/api/admin/devices/ag10", json={"role": "", "greet": False})
+        d.close()
+
+
+def test_voice_push_policy(a):
+    """voice_push = never：说给主人听的话一律不播（对 agent 透明，任务照常算成功）"""
+    d = Device(a, "ag10")
+    try:
+        a.request("PUT", "/api/admin/config", json={"voice_push": "never"})
+        a.fake_llm("别播我")
+        assert _run_job(a, "main", "ct-never", "device:ag10")["delivered"] == "muted:policy"
+        time.sleep(1)
+        assert not d.push
+    finally:
+        a.request("PUT", "/api/admin/config", json={"voice_push": "presence"})
         d.close()
 
 

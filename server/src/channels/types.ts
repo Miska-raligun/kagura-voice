@@ -59,11 +59,6 @@ export interface AccountConfig {
   owner_main: boolean;
   /** 每天最多回复多少条（防陌生人刷额度），0 = 不限 */
   daily_limit: number;
-  /**
-   * 主人私聊的回复要不要同时在家里设备上用语音播（代码判断，不靠模型自觉）：
-   * home = 在家才播（默认）/ always = 总是播 / off = 不播（模型仍可自己调 speak）
-   */
-  voice_push: "home" | "always" | "off";
 }
 
 export const STATUS_INIT = (): ChannelStatus => ({ state: "stopped", detail: "", since: Date.now() / 1000 });

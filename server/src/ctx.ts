@@ -61,17 +61,10 @@ export class Ctx {
   updates: import("./util/update.ts").UpdateChecker | null = null;
   /** 在线更新（下载安装包、校验、安装、重启） */
   selfUpdater: import("./util/selfupdate.ts").SelfUpdater | null = null;
-  /** 出口（内置 agent 模式才有）：所有说给主人听的话经它决定播 / 改发 IM / 留言 */
+  /** 出口（内置 agent 模式才有）：所有说给主人听的话经它按 voice_push 策略决定播不播、播到哪 */
   outbox: import("./agent/outbox.ts").Outbox | null = null;
-  /** 设备换了角色（播留言）。挂在 Ctx 上而不是 Roles 上：改 agent 时角色表会整个重建 */
-  onRoleSwitch: ((dev: string) => void) | null = null;
-  /** 换一张角色表（改了 agent 之后），钩子跟着挂上 */
-  setRoles(r: Roles) {
-    this.roles = r;
-    r.onSwitch = (dev) => this.onRoleSwitch?.(dev);
-  }
-  /** 在家状态变了（回家时把留言播出来） */
-  onPresence: ((status: "home" | "away") => void) | null = null;
+  /** 换一张角色表（改了 agent 之后） */
+  setRoles(r: Roles) { this.roles = r; }
 
   constructor(
     public cfg: Config, public dirs: Dirs, public voice: Voice, public brain: Brain,
@@ -80,7 +73,6 @@ export class Ctx {
     roleDefs: RoleDef[] | null = cfg.roles,
   ) {
     this.roles = new Roles(roleDefs, dirs.rolesFile);
-    this.roles.onSwitch = (dev) => this.onRoleSwitch?.(dev);
     this.hb = new Heartbeats(dirs.deviceLogs);
     this.reminders = new Reminders(dirs.remindersFile);
     this.schedules = new PhotoSchedules(dirs.schedulesFile);
@@ -100,19 +92,28 @@ export class Ctx {
 
   // ── 推送 ──
 
-  /** TTS 合成 → 存盘 → MQTT 通知设备下载播放 */
-  async sendPush(text: string, dev: string, per?: number): Promise<boolean> {
+  /**
+   * TTS 合成 → 存盘 → MQTT 通知设备下载播放。
+   * agentId：说话的 agent。它对应某个角色时，用那个角色的音色，并在通知里带上 role——
+   * 设备当前不是这个角色就在播放期间临时换成它的图（一台设备多个角色共用）。不传 = 设备当前角色。
+   */
+  async sendPush(text: string, dev: string, agentId?: string | null): Promise<boolean> {
     if (!this.mqtt.ok) return false;
-    // 默认用设备当前角色的音色；agent 主动 speak 时传它自己的音色
-    const wav = await this.voice.synthesize(text, per ?? this.roles.get(dev).per);
+    const cur = this.roles.get(dev);
+    const role = agentId ? (cur.agent === agentId ? cur : this.roles.all().find((r) => r.agent === agentId)) : cur;
+    const wav = await this.voice.synthesize(text, role?.per ?? this.agentPer?.(agentId!) ?? cur.per);
     if (!wav) return false;
     const fname = `${hex(8)}.wav`;
     fs.copyFileSync(wav, path.join(this.dirs.pushAudio, fname));
     pruneDir(this.dirs.pushAudio, PUSH_AUDIO_MAX_FILES);
-    this.mqtt.publish(`kagura/push/${dev}`, { type: "push", url: `/push-audio/${fname}` });
-    console.log(`[push] → ${dev} via MQTT notify: ${pyHead(text, 50)}${pyLen(text) > 50 ? "..." : ""}`);
+    this.mqtt.publish(`kagura/push/${dev}`, { type: "push", url: `/push-audio/${fname}`, ...(role ? { role: role.id } : {}) });
+    const tag = role && role.id !== cur.id ? `（${role.name}）` : "";
+    console.log(`[push] → ${dev}${tag} via MQTT notify: ${pyHead(text, 50)}${pyLen(text) > 50 ? "..." : ""}`);
     return true;
   }
+
+  /** 不对应任何角色的 agent 的音色（agent 系统挂上） */
+  agentPer: ((agentId: string) => number | undefined) | null = null;
 
   // ── 录音留档 ──
 
@@ -291,10 +292,8 @@ export class Ctx {
         at_home: status === "home", last_updated: ts, last_action: `${source}_${status === "home" ? "detected_home" : "detected_away"}`,
       }));
     } catch (e: any) { console.log(`[presence] 写状态文件失败: ${e.message}`); }
-    const prev = this.presence?.status;
     this.presence = { status, ts, dev };
     console.log(`[presence] ${dev} → ${status} @ ${ts}${source === "ble" ? "" : `（${source}）`}`);
-    if (prev !== status) this.onPresence?.(status);
   }
 
   /** 重启后恢复上次的在家状态（设备 BLE 只在状态变化时上报，不恢复的话一重启就成了「不知道」） */

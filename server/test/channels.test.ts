@@ -325,15 +325,15 @@ describe("主人私聊的回复同时播语音（代码判断，不靠模型）"
     const env = setupMgr({ dm_policy: "allowlist", ...acc });
     env.store.allow("fs", "ou_owner", "主人", true);
     env.store.allow("fs", "ou_friend", "朋友");
-    const st = { presence, pushed: [] as any[], online: ["cores3"] as string[] };
+    const st = { presence, policy: "presence" as "presence" | "always" | "never", pushed: [] as any[], online: ["cores3"] as string[] };
     env.mgr.voice = {
-      presence: () => st.presence,
+      allowed: () => st.policy === "always" || (st.policy === "presence" && st.presence !== "away"),
       device: () => st.online[0] ?? null,
       push: async (text, dev, agentId) => { st.pushed.push({ text, dev, agentId }); return true; },
     };
     const { deviceTools } = await import("../src/agent/tools/device.ts");
     env.rt.addTools(deviceTools({
-      say: async (text, _agentId, dev) => { st.pushed.push({ text, dev, via: "speak" }); return { via: "device", note: "ok" }; },
+      say: async (text, _agentId, dev) => { st.pushed.push({ text, dev, via: "speak" }); return { played: true }; },
       captureAndWait: async () => [null, "离线"], presence: () => st.presence ?? "", defaultDevice: () => "cores3",
       setPresence: (s) => { st.presence = s; }, schedules: { list: () => [] } as any,
     }));
@@ -350,8 +350,8 @@ describe("主人私聊的回复同时播语音（代码判断，不靠模型）"
     expect(fake.calls[0].system).not.toContain("不要调 speak");       // 在家播不播由代码决定，不再写进提示词
   });
 
-  it("不在家 / 群聊 / 非主人 / 设备不在线 → 不播；off 不播；always 不在家也播", async () => {
-    const { mgr, fake, st, store } = await setup({}, "away");
+  it("不在家 / 群聊 / 非主人 / 设备不在线 → 不播；never 不播；always 不在家也播", async () => {
+    const { mgr, fake, st } = await setup({}, "away");
     fake.queue.push("a", "b", "c", "d", "e");
     await mgr.handle(msg({ sender: "ou_owner", chatId: "oc_owner" }));
     expect(st.pushed).toEqual([]);
@@ -363,10 +363,10 @@ describe("主人私聊的回复同时播语音（代码判断，不靠模型）"
     await mgr.handle(msg({ sender: "ou_owner", chatId: "oc_owner" }));
     expect(st.pushed).toEqual([]);
     st.online = ["cores3"];
-    store.upsertAccount({ id: "fs", voice_push: "off" });
+    st.policy = "never";
     await mgr.handle(msg({ sender: "ou_owner", chatId: "oc_owner" }));
     expect(st.pushed).toEqual([]);
-    store.upsertAccount({ id: "fs", voice_push: "always" });
+    st.policy = "always";
     st.presence = "away";
     fake.queue.push("总是播");
     await mgr.handle(msg({ sender: "ou_owner", chatId: "oc_owner" }));

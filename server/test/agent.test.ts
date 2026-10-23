@@ -13,7 +13,7 @@ function withDevice(rt: Runtime) {
   const pushed: any[] = [];
   const sched: any = { list: () => [], add: () => ({}), update: () => null, remove: () => false };
   rt.addTools(deviceTools({
-    say: async (text, agentId, dev) => { pushed.push({ text, dev, agentId }); return { via: "device", note: `已在 ${dev} 上播出。` }; },
+    say: async (text, agentId, dev) => { pushed.push({ text, dev, agentId }); return { played: true, device: dev }; },
     captureAndWait: async () => [null, "离线"],
     presence: () => "在家",
     setPresence: () => {},

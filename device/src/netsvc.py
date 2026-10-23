@@ -61,7 +61,7 @@ _mqtt = None
 _MQTT_TOPICS = []
 
 
-_pending_push = []   # 待播放的 push 音频 URL
+_pending_push = []   # 待播放的 push：(url, role)，role=None 表示用设备当前角色
 
 
 _pending_cmd  = []   # 待执行的远程命令 dict
@@ -70,9 +70,12 @@ _pending_cmd  = []   # 待执行的远程命令 dict
 _role_redraw  = False  # MQTT 换了角色、还没重画
 
 
+_role_gen = 0  # 每收到一次 role 命令 +1：push 临时换图播完后，据此判断要不要换回去
+
+
 def _mqtt_callback(topic, msg):
     """MQTT 消息回调：只入队，不做任何耗时操作。"""
-    global _role_redraw
+    global _role_redraw, _role_gen
     topic_str = topic.decode("utf-8") if isinstance(topic, bytes) else topic
 
     if "/push/" in topic_str:
@@ -88,7 +91,8 @@ def _mqtt_callback(topic, msg):
             return
         url = info.get("url", "")
         if url:
-            _pending_push.append(url)
+            # role：说这句话的角色（服务端按 agent 找）。和当前角色不同就临时换图播
+            _pending_push.append((url, info.get("role")))
 
     elif "/cmd/" in topic_str:
         try:
@@ -97,6 +101,7 @@ def _mqtt_callback(topic, msg):
             print("[mqtt] cmd parse error:", e)
             return
         if cmd.get("action") == "role":
+            _role_gen += 1
             # 就地换角色：只改一个变量、作废重绘缓存，不碰屏幕不碰网络，回调里做得起。
             # 不入队——队列里 push 优先，网页切角色后紧跟的问候会先用旧图播出来
             if ui.set_role(cmd.get("role", "")):
@@ -105,8 +110,28 @@ def _mqtt_callback(topic, msg):
         _pending_cmd.append(cmd)
 
 
-def _play_push(url):
-    """下载并播放一条 push 音频（主循环调用）。"""
+def _play_push(item):
+    """下载并播放一条 push 音频（主循环调用）。
+
+    item = (url, role)。role 和设备当前角色不同时，播放期间临时显示那个角色的图，
+    播完换回去——一台设备多个角色共用时，谁说话就显示谁，不会「声音是 A、脸是 B」。
+    播放中途收到了 role 命令（_role_gen 变了）就不换回，以命令为准。
+    """
+    url, role = item if isinstance(item, tuple) else (item, None)
+    prev, gen = cfg.St.role, _role_gen
+    temp = role is not None and role != prev
+    if temp:
+        ui.set_role(role)
+    try:
+        _play_push_url(url)
+    finally:
+        if temp and _role_gen == gen:
+            ui.set_role(prev)
+        ui.draw_state("idle")    # 先换回角色再画，免得多画一屏临时角色的待机图
+        hw._set_led(0, 0, 0)
+
+
+def _play_push_url(url):
     if cfg.St.sleeping:
         ui.wake_up()
     cfg.St.last_activity = time.time()
@@ -121,8 +146,6 @@ def _play_push(url):
             resp.close()
     except OSError as e:
         print("push download err:", e)
-    ui.draw_state("idle")
-    hw._set_led(0, 0, 0)
 
 
 def _play_streamed(resp):

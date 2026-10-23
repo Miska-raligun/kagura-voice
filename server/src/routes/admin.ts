@@ -13,7 +13,7 @@ import { Memories } from "../agent/tools/memory.ts";
 import { importOpenClaw, findOpenClawDirs, describeImport } from "../agent/import-openclaw.ts";
 import { scheduleFrom } from "../agent/tools/cron.ts";
 import { Roles } from "../roles.ts";
-import { parseToolsConfig } from "../config.ts";
+import { parseToolsConfig, parseVoicePush } from "../config.ts";
 import { GLOBAL_OWNER } from "../agent/skills.ts";
 import { registerAdminChat } from "./admin-chat.ts";
 import { registerAdminPlugins } from "./admin-plugins.ts";
@@ -286,11 +286,8 @@ export function registerAdmin(r: Router, ctx: Ctx, sys: AgentSystem) {
       id, agent: ctx.roles.get(id).agent, role: ctx.roles.get(id).id, online: t - rec.ts < 200, secs_ago: Math.trunc(t - rec.ts),
       bat: rec.data.bat ?? null, rssi: rec.data.rssi ?? null, heap: rec.data.heap ?? null, wdt: rec.data.wdt ?? null,
       trusted: ctx.cfg.deviceTrust === "all" || !!ctx.trust[id]?.trusted, ip: ctx.trust[id]?.ip ?? "", trust_mode: ctx.cfg.deviceTrust,
-      held: (ctx.outbox?.heldFor(id) ?? []).map((h) => ({ agent: h.agentId, text: h.text, at: h.at, reason: h.reason })),
     })));
   });
-  /** 清空留给这台设备的话（出口留着、等切到对应角色 / 主人回家才播的） */
-  del("/api/admin/devices/<id>/held", (req) => { ctx.outbox?.clear(req.params.id); return json({ status: "ok" }); });
   post("/api/admin/devices/<id>/trust", (req) => {
     ctx.setDeviceTrusted(req.params.id, !!(req.json() ?? {}).trusted);
     return json({ status: "ok" });
@@ -347,6 +344,7 @@ export function registerAdmin(r: Router, ctx: Ctx, sys: AgentSystem) {
       memories.setEmbedder(e?.base_url && e?.model ? new OpenAIEmbedder({ baseUrl: e.base_url, apiKey: e.api_key ?? "", model: e.model }) : null);
       hot.push("embedding");
     }
+    if ("voice_push" in patch) { ctx.cfg.voicePush = parseVoicePush(next.voice_push); hot.push("voice_push"); }
     if (next.a2a) {
       if ("enabled" in next.a2a) a2a.cfg.enabled = !!next.a2a.enabled;
       if (next.a2a.max_hops) a2a.cfg.maxHops = Number(next.a2a.max_hops);

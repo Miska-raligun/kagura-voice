@@ -11,6 +11,10 @@ import { isWsl, wslUncPath } from "./util/platform.ts";
 
 export interface RoleDef { id?: string; name?: string; agent?: string; per?: number; aliases?: string[] }
 
+export function parseVoicePush(v: unknown): "presence" | "always" | "never" {
+  return v === "always" || v === "never" ? v : "presence";
+}
+
 export interface Config {
   dataDir: string;
   port: number;
@@ -23,6 +27,8 @@ export interface Config {
   deviceTrust: "approve" | "all";
   /** 定时查 GitHub 上有没有新版本（只提示，不自动安装） */
   updateCheck: boolean;
+  /** 说给主人听的话（speak、定时任务、提醒、IM 回复同步念）播不播：presence = 在家才播 / always / never。管理界面改了就地生效 */
+  voicePush: "presence" | "always" | "never";
   streamToken: string;
   roles: RoleDef[] | null;
   baidu: { asrKey: string; asrSecret: string; ttsKey: string; ttsSecret: string; asrMode?: "standard" | "pro" };
@@ -163,6 +169,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     apiToken: String(file.api_token ?? ""),
     deviceTrust: file.device_trust === "all" ? "all" : "approve",
     updateCheck: file.update_check !== false && !fake,
+    voicePush: parseVoicePush(file.voice_push),
     streamToken: String(file.stream_token ?? ""),
     roles: Array.isArray(file.roles) ? file.roles : null,
     baidu: {

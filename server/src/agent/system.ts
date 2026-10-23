@@ -99,41 +99,33 @@ export function attachAgentSystem(sys: AgentSystem, ctx: Ctx) {
       restartSelf(ctx.cfg.dataDir, { ...n, from: kind });
     },
   };
-  // 出口：所有说给主人听的话都经它（在家状态、设备当前角色由代码判断，不靠提示词）
+  // 出口：所有说给主人听的话都经它（播不播按 voice_push 策略，由代码判断，不靠提示词）
   const presence = () => (ctx.presence?.status === "home" ? "home" as const : ctx.presence?.status === "away" ? "away" as const : null);
   const online = () => {
     const t = Date.now() / 1000;
     return [...ctx.hb.devices.entries()].filter(([, r]) => t - r.ts < HB_SILENT_SECS).map(([d]) => d);
   };
+  ctx.agentPer = (id) => registry.get(id)?.per;
   const outbox = new Outbox({
+    policy: () => ctx.cfg.voicePush ?? "presence",
     presence, onlineDevices: online, knownDevices: () => [...ctx.hb.devices.keys()],
     roleAgent: (dev) => ctx.roles.get(dev).agent,
-    agentName: (id) => registry.get(id)?.name ?? id,
-    busy: (dev) => (ctx.activeChats.get(dev) ?? 0) > 0,
-    push: (text, dev, agentId) => ctx.sendPush(text, dev, agentId ? registry.get(agentId)?.per : undefined),
-    ownerIm: () => sys.channels.store.ownerChat(),
-    deliverIm: (target, text) => sys.channels.deliver(target, text),
-  }, path.join(ctx.cfg.dataDir, "held_messages.json"));
+    push: (text, dev, agentId) => ctx.sendPush(text, dev, agentId),
+  });
   ctx.outbox = outbox;
   sys.outbox = outbox;
-  // 设备切到某个角色（问候之后）/ 主人回家：把留给它的话播出来
-  ctx.onRoleSwitch = (dev) => outbox.flush(dev);
-  ctx.onPresence = (status) => { if (status === "home") outbox.flushAll(); };
-  // 主人在 IM / 网页里的回复顺带在设备上念（ChannelManager 按账号的 voice_push 决定念不念；念到哪由出口定）
+  // 主人在 IM / 网页里的回复顺带在设备上念（念不念、念到哪都由出口定）
   sys.channels.voice = {
-    presence,
-    device: (agentId) => online().find((d) => ctx.roles.get(d).agent === agentId) ?? null,
-    push: async (text, dev, agentId, force) => {
-      if (force) return ctx.sendPush(text, dev, registry.get(agentId)?.per);
-      return (await outbox.say({ text, agentId, kind: "reply", device: dev, source: "mirror" })).via === "device";
-    },
+    allowed: () => outbox.allowed(),
+    device: (agentId) => outbox.pick(agentId) ?? null,
+    push: (text, dev, agentId) => ctx.sendPush(text, dev, agentId),
   };
   const scheduler = new Scheduler(ctx.dirs.systemDb, runtime, registry, {
     async deliver(agentId, delivery, text) {
       if (delivery.startsWith("device:")) {
-        // 投到设备也要过出口：主人不在家改发 IM、设备显示的不是这个角色就留言
-        const r = await outbox.say({ text, agentId, kind: "proactive", device: delivery.slice("device:".length), source: "job" });
-        return r.via === "device" ? delivery : r.via === "im" ? r.target! : r.via === "held" ? `held:${r.device}` : "";
+        // 投到设备也要过出口：按策略不播（主人不在家等）记为「静音」，不算失败
+        const r = await outbox.say({ text, agentId, device: delivery.slice("device:".length), source: "job" });
+        return r.played ? `device:${r.device}` : r.reason === "away" || r.reason === "policy" ? `muted:${r.reason}` : "";
       }
       if (delivery === "webchat") return "webchat";      // 运行记录里就是投递内容；网页聊天页面读取
       return (await sys.channels.deliver(delivery, text)) ? delivery : "";
@@ -147,14 +139,14 @@ export function attachAgentSystem(sys: AgentSystem, ctx: Ctx) {
   // 后台子任务的结果回到发起方后，按消息来源转达：设备 → 推送语音；IM → 发回原聊天
   sys.a2a.announce = async (scope, text) => {
     const o = scope.origin ?? "";
-    if (o.startsWith("device:")) await outbox.say({ text, agentId: scope.agentId, kind: "proactive", device: o.slice("device:".length), source: "subtask" });
+    if (o.startsWith("device:")) await outbox.say({ text, agentId: scope.agentId, device: o.slice("device:".length), source: "subtask" });
     else if (/^(feishu|qq|onebot):/.test(o)) await sys.channels.deliver(o, text);
   };
   scheduler.syncHeartbeats();
   runtime.addTools(cronTools(scheduler));
   runtime.presence = () => ctx.presenceText();
   runtime.addTools(deviceTools({
-    say: (text, agentId, device) => outbox.say({ text, agentId, kind: "proactive", device, source: "speak" }),
+    say: (text, agentId, device) => outbox.say({ text, agentId, device, source: "speak" }),
     captureAndWait: (dev) => ctx.captureAndWait(dev),
     presence: () => ctx.presenceText(),
     setPresence: (status) => ctx.setPresence(status, ctx.presence?.dev ?? "cores3", "chat"),

@@ -8,7 +8,7 @@ export interface Binding { account: string; chatId: string; agent: string; label
 export interface Allowed { account: string; user: string; name?: string; owner?: boolean; since: number }
 export interface Pairing { account: string; user: string; name?: string; code: string; chatId: string; ts: number }
 
-interface Data { accounts: AccountConfig[]; bindings: Binding[]; allowed: Allowed[]; pairings: Pairing[]; ownerChat?: string }
+interface Data { accounts: AccountConfig[]; bindings: Binding[]; allowed: Allowed[]; pairings: Pairing[] }
 
 const ID_RE = /^[A-Za-z0-9_-]{1,32}$/;
 const KINDS: ChannelKind[] = ["feishu", "qq", "onebot"];
@@ -24,8 +24,6 @@ export function normalizeAccount(raw: any, prev?: AccountConfig): AccountConfig 
   const gp = pick("group_policy", "mention");
   if (!["pairing", "allowlist", "open"].includes(dm)) throw new Error("dm_policy 只能是 pairing / allowlist / open");
   if (!["mention", "all", "off"].includes(gp)) throw new Error("group_policy 只能是 mention / all / off");
-  const vp = pick("voice_push", "home");
-  if (!["home", "always", "off"].includes(vp)) throw new Error("voice_push 只能是 home / always / off");
   // 凭据：传了就逐项覆盖；传 "***" 表示「保持原值」（管理界面回显的是打码值）
   const creds: Record<string, string> = { ...(prev?.credentials ?? {}) };
   for (const [k, v] of Object.entries(raw.credentials ?? {})) if (v !== "***") creds[k] = String(v);
@@ -33,7 +31,6 @@ export function normalizeAccount(raw: any, prev?: AccountConfig): AccountConfig 
     id, kind, name: String(pick("name", id)), enabled: !!pick("enabled", true), credentials: creds,
     agent: String(pick("agent", "")), dm_policy: dm, group_policy: gp,
     owner_main: !!pick("owner_main", false), daily_limit: Math.max(0, Number(pick("daily_limit", 200)) || 0),
-    voice_push: vp,
   };
 }
 
@@ -89,9 +86,6 @@ export class ChannelStore {
   // ── 白名单 / 配对 ──
   allowed() { return [...this.d.allowed]; }
   isAllowed(account: string, user: string) { return this.d.allowed.find((x) => x.account === account && x.user === user); }
-  /** 主人最近用来私聊的 IM（<渠道>:<账号>:<聊天 id>）：不在家时主动消息改发到这里 */
-  ownerChat(): string { return this.d.ownerChat ?? ""; }
-  setOwnerChat(target: string) { if (this.d.ownerChat !== target) { this.d.ownerChat = target; this.save(); } }
 
   allow(account: string, user: string, name?: string, owner = false) {
     this.d.allowed = this.d.allowed.filter((x) => !(x.account === account && x.user === user));

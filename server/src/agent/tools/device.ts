@@ -8,8 +8,8 @@ import type { AgentInfo } from "../registry.ts";
 import type { PhotoSchedules } from "../../jobs/photoSchedules.ts";
 
 export interface DeviceHost {
-  /** 让 agent 开口说一句：经出口（Outbox）按在家状态、设备当前角色决定播到哪 / 改发 IM / 留言 */
-  say(text: string, agentId: string, device?: string): Promise<{ via: string; note: string }>;
+  /** 让 agent 开口说一句：经出口（Outbox）按 voice_push 策略决定播不播、播到哪（对 agent 透明） */
+  say(text: string, agentId: string, device?: string): Promise<{ played: boolean; reason?: string }>;
   captureAndWait(dev: string): Promise<[string | null, string | null]>;
   presence(): string;
   /** 主人亲口说的在家 / 出门（设备蓝牙没感知到时补上） */
@@ -36,10 +36,11 @@ export function deviceTools(host: DeviceHost) {
         async execute(_id, p: any) {
           const want = p.device && DEV_RE.test(p.device) ? p.device : undefined;
           if ((want ?? spokenTo) && (want ?? spokenTo) === spokenTo) return ok("你这轮的回复本身就会在这台设备上播出来，不用再调 speak，直接回复要说的话即可。");
-          // 播不播、播到哪由系统定：主人不在家改发 IM，设备显示的不是你就先留言——都会在结果里告诉你
+          // 播不播、播到哪由系统按策略定，对 agent 透明：按策略不播（主人不在家等）也回「已说出」
           const r = await host.say(String(p.text), agent.id, want);
-          if (r.via !== "none") (scope.meta.spoke ??= []).push(String(p.text));
-          return r.via === "none" ? fail(r.note) : ok(r.note);
+          if (r.reason === "no-device" || r.reason === "failed") return fail("设备不在线，没说出去。");
+          (scope.meta.spoke ??= []).push(String(p.text));
+          return ok("已说出。");
         },
       },
       {

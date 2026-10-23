@@ -131,8 +131,8 @@ async function main() {
   await listenOrExplain("MQTT", cfg.mqttPort, () => mqtt.start(cfg.mqttPort));
   await listenOrExplain("直播", cfg.streamPort, () => stream.start(cfg.streamPort));
   await listenOrExplain("UDP 发现", cfg.discPort, () => startDiscovery(cfg.discPort));
-  // 提醒不属于哪个 agent：有出口（内置 agent）就按在家状态走（不在家改发 IM），否则照旧直接推
-  ctx.reminders.start(async (text, dev) => (ctx.outbox ? (await ctx.outbox.say({ text, agentId: null, kind: "system", device: dev, source: "reminder" })).via !== "none" : ctx.sendPush(text, dev)));
+  // 提醒不属于哪个 agent：有出口（内置 agent）就按 voice_push 策略走，否则照旧直接推
+  ctx.reminders.start(async (text, dev) => (ctx.outbox ? (await ctx.outbox.say({ text, agentId: null, device: dev, source: "reminder" })).played : ctx.sendPush(text, dev)));
   sys.scheduler?.start(cfg.schedulerTick);
   // 扩展加载完会顺带（重新）连接 MCP 服务器；都在后台，不拖慢启动
   sys.extensions.reloadAll().catch((e) => console.log(`[ext] ⚠️  ${e.message}`))
