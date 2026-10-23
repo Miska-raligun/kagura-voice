@@ -108,7 +108,11 @@ class Server:
         cmd = os.environ.get("KAGURA_SERVER_CMD") or f"{shlex.quote(sys.executable)} voice_server.py"
         cmd = cmd.format(port=self.port, mqtt_port=self.mqtt_port, stream_port=self.stream_port,
                          disc_port=self.disc_port, data=self.data)
-        proc = self._spawn(shlex.split(cmd), "server", env, ROOT)
+        args = shlex.split(cmd)
+        # Windows 的 CreateProcess 按父进程当前目录找相对路径的程序，不看 cwd 参数：先拼成绝对路径
+        if (ROOT / args[0]).exists():
+            args[0] = str(ROOT / args[0])
+        proc = self._spawn(args, "server", env, ROOT)
         _wait_http(self.base + "/health", proc, self.data / "server.log")
         # Python 版连 broker 是异步的，等它真的连上（/api/monitor/state 的 mqtt 字段）
         deadline = time.time() + 10
