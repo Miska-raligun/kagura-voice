@@ -1,239 +1,355 @@
-# Kagura 自研 Agent 与三端安装包 —— 开发计划
+# Kagura 自研 Agent 系统与三端安装包 —— 开发计划
 
-> 状态：草案，待确认「§2 需要拍板的决定」后动工。
+> 状态：草案 v2（2026-10-23）。待确认「§11 动工前需要回答」后开始 M0。
 > 目标读者：项目作者 + 之后接手开发的人（包括 Claude）。
+> v2 变更：按作者要求，本期范围定为**系统层核心**——定时任务、heartbeat、多 agent 隔离与
+> agent 间通信、memory、soul（人设文件体系）、管理 UI；通用 skill 后续再迁。新服务端放本仓库。
 
 ## 1. 目标与边界
 
 **目标**
 
-1. 用 [pi](https://github.com/badlogic/pi-mono)（`@earendil-works/pi-ai` + `pi-agent-core`，MIT）
-   做一套为本项目定制的轻量 agent，替换 OpenClaw。
-2. **现有功能原样支持**：设备固件的协议不变（老固件不升级也能用），网页监控页功能不变，
-   服务端现有 31 个 HTTP 接口、MQTT、UDP 发现、直播 TCP 全部保留。见 §4 对照表。
-3. Windows / macOS / Linux 三端**安装包即开即用**：不需要 WSL、不需要单独装 Node/Python/
-   mosquitto，装完打开浏览器填 API Key 就能用。
-4. GitHub Actions 打 tag 自动构建三端安装包并发布 Release。
+1. 基于 [pi](https://github.com/badlogic/pi-mono)（`@earendil-works/pi-ai` + `pi-agent-core`，MIT）
+   自研一套为本项目定制的 agent 系统，替换 OpenClaw。pi 只提供「调模型 + 跑一轮 agent 循环」，
+   **会话持久化、记忆、定时任务、heartbeat、多 agent、agent 间通信都不是 pi 原生的**，
+   全部在本项目的系统层实现（§6）。
+2. **现有设备功能原样支持**：固件协议不变（老固件不升级也能用），监控页功能不变，
+   服务端 31 个 HTTP 接口、MQTT、UDP 发现、直播 TCP 全部保留（§4）。
+3. 提供一个类似 OpenClaw 控制台、但贴合本系统的**管理 UI**（§7）。
+4. Windows / macOS / Linux 三端**安装包即开即用**；GitHub Actions 打 tag 自动发布 Release（§9）。
 
-**不做（本期）**
+**本期不做**
 
-- 云端多租户托管（形态 B）。本期是单机版，但架构上不堵死：agent 进程内运行、无子进程、
-  无全局并发 2 的限制。
-- 浏览器自动化、家居控制等 OpenClaw 侧的通用能力（见 §2 D6）。
-- 设备固件大改。只有 §6.3「边生成边播」需要一处小改，且老固件保持兼容。
+- 通用 skill 的迁移（浏览器操作、各类第三方集成等）。但**本期会把 skill 的加载机制做好**
+  （§6.8），之后迁移只是把 skill 文件夹拷进来。
+- 聊天软件渠道（微信/Telegram 等）。本期的"渠道"只有设备语音和管理 UI 里的网页聊天，
+  渠道层留好接口。
+- 云端多租户托管。单机版，但架构不堵死（进程内运行、无子进程、无全局并发 2 的限制）。
 
-## 2. 需要拍板的决定
+## 2. 名词对照（OpenClaw → 本系统）
+
+为了迁移顺手、也为了作者不用重新学一套概念，**名词和文件布局尽量沿用 OpenClaw**：
+
+| OpenClaw | 本系统 | 说明 |
+|---|---|---|
+| agent（workspace + agentDir + session store） | **agent**，同样三件套 | 现在的「角色」升级为 agent：人设、模型、音色、设备图片都挂在 agent 上 |
+| `SOUL.md` `IDENTITY.md` `USER.md` `AGENTS.md` `TOOLS.md` | 同名文件，同样语义 | 直接从 OpenClaw workspace 拷过来就能用 |
+| `MEMORY.md` + `memory/YYYY-MM-DD.md` + `memory_search` | 同 | §6.4 |
+| heartbeat（`HEARTBEAT.md` 清单，周期唤醒，无事回 `HEARTBEAT_OK`） | 调度器里的一种任务：`heartbeat` | 与 cron 共用一个调度器，§6.5 |
+| cron / automations（at / every / cron 表达式，main / isolated 会话） | 调度器里的 `at` / `every` / `cron` 任务 | §6.5 |
+| `sessions_list` / `sessions_send` / `sessions_spawn` + `agentToAgent.allow` | 同名工具 + 同类白名单 | §6.6 |
+| bindings（渠道账号 → agent） | **设备绑定**（device_id → agent） | 角色切换 = 改绑定，§6.7 |
+| skills（`SKILL.md` 文件夹） | 同格式 | 本期只做加载机制，§6.8 |
+| Gateway 控制台 | **管理 UI** `/admin` | §7 |
+
+## 3. 需要拍板的技术决定
 
 | # | 问题 | 推荐 | 备选与代价 |
 |---|---|---|---|
-| D1 | 服务端语言 | **整体迁到 TypeScript（Node）**，一个运行时 | 保留 Python，pi 作为 Node 子进程旁挂：安装包里要塞两套运行时，三端打包和进程守护都翻倍复杂 |
-| D2 | 单文件可执行怎么打 | **Node 22 SEA（官方单可执行）**，依赖全部选纯 JS 的 | `bun build --compile` 更省事，但 pi 声明 Node ≥22.19，bun 兼容性要实测；M0 两个都试 |
-| D3 | 安装包形态 | Windows **Inno Setup .exe**；macOS **.dmg**（含 .app）；Linux **AppImage + .deb** | 用 Electron/Tauri 做桌面壳：体积大、多一层，网页配置页足够，不需要 |
-| D4 | 代码签名 | Windows 先不签（首次运行有 SmartScreen 提示）；**macOS 必须签名+公证**，否则 Gatekeeper 拦截 | macOS 需要 Apple 开发者账号（年费），证书放 GitHub Secrets |
-| D5 | 语音识别/合成 | 先保留百度，抽成接口 | 之后可换支持流式的服务商，接口不动 |
-| D6 | OpenClaw 侧的能力 | 本期只做设备相关的；**需要作者列出 OpenClaw 里给设备用的 skill / 定时任务 / 记忆文件**（见 §4.3） | 不列清楚就无法保证"原样支持" |
-| D7 | 是否保留 OpenClaw 后端 | **保留一个可选适配器**（调 CLI，同现在），作者自用可继续接 OpenClaw，产品版默认 pi | 不保留：作者自己的设备也得迁 |
-| D8 | 现有 Python 版去留 | 新版达到 §8 验收后，Python 版冻结在 `legacy/`，一个版本后删除 | — |
+| D1 | 服务端语言 | **整体迁到 TypeScript（Node ≥22.19）**，一个运行时 | 保留 Python + Node 旁挂：安装包两套运行时，三端打包与进程守护都翻倍 |
+| D2 | 单文件可执行 | **Node SEA**；依赖只选纯 JS / Node 内置（不用原生模块） | `bun --compile` 更省事，但 pi 声明 Node ≥22.19，兼容性 M0 实测 |
+| D3 | 存储 | **Node 内置 `node:sqlite`**（会话、记忆索引、任务运行记录）+ 人设/记忆仍是 markdown 文件 | `better-sqlite3` 是原生模块，单文件打包麻烦；`node:sqlite` 的 FTS5 是否可用 M0 实测 |
+| D4 | 安装包 | Windows **Inno Setup .exe**；macOS **.dmg**；Linux **AppImage + .deb** | Electron/Tauri 壳：体积大一层，管理 UI 用浏览器打开就够 |
+| D5 | 签名 | Windows 先不签；**macOS 必须签名 + 公证** | 需 Apple 开发者账号，证书走 GitHub Secrets |
+| D6 | 管理 UI 技术 | **Preact + Vite**，构建成静态文件打进可执行 | 纯手写 HTML（像现在的 monitor.html）：页面多了难维护 |
+| D7 | 语音 | 保留百度，抽成接口 | 之后换流式服务商不动上层 |
+| D8 | OpenClaw 适配器 | **保留**为一种可选 agent 后端（调 CLI），作者自用可继续接 OpenClaw | 不保留：作者的设备也得一起迁 |
+| D9 | Python 版去留 | 新版达到 §10 验收后冻结到 `legacy/`，一个版本后删除 | — |
 
-## 3. 总体架构
+## 4. 现有设备功能对照（验收清单）
 
-```
-                       ┌──────────────── kagura-server（单个可执行文件）────────────────┐
-CoreS3 ──HTTP :5000──▶ │ http 层（Fastify）  路由与现在逐一对应，响应头协议不变          │
-       ◀─MQTT :1883──  │ 内置 MQTT broker（aedes，纯 JS）——不再需要 mosquitto          │
-       ──UDP  :5001──▶ │ 发现应答（dgram）——不再需要 discovery_relay                    │
-       ──TCP  :5002──▶ │ 直播接收（net）                                               │
-浏览器 ──HTTP :5000──▶ │ /monitor 监控页（原文件照搬） + /setup 首次配置页              │
-                       │                                                              │
-                       │ brain：pi-agent-core Agent（每设备×角色一个会话）              │
-                       │   ├ 人设：roles/<id>/persona.md                                │
-                       │   ├ 记忆：会话 JSONL + 滚动摘要 + 长期笔记                     │
-                       │   ├ 工具：speak / take_photo / reminder / photo_schedule /     │
-                       │   │       volume / time / presence / web_search(可选)          │
-                       │   └ 事件：shake / touch / presence / 定时任务 → agent.prompt    │
-                       │ voice：ASR / TTS 接口（百度实现）+ TTS 缓存                    │
-                       │ store：数据目录（按系统：%APPDATA% / ~/Library/Application      │
-                       │        Support / ~/.local/share）下的 json / jsonl / 图片       │
-                       └──────────────────────────────────────────────────────────────┘
-```
+### 4.1 接口（响应头协议逐字节兼容）
 
-## 4. 功能对照表（验收清单）
-
-### 4.1 设备与网页接口（必须逐字节兼容响应头协议）
-
-| 现在 | 新系统 | 备注 |
-|---|---|---|
-| `POST /chat`：ASR → 短路链（没听清/免手退出/角色/提醒/音量/快捷指令）→ LLM → TTS | 同；短路链原样移植；LLM 换 brain | 响应头 `X-Need-Photo` `X-Volume` `X-User-Text` `X-Reply-Text` `X-Role` `X-Asr-Empty` `X-Cont-Exit` 全保留 |
-| `POST /chat-vision` 三种入参 | 同；图片直接作为多模态输入给模型 | 不再写 OpenClaw 工作目录 |
-| `POST /push`、`GET /push-audio/<f>` | 同 | |
-| `POST /capture-request`、`/upload-photo`、`GET /capture-result/<id>`、`/photo/<id>` | 同；`take_photo` 工具内部复用 | `image_path` 字段保留 |
-| `/shake`、`/touch`、`/presence` | 同；改为向 agent 投递事件，agent 用 `speak` 工具开口 | 不再依赖 cores3-speak skill 和 workspace 状态文件 |
-| `/heartbeat`、`/device-status`、`/crash-report` | 同；日志落数据目录 | |
-| `/time`、`/health`、`/test-tone` | 同 | |
-| `/role` GET/POST、`/role/cycle` | 同 | |
-| `/debug-audio/<dev>`、`/snapshot/<name>` | 同 | |
-| `/monitor` 与 `/api/monitor/*`（state、stream、frame、describe、capture、schedules 增删改跑） | 同；`monitor.html` 原文件照搬 | |
-| MQTT `kagura/push/*`、`kagura/cmd/*`（capture / stream_start / stream_stop / role） | 同；broker 内置 | |
-| UDP 5001 `KAGURA_DISCOVER` → `KAGURA_HERE` | 内置应答 | WSL 下才需要的中继脚本删除 |
-| TCP 5002 直播（4 字节长度 + RGB565，握手合包坑） | 同；RGB565→JPEG 用纯 JS 编码 | 现在依赖 numpy + pillow |
-| `API_TOKEN`、`STREAM_TOKEN`、限流 | 同 | |
+| 现在 | 新系统 |
+|---|---|
+| `POST /chat`：ASR → 短路链（没听清/免手退出/角色/提醒/音量/快捷指令）→ LLM → TTS | 同；短路链原样移植；LLM 换成 agent 运行时。响应头 `X-Need-Photo` `X-Volume` `X-User-Text` `X-Reply-Text` `X-Role` `X-Asr-Empty` `X-Cont-Exit` 全保留 |
+| `POST /chat-vision` 三种入参 | 同；图片作为多模态输入，不再写 OpenClaw 工作目录 |
+| `/push`、`/push-audio/<f>` | 同 |
+| `/capture-request`、`/upload-photo`、`/capture-result/<id>`、`/photo/<id>` | 同（`image_path` 字段保留）；`take_photo` 工具内部复用 |
+| `/shake`、`/touch`、`/presence` | 同；改为向设备绑定的 agent 投递事件（§6.9） |
+| `/heartbeat`（设备心跳）、`/device-status`、`/crash-report` | 同。**注意与 agent 的 heartbeat 是两回事**，代码里命名区分（`device_heartbeat` / `agent_heartbeat`） |
+| `/time`、`/health`、`/test-tone` | 同 |
+| `/role` GET/POST、`/role/cycle` | 同；内部改为读写设备绑定 |
+| `/debug-audio/<dev>`、`/snapshot/<name>` | 同 |
+| `/monitor` 与 `/api/monitor/*` | 同；`monitor.html` 照搬，管理 UI 里再嵌一份 |
+| MQTT `kagura/push/*`、`kagura/cmd/*` | 同；broker 内置（aedes） |
+| UDP 5001 发现 | 内置应答；`discovery_relay.*` 删除 |
+| TCP 5002 直播 | 同；RGB565→JPEG 改纯 JS |
+| `API_TOKEN`、`STREAM_TOKEN`、限流 | 同 |
 
 ### 4.2 服务端后台逻辑
 
-提醒调度（`reminders.json`）、每日定时拍照（含 `MISS_WINDOW`、当天去重、`_SCHEDULE_SPEAK_HINT`
-语义）、心跳失联巡检、拍照结果清理、TTS 内容寻址缓存（cache key 规则不变）、
-`debug_audio` 留存、分阶段耗时日志、`_hb_seen`。全部移植，单测一起移植。
+提醒调度、每日定时拍照（`MISS_WINDOW`、当天去重、`_SCHEDULE_SPEAK_HINT` 语义）、设备心跳失联
+巡检、拍照结果清理、TTS 内容寻址缓存（cache key 规则不变）、`debug_audio`、分阶段耗时日志、
+`_hb_seen`——全部移植，单测一起移植。
 
-### 4.3 OpenClaw 侧的能力（需作者补全清单）
+> 设备提醒与定时拍照将来可以并入 §6.5 的统一调度器，但**本期保持原样**，避免两件事一起改。
 
-从代码里能看到的：
-
-- 角色人设与对话记忆（session）
-- `cores3-speak`：agent 主动说话 → `/push`
-- `cores3-camera`：agent 主动拍照 → `/capture-request` + `/capture-result`
-- 回复 `[PHOTO]` 前缀触发拍照
-- 读取 `user_presence.txt` / `mio-home-status.json` 判断在不在家
-- **定时主动播报（早报等）**：代码里有"早报推送 2.4MB"的记录，推测是 OpenClaw 的定时任务
-- 可能还有：联网搜索/天气（早报内容来源）、浏览器操作（启动脚本开了 Chrome 调试端口）
-
-**动工前请作者确认**：给设备用的 skill 列表、定时任务列表及其提示词、需要迁移的记忆内容。
-产品版至少要提供：定时任务（cron + 提示词）、联网搜索/天气两个工具。
-
-## 5. 模块拆分（新仓库目录，暂定 `server/`）
+## 5. 总体架构
 
 ```
-server/
-  src/
-    main.ts            启动：读配置 → 起 http / mqtt / udp / tcp → 托盘（可选）
-    config.ts          配置文件（数据目录下 config.json），首次启动生成
-    http/              每组路由一个文件，与 voice_server.py 的分段对应
-    voice/asr.ts       ASR 接口 + baidu 实现
-    voice/tts.ts       TTS 接口 + baidu 实现 + 缓存
-    shortcut/          quick_commands / roles 匹配（直接移植正则与测试）
-    brain/agent.ts     pi Agent 封装：会话池、并发、超时
-    brain/memory.ts    transformContext：最近 N 轮 + 滚动摘要；长期笔记
-    brain/tools/*.ts   speak、take_photo、reminder、photo_schedule、volume、time、
-                       presence、web_search（可选）
-    brain/events.ts    shake / touch / presence / cron → agent
-    brain/openclaw.ts  可选：OpenClaw CLI 适配器（D7）
-    jobs/              reminders、photo_schedules、心跳巡检、清理
-    stream/            直播 TCP 接收 + JPEG 编码
-    mqtt/              aedes broker + 发布助手
-    discovery.ts       UDP 应答
-  web/                 monitor.html（照搬）+ setup.html（新）
-  test/                单测（vitest）
-contract-tests/        黑盒协议测试（pytest，见 §7）
-packaging/             各平台安装脚本与图标
-.github/workflows/     ci.yml、release.yml
+kagura-server（单个可执行文件）
+├─ device 层   HTTP :5000 设备路由 · MQTT :1883（aedes）· UDP :5001 · TCP :5002 直播
+├─ voice 层    ASR / TTS 接口（百度实现）· TTS 缓存
+├─ channel 层  device（语音进出）· webchat（管理 UI 里聊天）· 预留 IM 渠道接口
+├─ router      渠道消息 → 绑定的 agent → 会话（§6.7）
+├─ runtime     agent 注册表 · 会话池 · 每会话串行队列 · 全局并发上限 · 超时/中止
+│   └─ 每轮：组装上下文（soul 文件 + 记忆 + 历史）→ pi Agent → 工具执行 → 落盘 → 回渠道
+├─ memory      MEMORY.md / 每日笔记 / 混合检索（FTS + 向量）/ 压缩前自动写记忆
+├─ scheduler   at / every / cron / heartbeat 任务 · 运行记录 · 重试 · 活跃时段
+├─ a2a         sessions_list / send / spawn · 白名单 · 防死循环
+├─ skills      SKILL.md 加载 · 每 agent 白名单（本期只加载说明，不执行脚本）
+├─ admin       /admin 管理 UI + /api/admin/*（§7）
+└─ store       数据目录（%APPDATA%/Kagura · ~/Library/Application Support/Kagura · ~/.local/share/kagura）
+               agents/<id>/workspace/*.md · agents/<id>/agent.sqlite · scheduler.sqlite · config.json
 ```
 
-## 6. Agent 设计
+## 6. 系统层核心设计
 
-### 6.1 会话与记忆
+### 6.1 Agent 与隔离
 
-- 会话 key 沿用现在的规则：默认角色 = `device_id`，其他 = `device_id~role_id`。
-- 每个会话一个 JSONL 文件落盘（**服务端重启不丢上下文**，现在的会话只在内存里）。
-- `transformContext` 回调：保留最近 N 轮原文 + 一段滚动摘要（超过阈值时用便宜模型压缩更早的
-  内容）。N 和阈值写进配置，**这是成本的主要旋钮**。
-- 长期记忆：`remember` / `recall` 两个工具，存成每角色一个 markdown 笔记文件，注入系统提示。
+每个 agent 一个目录：
 
-### 6.2 工具（替代 OpenClaw skill 和 `[PHOTO]` 前缀）
+```
+agents/<agentId>/
+  agent.json          模型、音色 per、设备图片集、工具白名单、技能白名单、a2a 权限
+  workspace/          SOUL.md IDENTITY.md USER.md AGENTS.md TOOLS.md HEARTBEAT.md MEMORY.md
+                      memory/YYYY-MM-DD.md   skills/   files/（agent 自己的读写区）
+  agent.sqlite        会话、消息、记忆索引、用量
+```
 
-| 工具 | 作用 | 对应现在 |
+隔离保证（写进测试）：
+
+- 会话、记忆、用量**按 agent 分库**，不存在跨 agent 的查询接口。
+- 文件类工具（读写笔记）的路径**限制在本 agent 的 workspace 内**（路径规范化后校验前缀，
+  拒绝 `..` 和符号链接逃逸）——这一点比 OpenClaw 默认更严，因为产品版没有沙箱。
+- 工具白名单按 agent 配置；跨 agent 只能走 §6.6 的工具，并受白名单约束。
+- API Key 默认全局共享，可按 agent 覆盖。
+
+### 6.2 会话与上下文
+
+- 会话 key：`<agentId>:<channel>:<peer>`，例如 `kagura:device:cores3`、`mio:webchat:owner`。
+  每个 agent 有一个 **main 会话**（heartbeat 与 `session=main` 的定时任务进这里）。
+- 消息全部落 `agent.sqlite`，**服务端重启不丢上下文**（现在的会话只在内存）。
+- 每会话串行（同一会话的消息排队），全局并发上限可配（默认 4，替代现在的 2）。
+- 每轮上下文 = 系统提示（§6.3 组装）+ 最近对话。超过阈值触发**压缩**：先跑一轮静默的
+  「记忆冲刷」让 agent 把要紧的事写进记忆（§6.4），再用便宜模型把较早的历史总结成一段摘要。
+  阈值、保留轮数、压缩用的模型都可配——**这是成本的主要旋钮**。
+- 用 pi 的 `transformContext` 钩子实现裁剪/压缩，`sessionId` 传给 pi 用于服务商侧缓存。
+
+### 6.3 Soul（人设文件体系）
+
+系统提示由 workspace 文件按固定顺序拼出来，每个文件有字数预算，超了截断注入（磁盘上不动）：
+
+| 文件 | 内容 | 注入时机 |
 |---|---|---|
-| `speak(text)` | 主动播报（推送到设备） | cores3-speak |
-| `take_photo(question)` | 对话中拍照并看图 | `[PHOTO]` → `X-Need-Photo` → `/chat-vision` |
-| `set_reminder` / `list_reminders` | 提醒 | 短路链里的提醒（保留短路，同时给 agent 用） |
-| `photo_schedule_*` | 定时拍照增删改 | 网页才能配，现在 agent 也能配 |
-| `set_volume` | 调音量 | `X-Volume` |
+| `SOUL.md` | 性格、语气、价值观 | 所有会话 |
+| `IDENTITY.md` | 名字、自我介绍、外形（对应设备图片） | 所有会话 |
+| `USER.md` | 主人的稳定偏好 | main 与设备/网页会话 |
+| `AGENTS.md` | 操作守则：何时用哪个工具、语音回复要短、不要输出 markdown | 所有会话（含子 agent） |
+| `TOOLS.md` | 工具使用备注 | 所有会话 |
+| `MEMORY.md` | 长期记忆 | main 与设备/网页会话（**不给子 agent**，同 OpenClaw） |
+| `HEARTBEAT.md` | heartbeat 检查清单 | 只在 heartbeat 运行时 |
+
+另外每轮自动附加：当前时间、在家状态、设备状态、渠道提示（语音渠道：回复口语化、少于 N 字）。
+现在 `chat()` 里拼的 `[当前时间]`、触觉背景（`X-Touch`）、`last_quick` 背景都迁到这一层。
+
+### 6.4 Memory
+
+- 存储：`MEMORY.md`（精炼长期记忆）+ `memory/YYYY-MM-DD.md`（每日详细笔记），纯 markdown，
+  可以在管理 UI 里直接改。
+- 工具：`memory_search(query)`、`memory_get(path, lines?)`、`memory_write(target, text)`
+  （target = 今日笔记 / MEMORY.md）。
+- 检索：混合检索——SQLite FTS 关键词 + 向量相似度（向量用配置的嵌入接口，存进 `agent.sqlite`，
+  余弦在 JS 里算；单机几千条笔记够用）。没配嵌入接口就退化为纯关键词。
+- 新会话或 `/reset` 时自动带上今天和昨天的笔记。
+- 压缩前自动「记忆冲刷」（§6.2）。
+- 文件变更（含管理 UI 手改）触发增量重建索引。
+
+### 6.5 调度器（定时任务 + heartbeat）
+
+一个调度器管所有定时触发，任务定义存 `scheduler.sqlite`，**进程重启后按定义恢复**：
+
+| 字段 | 取值 |
+|---|---|
+| `schedule` | `at`（一次性，绝对时间）/ `every`（间隔）/ `cron`（5 段表达式 + 时区） |
+| `kind` | `agentTurn`（给 agent 发一条提示词让它干活）/ `systemEvent`（往会话里注入一条系统事件，不一定回复）/ `heartbeat` |
+| `session` | `main`（共享主会话上下文）/ `isolated`（每次全新上下文，适合早报这类不需要聊天历史的任务）|
+| `delivery` | `device:<id>`（合成语音推到设备）/ `webchat` / `none`（只记录）|
+| `activeHours` | 例如 08:00–23:00，时段外跳过（夜里不让她突然开口） |
+| `idleOnly` | 设备正在对话时延后执行 |
+| 重试 | 失败按指数退避重试 N 次；连续失败在管理 UI 标红 |
+| 运行记录 | 每次运行的开始/结束时间、结果文本、token 用量、是否投递 |
+
+**heartbeat** = `kind: heartbeat` 的 `every` 任务（默认 30 分钟，可按 agent 关闭）：在 main 会话里
+带上 `HEARTBEAT.md` 清单跑一轮；agent 回 `HEARTBEAT_OK`（或 `NO_REPLY`）就不投递、不打扰，
+否则按 delivery 播报。
+
+agent 自己也能管任务：`cron_list` / `cron_add` / `cron_update` / `cron_remove` / `cron_run` 工具
+（「每天早上八点给我讲新闻」→ agent 自己建一条 isolated 任务）。
+
+与「设备提醒」的关系：现在的提醒（`reminders.py`）走短路链、不经过 LLM，本期保持；
+agent 侧的提醒用调度器的 `at` 任务。两者在管理 UI 里分开展示。
+
+### 6.6 多 agent 与 agent 间通信
+
+| 工具 | 作用 |
+|---|---|
+| `sessions_list` | 列出自己有权看到的 agent 及其会话 |
+| `sessions_send(agent, message, wait?)` | 给另一个 agent 的 main 会话发消息；`wait=true` 时等对方回复（有超时） |
+| `sessions_spawn(agent?, task)` | 起一个**子 agent** 后台跑任务（独立的 isolated 会话，只注入 AGENTS.md/SOUL.md，不给 MEMORY.md），完成后把结果作为系统事件投回发起方会话 |
+| `sessions_history(session, n)` | 读取有权限的会话最近 n 条 |
+
+权限：`agent.json` 里 `a2a.allow: ["mio"]`（可以找谁）；全局开关 `a2a.enabled`。
+防失控：每条 a2a 消息带调用链（`hop` 计数），超过 3 跳拒绝；同一对 agent 每分钟调用数上限；
+子 agent 不能再 spawn（同 OpenClaw 的 team 预设）。所有 a2a 调用在管理 UI 里可追踪。
+
+典型用法：「让小澪来帮我查一下」→ kagura `sessions_spawn(mio, …)` → 结果回来 kagura 转述；
+或直接 `/role` 切换设备绑定让小澪本人来说。
+
+### 6.7 设备绑定与角色切换
+
+- 「角色」= agent。现在的 `roles.py` 的数据迁成 agent 的 `agent.json`（名字、别名、音色 per、
+  设备图片目录 id）。
+- 设备绑定：`device_id → agentId`，持久化；`/role`、`/role/cycle`、语音切换、网页下拉
+  全部改为改绑定。设备端看到的 `X-Role` 仍是图片目录 id，固件不用改。
+- 推送音色、`/shake` `/touch` 的事件都按**当前绑定**的 agent 走（§6.9）。
+
+### 6.8 Skills（本期只做加载机制）
+
+- 格式沿用 `SKILL.md` 文件夹（与 OpenClaw/pi 一致）：front-matter 里的 name/description 进系统提示
+  的技能目录，agent 需要时用 `skill_read` 读全文。
+- 每 agent 白名单。
+- **本期不执行 skill 里的脚本**（产品版没有沙箱，执行任意脚本风险太大）。脚本执行、沙箱与
+  授权留到「skill 迁移」那一期。
+- 设备相关的 `cores3-speak` / `cores3-camera` 不再是 skill，改成内置工具 `speak` / `take_photo`。
+
+### 6.9 内置工具与设备事件
+
+| 工具 | 作用 | 替代 |
+|---|---|---|
+| `speak(text, device?)` | 主动播报到设备 | cores3-speak |
+| `take_photo(question)` | 对话中拍照看图（兼容做法见下） | `[PHOTO]` 前缀 |
+| `set_volume(dir)` | 调音量 | `X-Volume` |
 | `get_presence` | 在不在家 | workspace 状态文件 |
-| `web_search` / `weather`（可选） | 早报等内容来源 | OpenClaw 侧能力 |
+| `photo_schedule_*` | 每日定时拍照增删改 | 只能在网页配 |
+| `memory_*`、`cron_*`、`sessions_*`、`skill_read` | 见上文 | — |
+| `web_search` / `weather`（可选，需配 Key） | 早报内容来源 | OpenClaw 侧能力 |
 
-**`take_photo` 的兼容做法**：设备是单线程的，/chat 请求进行中收不了 MQTT 拍照命令。所以工具
-被调用时，本轮立即结束：用已生成的那句应答（如「我看看」）作为回复，带 `X-Need-Photo: 1`
-返回（工具返回 `terminate`，本轮不再调模型）；设备照现在的流程拍照并发 `/chat-vision`，
-服务端把照片连同原问题作为同一会话的下一条消息交给 agent。设备端零改动。
+`take_photo` 兼容做法：设备是单线程的，/chat 进行中收不了 MQTT 拍照命令。工具被调用时本轮
+立即结束（工具返回 `terminate`），用已生成的应答句 + `X-Need-Photo: 1` 返回；设备照现在的流程
+拍照发 `/chat-vision`，服务端把照片连同原问题作为下一条消息交给 agent。设备端零改动。
 
-### 6.3 边生成边播
+设备事件：shake / touch / presence 变化 → 作为 `systemEvent` 投进绑定 agent 的 main 会话，
+agent 决定是否 `speak`。现有提示词（摇一摇、触摸描述、`_SPEAK_HINT`）原样迁移；冷却与显著性
+筛选仍在设备端（`FEEL_NOTIFY_COOLDOWN` 不放宽）。
 
-- pi 的 `text_delta` 按句号/问号/感叹号切句 → 每句合成 → 写进 HTTP 响应。
-- 响应不带 `Content-Length`（读到连接关闭为止）。设备的 `stream_play` 本来就是读到 EOF、
-  每块自己补 WAV 头，**音频部分不用改**。
-- 难点是**响应头必须在正文之前发**，而 `X-Reply-Text`、`X-Need-Photo` 等要等生成后才知道。
-  做法：
-  1. 等到第一句话合成好、或模型已经调用了影响响应头的工具（拍照/音量/退出）时才发响应头；
-  2. `X-Reply-Text` 只放第一句，完整文本由设备播完后 `GET /chat/last` 取回（**固件小改**）；
-  3. 请求头带 `X-Stream: 1` 的新固件才走流式，老固件仍按整段返回 + `Content-Length`。
+### 6.10 边生成边播
 
-### 6.4 主动事件
+- pi 的 `text_delta` 按句切分 → 每句合成 → 写进 HTTP 响应（不带 `Content-Length`，读到连接关闭）。
+  设备 `stream_play` 本来就读到 EOF、每块自补 WAV 头，**音频部分不用改**。
+- 响应头必须先发：等首句合成好、或模型已调用影响响应头的工具时再发。`X-Reply-Text` 只放首句，
+  完整文本由设备播完后 `GET /chat/last` 取回（**固件小改**）。
+- 请求头带 `X-Stream: 1` 的新固件才走流式；老固件仍整段返回 + `Content-Length`。
 
-shake / touch / presence / 定时任务 → 构造一条事件消息投给对应会话的 agent，agent 自己决定
-是否 `speak`。现有提示词（摇一摇、触摸描述、`_SPEAK_HINT`）原样迁移。冷却和显著性筛选仍在
-设备端（`FEEL_NOTIFY_COOLDOWN` 不放宽）。
+### 6.11 模型与用量
 
-### 6.5 模型配置
+agent 配 `provider` + `model`（pi-ai 内置 DeepSeek、通义千问、任意 OpenAI 兼容接口）；压缩、
+记忆冲刷、heartbeat 可单独配便宜模型。每次调用的 token 与费用记进 `agent.sqlite`，管理 UI 展示。
 
-角色表扩展为：`agent` 字段换成 `provider` + `model` + `persona` 文件路径（兼容旧的 `ROLES`
-写法，迁移工具自动转换）。pi-ai 内置 DeepSeek、通义千问和任意 OpenAI 兼容接口。每次调用的
-token 用量和费用写日志，网页监控页加一个「本月用量」卡片。
+## 7. 管理 UI（`/admin`）
 
-## 7. 测试策略
+浏览器打开，本机免登录（只监听本机时）；局域网访问需管理员密码。页面：
 
-1. **单元测试**：现有 227 个 pytest 里，纯逻辑部分（快捷指令、提醒解析、角色匹配、定时拍照、
-   直播解析、限流等）逐个移植到 vitest，用例数据原样搬。
-2. **黑盒协议测试（关键）**：把 `test_routes.py` 等路由测试改写成只走 HTTP/MQTT/UDP/TCP 的
-   黑盒测试，同一套用例**先对现有 Python 服务端跑通，再对新服务端跑通**。服务端提供
-   `KAGURA_FAKE_PROVIDERS=1` 模式（假 ASR/TTS/LLM，按脚本返回），测试不花钱、不联网。
-   这是"原样支持"的硬证据。
-3. **设备模拟器**：一个脚本扮演 CoreS3，走完 UDP 发现 → 心跳 → /chat → MQTT push → 直播
-   全流程。CI 里在三端打出来的安装包上各跑一遍（冒烟测试）。
-4. 固件侧继续用 `check_split.py` + `import_sim.py`；真机验证仍由作者完成。
-5. agent 质量：准备一组对话样例（日常聊天、拍照、提醒、角色切换、主动事件），对比
-   OpenClaw 与新 agent 的回复和每轮 token，作者人工打分。
+| 页面 | 能做什么 |
+|---|---|
+| 总览 | 设备在线状态、各 agent 今日对话数/费用、最近失败的任务、heartbeat 最近一次结果 |
+| Agents | 新建/复制/删除 agent；编辑 SOUL/IDENTITY/USER/AGENTS/TOOLS/HEARTBEAT（带预览和字数预算提示）；选模型、音色（可试听）、设备图片目录、工具/技能白名单、a2a 权限 |
+| 会话 | 按 agent 浏览会话与完整对话（含工具调用）；重置、手动压缩、导出 |
+| 记忆 | 浏览/编辑 MEMORY.md 与每日笔记；检索测试（输入一句话看会搜出什么）；重建索引 |
+| 定时任务 | 列表 + 新建向导（at/every/cron、会话、投递、活跃时段）；立即运行；运行历史与输出；heartbeat 开关与间隔 |
+| Agent 通信 | a2a 调用记录（谁找谁、内容、耗时）；白名单编辑 |
+| 设备 | 设备绑定（哪个设备绑哪个 agent）；现有监控页（拍照/直播/定时拍照/快照）嵌入；设备日志与崩溃报告；`debug-audio` 试听 |
+| 网页聊天 | 直接和任一 agent 文字聊天（webchat 渠道），调试人设很方便 |
+| 用量 | 按 agent/天的 token 与费用曲线；本月预估 |
+| 设置 | 模型 API Key、百度 Key、端口、数据目录、`API_TOKEN`、管理员密码、开机自启、从 OpenClaw 导入 |
 
-## 8. 里程碑
+后端是 `/api/admin/*` JSON 接口，管理 UI 和将来的 IM 渠道/脚本都用它。
+
+## 8. 从 OpenClaw 迁移
+
+管理 UI「设置 → 从 OpenClaw 导入」，也有命令行版：
+
+1. 读 `~/.openclaw/workspace` 与 `~/.openclaw/agents/<id>`：人设与记忆的 markdown 文件**原样拷贝**
+   （文件布局一致，§2）。
+2. 定时任务：读 OpenClaw 的任务列表（命令行导出或存储文件，**具体格式 M0 核实**），转换成
+   §6.5 的任务定义，导入后默认暂停，作者逐条确认再启用。
+3. 本项目的 `config.py`、`roles_state.json`、`reminders.json`、`photo_schedules.json`、`snapshots/`
+   一并导入。
+4. 聊天历史不导入（OpenClaw 会话格式不同，且记忆已在 markdown 里）。
+
+## 9. 测试、打包与发布
+
+**测试**
+
+1. 单元测试：现有 pytest 里的纯逻辑部分（快捷指令、提醒解析、角色匹配、定时拍照、直播解析、
+   限流）移植到 vitest，用例数据原样搬。
+2. **黑盒协议测试**：路由测试改成只走 HTTP/MQTT/UDP/TCP，**先对 Python 版跑绿，再对新版跑绿**
+   ——「原样支持」的硬证据。服务端提供 `KAGURA_FAKE_PROVIDERS=1`（假 ASR/TTS/LLM，按脚本返回），
+   测试不花钱不联网。
+3. 系统层测试：假模型脚本化驱动，覆盖调度器（时区、错过补跑、活跃时段、重试、重启恢复）、
+   a2a（白名单、跳数上限、子 agent 不能再 spawn）、隔离（路径逃逸、跨 agent 查询）、
+   记忆（冲刷、检索、索引重建）、压缩。
+4. 设备模拟器：扮演 CoreS3 走完 UDP 发现 → 心跳 → /chat → push → 直播；CI 在三端安装包上各跑一遍。
+5. 固件侧继续 `check_split.py` + `import_sim.py`；真机由作者验证。
+6. agent 质量：一组对话样例对比 OpenClaw 与新系统的回复和 token，作者打分。
+
+**打包与发布**
+
+- `ci.yml`（PR）：单测 + 黑盒 + 系统层测试 + 三端构建。`release.yml`（`v*` tag）：构建、签名、发 Release。
+- 矩阵：`windows-latest`、`macos-14`（arm64）、`macos-13`（x64）、`ubuntu-22.04`。
+- 产物：`Kagura-Setup-x.y.z.exe`、`Kagura-x.y.z-arm64.dmg` / `-x64.dmg`、`.AppImage`、`.deb`、
+  固件包 `kagura-device-x.y.z.zip`（`device/` + 烧录说明）。
+- 安装时：Windows 加防火墙入站规则（5000/1883/5001/5002）与开机自启；macOS LaunchAgent；
+  Linux systemd `--user`。首次启动自动打开 `/admin` 的初始化向导。
+- 证书与 Key 全走 GitHub Secrets，不进仓库。
+
+## 10. 里程碑
 
 | 阶段 | 内容 | 完成标准 |
 |---|---|---|
-| **M0 技术验证** | pi + Node SEA / bun 在三端各打出一个可执行；aedes、纯 JS JPEG、百度接口跑通；确认 pi 当前包名与 API | 三端 CI 产物能启动并回答一句话；定下 D1/D2 |
-| **M1 黑盒协议测试** | 把现有路由测试改成黑盒，先在 Python 版上全绿 | 黑盒测试覆盖 §4.1 每个接口 |
-| **M2 服务端移植** | §4.1、§4.2 全部移植到 TS，LLM 先接 OpenClaw 适配器 | 黑盒测试在新服务端全绿；作者真机试用一周无回退 |
-| **M3 pi agent** | §6.1–6.2、6.4–6.5；§4.3 清单里的能力 | 对话样例评审通过；token 用量有日志 |
-| **M4 边生成边播** | §6.3 服务端 + 固件小改 | 长回复首句出声 < 5 秒；老固件仍正常 |
-| **M5 打包发布** | 三端安装包、首次配置页、开机自启、防火墙规则、数据迁移工具、release.yml | 干净虚拟机上装完即用；从 Python 版迁移数据无丢失 |
-| **M6 收尾** | 文档、`legacy/` 冻结、CLAUDE.md 更新 | — |
+| **M0 技术验证** | pi 当前包名/API；Node SEA（或 bun）在三端打出可执行；`node:sqlite` + FTS；aedes；纯 JS JPEG；百度接口；OpenClaw 任务导出格式 | 三端 CI 产物能启动并回答一句话；定下 D1–D3 |
+| **M1 黑盒协议测试** | 现有路由测试改黑盒，Python 版全绿 | 覆盖 §4.1 每个接口 |
+| **M2 服务端骨架移植** | §4 全部移植到 TS，agent 先接 OpenClaw 适配器 | 黑盒在新版全绿；作者真机试用一周无回退 |
+| **M3 agent 运行时** | §6.1–6.3、6.7、6.9、6.11：agent 目录、会话落盘、soul 组装、压缩、内置工具、设备绑定 | 设备对话改走 pi；对话样例评审通过 |
+| **M4 memory** | §6.4 | 检索与冲刷测试通过；管理 UI 可编辑 |
+| **M5 调度器 + heartbeat** | §6.5 | 早报等任务从 OpenClaw 迁过来稳定跑一周 |
+| **M6 多 agent 通信** | §6.6、§6.8 加载机制 | a2a 测试通过；两个 agent 协作样例 |
+| **M7 管理 UI** | §7（M3 起各页面随功能逐步上线，这里补齐与打磨） | 不碰配置文件也能完成全部日常管理 |
+| **M8 边生成边播** | §6.10 服务端 + 固件小改 | 长回复首句 < 5 秒出声；老固件正常 |
+| **M9 打包发布 + 迁移** | §8、§9 | 干净虚拟机三端装完即用；从 OpenClaw + Python 版迁移无丢失 |
+| **M10 收尾** | 文档、`legacy/` 冻结、CLAUDE.md 更新 | — |
 
-M2 完成前不动 agent，M3 完成前不动固件：每一步都能单独回滚。
+原则：M2 之前不动 agent；M8 之前不动固件；每一步都能单独回滚。
 
-## 9. 打包与发布细节
-
-- **触发**：推送 `v*` tag → `release.yml`；平时 PR 走 `ci.yml`（单测 + 黑盒测试 + 三端构建）。
-- **矩阵**：`windows-latest`、`macos-14`（arm64）、`macos-13`（x64）、`ubuntu-22.04`。
-- **产物**：`Kagura-Setup-x.y.z.exe`、`Kagura-x.y.z-arm64.dmg` / `-x64.dmg`、
-  `Kagura-x.y.z-x86_64.AppImage`、`kagura_x.y.z_amd64.deb`，外加固件包 `kagura-device-x.y.z.zip`
-  （`device/` 目录 + 烧录说明）。
-- **安装时做的事**：Windows 加防火墙入站规则（5000/1883/5001/5002）、开机自启（启动文件夹或
-  计划任务）；macOS 写 LaunchAgent；Linux 写 systemd `--user` 单元。
-- **首次启动**：自动打开 `http://localhost:5000/setup`，填模型 API Key、百度 Key、选角色；
-  配置存数据目录，升级不覆盖。
-- **端口被占**：启动时检测并在配置页提示；设备靠 UDP 发现找服务端，换 IP 不用改固件。
-- **签名**：见 D4，相关证书全部走 GitHub Secrets，不进仓库。
-
-## 10. 风险
+## 11. 风险
 
 | 风险 | 应对 |
 |---|---|
-| pi 迭代快（包名刚从 `@mariozechner` 改成 `@earendil-works`） | 锁定版本；只在 `brain/` 里引用 pi，外面隔一层自己的接口 |
-| 单文件打包与 pi 不兼容 | M0 先验证，不行就退回"安装包里带 Node 运行时 + 脚本" |
-| 新 agent 的效果不如 OpenClaw | M3 用对话样例对比；保留 OpenClaw 适配器兜底 |
-| OpenClaw 侧能力没列全 | §4.3 动工前确认 |
-| 未签名程序被杀毒软件误报 | 先在 Release 说明里写清楚；有收入后再买 Windows 证书 |
-| 移植引入回归 | 黑盒协议测试先在旧版跑绿，再在新版跑绿 |
+| pi 迭代快（包名刚改为 `@earendil-works`） | 锁版本；pi 只在 `runtime/` 里引用，外面隔一层自有接口 |
+| 单文件打包与 pi / `node:sqlite` 不兼容 | M0 验证；不行退回「安装包带 Node 运行时 + 脚本」 |
+| 系统层范围大，质量不如 OpenClaw | 名词与行为对齐 OpenClaw（§2），逐项写测试；保留 OpenClaw 适配器兜底 |
+| OpenClaw 的任务存储格式变化（它新版刚把 heartbeat 并进 automations） | 导入器按版本适配；导入后默认暂停、人工确认 |
+| 文件工具无沙箱 | 路径限制在 workspace；本期不执行 skill 脚本 |
+| heartbeat/定时任务费用失控 | 活跃时段、便宜模型、`HEARTBEAT_OK` 不投递、用量页预警 |
+| 未签名程序被误报 | Release 说明写清；有收入后买证书 |
 
-## 11. 动工前需要作者回答
+## 12. 动工前需要作者回答
 
-1. §2 的 D1–D8 是否同意推荐项？
-2. §4.3：OpenClaw 里给设备用的 skill、定时任务（含提示词）、记忆文件分别有哪些？
-3. 有没有 Apple 开发者账号（决定 macOS 包能否顺利安装）？
-4. 默认用哪家模型（DeepSeek / 通义千问 / 其他）？
-5. 新服务端放在本仓库 `server/` 子目录，还是新开仓库？（推荐本仓库，固件和协议测试在一起）
+1. §3 的 D1–D9 是否同意推荐项？
+2. 你现在 OpenClaw 里**有哪些定时任务**（大概几条、是不是 isolated 的、投递到哪）？heartbeat 开着吗、
+   间隔多少？——决定 M5 的迁移样例。
+3. 目前有几个 agent、之间有没有互相调用的用法？
+4. 有没有 Apple 开发者账号？
+5. 默认用哪家模型？是否需要配嵌入接口（记忆的语义检索；不配就只有关键词检索）？
+6. 管理 UI 只本机用，还是需要手机在局域网里也能打开（决定登录与权限这块做多少）？
