@@ -233,6 +233,12 @@ export class Runtime {
     return { text, meta: scope.meta, toolCalls, usage };
   }
 
+  /** 某个 agent 在普通会话里能看到的全部内置工具（管理界面白名单用，不过滤白名单本身） */
+  allToolNames(agent: AgentInfo): { name: string; label: string; description: string }[] {
+    const scope: RunScope = { agentId: agent.id, sessionKey: `${agent.id}:main`, kind: "main", channel: "webchat", purpose: "list", hop: 0, chain: [], meta: {} };
+    return this.providers.flatMap((p) => p(scope, agent)).map((t) => ({ name: t.name, label: t.label, description: t.description }));
+  }
+
   private toolsFor(scope: RunScope, agent: AgentInfo, req: RunRequest): AgentTool<any>[] {
     const all = this.providers.flatMap((p) => p(scope, agent));
     const allow = agent.tools.includes("*") ? null : new Set(agent.tools);

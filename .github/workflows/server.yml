@@ -32,6 +32,7 @@ jobs:
           cache-dependency-path: server/package-lock.json
       - run: npm ci
       - run: npx tsc --noEmit -p .
+      - run: npx tsc --noEmit -p admin-ui          # 管理界面（Preact）
       - run: npx vitest run
       - name: M0 验证脚本
         run: |

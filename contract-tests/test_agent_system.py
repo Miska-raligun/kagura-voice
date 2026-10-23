@@ -189,3 +189,55 @@ def test_device_binding_via_admin(a):
     finally:
         a.post("/role", json={"device_id": "ag11", "role": "", "greet": False})
         d.close()
+
+
+# ── 管理界面（M8）──────────────────────────────────────────────────────────
+
+def _lan_ip():
+    import socket
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("10.255.255.255", 1))
+        return s.getsockname()[0]
+    except OSError:
+        return None
+    finally:
+        s.close()
+
+
+def test_admin_ui_served_locally(a):
+    r = a.get("/admin")
+    assert r.status_code == 200 and '<div id="app">' in r.text
+    js = a.get("/admin/app.js")
+    assert js.status_code == 200 and "javascript" in js.headers["Content-Type"] and len(js.content) > 10_000
+
+
+def test_admin_rejects_non_local(a):
+    import requests
+    ip = _lan_ip()
+    if not ip or ip.startswith("127."):
+        pytest.skip("没有非回环地址")
+    base = a.base.replace("127.0.0.1", ip)
+    assert requests.get(base + "/admin", timeout=5).status_code == 403
+    assert requests.get(base + "/api/admin/agents", timeout=5).status_code == 403
+    # 设备接口照常对局域网开放
+    assert requests.get(base + "/health", timeout=5).status_code == 200
+
+
+def test_admin_config_masks_secrets_and_keeps_them(a):
+    a.request("PUT", "/api/admin/config", json={"baidu": {"asr_key": "k1", "asr_secret": "s1"}, "a2a": {"enabled": True}})
+    cfg = a.get("/api/admin/config").json()["config"]
+    assert cfg["baidu"] == {"asr_key": "***", "asr_secret": "***"}
+    r = a.request("PUT", "/api/admin/config", json={"baidu": {"asr_key": "***", "asr_secret": "s2"}}).json()
+    assert "baidu" in r["restart_needed"]
+    import json as _j
+    raw = _j.loads((a.data / "config.json").read_text(encoding="utf-8"))
+    assert raw["baidu"] == {"asr_key": "k1", "asr_secret": "s2"}
+
+
+def test_admin_channels_pairing_flow(a):
+    r = a.post("/api/admin/channels", json={"id": "ob1", "kind": "onebot", "name": "测试", "enabled": False, "credentials": {"url": "ws://127.0.0.1:9", "token": "t"}})
+    assert r.status_code == 201 and r.json()["credentials"]["token"] == "***"
+    d = a.get("/api/admin/channels").json()
+    assert d["accounts"][0]["status"]["state"] == "stopped"
+    assert a.request("DELETE", "/api/admin/channels/ob1").status_code == 200

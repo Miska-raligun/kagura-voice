@@ -18,6 +18,9 @@ export class Memories {
   private idx = new Map<string, MemoryIndex>();
   constructor(private rt: Runtime, private embedder: Embedder | null) {}
 
+  /** 管理界面改了嵌入接口：换掉并丢弃已打开的索引（下次检索按新接口补算向量） */
+  setEmbedder(e: Embedder | null) { this.embedder = e; this.idx.clear(); }
+
   of(agentId: string): MemoryIndex {
     let m = this.idx.get(agentId);
     if (!m) {

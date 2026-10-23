@@ -3,3 +3,7 @@ declare module "*.html" {
   const content: string;
   export default content;
 }
+declare module "virtual:admin-ui" {
+  export const js: string;
+  export const css: string;
+}

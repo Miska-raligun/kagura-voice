@@ -215,7 +215,7 @@ describe("渠道路由", () => {
     fake.queue.push("我在");
     await mgr.handle(msg({ chatType: "group", chatId: "oc_g", text: "神乐在吗", mentionedMe: true, senderName: "小明" }));
     expect(fake.calls[0].message).toBe("[小明] 神乐在吗");
-    expect(ad().sent.at(-1).text).toBe("我在");
+    expect(ad().sent.at(-1)!.text).toBe("我在");
     store.upsertAccount({ id: "fs", group_policy: "off" });
     await mgr.handle(msg({ chatType: "group", chatId: "oc_g", text: "x", mentionedMe: true }));
     expect(fake.calls.length).toBe(1);

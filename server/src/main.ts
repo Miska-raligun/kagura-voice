@@ -15,6 +15,7 @@ import { registerChat } from "./routes/chat.ts";
 import { registerDevice } from "./routes/device.ts";
 import { registerMonitor } from "./routes/monitor.ts";
 import { registerAdmin } from "./routes/admin.ts";
+import { registerAdminUi } from "./routes/admin-ui.ts";
 
 // Node 22 下 node:sqlite 等会打实验特性警告，对用户只是噪声
 process.removeAllListeners("warning");
@@ -26,13 +27,15 @@ async function main() {
   const baidu = fake ? null : new BaiduVoice(cfg.baidu, dirs.ttsCache);
   const voice = fake ?? baidu!;
   // 大脑：内置 agent（pi）或 OpenClaw CLI；假服务商模式下 OpenClaw 位置换成脚本假大脑
-  const sys = cfg.brain === "pi" ? createAgentSystem(cfg, dirs, fake) : null;
-  const brain = sys ? new PiBrain(sys.runtime) : (fake ?? new OpenClawBrain(cfg.openclaw.bin));
+  // agent 系统总是建：OpenClaw 模式下管理界面、首次设置向导也要能用；只有「设备对话交给谁」随 brain 配置
+  const sys = createAgentSystem(cfg, dirs, fake);
+  const pi = cfg.brain === "pi";
+  const brain = pi ? new PiBrain(sys.runtime) : (fake ?? new OpenClawBrain(cfg.openclaw.bin));
   const mqtt = new MqttHub();
   // 直播帧质量压到 70：单帧小一半，肉眼几乎看不出差别
   const stream = new StreamHub((raw) => rgb565ToJpeg(raw, 70), cfg.streamToken);
-  const ctx = new Ctx(cfg, dirs, voice, brain, mqtt, stream, sys ? sys.registry.roleDefs() : cfg.roles);
-  if (sys) attachAgentSystem(sys, ctx);
+  const ctx = new Ctx(cfg, dirs, voice, brain, mqtt, stream, pi ? sys.registry.roleDefs() : cfg.roles);
+  attachAgentSystem(sys, ctx);
 
   console.log("=".repeat(50));
   console.log("  Kagura 语音服务端" + (fake ? "（假服务商模式）" : ""));
@@ -48,21 +51,23 @@ async function main() {
   registerChat(r, ctx);
   registerDevice(r, ctx);
   registerMonitor(r, ctx);
-  if (sys) registerAdmin(r, ctx, sys);
+  registerAdmin(r, ctx, sys);
+  registerAdminUi(r);
 
   await mqtt.start(cfg.mqttPort);
   await stream.start(cfg.streamPort);
   await startDiscovery(cfg.discPort);
   ctx.reminders.start((text, dev) => ctx.sendPush(text, dev));
-  sys?.scheduler?.start(cfg.schedulerTick);
-  sys?.channels.startAll().catch((e) => console.log(`[channel] ⚠️  ${e.message}`));
+  sys.scheduler?.start(cfg.schedulerTick);
+  sys.channels.startAll().catch((e) => console.log(`[channel] ⚠️  ${e.message}`));
   ctx.schedules.start((s) => ctx.runScheduledCapture(s));
   setInterval(() => ctx.cleanupPhotoResults(), 300_000).unref();
   setInterval(() => ctx.hb.watch(), 30_000).unref();
 
   await r.listen(cfg.port);
-  if (sys) console.log(`Agent : ${sys.registry.list().map((a) => a.id).join(", ")}（内置，默认模型 ${sys.models.defaultRef() || "未配置"}）`);
+  if (pi) console.log(`Agent : ${sys.registry.list().map((a) => a.id).join(", ")}（内置，默认模型 ${sys.models.defaultRef() || "未配置"}）`);
   else console.log(`Agent : ${cfg.openclaw.defaultAgent}（OpenClaw）`);
+  console.log(`管理界面: http://127.0.0.1:${cfg.port}/admin（只限本机）`);
   console.log(`监听 0.0.0.0:${cfg.port}，Ctrl+C 退出`);
   console.log(`监控网页: http://<本机IP>:${cfg.port}/monitor\n`);
 }

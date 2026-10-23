@@ -3,7 +3,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { AgentInfo } from "./registry.ts";
-import { strftime } from "../util/time.ts";
+import { parseLocalTime, strftime } from "../util/time.ts";
 
 /** 每个文件注入的字数上限（字符数，中文一个字算一个） */
 export const BUDGETS: Record<string, number> = {
@@ -103,7 +103,9 @@ export function buildSystemPrompt(o: SoulOpts): string {
  * 系统提示一变，服务商侧的前缀缓存就全部失效，而时间每分钟都在变。
  */
 export function turnContext(localTime?: string, presence?: string): string {
-  const bits = [`时间 ${localTime || strftime("%Y-%m-%d %H:%M %A")}`];
+  // 设备带了 X-Local-Time 就用设备的时间（与快捷指令口径一致）
+  const d = parseLocalTime(localTime);
+  const bits = [`时间 ${strftime("%Y-%m-%d %H:%M", d)} 周${"日一二三四五六"[d.getDay()]}`];
   if (presence) bits.push(`主人${presence}`);
   return `[${bits.join("｜")}]`;
 }

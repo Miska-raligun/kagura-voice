@@ -7,10 +7,13 @@ import { json, type Req, type Res, type Router } from "../http/router.ts";
 import type { Ctx } from "../ctx.ts";
 import type { AgentSystem } from "../agent/system.ts";
 import { SOUL_FILES } from "../agent/registry.ts";
+import { BUDGETS } from "../agent/soul.ts";
 import { Memories } from "../agent/tools/memory.ts";
 import { importOpenClaw } from "../agent/import-openclaw.ts";
 import { scheduleFrom } from "../agent/tools/cron.ts";
 import { Roles } from "../roles.ts";
+import { ModelRegistry } from "../agent/models.ts";
+import { OpenAIEmbedder } from "../agent/memory.ts";
 
 const LOCAL = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"]);
 export const isLocal = (req: Req) => LOCAL.has(req.remoteAddr);
@@ -18,7 +21,8 @@ export const isLocal = (req: Req) => LOCAL.has(req.remoteAddr);
 type H = (req: Req) => Res | Promise<Res>;
 
 export function registerAdmin(r: Router, ctx: Ctx, sys: AgentSystem) {
-  const { registry, runtime, memories, a2a, skills, models } = sys;
+  const { registry, runtime, memories, a2a, skills } = sys;
+  const models = { list: () => sys.models.list(), defaultRef: () => sys.models.defaultRef(), cheapRef: () => sys.models.cheapRef() };
   const sched = () => sys.scheduler!;
   const guard = (h: H): H => async (req) => {
     if (!isLocal(req)) return json({ error: "管理接口只允许本机访问" }, 403);
@@ -38,7 +42,8 @@ export function registerAdmin(r: Router, ctx: Ctx, sys: AgentSystem) {
   const view = (id: string) => { const { dir, workspace, ...rest } = agentOr404(id); return { ...rest, workspace }; };
   /** agent 增删改之后：角色表、heartbeat 任务跟着变 */
   const changed = () => {
-    ctx.roles = new Roles(registry.roleDefs(), ctx.dirs.rolesFile);
+    // OpenClaw 模式下设备角色仍来自 config.roles，不跟着 agent 列表变
+    if (ctx.brain.kind === "pi") ctx.roles = new Roles(registry.roleDefs(), ctx.dirs.rolesFile);
     sched().syncHeartbeats();
   };
 
@@ -55,8 +60,15 @@ export function registerAdmin(r: Router, ctx: Ctx, sys: AgentSystem) {
       failing_jobs: sched().list().filter((j) => j.last_status === "error"),
       heartbeats: sched().list().filter((j) => j.kind === "heartbeat").map((j) => ({ agent: j.agent, enabled: j.enabled, last_status: j.last_status, last_run: j.last_run })),
       models: models.list(),
+      setup_needed: !models.defaultRef(),
+      channels: sys.channels.status(),
     });
   });
+  get("/api/admin/meta", () => json({
+    budgets: BUDGETS, soul_files: SOUL_FILES,
+    tools: runtime.allToolNames(registry.default()),
+    fake: ctx.cfg.fakeProviders,
+  }));
   get("/api/admin/models", () => json({ default: models.defaultRef(), cheap: models.cheapRef(), models: models.list() }));
 
   // ── Agents ──
@@ -194,13 +206,109 @@ export function registerAdmin(r: Router, ctx: Ctx, sys: AgentSystem) {
   });
 
   // ── 设备绑定（= 角色切换，改设备当前 agent）──
-  get("/api/admin/devices", () => json([...new Set([...ctx.hb.devices.keys()])].map((id) => ({ id, agent: ctx.roles.get(id).agent, role: ctx.roles.get(id).id }))));
+  get("/api/admin/devices", () => {
+    const t = Date.now() / 1000;
+    return json([...ctx.hb.devices.entries()].map(([id, rec]) => ({
+      id, agent: ctx.roles.get(id).agent, role: ctx.roles.get(id).id, online: t - rec.ts < 200, secs_ago: Math.trunc(t - rec.ts),
+      bat: rec.data.bat ?? null, rssi: rec.data.rssi ?? null, heap: rec.data.heap ?? null, wdt: rec.data.wdt ?? null,
+    })));
+  });
   put("/api/admin/devices/<id>", (req) => {
     const a = agentOr404(String((req.json() ?? {}).agent));
     const role = ctx.roles.set(req.params.id, a.device_role);
     if (!role) return json({ error: "这个 agent 没有对应的设备角色" }, 400);
     if (ctx.mqtt.ok) ctx.mqtt.publish(`kagura/cmd/${req.params.id}`, { action: "role", role: role.id });
     return json({ id: req.params.id, agent: a.id, role: role.id });
+  });
+
+  // ── 设置（config.json）──
+  const cfgFile = path.join(ctx.cfg.dataDir, "config.json");
+  const SECRET = /(secret|token|key|password)$/i;
+  const readCfg = (): any => { try { return JSON.parse(fs.readFileSync(cfgFile, "utf8")); } catch { return {}; } };
+  /** 递归打码：键名像密钥的字符串值换成 *** */
+  const mask = (v: any, k = ""): any => Array.isArray(v) ? v.map((x) => mask(x)) : v && typeof v === "object"
+    ? Object.fromEntries(Object.entries(v).map(([kk, vv]) => [kk, mask(vv, kk)])) : typeof v === "string" && v && SECRET.test(k) ? "***" : v;
+  /** 递归合并：新值是 *** 就保留旧值（数组按下标对齐，服务商列表按 id 对齐） */
+  const unmask = (nv: any, ov: any, k = ""): any => {
+    if (nv === "***" && SECRET.test(k)) return ov;
+    if (Array.isArray(nv)) return nv.map((x, i) => unmask(x, Array.isArray(ov) ? (ov.find((o: any) => o?.id && o.id === x?.id) ?? ov[i]) : undefined));
+    if (nv && typeof nv === "object") return Object.fromEntries(Object.entries(nv).map(([kk, vv]) => [kk, unmask(vv, ov?.[kk], kk)]));
+    return nv;
+  };
+  get("/api/admin/config", () => json({ config: mask(readCfg()), data_dir: ctx.cfg.dataDir, brain: ctx.cfg.brain, fake: ctx.cfg.fakeProviders }));
+  put("/api/admin/config", (req) => {
+    const patch = req.json();
+    if (!patch || typeof patch !== "object") return json({ error: "需要 JSON 对象" }, 400);
+    const old = readCfg();
+    const next = { ...old, ...unmask(patch, old) };
+    const tmp = cfgFile + ".tmp";
+    fs.writeFileSync(tmp, JSON.stringify(next, null, 2));
+    fs.renameSync(tmp, cfgFile);
+    // 能热更新的当场生效：模型、嵌入、agent 通信；端口、百度、token、大脑类型要重启
+    const hot: string[] = [];
+    if (!ctx.cfg.fakeProviders && next.models) {
+      const m = { providers: next.models.providers ?? [], default: String(next.models.default ?? ""), cheap: String(next.models.cheap ?? "") };
+      ctx.cfg.models = m;
+      sys.models = new ModelRegistry(m);
+      runtime.models = sys.models;
+      hot.push("models");
+    }
+    if (!ctx.cfg.fakeProviders && "embedding" in patch) {
+      const e = next.embedding;
+      memories.setEmbedder(e?.base_url && e?.model ? new OpenAIEmbedder({ baseUrl: e.base_url, apiKey: e.api_key ?? "", model: e.model }) : null);
+      hot.push("embedding");
+    }
+    if (next.a2a) {
+      if ("enabled" in next.a2a) a2a.cfg.enabled = !!next.a2a.enabled;
+      if (next.a2a.max_hops) a2a.cfg.maxHops = Number(next.a2a.max_hops);
+      if (next.a2a.per_pair_per_min) a2a.cfg.perPairPerMin = Number(next.a2a.per_pair_per_min);
+      hot.push("a2a");
+    }
+    const restart = ["port", "mqtt_port", "stream_port", "disc_port", "baidu", "api_token", "stream_token", "brain", "runtime", "openclaw"].filter((k) => k in patch);
+    return json({ status: "ok", applied: hot, restart_needed: restart });
+  });
+  /** 试一下模型通不通：发一句「你好」 */
+  post("/api/admin/models/test", async (req) => {
+    const ref = String((req.json() ?? {}).ref ?? "");
+    const t0 = Date.now();
+    try {
+      const m = sys.models.resolve(ref);
+      const r = await sys.models.models.completeSimple(m, { systemPrompt: "用一句话回答。", messages: [{ role: "user", content: "你好，报一下你是什么模型", timestamp: Date.now() }] });
+      if (r.stopReason === "error" || r.stopReason === "aborted") return json({ ok: false, error: r.errorMessage, ms: Date.now() - t0 });
+      return json({ ok: true, reply: r.content.filter((c: any) => c.type === "text").map((c: any) => c.text).join(""), ms: Date.now() - t0, usage: r.usage });
+    } catch (e: any) { return json({ ok: false, error: e.message, ms: Date.now() - t0 }); }
+  });
+  /** 音色试听 */
+  post("/api/admin/tts", async (req) => {
+    const d = req.json() ?? {};
+    const wav = await ctx.voice.synthesize(String(d.text || "你好，我是你的桌面小助手。"), Number(d.per ?? 111));
+    if (!wav) return json({ error: "语音合成失败（检查百度 Key）" }, 500);
+    return { status: 200, headers: { "Content-Type": "audio/wav" }, body: fs.readFileSync(wav) };
+  });
+
+  // ── 用量（全部 agent）──
+  get("/api/admin/usage", (req) => {
+    const days = Number(req.query.get("days") ?? 30);
+    return json(registry.list().map((a) => ({ agent: a.id, name: a.name, days: runtime.store(a.id).usageByDay(days) })));
+  });
+
+  // ── 设备日志 / 崩溃报告 / 录音 ──
+  get("/api/admin/devices/<id>/logs", (req) => {
+    const f = ctx.hb.logFile(req.params.id.replace(/[^A-Za-z0-9_-]/g, ""));
+    const lines = fs.existsSync(f) ? fs.readFileSync(f, "utf8").split(/\r?\n/).filter(Boolean) : [];
+    const hb = ctx.hb.devices.get(req.params.id);
+    return json({ lines: lines.slice(-Number(req.query.get("n") ?? 200)), heartbeat: hb ? { ...hb.data, secs_ago: Math.trunc(Date.now() / 1000 - hb.ts) } : null });
+  });
+  get("/api/admin/crash-reports", () => json(fs.readdirSync(ctx.dirs.crashReports).filter((f) => f.endsWith(".log")).sort().reverse().slice(0, 50)
+    .map((f) => ({ name: f, size: fs.statSync(path.join(ctx.dirs.crashReports, f)).size }))));
+  get("/api/admin/crash-reports/<name>", (req) => {
+    if (!/^[A-Za-z0-9_-]+\.log$/.test(req.params.name)) return json({ error: "bad name" }, 400);
+    const f = path.join(ctx.dirs.crashReports, req.params.name);
+    return fs.existsSync(f) ? json({ content: fs.readFileSync(f, "utf8") }) : json({ error: "not found" }, 404);
+  });
+  get("/api/admin/devices/<id>/audio", (req) => {
+    const f = path.join(ctx.dirs.debugAudio, `${req.params.id.replace(/[^A-Za-z0-9_-]/g, "")}_last.wav`);
+    return fs.existsSync(f) ? { status: 200, headers: { "Content-Type": "audio/wav", "Cache-Control": "no-cache" }, body: fs.readFileSync(f) } : json({ error: "还没有录音" }, 404);
   });
 
   // ── IM 渠道 ──
@@ -253,6 +361,7 @@ export function registerAdmin(r: Router, ctx: Ctx, sys: AgentSystem) {
     const text = String(d.text ?? "").trim();
     if (!text) return json({ error: "text 不能为空" }, 400);
     const key = runtime.sessionKey(a.id, "webchat", "owner");
+    if (/^\/(reset|new)\s*$/i.test(text)) { runtime.store(a.id).reset(key); return json({ reply: "好，我们重新开始吧。", tools: [], session: key }); }
     const res = await runtime.run({ agentId: a.id, sessionKey: key, kind: "chat", channel: "webchat", text });
     return json({ reply: res.text, tools: res.toolCalls, usage: res.usage, session: key });
   });

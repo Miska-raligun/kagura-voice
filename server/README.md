@@ -96,7 +96,28 @@ python3 tools/migrate_to_server.py        # config.py → config.json，并复�
 `speak` `take_photo` `set_volume` `get_presence` `photo_schedule_*` · `memory_search` `memory_get` `memory_write` ·
 `cron_list` `cron_add` `cron_update` `cron_remove` `cron_run` · `sessions_list` `sessions_history` `sessions_send` `sessions_spawn` · `skill_read`
 
-### 管理接口（只允许本机访问；页面在 M8）
+### 管理界面
+
+在运行服务端的这台电脑上打开 **http://127.0.0.1:5000/admin**（只允许本机访问，局域网其它机器 403）。
+总览、Agents（人设文件带字数预算、音色试听、工具/技能白名单、heartbeat、通信权限）、会话、记忆（编辑与检索测试）、
+定时任务（向导、立即运行、运行历史、从 OpenClaw 导入）、Agent 通信矩阵、渠道（飞书/QQ 账号、配对审批、绑定）、
+设备（绑定、日志、崩溃报告、录音试听、监控页）、网页聊天、用量、设置（模型服务商、嵌入、百度、端口、首次设置向导）。
+不碰配置文件也能完成全部日常管理。前端在 `admin-ui/`（Preact，esbuild 编译后内联进单文件可执行）。
+
+### IM 渠道（飞书 / QQ）
+
+在管理界面「渠道」页添加账号，配置存 `<数据目录>/channels.json`：
+
+| 渠道 | 需要 | 说明 |
+|---|---|---|
+| 飞书 / Lark | App ID、App Secret | 企业自建应用，事件订阅选「长连接」并加 `im.message.receive_v1`；不需要公网 |
+| QQ 官方机器人 | AppID、AppSecret | 回调方式选 WebSocket，开通单聊与群 @；不需要公网 |
+| OneBot v11（可选） | 正向 WebSocket 地址、token | NapCat / LLOneBot 等，**非官方协议有封号风险**，默认关闭 |
+
+私聊默认**配对制**（陌生人收到配对码，在「渠道」页批准）；群里默认只回应 @ 机器人；每账号每日回复上限。
+同一个 agent 的记忆跨渠道共享；定时任务的投递目标可以写 `feishu:<账号id>:<聊天id>`。聊天里发 `/reset` 开新对话。
+
+### 管理接口（只允许本机访问）
 
 | 接口 | 作用 |
 |---|---|
@@ -151,5 +172,7 @@ KAGURA_BRAIN=pi KAGURA_SERVER_CMD=server/dist/kagura KAGURA_SERVER_PROVIDES=brok
 | `src/voice/` | 百度 ASR/TTS（缓存 key 与 Python 版逐字节一致，旧 `tts_cache/` 可直接复用） |
 | `src/brain/` | 大脑接口；`pi.ts` = 内置 agent，`openclaw.ts` = OpenClaw CLI 适配器 |
 | `src/agent/` | 内置 agent 系统：`registry`（agent 目录）、`runtime`（每轮运行/串行/压缩）、`soul`（系统提示组装）、`models`、`memory`、`scheduler` + `cron`、`a2a`、`skills`、`tools/*` |
-| `src/routes/admin.ts` | 管理接口 `/api/admin/*`（只许本机） |
+| `src/routes/admin.ts` / `admin-ui.ts` | 管理接口 `/api/admin/*` 与 `/admin` 页面（只许本机） |
+| `src/channels/` | IM 渠道：`manager`（配对/绑定/路由/投递）、`store`、`feishu`、`qq`、`onebot` |
+| `admin-ui/` | 管理界面前端（Preact + TSX，`npx tsc -p admin-ui` 类型检查） |
 | `src/fake.ts` | `KAGURA_FAKE_PROVIDERS=1` 时的假 ASR/LLM/TTS（契约测试用） |

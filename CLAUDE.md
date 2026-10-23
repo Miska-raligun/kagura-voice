@@ -19,7 +19,7 @@ CoreS3 (MicroPython)  ──HTTP──▶  voice_server.py (Flask :5000)  ──
 | 文件 | 说明 |
 |---|---|
 | `voice_server.py` | Flask 服务端：路由、ASR/TTS、`ServerState`（会话/限流/拍照）、`_send_push` |
-| `server/` | **新服务端（TypeScript，替代 voice_server.py，迁移中）**：单文件可执行、内置 MQTT broker。见 `server/README.md`、`docs/plan-kagura-agent.md`。改服务端行为要两边同步，直到旧版删除；`contract-tests/` 两版共用 |
+| `server/` | **新服务端（TypeScript，替代 voice_server.py，迁移中）**：单文件可执行、内置 MQTT broker、内置 agent 系统（基于 pi：记忆、定时任务、heartbeat、agent 间通信、技能）、IM 渠道（飞书/QQ）、本机管理界面 `/admin`。见 `server/README.md`、`docs/plan-kagura-agent.md`。改设备协议相关行为要两边同步，直到旧版删除；`contract-tests/` 两版共用（`KAGURA_BRAIN=pi` 再跑一轮内置 agent） |
 | `device/src/*.py` | CoreS3 固件（**MicroPython**，不能用 CPython 特性/typing；改后需真机烧录验证） |
 | `device/main.py` | 烧成 `/flash/main.py` 的引导：把 `/flash/kagura/src` 加进 sys.path |
 | `cores3_client.py` | 旧单文件版，**已弃用勿改**，真机验证通过后删除 |
