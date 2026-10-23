@@ -2,6 +2,7 @@
 
 假模型的脚本项除了字符串，还可以是 {"text": ..., "tool_calls": [{"name": ..., "args": {...}}], "then": <工具结果之后的回复>}。
 """
+import json
 import os
 import time
 
@@ -310,3 +311,53 @@ def test_admin_loopback_port():
         assert s.get("/health").status_code == 200
     finally:
         s.stop()
+
+
+# ── 执行命令 / 联网 ─────────────────────────────────────────────────────────
+
+def _transcript_text(a, agent="main"):
+    """该 agent 所有会话的完整记录（含工具结果）拼成一段文本"""
+    out = []
+    for s in a.get(f"/api/admin/agents/{agent}/sessions").json():
+        key = s.get("key") or s.get("session_key")
+        msgs = a.get(f"/api/admin/agents/{agent}/sessions/{requests_quote(key)}").json().get("messages", [])
+        out.append(json.dumps(msgs, ensure_ascii=False))
+    return "\n".join(out)
+
+
+def requests_quote(s):
+    from urllib.parse import quote
+    return quote(s, safe="")
+
+
+def test_exec_tool_runs_command_in_workspace(a):
+    """设备对话里让 agent 执行命令：在它的工作目录里真的跑了（Windows 上是 PowerShell，Linux 是 bash）"""
+    a.fake_llm(tool("exec", _then="做好了", command="echo kagura-exec-ok > exec_ok.txt"))
+    r = a.post("/chat", data=wav(), headers={"X-Device-Id": "ag_exec"})
+    assert b64text(r.headers["X-Reply-Text"]) == "做好了"
+    f = a.data / "agents" / "main" / "workspace" / "exec_ok.txt"
+    assert f.exists(), "命令没在 agent 工作目录里执行"
+    raw = f.read_bytes()
+    text = raw.decode("utf-16") if raw[:2] in (b"\xff\xfe", b"\xfe\xff") else raw.decode("utf-8", "replace")
+    assert "kagura-exec-ok" in text
+    assert "exit=0" in _transcript_text(a)
+
+
+def test_web_fetch_tool_reads_page(a):
+    """web_fetch 能取回网页 / 文本内容（这里读服务端自己的 /health，CI 里不依赖外网）"""
+    a.fake_llm(tool("web_fetch", _then="看完了", url=a.base + "/health"))
+    a.post("/chat", data=wav(), headers={"X-Device-Id": "ag_web"})
+    t = _transcript_text(a)
+    assert '\\"app\\":\\"kagura\\"' in t or '"app":"kagura"' in t or "kagura" in t
+
+
+def test_tools_settings_hot_apply_and_test_exec(a):
+    """设置 → 工具：保存即生效；「试一下」能跑命令；关掉执行命令后 agent 的工具列表里就没有 exec"""
+    r = a.post("/api/admin/tools/test-exec", json={"command": "echo hi-kagura"}).json()
+    assert r["ok"] and "hi-kagura" in r["output"]
+    names = [t["name"] for t in a.get("/api/admin/meta").json()["tools"]]
+    assert "exec" in names and "web_search" in names and "web_fetch" in names
+    assert "tools" in a.request("PUT", "/api/admin/config", json={"tools": {"exec": {"enabled": False}, "web": {"enabled": True}}}).json()["applied"]
+    names = [t["name"] for t in a.get("/api/admin/meta").json()["tools"]]
+    assert "exec" not in names and "web_search" in names
+    a.request("PUT", "/api/admin/config", json={"tools": {"exec": {"enabled": True}, "web": {"enabled": True}}})

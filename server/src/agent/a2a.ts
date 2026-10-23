@@ -120,7 +120,7 @@ export class A2A {
             const t0 = Date.now();
             const go = () => this.rt.run({ agentId: p.agent, sessionKey: toKey, kind: "main", channel: "a2a", text, purpose: "a2a", timeoutSecs: SEND_TIMEOUT });
             if (p.wait === false) {
-              const lineage = { hop: scope.hop + 1, chain: scope.chain };
+              const lineage = { hop: scope.hop + 1, chain: scope.chain, trusted: scope.trusted };
               outsideScope(() => {
                 this.rt.run({ agentId: p.agent, sessionKey: toKey, kind: "main", channel: "a2a", text, purpose: "a2a", lineage })
                   .then((r) => this.finish(logId, "ok", r.text, Date.now() - t0))
@@ -163,7 +163,7 @@ export class A2A {
               } catch (e: any) { this.finish(logId, "error", String(e.message), Date.now() - t0); return fail(`子任务失败：${e.message}`); }
             }
             const caller = { ...scope, meta: {} };
-            const lineage = { hop: scope.hop + (to !== agent.id ? 1 : 0), chain: scope.chain };
+            const lineage = { hop: scope.hop + (to !== agent.id ? 1 : 0), chain: scope.chain, trusted: scope.trusted };
             outsideScope(() => {
               (async () => {
                 let result: string;
@@ -185,7 +185,7 @@ export class A2A {
     const r = await this.rt.run({
       agentId: caller.agentId, sessionKey: caller.sessionKey, kind: caller.kind as any, channel: caller.channel,
       deviceId: caller.deviceId, spokenTo: caller.channel === "device" ? caller.deviceId : undefined, purpose: "a2a", origin: caller.origin,
-      lineage: { hop: caller.hop, chain: [] },
+      lineage: { hop: caller.hop, chain: [], trusted: caller.trusted },
       text: `[系统事件] 你之前派出的子任务「${task.slice(0, 100)}」已由 ${who} 完成。结果：\n${result}\n\n需要告诉主人就直接说要说的话（会转达给主人）；不需要就只回 NO_REPLY。`,
       keepIf: (t) => !SILENT_RE.test(t),
     });

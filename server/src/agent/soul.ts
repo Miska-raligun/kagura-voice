@@ -91,7 +91,7 @@ export function buildSystemPrompt(o: SoulOpts): string {
     if (notes) parts.push(`<recent_notes>\n${clip(notes, BUDGETS.daily)}\n</recent_notes>`);
   }
   if (o.skills?.length) {
-    parts.push("<skills>\n可用技能（需要时用 skill_read 读全文再照做）：\n"
+    parts.push("<skills>\n可用技能（需要时用 skill_read 读全文再照做；要跑的脚本用 exec 执行）：\n"
       + o.skills.map((s) => `- ${s.name}：${s.description}`).join("\n") + "\n</skills>");
   }
   if (o.peers?.length) {

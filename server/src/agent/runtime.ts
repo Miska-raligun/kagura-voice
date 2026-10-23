@@ -13,6 +13,9 @@ import { AgentStore } from "./store.ts";
 import { buildSystemPrompt, turnContext, type SessionKind } from "./soul.ts";
 import { runScope, withScope, type RunScope } from "./scope.ts";
 
+/** IM 渠道：消息可能来自陌生人，默认不可信（主人私聊由渠道层显式标 trusted） */
+export const IM_CHANNELS = new Set(["feishu", "qq", "onebot"]);
+
 export interface RunRequest {
   agentId: string;
   sessionKey: string;
@@ -40,7 +43,9 @@ export interface RunRequest {
   /** 覆盖 agent 的模型（heartbeat 用便宜模型） */
   model?: string;
   /** 脱离调用方运行（后台子任务）时显式带上跳数与调用链，防循环 */
-  lineage?: { hop: number; chain: string[] };
+  lineage?: { hop: number; chain: string[]; trusted?: boolean };
+  /** 可信度（见 RunScope.trusted）。不传：嵌套调用沿用上层；IM 渠道默认不可信，其它渠道可信 */
+  trusted?: boolean;
   /** 直接用调用方给的对象当本轮 meta（边生成边播要在运行中途读到 needPhoto/volume） */
   meta?: RunScope["meta"];
   /** 逐字输出等事件（边生成边播用） */
@@ -181,6 +186,7 @@ export class Runtime {
       hop: parent ? parent.hop + (parent.agentId !== agent.id ? 1 : 0) : (req.lineage?.hop ?? 0),
       chain: [...(parent?.chain ?? req.lineage?.chain ?? []), `${agent.id}|${req.sessionKey}`],
       meta: req.meta ?? {},
+      trusted: req.trusted ?? parent?.trusted ?? req.lineage?.trusted ?? !IM_CHANNELS.has(req.channel),
     };
     const model = this.models.resolve(req.model || agent.model);
     const history = store.history(req.sessionKey).map((h) => h.msg);
@@ -253,7 +259,7 @@ export class Runtime {
 
   /** 某个 agent 在普通会话里能看到的全部内置工具（管理界面白名单用，不过滤白名单本身） */
   allToolNames(agent: AgentInfo): { name: string; label: string; description: string }[] {
-    const scope: RunScope = { agentId: agent.id, sessionKey: `${agent.id}:main`, kind: "main", channel: "webchat", purpose: "list", hop: 0, chain: [], meta: {} };
+    const scope: RunScope = { agentId: agent.id, sessionKey: `${agent.id}:main`, kind: "main", channel: "webchat", purpose: "list", hop: 0, chain: [], meta: {}, trusted: true };
     return this.providers.flatMap((p) => p(scope, agent)).map((t) => ({ name: t.name, label: t.label, description: t.description }));
   }
 
@@ -297,7 +303,7 @@ export class Runtime {
       return `${who}：${messageText(h.msg).slice(0, 800)}`;
     }).join("\n");
     const model = this.models.resolve(agent.cheap_model || this.models.cheapRef() || agent.model);
-    const res = await withScope({ agentId: agent.id, sessionKey: key, kind: "isolated", channel: "system", purpose: "compact", hop: 0, chain: [], meta: {} },
+    const res = await withScope({ agentId: agent.id, sessionKey: key, kind: "isolated", channel: "system", purpose: "compact", hop: 0, chain: [], meta: {}, trusted: false },
       () => this.models.models.completeSimple(model, {
         systemPrompt: "你负责把一段对话压缩成摘要，供之后继续对话时参考。保留：人物、约定、待办、偏好、未解决的问题、重要事实与数字。"
           + "省略寒暄与重复。用第三人称、中文、条目式，不超过 600 字。",

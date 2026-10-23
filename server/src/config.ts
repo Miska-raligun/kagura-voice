@@ -45,6 +45,49 @@ export interface Config {
   schedulerTick: number;
   /** 人设文件注入上限覆盖（见 agent/soul.ts 的 DEFAULT_BUDGETS） */
   promptBudgets: Record<string, number>;
+  /** 执行命令、联网工具的设置。管理界面改了就地更新这个对象（工具每次调用时读），不用重启 */
+  tools: ToolsConfig;
+}
+
+export interface ToolsConfig {
+  exec: {
+    enabled: boolean;
+    /** auto = Windows 用 PowerShell、其它用 bash；也可以 bash / sh / powershell / cmd / wsl */
+    shell: string;
+    /** shell=wsl 时用哪个发行版（空 = 默认发行版） */
+    wslDistro: string;
+    timeoutSecs: number;
+  };
+  web: {
+    enabled: boolean;
+    /** auto = 配了 Key 用对应服务，没配就抓必应网页；brave / tavily / bocha / searxng / bing / duckduckgo */
+    searchProvider: string;
+    searchApiKey: string;
+    /** searxng 的地址 */
+    searchBaseUrl: string;
+    /** 网络代理（http://127.0.0.1:7890 这种）。空 = 用环境变量 HTTPS_PROXY，没有就直连。对调模型也生效 */
+    proxy: string;
+  };
+}
+
+/** config.json 里的 tools 段 → ToolsConfig（缺省值在这里） */
+export function parseToolsConfig(t: any = {}): ToolsConfig {
+  const e = t.exec ?? {}, w = t.web ?? {};
+  return {
+    exec: {
+      enabled: e.enabled ?? true,
+      shell: String(e.shell ?? "auto"),
+      wslDistro: String(e.wsl_distro ?? ""),
+      timeoutSecs: Math.max(1, Number(e.timeout_secs ?? 60)),
+    },
+    web: {
+      enabled: w.enabled ?? true,
+      searchProvider: String(w.search_provider ?? "auto"),
+      searchApiKey: String(w.search_api_key ?? ""),
+      searchBaseUrl: String(w.search_base_url ?? ""),
+      proxy: String(w.proxy ?? ""),
+    },
+  };
 }
 
 export interface ModelDef {
@@ -132,6 +175,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     embedding: emb && emb.base_url && emb.model ? { baseUrl: String(emb.base_url), apiKey: String(emb.api_key ?? ""), model: String(emb.model) } : null,
     runtime: { maxConcurrency: Number(rt.max_concurrency ?? 4), timeoutSecs: Number(rt.timeout_secs ?? 120) },
     a2a: { enabled: a2a.enabled ?? true, maxHops: Number(a2a.max_hops ?? 3), perPairPerMin: Number(a2a.per_pair_per_min ?? 10) },
+    tools: parseToolsConfig(file.tools),
     promptBudgets: file.prompt_budgets && typeof file.prompt_budgets === "object" ? file.prompt_budgets : {},
     schedulerTick: Number(env.KAGURA_SCHEDULER_TICK || file.scheduler_tick || 15),
   };

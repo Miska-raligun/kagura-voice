@@ -108,7 +108,7 @@ kagura migrate <旧仓库目录>     # config.py → config.json，并复制提�
 <数据目录>/agents/<id>/workspace/     SOUL.md IDENTITY.md USER.md AGENTS.md TOOLS.md HEARTBEAT.md MEMORY.md memory/ skills/
 <数据目录>/agents/<id>/agent.sqlite   会话、消息、用量、记忆索引
 <数据目录>/system.sqlite              定时任务、运行记录、agent 通信记录
-<数据目录>/skills/<name>/SKILL.md     全局技能（本期只读说明，不执行脚本）
+<数据目录>/skills/<name>/SKILL.md     全局技能（脚本由 agent 用 exec 执行）
 ```
 
 从 OpenClaw 搬人设、记忆与定时任务（任务导入后默认暂停）：
@@ -117,7 +117,22 @@ kagura migrate <旧仓库目录>     # config.py → config.json，并复制提�
 ### 内置工具
 
 `speak` `take_photo` `set_volume` `get_presence` `photo_schedule_*` · `memory_search` `memory_get` `memory_write` ·
-`cron_list` `cron_add` `cron_update` `cron_remove` `cron_run` · `sessions_list` `sessions_history` `sessions_send` `sessions_spawn` · `skill_read`
+`cron_list` `cron_add` `cron_update` `cron_remove` `cron_run` · `sessions_list` `sessions_history` `sessions_send` `sessions_spawn` · `skill_read` ·
+`exec` · `web_search` `web_fetch`
+
+**执行命令（`exec`）的权限**：只有可信会话里才有这个工具——设备、网页聊天、定时任务 / heartbeat、渠道白名单里标了 owner 的私聊。
+IM 陌生人和群聊里没有；经 a2a 转手、或在不可信会话里建 / 改的定时任务，都沿用发起方的可信度（`RunScope.trusted`、`Job.untrusted`）。
+设置在 config.json 的 `tools` 段（管理界面「设置 → 工具」，改了立即生效）：
+
+```json
+"tools": {
+  "exec": { "enabled": true, "shell": "auto", "wsl_distro": "", "timeout_secs": 60 },
+  "web":  { "enabled": true, "search_provider": "auto", "search_api_key": "", "search_base_url": "", "proxy": "" }
+}
+```
+
+`shell`：auto（Windows=PowerShell，其它=bash）/ powershell / cmd / wsl / bash / sh。`search_provider`：auto（有 Key 用对应服务，
+否则抓必应网页，再不行 DuckDuckGo）/ bing / duckduckgo / bocha / tavily / brave / searxng。`proxy` 对所有出站请求生效（含调模型），本机地址直连。
 
 ### 管理界面
 

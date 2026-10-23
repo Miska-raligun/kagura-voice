@@ -285,6 +285,11 @@ CoreS3 (MicroPython)  ──HTTP──▶  voice_server.py (Flask :5000)  ──
   才删标记——别提前到 `setup()` 结束，那时还不知道新代码能不能跟服务端说上话；
   ④ `ota_state.json` 只记自己装过的文件，删除只删这些（手动传的文件不碰）；换了图要清 `ui._role_hit`/`_img_missing`；
   ⑤ `rev` 算法两边必须一致（`DeviceFiles.rev` ↔ `ota._rev`），`import_sim` 里专门对过。
+- **执行命令 / 联网（新服务端内置 agent，`server/src/agent/tools/exec.ts`、`web.ts`）**：`exec` 只在
+  `RunScope.trusted` 的会话里出现。可信度的来源：IM 渠道默认不可信，只有渠道白名单里 owner 的私聊显式可信；
+  其它渠道可信；嵌套调用（a2a）沿用上层，后台派出的经 `lineage.trusted` 带过去；**不可信会话里 cron_add / cron_update
+  的任务标 `untrusted`，跑起来也不可信**（管理界面改过才清掉）——新加任何「替别人跑一轮」的入口都要把可信度带上，
+  漏一处就是让陌生人借道执行命令。联网走 `util/proxy.ts`：配了代理就换全局 dispatcher（含调模型），本机地址直连。
 - **`global` 声明必须有主**（LRN 2026-08-25）：`netsvc.mqtt_check` 里写过
   `global _mqtt_ok`，但本模块从来没有这个名字（状态在 `diag`）。后果是
   **任何一次 MQTT 掉线都变成 NameError 逃出 `mqtt_check`**，主循环连吃 10 次

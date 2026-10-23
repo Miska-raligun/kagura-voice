@@ -1,7 +1,7 @@
 // Skills（§6.8，本期只做加载机制）：SKILL.md 文件夹，格式与 OpenClaw/pi 一致。
 //   全局：<数据目录>/skills/<name>/SKILL.md      本 agent：workspace/skills/<name>/SKILL.md（同名覆盖全局）
 // front-matter 里的 name/description 进系统提示的技能目录；agent 需要时 skill_read 读全文。
-// **本期不执行 skill 里的脚本**（产品版没有沙箱）——只能读说明与文本附件。
+// 技能里的脚本由 agent 用 exec 工具运行（只在可信会话里有 exec），skill_read 会告诉它技能目录在哪。
 import fs from "node:fs";
 import path from "node:path";
 import { Type } from "@earendil-works/pi-ai";
@@ -61,7 +61,7 @@ export class Skills {
       if (!this.list(agent).length) return [];
       return [{
         name: "skill_read", label: "读取技能",
-        description: "读取一个技能的完整说明（SKILL.md），或技能目录里的其他文本文件（file 参数）。技能里的脚本不能执行。",
+        description: "读取一个技能的完整说明（SKILL.md），或技能目录里的其他文本文件（file 参数）。说明里要跑的脚本用 exec 工具执行（技能目录会一并告诉你）。",
         parameters: Type.Object({ name: Type.String(), file: Type.Optional(Type.String()) }),
         execute: async (_id, p: any) => {
           const s = this.list(agent).find((x) => x.name === p.name);
@@ -75,7 +75,8 @@ export class Skills {
             const buf = fs.readFileSync(f);
             if (buf.length > MAX_READ) return fail(`文件太大（${buf.length} 字节）`);
             if (buf.includes(0)) return fail("不是文本文件");
-            return ok(buf.toString("utf8"));
+            const head = (p.file && p.file !== "SKILL.md") ? "" : `技能目录：${s.dir}（说明里提到的脚本、相对路径都以这里为准，用 exec 运行）\n\n`;
+            return ok(head + buf.toString("utf8"));
           } catch (e: any) { return fail(e.message); }
         },
       }];

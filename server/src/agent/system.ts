@@ -12,6 +12,8 @@ import { Scheduler } from "./scheduler.ts";
 import { cronTools } from "./tools/cron.ts";
 import { A2A } from "./a2a.ts";
 import { Skills } from "./skills.ts";
+import { execTools } from "./tools/exec.ts";
+import { webTools } from "./tools/web.ts";
 import { ChannelStore } from "../channels/store.ts";
 import { ChannelManager } from "../channels/manager.ts";
 import path from "node:path";
@@ -46,6 +48,9 @@ export function createAgentSystem(cfg: Config, dirs: Dirs, fake: FakeLlm | null)
   runtime.addTools(skills.tools());
   const a2a = new A2A(dirs.systemDb, runtime, registry, cfg.a2a);
   runtime.addTools(a2a.tools());
+  // 执行命令（只给可信会话）+ 联网搜索 / 读网页。cfg.tools 由管理界面就地更新，改了立即生效
+  runtime.addTools(execTools(cfg.tools));
+  runtime.addTools(webTools(cfg.tools));
   const channels = new ChannelManager(new ChannelStore(path.join(cfg.dataDir, "channels.json")), runtime, registry);
   return { registry, models, runtime, memories, scheduler: null, a2a, skills, channels };
 }

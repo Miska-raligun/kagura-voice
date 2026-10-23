@@ -126,6 +126,8 @@ export class ChannelManager {
         agentId, sessionKey, kind: ownerMain ? "main" : "chat", channel: m.kind, purpose: "chat",
         text: who + (m.text || "（发来一张图片）"), images: m.images.map((i) => ({ type: "image" as const, ...i })),
         origin: `${m.kind}:${a.id}:${m.chatId}`,
+        // 只有白名单里标了 owner 的人在私聊里说的才可信（能让 agent 执行命令）；群聊、配对的陌生人一律不可信
+        trusted: m.chatType === "dm" && !!allowed?.owner,
       });
       if (!r.text || SILENT_RE.test(r.text)) return;
       // take_photo 在 IM 里触发时，照片直接发回聊天

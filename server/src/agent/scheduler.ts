@@ -31,6 +31,8 @@ export interface Job {
   /** 可选：这个任务用的模型（heartbeat 默认便宜模型） */
   model: string;
   source: string;
+  /** 在不可信会话里创建的（见 RunScope.trusted） */
+  untrusted?: boolean;
   created: number; updated: number;
   next_run: number | null; last_run: number | null; last_status: string;
   fail_count: number; retry_at: number | null;
@@ -139,6 +141,7 @@ export class Scheduler {
       max_retries: input.max_retries ?? 2,
       model: input.model ?? "",
       source: input.source ?? "user",
+      ...(input.untrusted ? { untrusted: true } : {}),
       created: t, updated: t, next_run: null, last_run: null, last_status: "", fail_count: 0, retry_at: null,
     };
     this.check(j);
@@ -162,7 +165,8 @@ export class Scheduler {
     const j = this.get(id);
     if (!j) return null;
     const next: Job = { ...j };
-    for (const k of ["name", "enabled", "kind", "session", "message", "delivery", "active_hours", "idle_only", "max_retries", "model"] as const) {
+    // untrusted 只能被设上、不能被 agent 摘掉（管理界面编辑会显式传 false）
+    for (const k of ["name", "enabled", "kind", "session", "message", "delivery", "active_hours", "idle_only", "max_retries", "model", "untrusted"] as const) {
       if (k in patch && (patch as any)[k] !== undefined) (next as any)[k] = (patch as any)[k];
     }
     if (patch.schedule) {
@@ -329,6 +333,8 @@ export class Scheduler {
     const base = {
       agentId: agent.id, channel: "system", deviceId: dev, spokenTo: dev, voiceDelivery: voice,
       purpose: j.kind === "heartbeat" ? "heartbeat" : "cron",
+      // 不可信的会话（IM 陌生人）里让 agent 建的任务，跑起来也不可信——不能借定时任务绕过执行命令的限制
+      trusted: !j.untrusted,
     };
     if (j.kind === "heartbeat") {
       const list = this.agents.readFile(agent.id, "HEARTBEAT.md").trim();

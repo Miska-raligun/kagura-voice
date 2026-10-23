@@ -25,6 +25,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { execFile, execFileSync } from "node:child_process";
 import { isWsl, toLinuxPath } from "./util/platform.ts";
+import { applyProxy } from "./util/proxy.ts";
 import { preflight, realIO, closeAsk, pauseBeforeExit, type PortNeed } from "./startup/preflight.ts";
 
 // Node 22 下 node:sqlite 等会打实验特性警告，对用户只是噪声
@@ -47,6 +48,7 @@ async function main() {
   if (pf === "exit") throw new Error("端口被占用，没有启动。");
 
   const dirs = makeDirs(cfg);
+  const proxy = applyProxy(cfg.tools.web.proxy);
   const fake = cfg.fakeProviders ? new FakeProviders(dirs.ttsCache) : null;
   const baidu = fake ? null : new BaiduVoice(cfg.baidu, dirs.ttsCache);
   const voice = fake ?? baidu!;
@@ -65,6 +67,7 @@ async function main() {
   console.log(`  Kagura 语音服务端 ${VERSION}` + (fake ? "（假服务商模式）" : ""));
   console.log("=".repeat(50));
   console.log(`数据目录: ${cfg.dataDir}`);
+  if (proxy) console.log(`网络代理: ${proxy.replace(/\/\/[^@/]*@/, "//***@")}（本机地址直连）`);
   if (baidu) {
     try { await baidu.warmup(); console.log("百度 token OK"); }
     catch (e: any) { console.log(`⚠️  百度 token 获取失败（语音识别暂不可用）: ${e.message}`); }

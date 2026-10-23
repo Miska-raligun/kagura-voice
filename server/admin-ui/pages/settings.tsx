@@ -32,9 +32,10 @@ export function Settings({ arg }: { arg: string }) {
     <>
       {d.fake && <div class="errbox">当前是假服务商模式（测试用），模型设置不会生效。</div>}
       {cfg.brain === "openclaw" || (!cfg.brain && !(cfg.models?.providers ?? []).length) ? <div class="errbox">现在的大脑是 OpenClaw。配好模型并把「大脑」切到内置 agent 后重启才会用这里的设置。</div> : null}
-      <Tabs value={tab} onChange={setTab} tabs={[["wizard", "首次设置"], ["models", "模型"], ["voice", "语音与设备"], ["misc", "其它"]]} />
+      <Tabs value={tab} onChange={setTab} tabs={[["wizard", "首次设置"], ["models", "模型"], ["tools", "工具"], ["voice", "语音与设备"], ["misc", "其它"]]} />
       {tab === "wizard" && <Wizard cfg={cfg} save={save} done={() => { setTab("models"); go("overview"); }} />}
       {tab === "models" && <Models cfg={cfg} save={save} />}
+      {tab === "tools" && <Tools cfg={cfg} save={save} />}
       {tab === "voice" && <Voice cfg={cfg} save={save} />}
       {tab === "misc" && <Misc cfg={cfg} dataDir={d.data_dir} save={save} />}
     </>
@@ -123,6 +124,56 @@ function Models({ cfg, save }: { cfg: any; save: (p: any) => Promise<void> }) {
         </div>
       </Card>
       <Btn kind="primary" onClick={() => save({ models: m, embedding: emb.base_url && emb.model ? emb : null, ...(brain ? { brain } : {}) })}>保存</Btn>
+    </>
+  );
+}
+
+const SEARCH_PROVIDERS: [string, string][] = [
+  ["auto", "自动（配了 Key 用对应服务，否则抓必应网页）"], ["bing", "必应网页（不用 Key，国内可用）"], ["duckduckgo", "DuckDuckGo 网页（不用 Key，需能访问外网）"],
+  ["bocha", "博查 API（国内，要 Key）"], ["tavily", "Tavily API（要 Key）"], ["brave", "Brave Search API（要 Key）"], ["searxng", "自建 SearXNG"],
+];
+const SHELLS: [string, string][] = [
+  ["auto", "自动（Windows 用 PowerShell，其它用 bash）"], ["powershell", "PowerShell"], ["cmd", "cmd"], ["wsl", "交给 WSL 里的 bash（跑 Linux 脚本）"], ["bash", "bash"], ["sh", "sh"],
+];
+
+function Tools({ cfg, save }: { cfg: any; save: (p: any) => Promise<void> }) {
+  const t = cfg.tools ?? {};
+  const [w, setW] = useState({ enabled: true, search_provider: "auto", search_api_key: "", search_base_url: "", proxy: "", ...(t.web ?? {}) });
+  const [e, setE] = useState({ enabled: true, shell: "auto", wsl_distro: "", timeout_secs: 60, ...(t.exec ?? {}) });
+  const [q, setQ] = useState("今天的新闻");
+  const [cmd, setCmd] = useState("echo hello from Kagura");
+  const [sr, setSr] = useState<any>(null);
+  const [er, setEr] = useState<any>(null);
+  const saveAll = () => save({ tools: { web: w, exec: e } });
+  return (
+    <>
+      <Card title="联网（搜索 + 读网页）">
+        <p class="muted">agent 遇到新闻、天气、价格这类实时信息会先搜再答。什么都不配也能用（抓必应网页）；想更稳定可以配一个搜索 API。</p>
+        <div class="form">
+          <Field label="启用"><Toggle checked={w.enabled} onChange={(v) => setW({ ...w, enabled: v })} label="允许 agent 联网" /></Field>
+          <Field label="搜索服务"><Select value={w.search_provider} onChange={(v) => setW({ ...w, search_provider: v })} options={SEARCH_PROVIDERS} /></Field>
+          <Field label="API Key" hint="博查 / Tavily / Brave 用"><Input type="password" value={w.search_api_key} onInput={(v) => setW({ ...w, search_api_key: v })} /></Field>
+          <Field label="SearXNG 地址" hint="选 SearXNG 时填，如 http://127.0.0.1:8888"><Input value={w.search_base_url} onInput={(v) => setW({ ...w, search_base_url: v })} /></Field>
+          <Field label="网络代理" hint="上网要走代理就填，如 http://127.0.0.1:7890；调模型也会走它，本机地址直连"><Input value={w.proxy} onInput={(v) => setW({ ...w, proxy: v })} placeholder="留空 = 用环境变量 HTTPS_PROXY，没有就直连" /></Field>
+        </div>
+        <div class="row"><Input value={q} onInput={setQ} /><Btn onClick={async () => { await saveAll(); setSr({ loading: true }); try { setSr(await api("/tools/test-search", { body: { query: q } })); } catch (x: any) { setSr({ errors: [x.message] }); } }}>保存并试一下搜索</Btn></div>
+        {sr && (sr.loading ? <p class="muted">搜索中…</p> : sr.ok
+          ? <><p>✓ {sr.provider}，{sr.ms}ms{sr.proxy ? `，经代理 ${sr.proxy}` : ""}</p><ul>{sr.hits.map((h: any) => <li><a href={h.url} target="_blank">{h.title}</a> <small class="muted">{h.snippet.slice(0, 80)}</small></li>)}</ul></>
+          : <p class="over">✗ 搜索失败：{(sr.errors ?? []).join("；")}</p>)}
+      </Card>
+      <Card title="执行命令">
+        <p class="muted">让 agent 在这台电脑上跑命令和脚本（技能里的脚本、处理文件、调本机程序）。<b>只有主人</b>能触发：设备、网页聊天、定时任务、
+          标了「主人」的 IM 私聊；IM 里的陌生人和群聊拿不到这个工具。不想让它碰电脑就关掉；也可以在「Agents → 工具」里单独给某个 agent 关。</p>
+        <div class="form">
+          <Field label="启用"><Toggle checked={e.enabled} onChange={(v) => setE({ ...e, enabled: v })} label="允许执行命令" /></Field>
+          <Field label="用什么跑"><Select value={e.shell} onChange={(v) => setE({ ...e, shell: v })} options={SHELLS} /></Field>
+          <Field label="WSL 发行版" hint="选 WSL 时填，如 Ubuntu；留空 = 默认发行版"><Input value={e.wsl_distro} onInput={(v) => setE({ ...e, wsl_distro: v })} /></Field>
+          <Field label="默认超时（秒）"><Input type="number" value={e.timeout_secs} onInput={(v) => setE({ ...e, timeout_secs: Number(v) })} /></Field>
+        </div>
+        <div class="row"><Input value={cmd} onInput={setCmd} /><Btn onClick={async () => { await saveAll(); setEr({ loading: true }); try { setEr(await api("/tools/test-exec", { body: { command: cmd } })); } catch (x: any) { setEr({ error: x.message }); } }}>保存并试一下</Btn></div>
+        {er && (er.loading ? <p class="muted">执行中…</p> : <><p class={er.ok ? "" : "over"}>{er.ok ? "✓" : "✗"} {er.timed_out ? "超时" : er.error || `exit=${er.code}`}，{er.ms}ms</p>{er.output && <pre class="log">{er.output}</pre>}</>)}
+      </Card>
+      <Btn kind="primary" onClick={saveAll}>保存</Btn>
     </>
   );
 }

@@ -21,6 +21,11 @@ export interface RunScope {
   meta: { needPhoto?: boolean; volume?: string; spoke?: string[]; photos?: string[] };
   /** 这轮消息从哪来、结果该送回哪：device:<id> / feishu:<账号>:<聊天> …（后台子任务完成后按它转达） */
   origin?: string;
+  /**
+   * 这轮能不能做高风险的事（执行命令）：主人在设备 / 网页 / 私聊里说的、定时任务和 heartbeat 算可信；
+   * IM 里陌生人（配对用户、群聊）的消息不算。经 a2a 转手、或由它建的定时任务，都沿用发起方的可信度。
+   */
+  trusted: boolean;
   /** 假模型：工具结果回来后的续写脚本 */
   fakeAfterTool?: any;
 }

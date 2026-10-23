@@ -12,6 +12,10 @@ import { Memories } from "../agent/tools/memory.ts";
 import { importOpenClaw, findOpenClawDirs, describeImport } from "../agent/import-openclaw.ts";
 import { scheduleFrom } from "../agent/tools/cron.ts";
 import { Roles } from "../roles.ts";
+import { parseToolsConfig } from "../config.ts";
+import { applyProxy, activeProxy } from "../util/proxy.ts";
+import { search } from "../agent/tools/web.ts";
+import { runShell, shellFor, clipOutput } from "../agent/tools/exec.ts";
 import { ModelRegistry } from "../agent/models.ts";
 import { OpenAIEmbedder } from "../agent/memory.ts";
 
@@ -164,7 +168,8 @@ export function registerAdmin(r: Router, ctx: Ctx, sys: AgentSystem) {
   get("/api/admin/jobs", (req) => json(sched().list(req.query.get("agent") ?? undefined)));
   post("/api/admin/jobs", (req) => json(sched().add({ source: "admin", ...jobBody(req.json() ?? {}) }), 201));
   patch("/api/admin/jobs/<id>", (req) => {
-    const j = sched().update(req.params.id, jobBody(req.json() ?? {}));
+    // 主人在管理界面里改过 = 审过了：不再按「陌生人建的任务」限制
+    const j = sched().update(req.params.id, { ...jobBody(req.json() ?? {}), untrusted: false });
     return j ? json(j) : json({ error: "没有这个任务" }, 404);
   });
   del("/api/admin/jobs/<id>", (req) => (sched().remove(req.params.id) ? json({ status: "ok" }) : json({ error: "没有这个任务" }, 404)));
@@ -266,9 +271,31 @@ export function registerAdmin(r: Router, ctx: Ctx, sys: AgentSystem) {
       if (next.a2a.per_pair_per_min) a2a.cfg.perPairPerMin = Number(next.a2a.per_pair_per_min);
       hot.push("a2a");
     }
+    if ("tools" in patch) {
+      // 就地改：工具每次调用都读这个对象，不用重启
+      const t = parseToolsConfig(next.tools);
+      Object.assign(ctx.cfg.tools.exec, t.exec);
+      Object.assign(ctx.cfg.tools.web, t.web);
+      applyProxy(t.web.proxy);
+      hot.push("tools");
+    }
     if ("prompt_budgets" in patch) { applyBudgets(next.prompt_budgets); hot.push("prompt_budgets"); }
     const restart = ["port", "mqtt_port", "stream_port", "disc_port", "baidu", "api_token", "stream_token", "brain", "runtime", "openclaw"].filter((k) => k in patch);
     return json({ status: "ok", applied: hot, restart_needed: restart });
+  });
+  /** 试一下联网搜索（按当前设置） */
+  post("/api/admin/tools/test-search", async (req) => {
+    const q = String((req.json() ?? {}).query || "今天的新闻");
+    const t0 = Date.now();
+    const r = await search(q, 5, ctx.cfg.tools.web);
+    return json({ ok: r.hits.length > 0, provider: r.provider, hits: r.hits, errors: r.errors, ms: Date.now() - t0, proxy: activeProxy() });
+  });
+  /** 试一下执行命令（按当前设置的 shell；默认在数据目录里跑） */
+  post("/api/admin/tools/test-exec", async (req) => {
+    const cmd = String((req.json() ?? {}).command || "echo hello from Kagura");
+    const r = await runShell(shellFor(cmd, ctx.cfg.tools.exec.shell, { wslDistro: ctx.cfg.tools.exec.wslDistro, cwd: ctx.cfg.dataDir }),
+      { cwd: ctx.cfg.dataDir, timeoutSecs: 20 });
+    return json({ ok: r.code === 0 && !r.timedOut, code: r.code, output: clipOutput(r.output, 4000), error: r.error ?? "", timed_out: r.timedOut, ms: r.ms });
   });
   /** 试一下模型通不通：发一句「你好」 */
   post("/api/admin/models/test", async (req) => {

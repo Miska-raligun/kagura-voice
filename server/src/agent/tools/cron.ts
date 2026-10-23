@@ -64,6 +64,7 @@ export function cronTools(sched: Scheduler) {
             const j = sched.add({
               agent: agent.id, name: p.name, schedule: scheduleFrom(p.kind, p.value, p.tz), message: p.message,
               session: p.session ?? "isolated", delivery: p.delivery || defaultDelivery(), active_hours: p.active_hours ?? "", source: "agent",
+              ...(scope.trusted ? {} : { untrusted: true }),
             });
             return ok(`已创建：${JSON.stringify(brief(j))}`);
           } catch (e: any) { return fail(e.message); }
@@ -81,7 +82,7 @@ export function cronTools(sched: Scheduler) {
           if (!mine(p.id)) return fail("没有这个任务（或不是你的）");
           try {
             const { id, kind, value, ...rest } = p;
-            const j = sched.update(id, { ...rest, ...(kind && value ? { schedule: scheduleFrom(kind, value) } : {}) });
+            const j = sched.update(id, { ...rest, ...(kind && value ? { schedule: scheduleFrom(kind, value) } : {}), ...(scope.trusted ? {} : { untrusted: true }) });
             return ok(`已修改：${JSON.stringify(brief(j!))}`);
           } catch (e: any) { return fail(e.message); }
         },
