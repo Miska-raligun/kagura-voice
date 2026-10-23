@@ -8,7 +8,8 @@ import type { AgentInfo } from "../registry.ts";
 import type { PhotoSchedules } from "../../jobs/photoSchedules.ts";
 
 export interface DeviceHost {
-  push(text: string, dev: string, per: number): Promise<boolean>;
+  /** 让 agent 开口说一句：经出口（Outbox）按在家状态、设备当前角色决定播到哪 / 改发 IM / 留言 */
+  say(text: string, agentId: string, device?: string): Promise<{ via: string; note: string }>;
   captureAndWait(dev: string): Promise<[string | null, string | null]>;
   presence(): string;
   /** 主人亲口说的在家 / 出门（设备蓝牙没感知到时补上） */
@@ -33,11 +34,12 @@ export function deviceTools(host: DeviceHost) {
         description: "让设备用你的声音说一句话（主动开口、跨渠道传话）。正在和你语音对话时不用调，你的回复本身就会播出来。",
         parameters: Type.Object({ text: Type.String({ description: "要说的话，口语、简短" }), device: Type.Optional(Type.String()) }),
         async execute(_id, p: any) {
-          const dev = target(p.device);
-          if (dev === spokenTo) return ok("你这轮的回复本身就会在这台设备上播出来，不用再调 speak，直接回复要说的话即可。");
-          const done = await host.push(String(p.text), dev, agent.per);
-          (scope.meta.spoke ??= []).push(String(p.text));
-          return done ? ok(`已在 ${dev} 上播报`) : fail("播报失败：设备不在线或语音合成失败");
+          const want = p.device && DEV_RE.test(p.device) ? p.device : undefined;
+          if ((want ?? spokenTo) && (want ?? spokenTo) === spokenTo) return ok("你这轮的回复本身就会在这台设备上播出来，不用再调 speak，直接回复要说的话即可。");
+          // 播不播、播到哪由系统定：主人不在家改发 IM，设备显示的不是你就先留言——都会在结果里告诉你
+          const r = await host.say(String(p.text), agent.id, want);
+          if (r.via !== "none") (scope.meta.spoke ??= []).push(String(p.text));
+          return r.via === "none" ? fail(r.note) : ok(r.note);
         },
       },
       {

@@ -19,11 +19,10 @@ export interface VoiceBridge {
   presence(): "home" | "away" | null;
   /** 这个 agent 的语音播到哪台设备（在线的）；没有在线设备返回 null */
   device(agentId: string): string | null;
-  push(text: string, dev: string, agentId: string): Promise<boolean>;
+  /** force = 「总是播」：不看在家状态 */
+  push(text: string, dev: string, agentId: string, force?: boolean): Promise<boolean>;
 }
 
-const HINT_VOICE = "主人在家：这条回复发到聊天里的同时，会由系统自动在家里设备上用语音念出来（念去掉格式后的开头一段），不用再调 speak 播同样的内容。";
-const HINT_AWAY = "主人不在家（在外面用手机聊）：回复只发文字。除非主人明确让你往家里设备上传话，不要调 speak。";
 
 export type AdapterFactory = (a: AccountConfig) => ChannelAdapter;
 
@@ -148,12 +147,12 @@ export class ChannelManager {
     console.log(`[channel] 💬 ${a.kind}/${a.id} ${m.chatType} ${m.chatId} → ${agentId}: ${m.text.slice(0, 60)}`);
     // 要不要同时播语音由代码按在家状态决定，不靠模型自觉。只管主人的私聊：群聊、陌生人的消息不往家里喇叭上念
     const ownerDm = m.chatType === "dm" && !!allowed?.owner;
+    if (ownerDm) this.store.setOwnerChat(`${m.kind}:${a.id}:${m.chatId}`);
     const voiceOn = () => ownerDm && !!this.voice && a.voice_push !== "off" && (a.voice_push === "always" || this.voice.presence() === "home");
     const before = voiceOn() ? this.voice!.device(agentId) : null;
     try {
       const r = await this.rt.run({
         spokenTo: before ?? undefined,
-        extraSystem: ownerDm && this.voice && a.voice_push !== "off" ? [before ? HINT_VOICE : a.voice_push === "home" && this.voice.presence() === "away" ? HINT_AWAY : ""].filter(Boolean) : undefined,
         agentId, sessionKey, kind: ownerMain ? "main" : "chat", channel: m.kind, purpose: "chat",
         text: who + (m.text || "（发来一张图片）"), images: m.images.map((i) => ({ type: "image" as const, ...i })),
         origin: `${m.kind}:${a.id}:${m.chatId}`,
@@ -183,7 +182,7 @@ export class ChannelManager {
     if (!target) { console.log(`[channel] 🔇 在家但没有在线设备可播`); return; }
     const said = toSpoken(text);
     if (!said) return;
-    const ok = await this.voice.push(said, target, agentId).catch(() => false);
+    const ok = await this.voice.push(said, target, agentId, always).catch(() => false);
     console.log(`[channel] 🔊 回复同时播到 ${target}${ok ? "" : "（失败）"}`);
   }
 

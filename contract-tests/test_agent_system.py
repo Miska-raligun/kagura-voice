@@ -150,6 +150,8 @@ def test_agent_creates_job_via_cron_tool(a):
 def test_heartbeat_silent_then_delivered(a):
     d = Device(a, "ag9")
     try:
+        # 只有设备当前角色正是小澪时，小澪的话才直接播（不用别人的形象说话）
+        a.request("PUT", "/api/admin/devices/ag9", json={"role": "mio", "greet": False})
         a.request("PATCH", "/api/admin/agents/mio", json={"heartbeat": {"enabled": True, "every_minutes": 5, "delivery": "device:ag9", "active_hours": ""}})
         a.fake_llm("HEARTBEAT_OK", "该休息一下啦")
         a.post("/api/admin/jobs/hb-mio/run")
@@ -159,6 +161,32 @@ def test_heartbeat_silent_then_delivered(a):
         assert a.fake_log()["tts"][-1]["per"] == 4       # 用 mio 自己的音色
     finally:
         a.request("PATCH", "/api/admin/agents/mio", json={"heartbeat": {"enabled": False}})
+        a.request("PUT", "/api/admin/devices/ag9", json={"role": "", "greet": False})
+        d.close()
+
+
+def test_other_role_message_held_until_switch(a):
+    """设备显示的是神乐时，小澪的定时消息先留着；切到小澪（问候之后）再播"""
+    d = Device(a, "ag10")
+    try:
+        a.request("PUT", "/api/admin/devices/ag10", json={"role": "", "greet": False})
+        a.fake_llm("该喝水啦")
+        jid = a.post("/api/admin/jobs", json={"agent": "mio", "name": "ct-held", "schedule_kind": "at", "schedule_value": "+1s",
+                                              "message": "提醒主人喝水", "delivery": "device:ag10"}).json()["id"]
+        for _ in range(40):
+            runs = a.get(f"/api/admin/jobs/{jid}/runs").json()
+            if runs:
+                break
+            time.sleep(0.25)
+        assert runs[0]["delivered"] == "held:ag10", runs
+        time.sleep(1)
+        assert not d.push, "设备显示的是神乐，小澪的话不该直接播"
+        a.request("PUT", "/api/admin/devices/ag10", json={"role": "mio", "greet": False})
+        assert d.wait("push", timeout=15)["type"] == "push"
+        assert a.fake_log()["tts"][-1]["text"].endswith("该喝水啦")
+        assert a.fake_log()["tts"][-1]["per"] == 4
+    finally:
+        a.request("PUT", "/api/admin/devices/ag10", json={"role": "", "greet": False})
         d.close()
 
 

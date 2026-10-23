@@ -35,6 +35,11 @@ export function Devices() {
               </tr>))}</tbody></table> : <Empty>还没收到设备心跳。设备开机、连上 WiFi 后会自动出现。</Empty>}
           <p class="muted">第一台连上来的设备自动受信；之后新出现的设备要在这里批准，它的语音对话才能用执行命令、扩展这些高风险功能（防止同一 WiFi 下有人冒充设备）。没批准的设备照常能聊天。</p>
         </Card>
+        {(devs ?? []).filter((d) => d.held?.length).map((d) => (
+          <Card title={`${d.id} 有 ${d.held.length} 条留言`} actions={<Btn small kind="ghost" onClick={async () => { try { await api(`/devices/${enc(d.id)}/held`, { method: "DELETE" }); reload(); } catch (e: any) { toast(e.message, "err"); } }}>清空</Btn>}>
+            <p class="muted">设备显示的不是说话的那个角色、或者主人不在家时，要播的话会先留着：切到对应角色（问候之后）或主人回家时自动播。</p>
+            <ul>{d.held.map((h: any) => <li><b>{h.agent ?? "提醒"}</b>（{h.reason === "away" ? "等你回家" : "等切到这个角色"}）：{h.text.slice(0, 80)}</li>)}</ul>
+          </Card>))}
         {cur && <DeviceLogs id={cur} />}
       </>}
       {tab === "files" && <DeviceFiles />}

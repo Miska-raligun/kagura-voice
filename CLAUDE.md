@@ -309,10 +309,16 @@ CoreS3 (MicroPython) ──HTTP──▶ server/（TypeScript 单文件可执行
   **别用 spawn + -EncodedCommand**：实测子进程秒退 code=0、什么都不做；脚本里 `[ref]$created` 前必须先 `$created = $false`，否则 PowerShell 报「无法将 [ref] 应用于不存在的变量」。
   托盘用 `Global\\KaguraTrayMutex` 防重复；定时轮询 `/api/admin/meta`，服务端没了就自己消失。
   隐藏进程设 `KAGURA_NO_PROMPT=1`，preflight 和出错后的「按回车」都不再等待（否则没有窗口时会永久卡住）。
-- **IM / 网页聊天回复同时播语音（`channels/manager.ts` 的 `speakAside`，LRN 2026-10-23，症状「聊天时有时播语音有时不播，要提醒才播」）**：
-  以前全靠模型自己决定要不要调 `speak`。现在由代码决定：主人私聊 + 账号 `voice_push`（home/always/off）+ `ctx.presence`；网页聊天（`routes/admin-chat.ts`）走同一套，只按在家状态。
-  **跑完这一轮再判断一次**（这条消息里说了「我到家了」→ `set_presence` 也算），`toSpoken()` 转成适合念的一段后 `sendPush`。
-  在家时 `spokenTo` 设成目标设备，模型再 speak 同一台会被工具挡回（同 /chat），不会播两遍；模型已 speak 过别的就不再补播。
+- **出口（`agent/outbox.ts`，LRN 2026-10-23，症状「飞书聊天时有时播语音有时不播，要提醒才播」「设备显示小澪却用神乐的声音说话」）**：
+  所有「用声音说给主人听」的话——`speak` 工具、定时任务 / heartbeat 投到 `device:`、子任务结果、提醒、IM / 网页回复的顺带朗读——
+  都经 `Outbox.say()`，**由代码决定，提示词里不再写「不在家别 speak」这类劝告**：
+  ① 主人不在家：主动消息改发主人最近用的 IM 私聊（`ChannelStore.ownerChat`，主人私聊时自动记下）；没有 IM 就留言，回家（`ctx.onPresence`）再播；
+  顺带朗读的回复直接不念。② 在家（或未知，按在家）：只推给当前角色正是这个 agent 的设备；别的角色的话**留言**，
+  设备切到那个角色时（`ctx.onRoleSwitch`，等设备空闲、问候之后）播；顺带朗读对不上角色就不念也不留。③ 提醒不属于 agent，用当前角色播。
+  点名的设备只有「见过但已掉线」才放弃——没发过心跳的（刚开机）照样推。留言落盘 `held_messages.json`，最多 30 条、24 小时，设备页能看能清。
+  **新加任何「主动说话」的入口都走出口，别直接 `ctx.sendPush`**（直接推的只剩：设备自己发起的对话回复、摇一摇 / 触摸的回应、角色问候、监控页手动推送）。
+  **角色切换钩子挂在 Ctx 上（`setRoles`）**：改 agent 时角色表整个重建，钩子挂在 Roles 实例上会悄悄丢失（契约测试踩过）。
+  IM 里「回复同时念」仍由账号 `voice_push`（home/always/off）决定念不念，念到哪交给出口；在家时 `spokenTo` 设成目标设备，模型再 speak 同一台会被挡回。
   在家状态统一走 `ctx.setPresence` / `loadPresence`（设备 BLE、`set_presence` 工具、`/home` `/away` 命令三个入口）。
 - **管理接口与设备信任（`routes/admin.ts` 的 `isLocal`、`ctx.deviceTrusted`，LRN 2026-10-23 安全检查）**：
   ① 管理接口光看「来源是 127.0.0.1」不够——你电脑上任何网页都能让浏览器往 127.0.0.1 发请求（跨站请求伪造），

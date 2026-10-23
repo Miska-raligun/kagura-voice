@@ -8,7 +8,7 @@ export interface Binding { account: string; chatId: string; agent: string; label
 export interface Allowed { account: string; user: string; name?: string; owner?: boolean; since: number }
 export interface Pairing { account: string; user: string; name?: string; code: string; chatId: string; ts: number }
 
-interface Data { accounts: AccountConfig[]; bindings: Binding[]; allowed: Allowed[]; pairings: Pairing[] }
+interface Data { accounts: AccountConfig[]; bindings: Binding[]; allowed: Allowed[]; pairings: Pairing[]; ownerChat?: string }
 
 const ID_RE = /^[A-Za-z0-9_-]{1,32}$/;
 const KINDS: ChannelKind[] = ["feishu", "qq", "onebot"];
@@ -89,6 +89,10 @@ export class ChannelStore {
   // ── 白名单 / 配对 ──
   allowed() { return [...this.d.allowed]; }
   isAllowed(account: string, user: string) { return this.d.allowed.find((x) => x.account === account && x.user === user); }
+  /** 主人最近用来私聊的 IM（<渠道>:<账号>:<聊天 id>）：不在家时主动消息改发到这里 */
+  ownerChat(): string { return this.d.ownerChat ?? ""; }
+  setOwnerChat(target: string) { if (this.d.ownerChat !== target) { this.d.ownerChat = target; this.save(); } }
+
   allow(account: string, user: string, name?: string, owner = false) {
     this.d.allowed = this.d.allowed.filter((x) => !(x.account === account && x.user === user));
     this.d.allowed.push({ account, user, name, owner, since: Date.now() / 1000 });

@@ -71,7 +71,7 @@ export function registerAdmin(r: Router, ctx: Ctx, sys: AgentSystem) {
   /** agent 增删改之后：角色表、heartbeat 任务跟着变 */
   const changed = () => {
     // OpenClaw 模式下设备角色仍来自 config.roles，不跟着 agent 列表变
-    if (ctx.brain.kind === "pi") ctx.roles = new Roles(registry.roleDefs(), ctx.dirs.rolesFile);
+    if (ctx.brain.kind === "pi") ctx.setRoles(new Roles(registry.roleDefs(), ctx.dirs.rolesFile));
     sched().syncHeartbeats();
   };
 
@@ -286,8 +286,11 @@ export function registerAdmin(r: Router, ctx: Ctx, sys: AgentSystem) {
       id, agent: ctx.roles.get(id).agent, role: ctx.roles.get(id).id, online: t - rec.ts < 200, secs_ago: Math.trunc(t - rec.ts),
       bat: rec.data.bat ?? null, rssi: rec.data.rssi ?? null, heap: rec.data.heap ?? null, wdt: rec.data.wdt ?? null,
       trusted: ctx.cfg.deviceTrust === "all" || !!ctx.trust[id]?.trusted, ip: ctx.trust[id]?.ip ?? "", trust_mode: ctx.cfg.deviceTrust,
+      held: (ctx.outbox?.heldFor(id) ?? []).map((h) => ({ agent: h.agentId, text: h.text, at: h.at, reason: h.reason })),
     })));
   });
+  /** 清空留给这台设备的话（出口留着、等切到对应角色 / 主人回家才播的） */
+  del("/api/admin/devices/<id>/held", (req) => { ctx.outbox?.clear(req.params.id); return json({ status: "ok" }); });
   post("/api/admin/devices/<id>/trust", (req) => {
     ctx.setDeviceTrusted(req.params.id, !!(req.json() ?? {}).trusted);
     return json({ status: "ok" });

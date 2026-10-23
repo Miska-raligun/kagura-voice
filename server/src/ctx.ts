@@ -61,6 +61,17 @@ export class Ctx {
   updates: import("./util/update.ts").UpdateChecker | null = null;
   /** 在线更新（下载安装包、校验、安装、重启） */
   selfUpdater: import("./util/selfupdate.ts").SelfUpdater | null = null;
+  /** 出口（内置 agent 模式才有）：所有说给主人听的话经它决定播 / 改发 IM / 留言 */
+  outbox: import("./agent/outbox.ts").Outbox | null = null;
+  /** 设备换了角色（播留言）。挂在 Ctx 上而不是 Roles 上：改 agent 时角色表会整个重建 */
+  onRoleSwitch: ((dev: string) => void) | null = null;
+  /** 换一张角色表（改了 agent 之后），钩子跟着挂上 */
+  setRoles(r: Roles) {
+    this.roles = r;
+    r.onSwitch = (dev) => this.onRoleSwitch?.(dev);
+  }
+  /** 在家状态变了（回家时把留言播出来） */
+  onPresence: ((status: "home" | "away") => void) | null = null;
 
   constructor(
     public cfg: Config, public dirs: Dirs, public voice: Voice, public brain: Brain,
@@ -69,6 +80,7 @@ export class Ctx {
     roleDefs: RoleDef[] | null = cfg.roles,
   ) {
     this.roles = new Roles(roleDefs, dirs.rolesFile);
+    this.roles.onSwitch = (dev) => this.onRoleSwitch?.(dev);
     this.hb = new Heartbeats(dirs.deviceLogs);
     this.reminders = new Reminders(dirs.remindersFile);
     this.schedules = new PhotoSchedules(dirs.schedulesFile);
@@ -279,8 +291,10 @@ export class Ctx {
         at_home: status === "home", last_updated: ts, last_action: `${source}_${status === "home" ? "detected_home" : "detected_away"}`,
       }));
     } catch (e: any) { console.log(`[presence] 写状态文件失败: ${e.message}`); }
+    const prev = this.presence?.status;
     this.presence = { status, ts, dev };
     console.log(`[presence] ${dev} → ${status} @ ${ts}${source === "ble" ? "" : `（${source}）`}`);
+    if (prev !== status) this.onPresence?.(status);
   }
 
   /** 重启后恢复上次的在家状态（设备 BLE 只在状态变化时上报，不恢复的话一重启就成了「不知道」） */

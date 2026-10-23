@@ -333,7 +333,7 @@ describe("主人私聊的回复同时播语音（代码判断，不靠模型）"
     };
     const { deviceTools } = await import("../src/agent/tools/device.ts");
     env.rt.addTools(deviceTools({
-      push: async (text, dev) => { st.pushed.push({ text, dev, via: "speak" }); return true; },
+      say: async (text, _agentId, dev) => { st.pushed.push({ text, dev, via: "speak" }); return { via: "device", note: "ok" }; },
       captureAndWait: async () => [null, "离线"], presence: () => st.presence ?? "", defaultDevice: () => "cores3",
       setPresence: (s) => { st.presence = s; }, schedules: { list: () => [] } as any,
     }));
@@ -347,7 +347,7 @@ describe("主人私聊的回复同时播语音（代码判断，不靠模型）"
     await mgr.handle(msg({ sender: "ou_owner", chatId: "oc_owner", text: "天气怎样" }));
     expect(ad().sent.at(-1)!.text).toContain("**好的**");
     expect(st.pushed).toEqual([{ text: "好的，今天：晴。25 度", dev: "cores3", agentId: "main" }]);
-    expect(fake.calls[0].system).toContain("自动在家里设备上用语音念出来");
+    expect(fake.calls[0].system).not.toContain("不要调 speak");       // 在家播不播由代码决定，不再写进提示词
   });
 
   it("不在家 / 群聊 / 非主人 / 设备不在线 → 不播；off 不播；always 不在家也播", async () => {
@@ -355,7 +355,7 @@ describe("主人私聊的回复同时播语音（代码判断，不靠模型）"
     fake.queue.push("a", "b", "c", "d", "e");
     await mgr.handle(msg({ sender: "ou_owner", chatId: "oc_owner" }));
     expect(st.pushed).toEqual([]);
-    expect(fake.calls[0].system).toContain("主人不在家");
+    expect(fake.calls[0].system).not.toContain("不要调 speak");
     st.presence = "home";
     await mgr.handle(msg({ sender: "ou_friend", chatId: "oc_f" }));
     await mgr.handle(msg({ sender: "ou_owner", chatType: "group", chatId: "oc_g", mentionedMe: true }));

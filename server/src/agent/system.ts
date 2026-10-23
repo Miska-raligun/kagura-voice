@@ -20,6 +20,7 @@ import { webTools } from "./tools/web.ts";
 import { McpManager } from "./mcp.ts";
 import { Extensions, extensionTools, setExtAgentDir } from "./extensions.ts";
 import { PackageManager } from "./packages.ts";
+import { Outbox } from "./outbox.ts";
 import { proxiedFetch } from "../util/proxy.ts";
 import { ChannelStore } from "../channels/store.ts";
 import { ChannelManager } from "../channels/manager.ts";
@@ -37,6 +38,7 @@ export interface AgentSystem {
   mcp: McpManager;
   extensions: Extensions;
   packages: PackageManager;
+  outbox?: Outbox;
 }
 
 export function createAgentSystem(cfg: Config, dirs: Dirs, fake: FakeLlm | null): AgentSystem {
@@ -97,23 +99,41 @@ export function attachAgentSystem(sys: AgentSystem, ctx: Ctx) {
       restartSelf(ctx.cfg.dataDir, { ...n, from: kind });
     },
   };
-  // 主人在飞书 / QQ 私聊里的回复：在家就同时在设备上播（ChannelManager 按账号的 voice_push 决定）
+  // 出口：所有说给主人听的话都经它（在家状态、设备当前角色由代码判断，不靠提示词）
+  const presence = () => (ctx.presence?.status === "home" ? "home" as const : ctx.presence?.status === "away" ? "away" as const : null);
+  const online = () => {
+    const t = Date.now() / 1000;
+    return [...ctx.hb.devices.entries()].filter(([, r]) => t - r.ts < HB_SILENT_SECS).map(([d]) => d);
+  };
+  const outbox = new Outbox({
+    presence, onlineDevices: online, knownDevices: () => [...ctx.hb.devices.keys()],
+    roleAgent: (dev) => ctx.roles.get(dev).agent,
+    agentName: (id) => registry.get(id)?.name ?? id,
+    busy: (dev) => (ctx.activeChats.get(dev) ?? 0) > 0,
+    push: (text, dev, agentId) => ctx.sendPush(text, dev, agentId ? registry.get(agentId)?.per : undefined),
+    ownerIm: () => sys.channels.store.ownerChat(),
+    deliverIm: (target, text) => sys.channels.deliver(target, text),
+  }, path.join(ctx.cfg.dataDir, "held_messages.json"));
+  ctx.outbox = outbox;
+  sys.outbox = outbox;
+  // 设备切到某个角色（问候之后）/ 主人回家：把留给它的话播出来
+  ctx.onRoleSwitch = (dev) => outbox.flush(dev);
+  ctx.onPresence = (status) => { if (status === "home") outbox.flushAll(); };
+  // 主人在 IM / 网页里的回复顺带在设备上念（ChannelManager 按账号的 voice_push 决定念不念；念到哪由出口定）
   sys.channels.voice = {
-    presence: () => (ctx.presence?.status === "home" ? "home" : ctx.presence?.status === "away" ? "away" : null),
-    device: (agentId) => {
-      const t = Date.now() / 1000;
-      const online = [...ctx.hb.devices.entries()].filter(([, r]) => t - r.ts < HB_SILENT_SECS).map(([d]) => d);
-      // 优先当前角色正是这个 agent 的设备，其次任意在线设备
-      return online.find((d) => ctx.roles.get(d).agent === agentId) ?? online[0] ?? null;
+    presence,
+    device: (agentId) => online().find((d) => ctx.roles.get(d).agent === agentId) ?? null,
+    push: async (text, dev, agentId, force) => {
+      if (force) return ctx.sendPush(text, dev, registry.get(agentId)?.per);
+      return (await outbox.say({ text, agentId, kind: "reply", device: dev, source: "mirror" })).via === "device";
     },
-    push: (text, dev, agentId) => ctx.sendPush(text, dev, registry.get(agentId)?.per),
   };
   const scheduler = new Scheduler(ctx.dirs.systemDb, runtime, registry, {
     async deliver(agentId, delivery, text) {
       if (delivery.startsWith("device:")) {
-        const dev = delivery.slice("device:".length);
-        const ok = await ctx.sendPush(text, dev, registry.get(agentId)?.per);
-        return ok ? delivery : "";
+        // 投到设备也要过出口：主人不在家改发 IM、设备显示的不是这个角色就留言
+        const r = await outbox.say({ text, agentId, kind: "proactive", device: delivery.slice("device:".length), source: "job" });
+        return r.via === "device" ? delivery : r.via === "im" ? r.target! : r.via === "held" ? `held:${r.device}` : "";
       }
       if (delivery === "webchat") return "webchat";      // 运行记录里就是投递内容；网页聊天页面读取
       return (await sys.channels.deliver(delivery, text)) ? delivery : "";
@@ -127,14 +147,14 @@ export function attachAgentSystem(sys: AgentSystem, ctx: Ctx) {
   // 后台子任务的结果回到发起方后，按消息来源转达：设备 → 推送语音；IM → 发回原聊天
   sys.a2a.announce = async (scope, text) => {
     const o = scope.origin ?? "";
-    if (o.startsWith("device:")) await ctx.sendPush(text, o.slice("device:".length), registry.get(scope.agentId)?.per);
+    if (o.startsWith("device:")) await outbox.say({ text, agentId: scope.agentId, kind: "proactive", device: o.slice("device:".length), source: "subtask" });
     else if (/^(feishu|qq|onebot):/.test(o)) await sys.channels.deliver(o, text);
   };
   scheduler.syncHeartbeats();
   runtime.addTools(cronTools(scheduler));
   runtime.presence = () => ctx.presenceText();
   runtime.addTools(deviceTools({
-    push: (text, dev, per) => ctx.sendPush(text, dev, per),
+    say: (text, agentId, device) => outbox.say({ text, agentId, kind: "proactive", device, source: "speak" }),
     captureAndWait: (dev) => ctx.captureAndWait(dev),
     presence: () => ctx.presenceText(),
     setPresence: (status) => ctx.setPresence(status, ctx.presence?.dev ?? "cores3", "chat"),

@@ -13,7 +13,7 @@ function withDevice(rt: Runtime) {
   const pushed: any[] = [];
   const sched: any = { list: () => [], add: () => ({}), update: () => null, remove: () => false };
   rt.addTools(deviceTools({
-    push: async (text, dev, per) => { pushed.push({ text, dev, per }); return true; },
+    say: async (text, agentId, dev) => { pushed.push({ text, dev, agentId }); return { via: "device", note: `已在 ${dev} 上播出。` }; },
     captureAndWait: async () => [null, "离线"],
     presence: () => "在家",
     setPresence: () => {},
@@ -56,7 +56,7 @@ describe("内置工具", () => {
     const r = await rt.run({ ...dev, agentId: "mio", sessionKey: "mio:main", text: "大声点" });
     expect(r.text).toBe("调大了");
     expect(r.meta.volume).toBe("up");
-    expect(pushed).toEqual([{ text: "客厅你好", dev: "living", per: 4 }]);
+    expect(pushed).toEqual([{ text: "客厅你好", dev: "living", agentId: "mio" }]);
     expect(r.toolCalls).toEqual(["set_volume", "speak", "speak"]);
   });
 
