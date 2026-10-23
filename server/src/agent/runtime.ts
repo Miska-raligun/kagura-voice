@@ -21,6 +21,8 @@ export interface RunRequest {
   text: string;
   images?: ImageContent[];
   deviceId?: string;
+  /** 消息来源（见 RunScope.origin） */
+  origin?: string;
   /** 回复会被直接播报到这台设备（见 RunScope.spokenTo） */
   spokenTo?: string;
   localTime?: string;
@@ -165,7 +167,7 @@ export class Runtime {
     const parent = runScope();
     const scope: RunScope = {
       agentId: agent.id, sessionKey: req.sessionKey, kind: req.kind, channel: req.channel,
-      deviceId: req.deviceId, spokenTo: req.spokenTo, localTime: req.localTime, purpose: req.purpose ?? "chat",
+      deviceId: req.deviceId, spokenTo: req.spokenTo, origin: req.origin ?? (req.channel === "device" && req.deviceId ? `device:${req.deviceId}` : parent?.origin), localTime: req.localTime, purpose: req.purpose ?? "chat",
       hop: parent ? parent.hop + (parent.agentId !== agent.id ? 1 : 0) : (req.lineage?.hop ?? 0),
       chain: [...(parent?.chain ?? req.lineage?.chain ?? []), `${agent.id}|${req.sessionKey}`],
       meta: {},

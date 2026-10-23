@@ -184,7 +184,7 @@ export class A2A {
   private async deliverResult(caller: RunScope, task: string, who: string, result: string) {
     const r = await this.rt.run({
       agentId: caller.agentId, sessionKey: caller.sessionKey, kind: caller.kind as any, channel: caller.channel,
-      deviceId: caller.deviceId, spokenTo: caller.channel === "device" ? caller.deviceId : undefined, purpose: "a2a",
+      deviceId: caller.deviceId, spokenTo: caller.channel === "device" ? caller.deviceId : undefined, purpose: "a2a", origin: caller.origin,
       lineage: { hop: caller.hop, chain: [] },
       text: `[系统事件] 你之前派出的子任务「${task.slice(0, 100)}」已由 ${who} 完成。结果：\n${result}\n\n需要告诉主人就直接说要说的话（会转达给主人）；不需要就只回 NO_REPLY。`,
       keepIf: (t) => !SILENT_RE.test(t),

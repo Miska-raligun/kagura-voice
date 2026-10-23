@@ -53,6 +53,7 @@ export function deviceTools(host: DeviceHost) {
           const [img, err] = await host.captureAndWait(dev);
           if (err || !img) return fail(`拍照失败：${err}`);
           const data = fs.readFileSync(img).toString("base64");
+          (scope.meta.photos ??= []).push(img);      // IM 渠道里：照片随回复发回聊天
           return { content: [{ type: "text" as const, text: `照片（${dev}）：${p.question}` }, { type: "image" as const, data, mimeType: "image/jpeg" }], details: { image_path: img } };
         },
       },

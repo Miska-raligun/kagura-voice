@@ -203,6 +203,49 @@ export function registerAdmin(r: Router, ctx: Ctx, sys: AgentSystem) {
     return json({ id: req.params.id, agent: a.id, role: role.id });
   });
 
+  // ── IM 渠道 ──
+  const ch = sys.channels;
+  get("/api/admin/channels", () => {
+    const st = new Map(ch.status().map((x) => [x.id, x]));
+    return json({
+      accounts: ch.store.accounts().map((a) => ({ ...ch.store.masked(a), status: st.get(a.id) })),
+      bindings: ch.store.bindings(), allowed: ch.store.allowed(), pairings: ch.store.pairings(),
+    });
+  });
+  post("/api/admin/channels", async (req) => {
+    const a = ch.store.upsertAccount(req.json() ?? {});
+    if (a.agent && !registry.get(a.agent)) return json({ error: `没有 agent ${a.agent}` }, 400);
+    await ch.start(a.id);
+    return json(ch.store.masked(a), 201);
+  });
+  del("/api/admin/channels/<id>", async (req) => {
+    await ch.stop(req.params.id);
+    return ch.store.removeAccount(req.params.id) ? json({ status: "ok" }) : json({ error: "没有这个账号" }, 404);
+  });
+  post("/api/admin/channels/<id>/test", async (req) => json(await ch.test(req.params.id)));
+  post("/api/admin/channels/<id>/approve", async (req) => {
+    const d = req.json() ?? {};
+    const p = ch.store.approve(req.params.id, String(d.code ?? d.user ?? ""));
+    if (!p) return json({ error: "没有这个配对申请（可能已过期）" }, 404);
+    if (d.owner) ch.store.allow(req.params.id, p.user, p.name, true);
+    await ch.adapters.get(req.params.id)?.send(p.chatId, "主人已经批准啦，现在可以和我聊天了。").catch(() => {});
+    return json({ status: "ok", user: p.user });
+  });
+  post("/api/admin/channels/<id>/reject", (req) => { ch.store.rejectPairing(req.params.id, String((req.json() ?? {}).user ?? "")); return json({ status: "ok" }); });
+  put("/api/admin/channels/<id>/allowed", (req) => {
+    const d = req.json() ?? {};
+    if (!d.user) return json({ error: "user 必填" }, 400);
+    ch.store.allow(req.params.id, String(d.user), d.name, !!d.owner);
+    return json({ status: "ok" });
+  });
+  del("/api/admin/channels/<id>/allowed/<user>", (req) => { ch.store.disallow(req.params.id, req.params.user); return json({ status: "ok" }); });
+  put("/api/admin/channels/bindings", (req) => {
+    const d = req.json() ?? {};
+    if (d.agent) agentOr404(String(d.agent));
+    ch.store.bind({ account: String(d.account ?? ""), chatId: String(d.chatId ?? ""), agent: String(d.agent ?? ""), label: d.label });
+    return json({ status: "ok", bindings: ch.store.bindings() });
+  });
+
   // ── 网页聊天（webchat 渠道）──
   post("/api/admin/chat", async (req) => {
     const d = req.json() ?? {};

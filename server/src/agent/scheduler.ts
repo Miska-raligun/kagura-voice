@@ -90,7 +90,7 @@ export function validateSchedule(s: any): Schedule {
   throw new Error("schedule.kind 只能是 at / every / cron");
 }
 
-const DELIVERY_RE = /^(none|webchat|device:[A-Za-z0-9_-]{1,32}|feishu:.+|qq:.+)$/;
+const DELIVERY_RE = /^(none|webchat|device:[A-Za-z0-9_-]{1,32}|(feishu|qq|onebot):.+)$/;
 
 export class Scheduler {
   db: DatabaseSync;
@@ -153,7 +153,7 @@ export class Scheduler {
   private check(j: Job) {
     if (!["agentTurn", "systemEvent", "heartbeat"].includes(j.kind)) throw new Error("kind 只能是 agentTurn / systemEvent / heartbeat");
     if (!["main", "isolated"].includes(j.session)) throw new Error("session 只能是 main / isolated");
-    if (!DELIVERY_RE.test(j.delivery)) throw new Error("delivery 只能是 none / webchat / device:<设备id>");
+    if (!DELIVERY_RE.test(j.delivery)) throw new Error("delivery 只能是 none / webchat / device:<设备id> / feishu|qq|onebot:<账号>:<聊天id>");
     if (j.kind !== "heartbeat" && !j.message.trim()) throw new Error("message 不能为空");
     if (j.active_hours && !/^\d{1,2}:\d{2}\s*-\s*\d{1,2}:\d{2}$/.test(j.active_hours)) throw new Error("active_hours 格式：08:00-23:00");
   }

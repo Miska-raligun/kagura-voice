@@ -11,6 +11,9 @@ import { Scheduler } from "./scheduler.ts";
 import { cronTools } from "./tools/cron.ts";
 import { A2A } from "./a2a.ts";
 import { Skills } from "./skills.ts";
+import { ChannelStore } from "../channels/store.ts";
+import { ChannelManager } from "../channels/manager.ts";
+import path from "node:path";
 
 export interface AgentSystem {
   registry: AgentRegistry;
@@ -20,6 +23,7 @@ export interface AgentSystem {
   scheduler: Scheduler | null;
   a2a: A2A;
   skills: Skills;
+  channels: ChannelManager;
 }
 
 export function createAgentSystem(cfg: Config, dirs: Dirs, fake: FakeLlm | null): AgentSystem {
@@ -40,7 +44,8 @@ export function createAgentSystem(cfg: Config, dirs: Dirs, fake: FakeLlm | null)
   runtime.addTools(skills.tools());
   const a2a = new A2A(dirs.systemDb, runtime, registry, cfg.a2a);
   runtime.addTools(a2a.tools());
-  return { registry, models, runtime, memories, scheduler: null, a2a, skills };
+  const channels = new ChannelManager(new ChannelStore(path.join(cfg.dataDir, "channels.json")), runtime, registry);
+  return { registry, models, runtime, memories, scheduler: null, a2a, skills, channels };
 }
 
 /** 依赖 Ctx 的部分（设备工具要推送、拍照；调度器要投递）在 Ctx 建好之后接上 */
@@ -53,9 +58,8 @@ export function attachAgentSystem(sys: AgentSystem, ctx: Ctx) {
         const ok = await ctx.sendPush(text, dev, registry.get(agentId)?.per);
         return ok ? delivery : "";
       }
-      if (delivery === "webchat") return "webchat";      // 运行记录里就是投递内容；网页聊天页面读取（M8）
-      console.log(`[scheduler] 投递目标 ${delivery} 还不支持（IM 渠道在 M7）`);
-      return "";
+      if (delivery === "webchat") return "webchat";      // 运行记录里就是投递内容；网页聊天页面读取
+      return (await sys.channels.deliver(delivery, text)) ? delivery : "";
     },
     busy(agentId, delivery) {
       const dev = delivery.startsWith("device:") ? delivery.slice("device:".length) : "";
@@ -63,9 +67,11 @@ export function attachAgentSystem(sys: AgentSystem, ctx: Ctx) {
     },
   });
   sys.scheduler = scheduler;
-  // 后台子任务的结果回到发起方后：发起方在设备会话里 → 推送语音
+  // 后台子任务的结果回到发起方后，按消息来源转达：设备 → 推送语音；IM → 发回原聊天
   sys.a2a.announce = async (scope, text) => {
-    if (scope.channel === "device" && scope.deviceId) await ctx.sendPush(text, scope.deviceId, registry.get(scope.agentId)?.per);
+    const o = scope.origin ?? "";
+    if (o.startsWith("device:")) await ctx.sendPush(text, o.slice("device:".length), registry.get(scope.agentId)?.per);
+    else if (/^(feishu|qq|onebot):/.test(o)) await sys.channels.deliver(o, text);
   };
   scheduler.syncHeartbeats();
   runtime.addTools(cronTools(scheduler));

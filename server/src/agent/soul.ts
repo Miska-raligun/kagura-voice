@@ -41,6 +41,9 @@ export const CHANNEL_HINTS: Record<string, string> = {
   webchat: "你正在网页聊天窗口里和主人打字聊天，可以用 markdown，可以长一点。",
   system: "这是一次后台任务，没有人在实时等你回复。",
   a2a: "这条消息来自另一个 agent，不是主人。回复会原样交给对方。",
+  feishu: "你正在飞书上和人聊天，可以用 markdown，长短看需要。群聊消息前的 [名字] 是发言人。",
+  qq: "你正在 QQ 上和人聊天：QQ 不渲染 markdown，用纯文本，别太长。群聊消息前的 [名字] 是发言人。",
+  onebot: "你正在 QQ 上和人聊天：QQ 不渲染 markdown，用纯文本，别太长。群聊消息前的 [名字] 是发言人。",
 };
 
 export interface SoulOpts {
