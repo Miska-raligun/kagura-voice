@@ -8,6 +8,8 @@
 import fs from "node:fs";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
+import os from "node:os";
+import { DatabaseSync } from "node:sqlite";
 import type { AgentRegistry } from "./registry.ts";
 import { SOUL_FILES } from "./registry.ts";
 import type { Scheduler, Schedule } from "./scheduler.ts";
@@ -20,6 +22,9 @@ export interface ImportReport {
   jobs: { imported: { id: string; name: string; agent: string }[]; skipped: { name: string; reason: string }[] };
   /** 一个 workspace 都没找到时，告诉用户查过哪些地方 */
   searched: string[];
+  /** 定时任务从哪里读到的 / 查过哪些地方 */
+  jobSources?: string[];
+  jobsSearched?: string[];
 }
 
 /** OpenClaw 的配置是 JSON5：去掉注释和尾逗号再解析，失败就当没有 */
@@ -85,15 +90,85 @@ export function discoverOcAgents(dir: string, searched: string[] = []): OcAgent[
   return [...out.values()];
 }
 
-function readJobs(dir: string): any[] {
-  for (const f of [path.join(dir, "cron", "jobs.json"), path.join(dir, "cron.json"), path.join(dir, "automations", "jobs.json")]) {
-    try {
-      const raw = JSON.parse(fs.readFileSync(f, "utf8"));
-      const list = Array.isArray(raw) ? raw : raw.jobs ?? raw.items ?? [];
-      if (Array.isArray(list)) return list;
-    } catch { /* 下一个 */ }
+export interface OcJobs { jobs: any[]; sources: string[]; searched: string[] }
+
+/**
+ * 读 OpenClaw 的定时任务。不同版本存的地方不一样，几处都读、按 id 去重：
+ *   - 新版：状态库 <OpenClaw 目录>/state/openclaw.sqlite 的 cron_jobs 表（每行 job_json 是任务定义）
+ *   - 旧版：cron/jobs.json（或 openclaw.json 里 cron.store 指定的文件）{ version, jobs: [...] }
+ *   - openclaw.json 里直接写的 cron.jobs
+ */
+export function readOcJobs(dir: string): OcJobs {
+  const out: OcJobs = { jobs: [], sources: [], searched: [] };
+  const seen = new Set<string>();
+  const add = (list: any[], source: string) => {
+    let n = 0;
+    for (const j of list) {
+      if (!j || typeof j !== "object") continue;
+      const key = String(j.id ?? j.jobId ?? j.name ?? JSON.stringify(j.schedule));
+      if (seen.has(key)) continue;
+      seen.add(key); out.jobs.push(j); n++;
+    }
+    if (n) out.sources.push(`${source}（${n} 条）`);
+  };
+  let conf: any = null;
+  for (const f of ["openclaw.json", "clawdbot.json"]) {
+    const file = path.join(dir, f);
+    if (fs.existsSync(file)) { conf = parseJson5ish(fs.readFileSync(file, "utf8")); break; }
   }
-  return [];
+
+  // 1. 新版：SQLite 状态库
+  const db = path.join(dir, "state", "openclaw.sqlite");
+  out.searched.push(db);
+  if (fs.existsSync(db)) add(readJobsFromSqlite(db), db);
+
+  // 2. 旧版：jobs.json
+  const files = [
+    ...(typeof conf?.cron?.store === "string" ? [resolveOcPath(conf.cron.store, dir)] : []),
+    path.join(dir, "cron", "jobs.json"), path.join(dir, "state", "cron", "jobs.json"),
+    path.join(dir, "cron.json"), path.join(dir, "automations", "jobs.json"),
+  ];
+  for (const f of files) {
+    out.searched.push(f);
+    try {
+      const raw = parseJson5ish(fs.readFileSync(f, "utf8"));
+      const list = Array.isArray(raw) ? raw : raw?.jobs ?? raw?.items ?? [];
+      if (Array.isArray(list)) add(list, f);
+    } catch { /* 没有这个文件 */ }
+  }
+
+  // 3. 配置文件里直接写的任务
+  if (Array.isArray(conf?.cron?.jobs)) add(conf.cron.jobs, "openclaw.json 的 cron.jobs");
+  return out;
+}
+
+/**
+ * 只读地读 cron_jobs 表。先把库（连同 -wal）拷到临时目录再打开：
+ * OpenClaw 可能正开着它（WAL 模式），而且经 \\wsl.localhost 访问时 SQLite 的文件锁不可靠。
+ */
+function readJobsFromSqlite(db: string): any[] {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "oc-import-"));
+  try {
+    const copy = path.join(tmp, "openclaw.sqlite");
+    fs.copyFileSync(db, copy);
+    for (const ext of ["-wal", "-shm"]) if (fs.existsSync(db + ext)) fs.copyFileSync(db + ext, copy + ext);
+    const conn = new DatabaseSync(copy);
+    try {
+      const has = conn.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='cron_jobs'").get();
+      if (!has) return [];
+      const rows = conn.prepare("SELECT * FROM cron_jobs ORDER BY sort_order").all() as any[];
+      return rows.map((r) => {
+        let def: any = {};
+        try { def = JSON.parse(String(r.job_json ?? "{}")); } catch { /* 坏行 */ }
+        return { ...def, id: def.id ?? r.job_id, name: def.name ?? r.name, agentId: def.agentId ?? r.agent_id ?? undefined, enabled: r.enabled === undefined ? def.enabled : !!r.enabled };
+      });
+    } finally { conn.close(); }
+  } catch (e: any) {
+    console.log(`[import] ⚠️  读 ${db} 失败: ${e.message}`);
+    return [];
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
 }
 
 export function convertSchedule(s: any): Schedule {
@@ -169,7 +244,10 @@ export function importOpenClaw(dir: string, agents: AgentRegistry, sched: Schedu
     report.files.push({ agent: into, copied, from });
   }
   if (sched) {
-    for (const j of readJobs(dir)) {
+    const oj = readOcJobs(dir);
+    report.jobSources = oj.sources;
+    report.jobsSearched = oj.searched;
+    for (const j of oj.jobs) {
       const name = String(j.name ?? j.id ?? "未命名");
       try {
         const agent = idMap.get(String(j.agentId ?? j.agent ?? "")) ?? agents.default().id;
@@ -240,6 +318,8 @@ export function describeImport(rep: ImportReport): string[] {
     if (f) lines.push(`      ${f.copied.length ? f.copied.join("、") : "（目录里没有人设 / 记忆文件）"} ← ${f.from}`);
   }
   if (!rep.files.length && rep.searched.length) lines.push("  一个 workspace 都没找到，查过：", ...[...new Set(rep.searched)].map((p) => `      ${p}`));
+  if (rep.jobSources?.length) lines.push(`  定时任务来自：${rep.jobSources.join("；")}`);
+  else if (rep.jobsSearched) lines.push("  没找到定时任务，查过：", ...rep.jobsSearched.map((p) => `      ${p}`));
   for (const j of rep.jobs.imported) lines.push(`  ✓ 任务 ${j.name}（${j.agent}，已暂停，到管理界面确认后启用）`);
   for (const j of rep.jobs.skipped) lines.push(`  ✗ 任务 ${j.name}：${j.reason}`);
   return lines;

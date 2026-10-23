@@ -3,7 +3,11 @@ import path from "node:path";
 import { describe, it, expect } from "vitest";
 import { tmpdir } from "./helpers.ts";
 import { AgentRegistry } from "../src/agent/registry.ts";
-import { importOpenClaw, describeImport, findOpenClawDirs, parseJson5ish, parseWslList, resolveOcPath } from "../src/agent/import-openclaw.ts";
+import { DatabaseSync } from "node:sqlite";
+import { Scheduler } from "../src/agent/scheduler.ts";
+import { Runtime } from "../src/agent/runtime.ts";
+import { ModelRegistry } from "../src/agent/models.ts";
+import { importOpenClaw, readOcJobs, describeImport, findOpenClawDirs, parseJson5ish, parseWslList, resolveOcPath } from "../src/agent/import-openclaw.ts";
 
 /** Kagura 这边只有默认的 main（没跑过 migrate 的典型情况） */
 function kaguraWithMainOnly() {
@@ -106,5 +110,51 @@ describe("路径与平台", () => {
     const { home, oc } = openclawHome(null);
     expect(findOpenClawDirs("", home, () => [])).toEqual([oc]);
     expect(findOpenClawDirs("/不存在", "/也不存在", () => [])).toEqual([]);
+  });
+});
+
+describe("从 OpenClaw 导入：定时任务", () => {
+  const sched = (reg: AgentRegistry) => {
+    const rt = new Runtime(reg, new ModelRegistry({ providers: [], default: "", cheap: "" }), { maxConcurrency: 1, timeoutSecs: 5 });
+    return new Scheduler(path.join(tmpdir("sch"), "s.sqlite"), rt, reg, { deliver: async () => "", busy: () => false });
+  };
+
+  it("新版：读 state/openclaw.sqlite 的 cron_jobs 表", () => {
+    const reg = kaguraWithMainOnly();
+    const { oc, ws } = openclawHome(JSON.stringify({ agents: { list: [{ id: "main", default: true }, { id: "mio" }] } }));
+    ws("workspace", {}); ws("workspace-mio", {});
+    fs.mkdirSync(path.join(oc, "state"));
+    const db = new DatabaseSync(path.join(oc, "state", "openclaw.sqlite"));
+    db.exec(`CREATE TABLE cron_jobs (store_key TEXT, job_id TEXT, name TEXT, enabled INTEGER, agent_id TEXT, payload_kind TEXT, job_json TEXT, state_json TEXT, sort_order INTEGER)`);
+    const ins = db.prepare("INSERT INTO cron_jobs VALUES (?,?,?,?,?,?,?,?,?)");
+    ins.run("/x/cron/jobs.json", "7f3a-morning", "早报", 1, "main", "agentTurn",
+      JSON.stringify({ name: "早报", schedule: { kind: "cron", expr: "0 8 * * *", tz: "Asia/Shanghai" }, sessionTarget: "isolated", payload: { kind: "agentTurn", message: "讲讲今天的新闻" } }), "{}", 0);
+    ins.run("/x/cron/jobs.json", "water-1", "喝水", 0, "mio", "systemEvent",
+      JSON.stringify({ schedule: { kind: "every", everyMs: 7200000 }, sessionTarget: "main", payload: { kind: "systemEvent", text: "提醒喝水" } }), "{}", 1);
+    db.exec("PRAGMA journal_mode=WAL");
+    db.close();
+    const s = sched(reg);
+    const rep = importOpenClaw(oc, reg, s);
+    expect(rep.jobs.imported.map((j) => [j.name, j.agent])).toEqual([["早报", "main"], ["喝水", "mio"]]);
+    expect(s.get(rep.jobs.imported[0].id)).toMatchObject({ enabled: false, schedule: { kind: "cron", expr: "0 8 * * *" }, message: "讲讲今天的新闻" });
+    expect(s.get(rep.jobs.imported[1].id)).toMatchObject({ kind: "systemEvent", schedule: { kind: "every", every_secs: 7200 } });
+    expect(describeImport(rep).join("\n")).toContain("openclaw.sqlite（2 条）");
+  });
+
+  it("旧版 jobs.json、cron.store 指定的位置、openclaw.json 里的 cron.jobs 都读，按 id 去重", () => {
+    const { oc } = openclawHome(JSON.stringify({ cron: { store: "~/.openclaw/my-cron.json", jobs: [{ id: "c1", name: "配置里的", schedule: { kind: "at", at: "2030-01-01T08:00:00Z" }, payload: { kind: "agentTurn", message: "x" } }] } }));
+    fs.writeFileSync(path.join(oc, "my-cron.json"), JSON.stringify({ version: 1, jobs: [{ id: "a", name: "A", schedule: { kind: "cron", expr: "0 9 * * *" }, payload: { kind: "agentTurn", message: "a" } }] }));
+    fs.mkdirSync(path.join(oc, "cron"));
+    fs.writeFileSync(path.join(oc, "cron", "jobs.json"), JSON.stringify({ jobs: [{ id: "a", name: "A 重复" }, { id: "b", name: "B", schedule: { kind: "every", everyMs: 60000 }, payload: { kind: "systemEvent", text: "b" } }] }));
+    const r = readOcJobs(oc);
+    expect(r.jobs.map((j) => j.name)).toEqual(["A", "B", "配置里的"]);
+  });
+
+  it("一条都没有：报告里列出查过的位置", () => {
+    const reg = kaguraWithMainOnly();
+    const { oc } = openclawHome(null);
+    const text = describeImport(importOpenClaw(oc, reg, sched(reg))).join("\n");
+    expect(text).toContain("没找到定时任务");
+    expect(text).toContain(path.join(oc, "state", "openclaw.sqlite"));
   });
 });

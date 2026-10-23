@@ -1,4 +1,10 @@
-## 本版新增（0.1.0-beta.6）
+## 本版新增（0.1.0-beta.7）
+
+- **从 OpenClaw 导入定时任务修好了**：新版 OpenClaw 把任务存在 `~/.openclaw/state/openclaw.sqlite`，以前只读 `cron/jobs.json`，
+  所以一条都没导进来。现在新版数据库、旧版 `jobs.json`（含 `cron.store` 指定的位置）、`openclaw.json` 里的 `cron.jobs` 都读，
+  导入结果会写明任务从哪读到的；一条都没找到时列出查过的位置
+
+## 0.1.0-beta.6
 
 - **人设文件注入上限调大**：每个文件默认 2 万字（与 OpenClaw 一致，原来 SOUL 4000、其它 2000），最近笔记 8000 字；
   「Agents → 人设文件」里点「改上限」可以单独调，也可以在 config.json 写 `prompt_budgets`
