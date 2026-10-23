@@ -44,7 +44,7 @@ export function deviceTools(host: DeviceHost) {
         parameters: Type.Object({ question: Type.String({ description: "看照片要回答的问题" }), device: Type.Optional(Type.String()) }),
         async execute(_id, p: any) {
           const dev = target(p.device);
-          if (dev === spokenTo) {
+          if (scope.channel === "device" && dev === spokenTo) {
             // 设备是单线程的：/chat 进行中收不了拍照命令。本轮立即结束、带 X-Need-Photo 回去，
             // 设备拍完把照片连同原问题发 /chat-vision，作为下一条消息交给你（固件零改动）
             scope.meta.needPhoto = true;
@@ -61,7 +61,7 @@ export function deviceTools(host: DeviceHost) {
         description: "调大或调小设备音量（只在语音对话里有效）。",
         parameters: Type.Object({ direction: Type.Union([Type.Literal("up"), Type.Literal("down")]) }),
         async execute(_id, p: any) {
-          if (!spokenTo) return fail("只有在设备语音对话里才能调音量");
+          if (scope.channel !== "device" || !spokenTo) return fail("只有在设备语音对话里才能调音量");
           scope.meta.volume = p.direction;
           return ok(p.direction === "up" ? "音量已调大" : "音量已调小");
         },

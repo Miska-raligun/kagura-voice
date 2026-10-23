@@ -35,6 +35,10 @@ export interface RunRequest {
   timeoutSecs?: number;
   /** 不在消息前附 [时间…]（a2a 转述等） */
   noTurnContext?: boolean;
+  /** 覆盖 agent 的模型（heartbeat 用便宜模型） */
+  model?: string;
+  /** 落盘前最后一道判断：返回 false 就不落盘（heartbeat 回 HEARTBEAT_OK 时不让它撑大历史） */
+  keepIf?: (text: string) => boolean;
 }
 
 export interface RunResult {
@@ -164,7 +168,7 @@ export class Runtime {
       chain: [...(parent?.chain ?? []), `${agent.id}|${req.sessionKey}`],
       meta: {},
     };
-    const model = this.models.resolve(agent.model);
+    const model = this.models.resolve(req.model || agent.model);
     const history = store.history(req.sessionKey).map((h) => h.msg);
     const session = store.getSession(req.sessionKey);
     const tools = this.toolsFor(scope, agent, req);
@@ -219,10 +223,9 @@ export class Runtime {
         model: `${a.provider}/${a.model}`, input: u.input, output: u.output, cacheRead: u.cacheRead, cacheWrite: u.cacheWrite, cost: u.cost?.total ?? 0,
       });
     }
-    if (persist) store.append(req.sessionKey, fresh.map(stripImages));
-
     const textOf = (a: AssistantMessage) => a.content.filter((c: any) => c.type === "text").map((c: any) => c.text).join("").trim();
     const text = textOf(last) || assistants.map(textOf).filter(Boolean).join("\n");
+    if (persist && (!req.keepIf || req.keepIf(text))) store.append(req.sessionKey, fresh.map(stripImages));
     return { text, meta: scope.meta, toolCalls, usage };
   }
 

@@ -7,12 +7,15 @@ import { Runtime } from "./runtime.ts";
 import { deviceTools } from "./tools/device.ts";
 import { Memories } from "./tools/memory.ts";
 import { OpenAIEmbedder } from "./memory.ts";
+import { Scheduler } from "./scheduler.ts";
+import { cronTools } from "./tools/cron.ts";
 
 export interface AgentSystem {
   registry: AgentRegistry;
   models: ModelRegistry;
   runtime: Runtime;
   memories: Memories;
+  scheduler: Scheduler | null;
 }
 
 export function createAgentSystem(cfg: Config, dirs: Dirs, fake: FakeLlm | null): AgentSystem {
@@ -28,12 +31,31 @@ export function createAgentSystem(cfg: Config, dirs: Dirs, fake: FakeLlm | null)
   const memories = new Memories(runtime, cfg.embedding && !fake ? new OpenAIEmbedder(cfg.embedding) : null);
   runtime.addTools(memories.tools());
   runtime.beforeCompact = (agent, key) => memories.flush(agent, key);
-  return { registry, models, runtime, memories };
+  return { registry, models, runtime, memories, scheduler: null };
 }
 
-/** 依赖 Ctx 的部分（设备工具要推送、拍照）在 Ctx 建好之后接上 */
+/** 依赖 Ctx 的部分（设备工具要推送、拍照；调度器要投递）在 Ctx 建好之后接上 */
 export function attachAgentSystem(sys: AgentSystem, ctx: Ctx) {
-  const { runtime } = sys;
+  const { runtime, registry } = sys;
+  const scheduler = new Scheduler(ctx.dirs.systemDb, runtime, registry, {
+    async deliver(agentId, delivery, text) {
+      if (delivery.startsWith("device:")) {
+        const dev = delivery.slice("device:".length);
+        const ok = await ctx.sendPush(text, dev, registry.get(agentId)?.per);
+        return ok ? delivery : "";
+      }
+      if (delivery === "webchat") return "webchat";      // 运行记录里就是投递内容；网页聊天页面读取（M8）
+      console.log(`[scheduler] 投递目标 ${delivery} 还不支持（IM 渠道在 M7）`);
+      return "";
+    },
+    busy(agentId, delivery) {
+      const dev = delivery.startsWith("device:") ? delivery.slice("device:".length) : "";
+      return (dev !== "" && (ctx.activeChats.get(dev) ?? 0) > 0) || runtime.busy(agentId, `${agentId}:main`);
+    },
+  });
+  sys.scheduler = scheduler;
+  scheduler.syncHeartbeats();
+  runtime.addTools(cronTools(scheduler));
   runtime.presence = () => ctx.presenceText();
   runtime.addTools(deviceTools({
     push: (text, dev, per) => ctx.sendPush(text, dev, per),

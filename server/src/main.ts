@@ -52,6 +52,7 @@ async function main() {
   await stream.start(cfg.streamPort);
   await startDiscovery(cfg.discPort);
   ctx.reminders.start((text, dev) => ctx.sendPush(text, dev));
+  sys?.scheduler?.start(cfg.schedulerTick);
   ctx.schedules.start((s) => ctx.runScheduledCapture(s));
   setInterval(() => ctx.cleanupPhotoResults(), 300_000).unref();
   setInterval(() => ctx.hb.watch(), 30_000).unref();

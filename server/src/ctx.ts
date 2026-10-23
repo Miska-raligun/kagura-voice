@@ -51,6 +51,8 @@ export class Ctx {
   reminders: Reminders;
   schedules: PhotoSchedules;
 
+  /** 正在进行中的设备对话数（调度器 idleOnly：设备正在对话时延后执行） */
+  activeChats = new Map<string, number>();
   /** 最近一次在家状态（BLE 上报），内置 agent 每轮带上 */
   presence: { status: string; ts: string; dev: string } | null = null;
 
@@ -246,6 +248,16 @@ export class Ctx {
       };
     }
     return this.describeAndSpeak(img!, dev, prompt, label, started);
+  }
+
+  /** 包住一次设备对话：期间 activeChats 计数 +1 */
+  async inChat<T>(dev: string, fn: () => Promise<T>): Promise<T> {
+    this.activeChats.set(dev, (this.activeChats.get(dev) ?? 0) + 1);
+    try { return await fn(); }
+    finally {
+      const n = (this.activeChats.get(dev) ?? 1) - 1;
+      if (n > 0) this.activeChats.set(dev, n); else this.activeChats.delete(dev);
+    }
   }
 
   presenceText(): string {
