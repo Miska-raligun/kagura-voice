@@ -130,7 +130,8 @@ function elevated(cmdline: string): boolean {
 }
 
 export function realIO(): PreflightIO {
-  const interactive = !!process.stdin.isTTY && !!process.stdout.isTTY;
+  // 托盘/隐藏进程没有可交互窗口：不能停下来等人回车（会永远卡住）
+  const interactive = process.env.KAGURA_NO_PROMPT !== "1" && !!process.stdin.isTTY && !!process.stdout.isTTY;
   return {
     probe: probePort,
     owner: findOwner,
@@ -181,7 +182,7 @@ export function closeAsk() { rl?.close(); rl = null; }
 
 /** 出错退出前停一下：Windows 双击启动的窗口不然一闪就关了 */
 export async function pauseBeforeExit(msg = "按回车键关闭窗口……") {
-  if (process.platform !== "win32" || !process.stdin.isTTY) return;
+  if (process.platform !== "win32" || !process.stdin.isTTY || process.env.KAGURA_NO_PROMPT === "1") return;
   await ask(`\n${msg}`);
   closeAsk();
 }

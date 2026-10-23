@@ -26,11 +26,30 @@ import path from "node:path";
 import { execFile, execFileSync } from "node:child_process";
 import { isWsl, toLinuxPath } from "./util/platform.ts";
 import { applyProxy } from "./util/proxy.ts";
+import { initLogFile } from "./util/logfile.ts";
+import { startTray } from "./tray.ts";
 import { waitForOldProcess, takeRestartNotice } from "./util/restart.ts";
 import { preflight, realIO, closeAsk, pauseBeforeExit, type PortNeed } from "./startup/preflight.ts";
 
 // Node 22 下 node:sqlite 等会打实验特性警告，对用户只是噪声
 process.removeAllListeners("warning");
+
+// --tray：托盘模式。用 Start-Process -WindowStyle Hidden 换成一个隐藏进程（CREATE_NO_WINDOW 由它保证），
+// 再由那个进程起服务端 + 托盘图标。直接 spawn 的话子进程会挂到父进程的控制台上，父进程一退就被一起关掉。
+const TRAY_FLAG = process.argv.includes("--tray");
+if (process.platform === "win32" && TRAY_FLAG && process.env.KAGURA_TRAY_CHILD !== "1") {
+  // SEA 下 argv 有时会把可执行文件自己再带一遍；别把它当子命令传给子进程
+  const args = process.argv.slice(1).filter((a) => a !== "--tray" && a !== process.execPath && a !== process.argv[0]);
+  const ps = (s: string) => `'${s.replace(/'/g, "''")}'`;
+  const argPart = args.length ? ` -ArgumentList @(${args.map(ps).join(",")})` : "";
+  const cmd = `$env:KAGURA_TRAY_CHILD='1'; $env:KAGURA_NO_PROMPT='1'; Start-Process -FilePath ${ps(process.execPath)}${argPart} -WindowStyle Hidden`;
+  try {
+    execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", cmd], { windowsHide: true, timeout: 15000 });
+  } catch (e: any) {
+    console.log(`[tray] ⚠️  拉起隐藏进程失败: ${e.message}`);
+  }
+  process.exit(0);
+}
 
 async function main() {
   const cfg = loadConfig();
@@ -50,6 +69,7 @@ async function main() {
   if (pf === "exit") throw new Error("端口被占用，没有启动。");
 
   const dirs = makeDirs(cfg);
+  initLogFile(cfg.dataDir);
   const proxy = applyProxy(cfg.tools.web.proxy);
   const fake = cfg.fakeProviders ? new FakeProviders(dirs.ttsCache) : null;
   const baidu = fake ? null : new BaiduVoice(cfg.baidu, dirs.ttsCache);
@@ -119,6 +139,8 @@ async function main() {
   }
   console.log(`监听 0.0.0.0:${cfg.port}，Ctrl+C 退出`);
   console.log(`监控网页: http://<本机IP>:${cfg.port}/monitor\n`);
+  // 托盘模式（隐藏进程）：图标 + 右键菜单（打开管理界面 / 打开日志 / 重启 / 退出）
+  if (process.platform === "win32" && process.env.KAGURA_TRAY_CHILD === "1") startTray(cfg.adminPort || cfg.port, cfg.dataDir);
   maybeOpenAdmin(cfg, !sys.models.defaultRef());
 }
 

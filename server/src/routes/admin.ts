@@ -336,6 +336,12 @@ export function registerAdmin(r: Router, ctx: Ctx, sys: AgentSystem) {
     setTimeout(() => restartSelf(ctx.cfg.dataDir, { account: "", chatId: "", from: "" }), 200);
     return json({ status: "restarting" });
   });
+  /** 退出服务端（托盘菜单「退出」用；只允许本机） */
+  post("/api/admin/quit", () => {
+    console.log("[admin] 收到退出请求，服务端即将结束");
+    setTimeout(() => process.exit(0), 200);
+    return json({ status: "quitting" });
+  });
   /** 试一下联网搜索（按当前设置） */
   post("/api/admin/tools/test-search", async (req) => {
     const q = String((req.json() ?? {}).query || "今天的新闻");

@@ -1,4 +1,4 @@
-﻿; Kagura Windows 安装包（Inno Setup 6）。由 .github/workflows/release.yml 调用：
+; Kagura Windows 安装包（Inno Setup 6）。由 .github/workflows/release.yml 调用：
 ;   ISCC /DAppVersion=1.2.3 packaging\windows\kagura.iss
 ; 产物：server\dist\Kagura-Setup-<版本>.exe
 ;
@@ -56,12 +56,12 @@ Filename: "{app}\管理界面.url"; Section: "InternetShortcut"; Key: "IconFile"
 Filename: "{app}\管理界面.url"; Section: "InternetShortcut"; Key: "IconIndex"; String: "0"
 
 [Icons]
-Name: "{group}\Kagura 服务端"; Filename: "{app}\kagura.exe"; IconFilename: "{app}\icon.ico"
+Name: "{group}\Kagura 服务端"; Filename: "{app}\kagura.exe"; Parameters: "--tray"; IconFilename: "{app}\icon.ico"
 Name: "{group}\Kagura 管理界面"; Filename: "{app}\管理界面.url"; IconFilename: "{app}\icon.ico"
 Name: "{group}\使用说明"; Filename: "{app}\使用说明.txt"
 Name: "{group}\卸载 Kagura"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\Kagura 管理界面"; Filename: "{app}\管理界面.url"; IconFilename: "{app}\icon.ico"
-Name: "{userstartup}\Kagura"; Filename: "{app}\kagura.exe"; Parameters: "--no-browser"; IconFilename: "{app}\icon.ico"; Flags: runminimized; Tasks: autostart
+Name: "{userstartup}\Kagura"; Filename: "{app}\kagura.exe"; Parameters: "--tray --no-browser"; IconFilename: "{app}\icon.ico"; Flags: runminimized; Tasks: autostart
 
 [Run]
 ; 防火墙：按程序放行（TCP 5000/1883/5002、UDP 5001 都是它开的）；所有网络类型——
