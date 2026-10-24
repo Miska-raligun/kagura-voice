@@ -119,6 +119,11 @@ export interface ProviderDef {
   api: string;
   base_url: string; api_key?: string; headers?: Record<string, string>;
   models: ModelDef[];
+  /**
+   * 内部小任务（压缩摘要、长回复压成口语）怎么关掉思考：加进请求体的字段。不填按地址自动认
+   * （MiniMax / DeepSeek / 智谱 → thinking: {type: "disabled"}，通义 → enable_thinking: false）；false = 不发
+   */
+  no_thinking?: Record<string, unknown> | false;
 }
 export interface ModelsConfig {
   providers: ProviderDef[];

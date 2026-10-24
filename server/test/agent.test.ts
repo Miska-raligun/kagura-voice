@@ -313,3 +313,62 @@ describe("注册表", () => {
     expect(fs.readdirSync(path.join(root, "agents", ".trash")).length).toBe(1);
   });
 });
+
+describe("内部小任务关思考", () => {
+  it("按地址认出怎么关；去掉正文里的 <think>；服务商不认就去掉重试、之后不再发", async () => {
+    const { autoNoThinking, stripThinkText, ModelRegistry } = await import("../src/agent/models.ts");
+    expect(autoNoThinking("https://api.minimaxi.com/v1")).toEqual({ thinking: { type: "disabled" } });
+    expect(autoNoThinking("https://api.deepseek.com/v1")).toEqual({ thinking: { type: "disabled" } });
+    expect(autoNoThinking("https://open.bigmodel.cn/api/paas/v4")).toEqual({ thinking: { type: "disabled" } });
+    expect(autoNoThinking("https://dashscope.aliyuncs.com/compatible-mode/v1")).toEqual({ enable_thinking: false });
+    expect(autoNoThinking("https://api.openai.com/v1", "openai", "gpt-x")).toBeUndefined();
+    expect(stripThinkText("<think>想了很久</think>摘要正文")).toBe("摘要正文");
+    expect(stripThinkText("<think>想到一半被截断")).toBe("");
+
+    const reg = new ModelRegistry({ providers: [{ id: "mm", api: "openai-completions", base_url: "https://api.minimaxi.com/v1", models: [{ id: "MiniMax-M3" }] }], default: "mm/MiniMax-M3", cheap: "" } as any);
+    const m = reg.resolve("mm/MiniMax-M3");
+    expect(m.maxTokens).toBe(8192);
+    const seen: any[] = [];
+    let reject = true;
+    (reg.models as any).completeSimple = async (_m: any, _c: any, o: any) => {
+      seen.push(o.samplingParams);
+      if (o.samplingParams && reject) return { stopReason: "error", errorMessage: "400 unrecognized field: thinking", content: [] };
+      return { stopReason: "stop", content: [{ type: "text", text: "<think>嗯</think>好的" }] };
+    };
+    const r = await reg.quick(m, { messages: [] } as any);
+    expect((r.content[0] as any).text).toBe("好的");
+    expect(seen).toEqual([{ thinking: { type: "disabled" } }, undefined]);      // 被拒 → 去掉重试
+    await reg.quick(m, { messages: [] } as any);
+    expect(seen.at(-1)).toBeUndefined();                                         // 之后不再发
+    // 手动指定：false = 不发
+    const reg2 = new ModelRegistry({ providers: [{ id: "ds", api: "openai-completions", base_url: "https://api.deepseek.com", no_thinking: false, models: [{ id: "v4" }] }], default: "ds/v4", cheap: "" } as any);
+    expect(reg2.noThinkingParams(reg2.resolve("ds/v4"))).toBeUndefined();
+  });
+});
+
+describe("关思考字段真的进了请求体", () => {
+  it("OpenAI 兼容接口：请求里带 thinking: {type: disabled}，max_tokens 按给的", async () => {
+    const http = await import("node:http");
+    const { ModelRegistry } = await import("../src/agent/models.ts");
+    let body: any = null;
+    const srv = http.createServer((req, res) => {
+      let raw = ""; req.on("data", (c) => (raw += c)); req.on("end", () => {
+        body = JSON.parse(raw);
+        res.writeHead(200, { "content-type": "text/event-stream" });
+        const chunk = (o: any) => res.write(`data: ${JSON.stringify({ id: "x", object: "chat.completion.chunk", created: 1, model: "MiniMax-M3", ...o })}\n\n`);
+        chunk({ choices: [{ index: 0, delta: { role: "assistant", content: "摘要" }, finish_reason: null }] });
+        chunk({ choices: [{ index: 0, delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } });
+        res.end("data: [DONE]\n\n");
+      });
+    });
+    await new Promise<void>((r) => srv.listen(0, "127.0.0.1", r));
+    const port = (srv.address() as any).port;
+    try {
+      const reg = new ModelRegistry({ providers: [{ id: "minimax", api: "openai-completions", base_url: `http://127.0.0.1:${port}/v1`, api_key: "k", models: [{ id: "MiniMax-M3" }] }], default: "minimax/MiniMax-M3", cheap: "" } as any);
+      const r = await reg.quick(reg.resolve("minimax/MiniMax-M3"), { systemPrompt: "s", messages: [{ role: "user", content: "hi", timestamp: Date.now() }] } as any, { maxTokens: 8192 });
+      expect(r.errorMessage ?? "").toBe("");
+      expect(body.thinking).toEqual({ type: "disabled" });
+      expect(body.max_tokens ?? body.max_completion_tokens).toBe(8192);
+    } finally { srv.close(); }
+  });
+});

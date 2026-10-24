@@ -523,7 +523,7 @@ export class Runtime {
       try {
         const sig = signal ? AbortSignal.any([signal, AbortSignal.timeout(perCall)]) : AbortSignal.timeout(perCall);
         const res = await withScope({ agentId: agent.id, sessionKey: key, kind: "isolated", channel: "system", purpose: "compact", hop: 0, chain: [], meta: {}, trusted: false },
-          () => this.models.models.completeSimple(model, {
+          () => this.models.quick(model, {
             systemPrompt: "你负责把一段对话压缩成摘要，供之后继续对话时参考。保留：人物、约定、待办、偏好、未解决的问题、重要事实与数字。"
               + "省略寒暄与重复。用第三人称、中文、条目式，不超过 800 字。直接输出摘要本身，不要思考过程。",
             messages: [{ role: "user", content: (summary ? `此前的摘要：\n${summary}\n\n` : "") + `需要并进摘要的对话${chunks.length > 1 ? `（第 ${i + 1}/${chunks.length} 段）` : ""}：\n${chunk.join("\n")}`, timestamp: Date.now() }],
@@ -564,12 +564,12 @@ export class Runtime {
       const model = this.models.resolve(agent.cheap_model || this.models.cheapRef() || agent.model);
       const res = await Promise.race([
         withScope({ agentId, sessionKey: `${agentId}:voice`, kind: "isolated", channel: "system", purpose: "voice", hop: 0, chain: [], meta: {}, trusted: false },
-          () => this.models.models.completeSimple(model, {
+          () => this.models.quick(model, {
             systemPrompt: `你是${agent.name}。下面是你刚用文字发给主人的回复，现在要在家里的设备上用语音念出来。`
               + `把它改写成适合朗读的口语，不超过 ${max} 字：保留结论和关键数字，省略细节、列表、代码和网址；`
               + "不要用 markdown、表情符号；内容放不下时最后说一句「详细的我发在消息里了」。只输出要念的话本身。",
             messages: [{ role: "user", content: text.slice(0, 6000), timestamp: Date.now() }],
-          })),
+          }, { signal: AbortSignal.timeout(20_000) })),           // 到时真的中止请求，别在后台接着想
         new Promise<never>((_, rej) => setTimeout(() => rej(new Error("超时")), 20_000)),
       ]);
       if (res.stopReason === "error" || res.stopReason === "aborted") throw new Error(res.errorMessage || "模型调用失败");

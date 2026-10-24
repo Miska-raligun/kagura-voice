@@ -308,6 +308,10 @@ CoreS3 (MicroPython) ──HTTP──▶ server/（TypeScript 单文件可执行
   各自 `timeout_secs`；某块失败 / 为空就记下这段里用户说过的话**照样压掉**——别改回「失败就下轮重试」，那样历史只会越来越大、越来越压不动。
   默认值（2026-10）：压缩阈值 6 万 / 保留 30 条（不超过主模型上下文的六成）；模型没填时上下文 12.8 万、单次输出 8192。
   agent.json 里原样存着旧默认（16000 / 16）的当成没改过、跟新默认走。
+  ⑥ **内部小任务关思考**（`ModelRegistry.quick`，症状「压缩经常超时 / 思考把输出额度占满」）：压缩摘要、长回复压成口语都走 `quick`，
+  按服务商地址自动加关思考的字段（MiniMax / DeepSeek / 智谱 → `thinking: {type: "disabled"}`，通义 → `enable_thinking: false`），经 pi-ai 的
+  `samplingParams` 原样并进请求体；服务商报错里提到这个字段就去掉重试、本次运行不再发；正文里的 `<think>…</think>` 剥掉。
+  `ProviderDef.no_thinking` 可手动指定字段或 `false`（不发）。只用于内部小任务，**正常对话不动**（要不要思考是对话质量的事）。
 - **设备文件同步（`ota.py`，管理界面「设备 → 图片与代码」）**：服务端 `server/src/devicefiles.ts` 存
   `<数据目录>/device_files/`（自定义）+ 构建时打进来的 `device/src`（`virtual:device-fw`，版本 = 服务端版本）；
   MQTT `{"action":"sync","scope":"res|code|all"}` → 设备空闲时 `GET /device/files` 拿清单（路径/大小/sha256）

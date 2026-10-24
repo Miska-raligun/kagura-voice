@@ -38,13 +38,32 @@ const keyAuth = (name: string, key: string) =>
 export const DEFAULT_CONTEXT_WINDOW = 128_000;
 export const DEFAULT_MAX_TOKENS = 8192;
 
+/** 去掉混在正文里的思考（有的接口把思考写成 <think>…</think> 放进正文；输出被截断时只有开头没有结尾） */
+export function stripThinkText(t: string): string {
+  return t.replace(/<think>[\s\S]*?<\/think>/gi, "").replace(/<think>[\s\S]*$/i, "").trim();
+}
+
+/** 按服务商地址认出怎么关思考；认不出就不发（有的接口见到不认识的字段会直接报错） */
+export function autoNoThinking(baseUrl: string, provider = "", model = ""): Record<string, unknown> | undefined {
+  const u = `${baseUrl} ${provider} ${model}`.toLowerCase();
+  if (/minimax|deepseek|bigmodel|zhipu|z\.ai|\bglm/.test(u)) return { thinking: { type: "disabled" } };
+  if (/dashscope|aliyuncs|qwen/.test(u)) return { enable_thinking: false };
+  return undefined;
+}
+
 export class ModelRegistry {
   models: MutableModels;
   private fake: FakeLlm | null = null;
 
+  /** 各服务商手动指定的「关思考」字段（ProviderDef.no_thinking） */
+  private noThinkCfg = new Map<string, Record<string, unknown> | false>();
+  /** 发了关思考字段却被拒的服务商：本次运行不再发 */
+  private noThinkRejected = new Set<string>();
+
   constructor(private cfg: ModelsConfig) {
     this.models = createModels();
     for (const raw of cfg.providers) {
+      if (raw.no_thinking !== undefined) this.noThinkCfg.set(String(raw.id ?? "").trim(), raw.no_thinking);
       // 手填的 id / 模型名常带首尾空格（从网页复制过来），去掉，不然「服务商/模型」对不上
       const p = { ...raw, id: String(raw.id ?? "").trim(), base_url: String(raw.base_url ?? "").trim(),
         models: (raw.models ?? []).map((m) => ({ ...m, id: String(m.id ?? "").trim() })).filter((m) => m.id) };
@@ -109,6 +128,30 @@ export class ModelRegistry {
     } else reply = fauxAssistantMessage(step);
     core.setResponses([reply]);
     return core.streamSimple(m, ctx, opts);
+  }
+
+  /** 内部小任务要加的「关思考」字段 */
+  noThinkingParams(m: Model<any>): Record<string, unknown> | undefined {
+    if (this.noThinkRejected.has(m.provider)) return undefined;
+    const c = this.noThinkCfg.get(m.provider);
+    if (c === false) return undefined;
+    return c ?? autoNoThinking(m.baseUrl ?? "", m.provider, m.id);
+  }
+
+  /**
+   * 内部小任务（压缩摘要、长回复压成口语）调模型：关掉思考——这类活不需要想，推理型模型（MiniMax-M3、DeepSeek V4、GLM）
+   * 默认会先想一大段，又慢又可能把输出额度用光、正文为空。服务商不认关思考的字段（报错里提到它）就去掉重试一次，之后不再发。
+   * 返回的正文去掉了 <think>…</think>。
+   */
+  async quick(model: Model<any>, ctx: Parameters<MutableModels["completeSimple"]>[1], opts: { signal?: AbortSignal; maxTokens?: number } = {}) {
+    const extra = this.noThinkingParams(model);
+    let res = await this.models.completeSimple(model, ctx, { ...opts, ...(extra ? { samplingParams: extra as any } : {}) });
+    if (extra && res.stopReason === "error" && !opts.signal?.aborted && /think|unrecogni[sz]ed|unknown|not support|extra|invalid param/i.test(res.errorMessage ?? "")) {
+      this.noThinkRejected.add(model.provider);
+      console.log(`[models] ${model.provider} 不认关思考的参数（${String(res.errorMessage).slice(0, 80)}），之后不再发`);
+      res = await this.models.completeSimple(model, ctx, opts);
+    }
+    return { ...res, content: res.content.map((c: any) => (c.type === "text" ? { ...c, text: stripThinkText(c.text) } : c)) };
   }
 
   /** "provider/model" → Model。找不到抛错，错误信息直接给用户看 */
