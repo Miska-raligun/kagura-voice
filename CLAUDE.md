@@ -362,6 +362,9 @@ CoreS3 (MicroPython) ──HTTP──▶ server/（TypeScript 单文件可执行
   管理界面里手机和 CoreS3 在同一张设备表（`/api/admin/devices` 带 `kind: "phone"`），配对入口是表上的「＋ 添加手机」。
   舞台图跟着状态换，规则抄设备端 `ui._IMG_MAP`（待机 img_bg / 录音 img_recording / 思考 img_streaming / 说话 img_playing，角色目录优先、缺了退 img_bg）——
   改设备端的映射要同步改 `app.html` 的 `IMG_MAP`；图预先解码好、复用同一个 `<img>` 换 src。
+  布局：清晰的角色图按 4:3 放顶上（`--stage-h`），聊天从它下面开始（`.stagegap`）、不压着她；底色是同一张待机图放大糊开压暗（`#bgAmb`），颜色跟着角色走，别再写死成某个色调。
+  **摇一摇**同 CoreS3 彩蛋：`devicemotion` 去重力后 700ms 内 3 下 → 换 `img_shake`、`GET /shake`，回复走推送（推给手机的通知带 `text`，页面显示成她的一条消息）。
+  动作传感器只在 https 下有；iOS / 新版 Chrome 要在一次点击里 `DeviceMotionEvent.requestPermission()`——挂在 `unlockAudio` 上，**`pointerdown` 里申请不算数**。
 - **管理接口与设备信任（`routes/admin.ts` 的 `isLocal`、`ctx.deviceTrusted`，LRN 2026-10-23 安全检查）**：
   ① 管理接口光看「来源是 127.0.0.1」不够——你电脑上任何网页都能让浏览器往 127.0.0.1 发请求（跨站请求伪造），
   DNS 重绑定还能绕过同源。`isLocal` 同时要求 Host 是本机地址、跨站的 Origin / `Sec-Fetch-Site: cross-site` 一律拒绝
@@ -382,7 +385,7 @@ CoreS3 (MicroPython) ──HTTP──▶ server/（TypeScript 单文件可执行
   在线更新：Windows 由一个独立的隐藏 PowerShell 跑安装包再拉起托盘版（本进程先退出，安装包会强制结束它）；
   装失败也要把原来的拉起来，不然用户点一下更新服务就没了。下载（LRN 2026-10-24，症状「卡在 1KB 然后 fetch failed」）：安装包实际在
   release-assets.githubusercontent.com，国内常连不上——按「直连 → 加速镜像（`UPDATE_MIRRORS`，`update_mirrors` 可覆盖）」依次试，
-  断点续传、30 秒没数据换源；**镜像下的文件只认 GitHub 接口给的 `digest` 校验**，没有 digest 的老发布不走镜像。
+  断点续传、30 秒没数据换源、后面还有源时速度低于 200KB/s（且照这速度还要 30 秒以上）也换源接着续传（直连 GitHub 常见的是一直几 KB/s 地慢慢给，不是断）；**镜像下的文件只认 GitHub 接口给的 `digest` 校验**，没有 digest 的老发布不走镜像。
   **下载不能走 undici**（`util/nodefetch.ts`，LRN 2026-10-24）：对方 `Connection: close` + 写盘背压暂停时，undici 在 socket end 里 `assert(!this.paused)`
   抛未捕获异常，托盘版进程无声消失（CI 冒烟在 Windows 上抓到，undici 7/8 都在）。用 Node 自带 http/https，代理走 CONNECT 隧道。
   **Windows 安装期间服务端不先退出**：等用户点了 UAC「是」、安装包的 `PrepareToInstall` 才结束它，装完 `run-update.ps1` 再拉起；

@@ -208,6 +208,29 @@ describe("在线更新：下载源与断点续传", () => {
     expect(seen.every((u) => !u.startsWith("https://m1"))).toBe(true);
   });
 
+  it("直连一直慢慢给：测速太慢就换镜像，已下的部分接着续传", async () => {
+    const calls: string[] = [];
+    const f = (async (url: string, init: any) => {
+      calls.push(`${url.startsWith("https://m1") ? "m1" : "gh"}@${startOf(init)}`);
+      if (url.startsWith("https://m1")) return partial(startOf(init));
+      let off = startOf(init);
+      const stream = new ReadableStream({                     // 每 10ms 给 10 字节：1 KB/s
+        async pull(c) {
+          await new Promise((r) => setTimeout(r, 10));
+          if (init.signal.aborted) { c.error(Object.assign(new Error("aborted"), { name: "AbortError" })); return; }
+          c.enqueue(new Uint8Array(body.subarray(off, off + 10))); off += 10;
+        },
+      });
+      return new Response(stream, { status: 200 });
+    }) as any;
+    const dir = tmpdir("upd");
+    const st = await new SelfUpdater(dir, f, "deb", undefined, { mirrors: ["https://m1.com"], slowBps: 1_000_000, slowWindowMs: 150 }).install(info());
+    expect(st.phase).toBe("manual");
+    expect(fs.readFileSync(path.join(dir, "updates", "kagura_1.0.0_amd64.deb")).equals(body)).toBe(true);
+    expect(calls[0]).toBe("gh@0");
+    expect(calls[1]).toMatch(/^m1@[1-9]\d*$/);                // 从直连已下到的地方续传
+  });
+
   it("连上了但一直不给数据：超时换下一个源", async () => {
     const f = (async (url: string, init: any) => {
       if (url.startsWith("https://m1")) return partial(startOf(init));

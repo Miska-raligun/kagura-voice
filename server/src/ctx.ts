@@ -117,7 +117,9 @@ export class Ctx {
     const fname = `${hex(8)}.wav`;
     fs.copyFileSync(wav, path.join(this.dirs.pushAudio, fname));
     pruneDir(this.dirs.pushAudio, PUSH_AUDIO_MAX_FILES);
-    this.mqtt.publish(`kagura/push/${dev}`, { type: "push", url: `/push-audio/${fname}`, ...(role ? { role: role.id } : {}) });
+    // 手机页面要把这句话显示出来；CoreS3 不需要，MQTT 包保持原样
+    const isPhone = !!this.clients?.list().some((c) => c.id === dev);
+    this.mqtt.publish(`kagura/push/${dev}`, { type: "push", url: `/push-audio/${fname}`, ...(role ? { role: role.id } : {}), ...(isPhone ? { text } : {}) });
     const tag = role && role.id !== cur.id ? `（${role.name}）` : "";
     console.log(`[push] → ${dev}${tag} via MQTT notify: ${pyHead(text, 50)}${pyLen(text) > 50 ? "..." : ""}`);
     return true;

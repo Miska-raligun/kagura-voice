@@ -7,7 +7,7 @@ export function Overview() {
   if (!d) return <Err msg={err} />;
   const calls = d.agents.reduce((n: number, a: any) => n + (a.today.calls ?? 0), 0);
   const cost = d.agents.reduce((n: number, a: any) => n + (a.today.cost ?? 0), 0);
-  const online = d.devices.filter((x: any) => x.last_seen_secs_ago < 200).length;
+  const online = d.devices.filter((x: any) => x.online).length;
   const chOk = d.channels.filter((c: any) => c.state === "online").length;
   return (
     <>
@@ -40,8 +40,9 @@ export function Overview() {
         </Card>
         <Card title="设备">
           {d.devices.length ? <table><tbody>{d.devices.map((x: any) => (
-            <tr><td>{x.id}</td><td><Badge s={x.last_seen_secs_ago < 200 ? "online" : "stopped"} text={x.last_seen_secs_ago < 200 ? "在线" : "离线"} /></td>
-              <td class="muted">{ago(x.last_seen_secs_ago)}</td><td>{x.agent}</td></tr>))}</tbody></table> : <Empty>暂无设备</Empty>}
+            <tr><td>{x.kind === "phone" ? <>📱 {x.name} <small class="muted">{x.id}</small></> : x.id}</td>
+              <td><Badge s={x.online ? "online" : "stopped"} text={x.online ? "在线" : x.kind === "phone" ? "页面没开" : "离线"} /></td>
+              <td class="muted">{x.secs_ago == null ? "" : ago(x.secs_ago)}</td><td>{x.agent}</td></tr>))}</tbody></table> : <Empty>暂无设备</Empty>}
         </Card>
         <Card title="渠道">
           {d.channels.length ? <table><tbody>{d.channels.map((c: any) => (

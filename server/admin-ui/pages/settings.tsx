@@ -486,7 +486,7 @@ export function Update() {
         </div>
       </>}
       {st && st.phase !== "idle" && <div class={st.phase === "error" ? "errbox" : "card"}>
-        <p>{st.message}{st.phase === "downloading" && st.total ? `：${fmtMB(st.done)} / ${fmtMB(st.total)}（${Math.round(st.done * 100 / st.total)}%）` : ""}</p>
+        <p>{st.message}{st.phase === "downloading" && st.total ? `：${fmtMB(st.done)} / ${fmtMB(st.total)}（${Math.round(st.done * 100 / st.total)}%）${st.rate ? ` · ${st.rate >= 1048576 ? (st.rate / 1048576).toFixed(1) + " MB/s" : Math.round(st.rate / 1024) + " KB/s"}` : ""}` : ""}</p>
         {st.phase === "downloading" && st.total ? <progress max={st.total} value={st.done} style="width:100%" /> : null}
         {st.phase === "installing" && <p class="muted">{restarting ? "服务端正在重启，好了会自动刷新…（超过 3 分钟还没好，请从开始菜单启动「Kagura 服务端」）" : "装好后服务端会重启，页面会自动刷新。"}</p>}
         {st.command && <pre>{st.command}</pre>}

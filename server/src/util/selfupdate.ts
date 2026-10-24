@@ -13,7 +13,10 @@ import { execFileSync } from "node:child_process";
 import type { UpdateInfo } from "./update.ts";
 
 export type InstallKind = "windows" | "appimage" | "deb" | "unsupported";
-export interface UpdateState { phase: "idle" | "downloading" | "verifying" | "installing" | "manual" | "error"; done: number; total: number; message: string; command?: string; file?: string }
+export interface UpdateState { phase: "idle" | "downloading" | "verifying" | "installing" | "manual" | "error"; done: number; total: number; message: string; command?: string; file?: string; rate?: number }
+
+/** 下载源太慢：换下一个源（已下的部分留着续传） */
+class SlowSource extends Error {}
 
 function isSea(): boolean { try { return !!require("node:sea").isSea(); } catch { return false; } }
 
@@ -100,11 +103,15 @@ export class SelfUpdater {
   state: UpdateState = { phase: "idle", done: 0, total: 0, message: "" };
   private mirrors: string[];
   private stallMs: number;
+  private slowBps: number;
+  private slowWindowMs: number;
   constructor(private dataDir: string, private fetchFn: typeof fetch = fetch, private kind: InstallKind = installKind(),
               private onRestart: () => void = () => setTimeout(() => process.exit(0), 800),
-              opts: { mirrors?: string[]; stallMs?: number } = {}) {
+              opts: { mirrors?: string[]; stallMs?: number; slowBps?: number; slowWindowMs?: number } = {}) {
     this.mirrors = opts.mirrors ?? UPDATE_MIRRORS;
     this.stallMs = opts.stallMs ?? 30_000;
+    this.slowBps = opts.slowBps ?? 200 * 1024;
+    this.slowWindowMs = opts.slowWindowMs ?? 15_000;
   }
 
   get installKind() { return this.kind; }
@@ -112,13 +119,33 @@ export class SelfUpdater {
   /**
    * 从一个源下到 dest（已有部分就续传）。返回 true = 完整；中途断了抛错，已下的留着给下一次续传。
    * stallMs 内没收到任何数据（含连接、等响应头）就放弃这个源。
+   * canSkip（后面还有别的源）时还看速度：每 slowWindowMs 算一次，低于 slowBps 且照这速度还要下 30 秒以上，
+   * 就抛 SlowSource 换源——国内直连 GitHub 常见的不是断，是几 KB/s 一直慢慢给。
    */
-  private async fetchOnce(url: string, dest: string, total: number): Promise<void> {
+  private async fetchOnce(url: string, dest: string, total: number, canSkip = false): Promise<void> {
     let have = fs.existsSync(dest) ? fs.statSync(dest).size : 0;
     if (total && have >= total) return;
     const ac = new AbortController();
+    let slow = "";
     let timer = setTimeout(() => ac.abort(), this.stallMs);
     const poke = () => { clearTimeout(timer); timer = setTimeout(() => ac.abort(), this.stallMs); };
+    // 测速：每秒采一次，显示用最近 5 秒；换源判据用最近一个窗口
+    const samples: [number, number][] = [[Date.now(), have]];
+    const started = Date.now();
+    const tick = Math.max(10, Math.min(1000, Math.floor(this.slowWindowMs / 5)));
+    const meter = setInterval(() => {
+      const now = Date.now(), done = this.state.done;
+      samples.push([now, done]);
+      while (samples.length > 2 && now - samples[1][0] >= Math.max(5000, this.slowWindowMs)) samples.shift();
+      const recent = samples.find(([t]) => now - t <= 5000) ?? samples[0];
+      this.state.rate = now > recent[0] ? Math.round((done - recent[1]) * 1000 / (now - recent[0])) : 0;
+      if (!canSkip || now - started < this.slowWindowMs) return;
+      const base = samples.find(([t]) => now - t <= this.slowWindowMs) ?? samples[0];
+      if (now - base[0] < this.slowWindowMs * 0.8) return;
+      const bps = (done - base[1]) * 1000 / (now - base[0]);
+      const left = total ? total - done : Infinity;
+      if (bps < this.slowBps && left > bps * 30) { slow = `太慢（${Math.round(bps / 1024)} KB/s）`; ac.abort(); }
+    }, tick);
     try {
       const r = await this.fetchFn(url, { headers: { "user-agent": "kagura", ...(have ? { range: `bytes=${have}-` } : {}) }, signal: ac.signal });
       if (r.status === 416 && total && have === total) return;
@@ -138,19 +165,23 @@ export class SelfUpdater {
       } finally { await out.close(); }
       const size = fs.statSync(dest).size;
       if (total && size !== total) throw new Error(`文件不完整（${size}/${total} 字节）`);
-    } finally { clearTimeout(timer); }
+    } catch (e) {
+      if (slow) throw new SlowSource(slow);
+      throw e;
+    } finally { clearTimeout(timer); clearInterval(meter); this.state.rate = undefined; }
   }
 
   /** 依次试各个源；某个源有进展就在它上面接着续传，没进展再换下一个。返回下载到的文件的 sha256 */
   private async download(asset: { url: string; size: number; name: string }, dest: string, want: string | undefined, mirrors: string[]): Promise<string> {
     const tried: string[] = [];
     fs.rmSync(dest, { force: true });
-    for (const src of downloadSources(asset.url, mirrors)) {
+    const sources = downloadSources(asset.url, mirrors);
+    for (const [i, src] of sources.entries()) {
       this.state.message = `正在下载 ${asset.name}（${src.name}）`;
       for (let attempt = 0; attempt < 5; attempt++) {
         const before = fs.existsSync(dest) ? fs.statSync(dest).size : 0;
         try {
-          await this.fetchOnce(src.url, dest, asset.size);
+          await this.fetchOnce(src.url, dest, asset.size, i < sources.length - 1);
           const got = await sha256File(dest);
           if (want && got !== want) {                       // 这个源给的东西不对：丢掉，换下一个源从头下
             fs.rmSync(dest, { force: true });
@@ -163,6 +194,11 @@ export class SelfUpdater {
           return got;
         } catch (e: any) {
           if (String(e?.message).startsWith("校验失败")) throw e;
+          if (e instanceof SlowSource) {                    // 慢：已下的留着，下一个源接着续传
+            console.log(`[update] 🐢  ${src.name} ${e.message}，换下一个源`);
+            tried.push(`${src.name}（${e.message}）`);
+            break;
+          }
           const why = netReason(e);
           console.log(`[update] ⚠️  ${src.name} 下载中断：${why}`);
           const after = fs.existsSync(dest) ? fs.statSync(dest).size : 0;

@@ -20,9 +20,10 @@
 -->
 <style>
 :root {
-  --bg:#041c1c; --panel:#0b2323; --panel2:#102a29; --fg:#ffe6cb; --muted:#ffe6cbaa; --faint:#ffe6cb66;
-  --line:#ffe6cb1a; --line2:#ffe6cb2e; --accent:#ffbd38; --accent-fg:#1a1204; --ok:#5fd4a0; --err:#ff7a6b;
-  --glass:rgba(6,26,26,.62); --glass2:rgba(16,42,41,.78);
+  --bg:#111113; --panel:#1b1b1e; --panel2:#242428; --fg:#f5f5f7; --muted:rgba(245,245,247,.7); --faint:rgba(245,245,247,.42);
+  --line:rgba(255,255,255,.1); --line2:rgba(255,255,255,.18); --accent:#ffb74a; --accent-fg:#1f1405; --ok:#5fd4a0; --err:#ff7a6b;
+  --glass:rgba(0,0,0,.28); --glass2:rgba(0,0,0,.34);
+  --stage-h:min(75vw, 44vh);       /* 角色图按 4:3 完整露出来的高度 */
   --safe-b: env(safe-area-inset-bottom, 0px); --safe-t: env(safe-area-inset-top, 0px);
 }
 * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
@@ -39,12 +40,13 @@ svg { display:block; }
 
 /* ── 整体：角色图铺满做背景，聊天浮在上面 ── */
 .app { position:relative; flex:1; min-height:0; display:flex; flex-direction:column; }
-.backdrop { position:absolute; inset:0; overflow:hidden; background:radial-gradient(120% 70% at 50% 18%, #12403d 0%, var(--bg) 70%); }
-.backdrop img { position:absolute; left:0; right:0; top:0; width:100%; height:66%; object-fit:cover;
-  -webkit-mask-image:linear-gradient(180deg, #000 55%, transparent 100%); mask-image:linear-gradient(180deg, #000 55%, transparent 100%); }
-.backdrop .face { position:absolute; left:0; right:0; top:calc(var(--safe-t) + 18%); text-align:center; font-size:42px; color:var(--accent); opacity:.85; letter-spacing:.04em; }
-.backdrop .veil { position:absolute; inset:0;
-  background:linear-gradient(180deg, rgba(4,28,28,.5) 0%, rgba(4,28,28,0) 15%, rgba(4,28,28,0) 36%, rgba(4,28,28,.7) 56%, var(--bg) 72%); }
+/* 底色 = 同一张图放大糊开压暗（颜色跟着角色走）；清晰的那张按 4:3 放在上面，聊天从它下面开始，不压着她 */
+.backdrop { position:absolute; inset:0; overflow:hidden; background:var(--bg); }
+.backdrop .ambient { position:absolute; inset:-12%; width:124%; height:124%; object-fit:cover; filter:blur(36px) saturate(1.15) brightness(.42); transform:translateZ(0); }
+.backdrop #bg { position:absolute; left:0; right:0; top:0; width:100%; height:var(--stage-h); object-fit:cover;
+  -webkit-mask-image:linear-gradient(180deg, #000 80%, transparent 100%); mask-image:linear-gradient(180deg, #000 80%, transparent 100%); }
+.backdrop .face { position:absolute; left:0; right:0; top:calc(var(--stage-h) * .45); text-align:center; font-size:42px; color:var(--accent); opacity:.85; letter-spacing:.04em; }
+.backdrop .veil { position:absolute; inset:0; background:linear-gradient(180deg, rgba(0,0,0,.38) 0, transparent calc(var(--safe-t) + 70px)); }
 
 header { position:relative; z-index:2; display:flex; align-items:center; gap:10px; padding:calc(var(--safe-t) + 8px) 12px 8px 14px; }
 .who { position:relative; display:flex; align-items:center; gap:10px; min-width:0; flex:1; }
@@ -66,13 +68,14 @@ main { position:relative; z-index:1; flex:1; min-height:0; }
 .page { position:absolute; inset:0; display:flex; flex-direction:column; }
 
 /* ── 对话 ── */
-.log { flex:1; overflow-y:auto; padding:12px 12px 8px; display:flex; flex-direction:column; gap:8px; -webkit-overflow-scrolling:touch; overscroll-behavior:contain; }
-.log::before { content:""; margin-top:auto; }       /* 消息从底部往上排，上面留出角色图 */
+.stagegap { flex:none; height:max(0px, calc(var(--stage-h) - var(--safe-t) - 78px)); }
+.log { flex:1; overflow-y:auto; padding:22px 12px 8px;
+  -webkit-mask-image:linear-gradient(180deg, transparent 0, #000 22px); mask-image:linear-gradient(180deg, transparent 0, #000 22px); display:flex; flex-direction:column; gap:8px; -webkit-overflow-scrolling:touch; overscroll-behavior:contain; }
+.log::before { content:""; margin-top:auto; }       /* 消息从底部往上排 */
 .msg { max-width:78%; padding:8px 12px; border-radius:18px; white-space:pre-wrap; word-break:break-word; font-size:15px; line-height:1.45; }
 .msg.me { align-self:flex-end; background:var(--accent); color:var(--accent-fg); border-bottom-right-radius:6px; }
-.msg.her { align-self:flex-start; background:var(--glass2); border:1px solid var(--line); border-bottom-left-radius:6px;
-  backdrop-filter:blur(12px); -webkit-backdrop-filter:blur(12px); }
-.msg.sys { align-self:center; max-width:88%; background:rgba(4,28,28,.55); color:var(--muted); font-size:12px; padding:3px 10px; border-radius:10px; text-align:center; }
+.msg.her { align-self:flex-start; background:rgba(255,255,255,.11); border:1px solid rgba(255,255,255,.1); border-bottom-left-radius:6px; }
+.msg.sys { align-self:center; max-width:88%; background:rgba(0,0,0,.25); color:var(--muted); font-size:12px; padding:3px 10px; border-radius:10px; text-align:center; }
 .msg img { display:block; max-width:200px; max-height:220px; border-radius:12px; margin:-2px -6px 6px; }
 .msg .act { display:inline-block; margin-top:6px; color:var(--accent); font-weight:600; }
 
@@ -85,12 +88,12 @@ main { position:relative; z-index:1; flex:1; min-height:0; }
 .bars.idle i:nth-child(2) { animation-delay:.15s } .bars.idle i:nth-child(3) { animation-delay:.3s } .bars.idle i:nth-child(4) { animation-delay:.45s } .bars.idle i:nth-child(5) { animation-delay:.6s }
 @keyframes breathe { 0%,100% { height:4px } 50% { height:12px } }
 
-.composer { flex:none; padding:8px 10px calc(var(--safe-b) + 8px); background:linear-gradient(180deg, transparent, var(--bg) 40%); }
+.composer { flex:none; padding:8px 10px calc(var(--safe-b) + 8px); }
 .attach { display:flex; align-items:center; gap:10px; margin:0 4px 8px; padding:6px; border-radius:14px; background:var(--glass2); border:1px solid var(--line); font-size:13px; color:var(--muted); }
 .attach img { width:40px; height:40px; object-fit:cover; border-radius:9px; }
 .attach span { flex:1; }
 .attach button { width:28px; height:28px; border-radius:50%; background:#ffffff14; font-size:16px; }
-.cbar { display:flex; align-items:center; gap:6px; padding:5px; border-radius:26px; background:var(--glass2); border:1px solid var(--line2);
+.cbar { display:flex; align-items:center; gap:6px; padding:5px; border-radius:26px; background:rgba(255,255,255,.09); border:1px solid var(--line2);
   backdrop-filter:blur(14px); -webkit-backdrop-filter:blur(14px); }
 .cbtn { width:40px; height:40px; border-radius:50%; flex:none; display:flex; align-items:center; justify-content:center; color:var(--muted); }
 .cbtn svg { width:22px; height:22px; }
@@ -104,9 +107,9 @@ main { position:relative; z-index:1; flex:1; min-height:0; }
 .talk.busy { color:var(--muted); font-weight:500; letter-spacing:0; }
 
 /* ── 看家 ── */
-#homePage { background:var(--bg); }
+#homePage { background:rgba(17,17,19,.9); }
 .home { flex:1; overflow-y:auto; padding:4px 12px calc(var(--safe-b) + 16px); display:flex; flex-direction:column; gap:12px; }
-.card { background:var(--panel); border:1px solid var(--line); border-radius:18px; padding:14px; }
+.card { background:rgba(255,255,255,.06); border:1px solid var(--line); border-radius:18px; padding:14px; }
 .card h3 { margin:0 0 10px; font-size:14px; font-weight:600; color:var(--muted); display:flex; align-items:center; gap:8px; }
 .card h3 select { background:var(--panel2); border:1px solid var(--line2); border-radius:14px; padding:3px 10px; font-size:14px; color:var(--fg); font-weight:600; }
 .kv { display:flex; flex-wrap:wrap; gap:4px 16px; font-size:13.5px; color:var(--muted); }
@@ -148,7 +151,7 @@ main { position:relative; z-index:1; flex:1; min-height:0; }
 </div>
 
 <div id="appView" class="app hidden">
-  <div class="backdrop"><img id="bg" alt="" class="hidden"><div class="face" id="face">(｡･ω･｡)</div><div class="veil"></div></div>
+  <div class="backdrop"><img id="bgAmb" class="ambient hidden" alt=""><img id="bg" alt="" class="hidden"><div class="face" id="face">(｡･ω･｡)</div><div class="veil"></div></div>
   <header>
     <label class="who">
       <span class="avatar" id="avatarBox"><img id="avatar" alt="" class="hidden"><span id="avatarText">神</span></span>
@@ -164,6 +167,7 @@ main { position:relative; z-index:1; flex:1; min-height:0; }
   <div id="insecure" class="notice hidden"><span>当前不是 https 地址，浏览器不让网页录音：「按住说话」用不了，可以点键盘上的麦克风键语音输入。其它都正常。</span><button id="insecureX" aria-label="知道了">×</button></div>
   <main>
     <section class="page" id="chatPage">
+      <div class="stagegap"></div>
       <div class="log" id="log"></div>
       <div class="status hidden" id="status"><span class="bars" id="bars"><i></i><i></i><i></i><i></i><i></i></span><span id="stateText"></span><button class="stop" id="stopBtn">停止</button></div>
       <div class="composer">
@@ -279,7 +283,8 @@ function ac() {
  * 系统会把整个页面切到媒体播放类别，之后 Web Audio 也不受静音开关影响。只有在点击 / 抬手里做才算数。
  */
 let unlocked = false;
-function unlockAudio() {
+function unlockAudio(e) {
+  if (!e || e.type !== "pointerdown") askMotion();          // iOS 只认 touchend / click 里申请传感器权限
   try { if (navigator.audioSession) navigator.audioSession.type = "playback"; } catch {}
   try { ac(); } catch {}
   if (unlocked) return;
@@ -442,7 +447,7 @@ function addMsg(kind, text, img) {
  * 思考 img_streaming、说话 img_playing；先找 resource/<角色>/ 下的，没有用默认目录的，再没有退回 img_bg，都没有就显示颜文字。
  * 当前角色的几张图提前加载并解码好，切换时只换 src、复用同一个 <img>（没解码完就换上去会闪，见 CLAUDE.md「频闪」）。
  */
-const IMG_MAP = { idle: "img_bg", recording: "img_recording", processing: "img_streaming", playing: "img_playing" };
+const IMG_MAP = { idle: "img_bg", recording: "img_recording", processing: "img_streaming", playing: "img_playing", shake: "img_shake" };
 const imgCache = new Map();      // "角色|图名" → Promise<url | null>
 function loadImg(path) {
   return new Promise((ok) => {
@@ -490,7 +495,8 @@ function renderRoles() {
   resolveImg(role, "img_bg").then((url) => {
     if (S.role !== role) return;
     $("avatar").classList.toggle("hidden", !url); $("avatarText").classList.toggle("hidden", !!url);
-    if (url) $("avatar").src = url;
+    $("bgAmb").classList.toggle("hidden", !url);
+    if (url) { $("avatar").src = url; $("bgAmb").src = url; }      // 底色只用待机图糊开：换状态不跟着闪
   });
 }
 $("roleSel").onchange = async (e) => {
@@ -689,7 +695,7 @@ async function drainPushes() {
       try {
         const r = await fetch(p.url);
         if (!r.ok) continue;
-        addMsg("sys", "🔔 她有话说");
+        if (p.text) addMsg("her", p.text); else addMsg("sys", "🔔 她有话说");
         setState("她在说…", "", "", "playing");
         S.player = new Player();
         await playResponse(r, S.player);
@@ -826,6 +832,49 @@ async function loadMe() {
   renderRoles();
   return me;
 }
+// ── 摇一摇（同 CoreS3 的彩蛋：换 img_shake 那张图，她主动找你聊几句，回复走推送）──
+// 浏览器只在 https 下给动作传感器；iOS 还要在一次点击里申请权限（第一次点屏幕时问）。
+const SHAKE = { th: 13, count: 3, win: 700, cool: 20000 };   // 去掉重力后的加速度 m/s²；700ms 内 3 下；冷却 20 秒
+let shakeHits = [], shakeLast = 0, motionAsked = false, motionOn = false;
+function onMotion(e) {
+  let m;
+  const a = e.acceleration;
+  if (a && a.x != null) m = Math.hypot(a.x, a.y, a.z);
+  else { const g = e.accelerationIncludingGravity; if (!g || g.x == null) return; m = Math.abs(Math.hypot(g.x, g.y, g.z) - 9.81); }
+  if (m < SHAKE.th) return;
+  const now = Date.now();
+  if (shakeHits.length && now - shakeHits[shakeHits.length - 1] < 90) return;     // 同一下的尖峰只算一次
+  shakeHits = shakeHits.filter((t) => now - t < SHAKE.win);
+  shakeHits.push(now);
+  if (shakeHits.length >= SHAKE.count) { shakeHits = []; onShake(now); }
+}
+async function onShake(now) {
+  if (now - shakeLast < SHAKE.cool || S.busy || document.hidden || !$("homePage").classList.contains("hidden")) return;
+  shakeLast = now;
+  try { navigator.vibrate && navigator.vibrate(60); } catch {}
+  showVis("shake");
+  setTimeout(() => { if (S.vis === "shake") showVis("idle"); }, 2500);
+  try {
+    const r = await fetch("/shake", { headers: devH({ "X-Local-Time": localTime() }) });
+    if (!r.ok) toast(r.status === 429 ? "摇得太频繁啦，歇一会儿" : "她没接住（" + r.status + "）", true);
+  } catch { toast("连不上服务端", true); }
+}
+function startMotion() {
+  if (motionOn) return;
+  motionOn = true;
+  window.addEventListener("devicemotion", onMotion);
+}
+/** 能直接听就直接听；iOS 要权限的话返回 false，等第一次点击里 askMotion() */
+function initMotion() {
+  if (!window.DeviceMotionEvent || !window.isSecureContext) return;
+  if (typeof DeviceMotionEvent.requestPermission !== "function") startMotion();
+}
+function askMotion() {
+  if (motionAsked || motionOn || !window.DeviceMotionEvent || !window.isSecureContext || typeof DeviceMotionEvent.requestPermission !== "function") return;
+  motionAsked = true;
+  DeviceMotionEvent.requestPermission().then((r) => { if (r === "granted") startMotion(); }).catch(() => { motionAsked = false; });
+}
+
 async function boot() {
   readPairFromHash();
   S.token = store.get("kagura_token");
@@ -841,6 +890,7 @@ async function boot() {
     addMsg("sys", canRec ? "按住说话，或者点左边切换成打字" : "打字跟她聊吧");
     if (/iPhone|iPad|iPod/.test(navigator.userAgent) && !navigator.audioSession) addMsg("sys", "没声音的话，看看手机侧面的静音开关");
   }
+  initMotion();
   connectEvents();
 }
 // 已经开着页面时再打开配对链接（只改了 # 后面），页面不会重新加载
