@@ -18,6 +18,8 @@ export interface InboundMessage {
   /** 群里是否 @ 了机器人 */
   mentionedMe: boolean;
   messageId: string;
+  /** 消息在对方那边发出的时间（毫秒）。晚到很久的（连接断过后补投）要告诉 agent */
+  sentAt?: number;
 }
 
 export interface SendOpts {

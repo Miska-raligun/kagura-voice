@@ -209,6 +209,32 @@ const msg = (o: Partial<InboundMessage> = {}): InboundMessage => ({
 });
 
 describe("渠道路由", () => {
+  it("同一条消息重复投递（重连补投、重启后重投）只回一次，重启后也记得；晚到很久的告诉 agent 是多久前发的", async () => {
+    const env = makeRuntime();
+    const store = new ChannelStore(path.join(env.root, "channels.json"));
+    store.upsertAccount({ id: "fs", kind: "feishu", credentials: { app_id: "a", app_secret: "s" }, dm_policy: "allowlist" });
+    store.allow("fs", "ou_1", "主人", true);
+    const seenFile = path.join(env.root, "channels_seen.json");
+    const mk = () => { let ad!: FakeAdapter; const m = new ChannelManager(store, env.rt, env.reg, (a) => (ad = new FakeAdapter(a.id, a.kind)), seenFile); return { m, ad: () => ad }; };
+    const a = mk();
+    await a.m.startAll();
+    env.fake.queue.push("在的", "不该有第二次");
+    a.ad().onMsg(msg({ messageId: "om_dup", text: "在吗", sentAt: Date.now() - 20 * 60_000 }));
+    await new Promise((r) => setTimeout(r, 50));
+    a.ad().onMsg(msg({ messageId: "om_dup", text: "在吗" }));
+    await new Promise((r) => setTimeout(r, 50));
+    expect(a.ad().sent.map((x) => x.text)).toEqual(["在的"]);
+    expect(env.fake.calls[0].message).toMatch(/^\[这条消息是 20 分钟前发的/);
+    await a.m.stopAll();                                     // 退出时落盘
+    // 「重启」：新的管理器读同一个文件，飞书又把这条投了一次
+    const b = mk();
+    await b.m.startAll();
+    b.ad().onMsg(msg({ messageId: "om_dup", text: "在吗" }));
+    await new Promise((r) => setTimeout(r, 50));
+    expect(b.ad().sent).toEqual([]);
+    expect(env.fake.calls.length).toBe(1);
+  });
+
   it("收到消息先贴「正在处理」表情，回复发出后撤掉；命令和配对提示不贴", async () => {
     const { mgr, store, fake, ad } = setupMgr({ dm_policy: "allowlist" });
     store.allow("fs", "ou_1", "主人", true);

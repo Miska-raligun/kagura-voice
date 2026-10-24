@@ -79,7 +79,7 @@ export function createAgentSystem(cfg: Config, dirs: Dirs, fake: FakeLlm | null)
   runtime.addTools(extensionTools(extensions));
   runtime.addTools(extensions.tools(), { plugin: true });
   runtime.addTools(mcp.tools(), { plugin: true });
-  const channels = new ChannelManager(new ChannelStore(path.join(cfg.dataDir, "channels.json")), runtime, registry);
+  const channels = new ChannelManager(new ChannelStore(path.join(cfg.dataDir, "channels.json")), runtime, registry, undefined, path.join(cfg.dataDir, "channels_seen.json"));
   return { registry, models, runtime, memories, scheduler: null, a2a, skills, channels, mcp, extensions, packages };
 }
 

@@ -12,6 +12,10 @@ import { FeishuAdapter } from "./feishu.ts";
 import { QQAdapter } from "./qq.ts";
 import { OneBotAdapter } from "./onebot.ts";
 import { runCommand, type CommandDeps } from "./commands.ts";
+import { SeenMessages } from "./seen.ts";
+
+/** 晚到多久就在消息前注明（断线后补投的老消息，agent 得知道这不是刚说的） */
+const LATE_MS = 5 * 60_000;
 
 /** 渠道回复同时在家里设备上播语音要用的东西（attachAgentSystem 里接上） */
 export interface VoiceBridge {
@@ -30,6 +34,13 @@ export const defaultFactory: AdapterFactory = (a) => {
 
 const PAIRING_REMIND_SECS = 600;
 
+/** 晚到的消息前面注明是多久以前发的 */
+function late(m: InboundMessage): string {
+  if (!m.sentAt) return "";
+  const min = Math.round((Date.now() - m.sentAt) / 60_000);
+  return Date.now() - m.sentAt > LATE_MS ? `[这条消息是 ${min} 分钟前发的，网络原因现在才收到] ` : "";
+}
+
 export class ChannelManager {
   adapters = new Map<string, ChannelAdapter>();
   private errors = new Map<string, string>();
@@ -41,7 +52,11 @@ export class ChannelManager {
   /** 主人私聊的回复同时播语音（没接就不播） */
   voice: VoiceBridge | null = null;
 
-  constructor(public store: ChannelStore, private rt: Runtime, private agents: AgentRegistry, private factory: AdapterFactory = defaultFactory) {}
+  private seen: SeenMessages;
+
+  constructor(public store: ChannelStore, private rt: Runtime, private agents: AgentRegistry, private factory: AdapterFactory = defaultFactory, seenFile: string | null = null) {
+    this.seen = new SeenMessages(seenFile);
+  }
 
   async startAll() {
     for (const a of this.store.accounts()) if (a.enabled) await this.start(a.id);
@@ -55,7 +70,11 @@ export class ChannelManager {
     this.adapters.set(id, ad);
     this.errors.delete(id);
     try {
-      await ad.start((m) => { this.handle(m).catch((e) => console.log(`[channel] ⚠️  ${id} 处理消息失败: ${e.message}`)); });
+      await ad.start((m) => {
+        // 飞书等是「至少投递一次」：同一条消息可能来两次（重连补投、重启后重投），只处理第一次
+        if (!this.seen.first(m.account, m.messageId)) { console.log(`[channel] ↩️  ${id} 重复投递的消息，跳过（${m.messageId}）`); return; }
+        this.handle(m).catch((e) => console.log(`[channel] ⚠️  ${id} 处理消息失败: ${e.message}`));
+      });
       console.log(`[channel] ${a.kind}/${id} 已启动`);
     } catch (e: any) {
       this.errors.set(id, e.message);
@@ -69,7 +88,7 @@ export class ChannelManager {
     if (ad) await ad.stop().catch(() => {});
   }
 
-  async stopAll() { for (const id of [...this.adapters.keys()]) await this.stop(id); }
+  async stopAll() { for (const id of [...this.adapters.keys()]) await this.stop(id); this.seen.flush(); }
 
   status() {
     return this.store.accounts().map((a) => {
@@ -150,7 +169,7 @@ export class ChannelManager {
     try {
       const r = await this.rt.run({
         agentId, sessionKey, kind: ownerMain ? "main" : "chat", channel: m.kind, purpose: "chat",
-        text: who + (m.text || "（发来一张图片）"), images: m.images.map((i) => ({ type: "image" as const, ...i })),
+        text: late(m) + who + (m.text || "（发来一张图片）"), images: m.images.map((i) => ({ type: "image" as const, ...i })),
         origin: `${m.kind}:${a.id}:${m.chatId}`,
         // 只有白名单里标了 owner 的人在私聊里说的才可信（能让 agent 执行命令）；群聊、配对的陌生人一律不可信
         trusted: m.chatType === "dm" && !!allowed?.owner,

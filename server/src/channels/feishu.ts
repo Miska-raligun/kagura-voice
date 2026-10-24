@@ -111,6 +111,7 @@ export class FeishuAdapter implements ChannelAdapter {
     return {
       kind: "feishu", account: this.accountId, chatType: msg.chat_type === "p2p" ? "dm" : "group",
       chatId: msg.chat_id, sender: data.sender?.sender_id?.open_id ?? "", text, images, mentionedMe, messageId: msg.message_id,
+      ...(Number(msg.create_time) > 0 ? { sentAt: Number(msg.create_time) } : {}),
     };
   }
 

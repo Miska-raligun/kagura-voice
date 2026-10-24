@@ -412,6 +412,9 @@ CoreS3 (MicroPython) ──HTTP──▶ server/（TypeScript 单文件可执行
   以前退出 / 重启 / 更新都是直接结束进程，飞书长连接没断开，飞书把事件继续投给死连接，直到租约过期。现在 `gracefulExit` 先跑 `onShutdown`
   （关 IM 渠道，最多等 3 秒）再退；`/api/admin/quit`、`restartSelf`、SIGINT/SIGTERM 都走它。Windows 安装包的 `PrepareToInstall` 先
   `POST /api/admin/quit`（端口由更新脚本 `/KAGURAPORT=` 传入，手动安装按 5000 试）、等 3 秒，再 taskkill 兜底。**新加要退出进程的地方别直接 `process.exit`。**
+  **IM 消息去重**（`channels/seen.ts`，症状「升级完她把之前那几条又回了一遍」）：飞书事件「至少投递一次」，投给死连接 / 没确认的会重投，QQ 重连也补发。
+  `ChannelManager` 收到就按「账号 + message_id」查 `channels_seen.json`（留 3 天、最多 3000 条，重启后也记得），见过就跳过（日志 `↩️ 重复投递`）。
+  晚到超过 5 分钟的（`InboundMessage.sentAt`，飞书 `create_time`）在消息前注明「这条消息是 N 分钟前发的」，别让 agent 当成刚说的。
 - **新版本提醒（`util/update.ts`）**：启动 30 秒后、之后每 12 小时查一次 GitHub Releases，只提示不安装；
   预览版连预览版一起比，正式版只看正式版。`update_check: false` 关掉。
 - **`global` 声明必须有主**（LRN 2026-08-25）：`netsvc.mqtt_check` 里写过
