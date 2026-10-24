@@ -64,8 +64,9 @@ describe("sessions_send", () => {
     expect(Date.now() - t0).toBeLessThan(3000);
     expect(ra.text).toBe("A 结束");
     expect(rb.text).toBe("B 结束");
-    const tr = rt.store("mio").history("mio:main").map((h) => h.msg as any).find((m) => m.role === "toolResult");
-    expect(tr.content[0].text).toMatch(/互相等/);
+    // 哪一边被拒取决于谁后发起等待；必须恰好有一边被拒、另一边拿到了回复
+    const results = ["main", "mio"].flatMap((id) => rt.store(id).history(`${id}:main`).map((h) => h.msg as any).filter((m) => m.role === "toolResult").map((m) => m.content[0].text));
+    expect(results.filter((t) => /互相等/.test(t)).length).toBe(1);
     expect(rt.busy("main", "main:main") || rt.busy("mio", "mio:main")).toBe(false);
   }, 15_000);
 

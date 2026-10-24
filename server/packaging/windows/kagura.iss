@@ -88,7 +88,15 @@ Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
   Code: Integer;
+  Port: String;
 begin
+  // 先请正在运行的 Kagura 自己退出（它会先断开飞书 / QQ 长连接）：直接强杀的话，飞书会把消息继续投给那条死连接十几分钟。
+  // 在线更新会传 /KAGURAPORT=端口；手动运行安装包时按默认端口试一下，没在跑就什么也不发生
+  Port := ExpandConstant('{param:KAGURAPORT|5000}');
+  Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
+    '-NoProfile -NonInteractive -WindowStyle Hidden -Command "try { Invoke-RestMethod -Method Post -Uri http://127.0.0.1:' + Port + '/api/admin/quit -TimeoutSec 5 | Out-Null; Start-Sleep -Seconds 3 } catch {}"',
+    '', SW_HIDE, ewWaitUntilTerminated, Code);
+  // 还没退的（老版本、卡住的）照旧强制结束
   Exec(ExpandConstant('{sys}\taskkill.exe'), '/IM kagura-tray.exe /F', '', SW_HIDE, ewWaitUntilTerminated, Code);
   Exec(ExpandConstant('{sys}\taskkill.exe'), '/IM kagura.exe /F', '', SW_HIDE, ewWaitUntilTerminated, Code);
   Sleep(1000);

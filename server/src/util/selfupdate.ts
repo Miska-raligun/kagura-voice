@@ -10,6 +10,7 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { execFileSync } from "node:child_process";
+import { gracefulExit } from "./shutdown.ts";
 import type { UpdateInfo } from "./update.ts";
 
 export type InstallKind = "windows" | "appimage" | "deb" | "unsupported";
@@ -74,14 +75,14 @@ const psq = (s: string) => `'${s.replace(/'/g, "''")}'`;
 export const UAC_HINT = "等待安装：请在弹出的「用户账户控制」窗口里点「是」。没看到的话，看看任务栏上有没有闪烁的盾牌图标";
 
 /** Windows 更新脚本：跑安装包 → 关掉残留 → 拉起托盘版。每步写日志，服务端靠它判断进度 */
-export function windowsUpdateScript(setup: string, exe: string, log: string): string {
+export function windowsUpdateScript(setup: string, exe: string, log: string, port = 5000): string {
   return [
     "$ErrorActionPreference = 'Continue'",
     `$log = ${psq(log)}`,
     "function Log($m) { Add-Content -Path $log -Value ((Get-Date -Format 'yyyy-MM-dd HH:mm:ss') + ' ' + $m) }",
     "Log 'script-start'",
     // 安装包要管理员权限：这里会弹「用户账户控制」。选了「否」会抛错——服务端还在跑，记一笔就走
-    `try { $p = Start-Process -FilePath ${psq(setup)} -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-' -PassThru -ErrorAction Stop }`,
+    `try { $p = Start-Process -FilePath ${psq(setup)} -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-','/KAGURAPORT=${Math.trunc(port)}' -PassThru -ErrorAction Stop }`,
     "catch { Log ('uac-declined ' + $_.Exception.Message); exit 1 }",
     "$null = $p.Handle",          // 先拿句柄，否则提权进程退出后读不到 ExitCode
     "Log 'installer-started'",
@@ -103,11 +104,13 @@ export class SelfUpdater {
   state: UpdateState = { phase: "idle", done: 0, total: 0, message: "" };
   private mirrors: string[];
   private stallMs: number;
+  private port: number;
   private slowBps: number;
   private slowWindowMs: number;
   constructor(private dataDir: string, private fetchFn: typeof fetch = fetch, private kind: InstallKind = installKind(),
-              private onRestart: () => void = () => setTimeout(() => process.exit(0), 800),
-              opts: { mirrors?: string[]; stallMs?: number; slowBps?: number; slowWindowMs?: number } = {}) {
+              private onRestart: () => void = () => setTimeout(() => void gracefulExit(0), 800),
+              opts: { mirrors?: string[]; stallMs?: number; slowBps?: number; slowWindowMs?: number; port?: number } = {}) {
+    this.port = opts.port ?? 5000;
     this.mirrors = opts.mirrors ?? UPDATE_MIRRORS;
     this.stallMs = opts.stallMs ?? 30_000;
     this.slowBps = opts.slowBps ?? 200 * 1024;
@@ -290,7 +293,7 @@ export class SelfUpdater {
     const exe = fs.existsSync(tray) ? tray : process.execPath;
     fs.writeFileSync(this.updateLog, "");
     const ps1 = path.join(this.dataDir, "updates", "run-update.ps1");
-    fs.writeFileSync(ps1, "\ufeff" + windowsUpdateScript(setup, exe, this.updateLog), "utf16le");
+    fs.writeFileSync(ps1, "\ufeff" + windowsUpdateScript(setup, exe, this.updateLog, this.port), "utf16le");
     const cmd = `Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',${psq(ps1)}) -WindowStyle Hidden`;
     execFileSync("powershell.exe", ["-NoProfile", "-Command", cmd], { windowsHide: true, timeout: 15_000 });
   }

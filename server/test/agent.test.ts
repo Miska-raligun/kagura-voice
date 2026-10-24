@@ -184,6 +184,32 @@ describe("会话与压缩", () => {
     expect((await rt.run({ ...dev, agentId: "main", sessionKey: key, text: "嗯" })).text).toBe("好的");
   }, 20_000);
 
+  it("历史很长：分块滚动摘要（每块带上一版摘要）；某块摘要为空就记要点照样压掉，不再每轮重试", async () => {
+    const { rt, reg, fake } = makeRuntime();
+    reg.update("main", { compaction: { max_tokens: 1_000_000, keep_messages: 2 } });
+    const key = "main:main";
+    const long = (i: number) => `第${i}件事：` + "很长的细节".repeat(600);    // 每条约 3000 字
+    for (let i = 0; i < 6; i++) { fake.queue.push("记下了"); await rt.run({ ...dev, agentId: "main", sessionKey: key, text: long(i) }); }
+    reg.update("main", { compaction: { max_tokens: 10_000, keep_messages: 2 } });
+    // 约 1.8 万字 → 超过阈值；要压的 5 轮每条截到 1500 字，约 7500 字 → 按 5000 一块分成两块
+    (rt as any).compactChunk = 5000;                                     // 单测里把块调小
+    fake.queue.push("摘要一：前几件事", "", "这轮照常");               // 第二块模型给了空正文
+    const r = await rt.run({ ...dev, agentId: "main", sessionKey: key, text: "还记得吗" });
+    expect(r.text).toBe("这轮照常");
+    const compacts = fake.calls.filter((c) => c.purpose === "compact");
+    expect(compacts.length).toBe(2);
+    expect(compacts[1].message).toContain("此前的摘要：\n摘要一：前几件事");
+    expect(compacts[1].message).toContain("（第 2/2 段）");
+    const s = rt.store("main").getSession(key)!;
+    expect(s.summary).toContain("摘要一：前几件事");
+    expect(s.summary).toContain("没能总结");
+    expect(s.summary).toMatch(/- 第\d件事/);
+    expect(rt.store("main").history(key).length).toBeLessThanOrEqual(4);
+    fake.queue.push("好");
+    await rt.run({ ...dev, agentId: "main", sessionKey: key, text: "嗯" });
+    expect(fake.calls.filter((c) => c.purpose === "compact").length).toBe(2);   // 已经压下去了，不再重试
+  }, 20_000);
+
   it("管理界面看得到正在跑的轮次和排队数，能手动终止，排着的消息接着处理", async () => {
     const { rt, fake } = makeRuntime();
     rt.addTools(() => [{

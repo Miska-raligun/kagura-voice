@@ -38,6 +38,7 @@ import { initLogFile, installCrashLogging } from "./util/logfile.ts";
 import { startTray } from "./tray.ts";
 import { isGuiProcess, messageBox } from "./util/wingui.ts";
 import { waitForOldProcess, takeRestartNotice, restartSelf } from "./util/restart.ts";
+import { gracefulExit, onShutdown } from "./util/shutdown.ts";
 import { preflight, realIO, closeAsk, pauseBeforeExit, type PortNeed } from "./startup/preflight.ts";
 
 // Node 22 下 node:sqlite 等会打实验特性警告，对用户只是噪声
@@ -111,7 +112,7 @@ async function main() {
     const kind = installKind();
     // 下载走 Node 自带的 http（undici 在对方断开 + 背压时会抛未捕获异常，见 util/nodefetch.ts）
     ctx.selfUpdater = new SelfUpdater(cfg.dataDir, makeNodeFetch(activeProxy), kind, kind === "appimage" ? () => setTimeout(() => restartSelf(cfg.dataDir, null), 800) : undefined,
-      { mirrors: cfg.updateMirrors });
+      { mirrors: cfg.updateMirrors, port: cfg.adminPort || cfg.port });
   }
 
   console.log("=".repeat(50));
@@ -151,6 +152,9 @@ async function main() {
   // 扩展加载完会顺带（重新）连接 MCP 服务器；都在后台，不拖慢启动
   sys.extensions.reloadAll().catch((e) => console.log(`[ext] ⚠️  ${e.message}`))
     .then(() => reinstallImportedPackages(cfg.dataDir, sys.packages));
+  // 退出 / 重启 / 更新前先正常断开 IM 长连接（飞书：不断开的话事件会继续投给死连接十几分钟）
+  onShutdown("关闭 IM 渠道", () => sys.channels.stopAll());
+  for (const sig of ["SIGINT", "SIGTERM"] as const) process.on(sig, () => { console.log(`[main] 收到 ${sig}，正在退出`); void gracefulExit(0); });
   sys.channels.startAll().then(async () => {
     // /restart 之前在哪个聊天里发的，回来在那说一声
     const n = takeRestartNotice(cfg.dataDir);

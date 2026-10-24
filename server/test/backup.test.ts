@@ -249,7 +249,23 @@ describe("在线更新：Windows 安装脚本", () => {
     expect(ps.indexOf("installer exit")).toBeLessThan(ps.indexOf("server still running"));
     expect(ps.indexOf("tray.ps1")).toBeLessThan(ps.indexOf("Start-Process -FilePath 'C:\\Program Files"));
     expect(ps).toContain("'--tray','--no-browser'");
+    expect(ps).toContain("'/KAGURAPORT=5000'");                                      // 安装包先按这个端口请服务端自己退出（断开飞书长连接）
+    expect(windowsUpdateScript("a", "b", "c", 5077)).toContain("'/KAGURAPORT=5077'");
     expect(ps).not.toMatch(/-Wait/);                                                    // 用 WaitForExit，先取句柄才读得到退出码
     expect(ps).toContain("$null = $p.Handle");
+  });
+});
+
+describe("优雅退出", () => {
+  it("退出前的收尾都跑一遍；卡住的不等，最多等 capMs", async () => {
+    const { onShutdown, runShutdownHooks } = await import("../src/util/shutdown.ts");
+    const done: string[] = [];
+    onShutdown("关渠道", async () => { await new Promise((r) => setTimeout(r, 20)); done.push("渠道"); });
+    onShutdown("会报错", () => { throw new Error("x"); });
+    onShutdown("卡住", () => new Promise(() => {}));
+    const t0 = Date.now();
+    await runShutdownHooks(300);
+    expect(done).toEqual(["渠道"]);
+    expect(Date.now() - t0).toBeLessThan(1000);
   });
 });

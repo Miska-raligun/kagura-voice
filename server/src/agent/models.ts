@@ -35,6 +35,9 @@ export interface FakeLlm {
 const keyAuth = (name: string, key: string) =>
   ({ apiKey: { name, resolve: async () => ({ auth: { apiKey: key || "none" } }) } }) as any;
 
+export const DEFAULT_CONTEXT_WINDOW = 128_000;
+export const DEFAULT_MAX_TOKENS = 8192;
+
 export class ModelRegistry {
   models: MutableModels;
   private fake: FakeLlm | null = null;
@@ -52,7 +55,8 @@ export class ModelRegistry {
         id: m.id, name: m.name ?? m.id, api: p.api, provider: p.id, baseUrl: p.base_url,
         reasoning: !!m.reasoning, input: m.input ?? ["text"],
         cost: { input: m.cost?.input ?? 0, output: m.cost?.output ?? 0, cacheRead: m.cost?.cache_read ?? 0, cacheWrite: m.cost?.cache_write ?? 0 },
-        contextWindow: m.context_window ?? 64000, maxTokens: m.max_tokens ?? 4096,
+        // 没填时的默认：上下文 12.8 万、单次输出 8192（含推理型模型的思考；4096 常被思考用完、正文为空）
+        contextWindow: m.context_window ?? DEFAULT_CONTEXT_WINDOW, maxTokens: m.max_tokens ?? DEFAULT_MAX_TOKENS,
         ...(p.headers ? { headers: p.headers } : {}),
       })) as Model<any>[];
       this.models.setProvider(createProvider({

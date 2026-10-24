@@ -120,6 +120,11 @@ function saveImageRef(c: { data: string; mimeType: string }, workspace?: string)
 
 interface RunInfo { purpose: string; channel: string; since: number; tool: string; stage: string; abort: () => void; cancelled: boolean }
 
+/** 压缩时每次交给摘要模型的对话量（估算 token）；太大推理型模型会把输出额度全花在思考上 */
+export const COMPACT_CHUNK_TOKENS = 16_000;
+/** 摘要那次调用的输出额度下限（含思考）：模型配置的 max_tokens 更大就用模型的 */
+export const COMPACT_MAX_OUTPUT = 8192;
+
 /** 一个工具最多执行多久（工具自己不理超时、卡在网络上时的兜底；exec 自己的上限是 10 分钟） */
 export const TOOL_MAX_MS = 15 * 60_000;
 
@@ -143,6 +148,8 @@ export class Runtime {
   private waitsFor = new Map<string, string>();
   /** 在别的会话里发起、要等这个会话的锁（a2a 等对方回复）最多等多久。拿着自己的锁干等别人，等久了谁都动不了 */
   lockWaitMs = { a2a: 90_000 };
+  /** 压缩时每块交给摘要模型的对话量（单测可调小） */
+  compactChunk = COMPACT_CHUNK_TOKENS;
   /** 每个会话正在跑的那一轮：卡住时日志里说清楚是谁占着 */
   private running = new Map<string, RunInfo>();
   /** 每个会话后面排着几轮 */
@@ -453,8 +460,13 @@ export class Runtime {
     const hist = store.history(key);
     const summary = store.getSession(key)?.summary ?? "";
     const size = estimateTokens(summary) + hist.reduce((n, h) => n + estimateTokens(messageText(h.msg)), 0);
-    if (size <= agent.compaction.max_tokens) return;
-    const ms = this.opts.timeoutSecs * 1000 * 2;            // 冲刷 + 摘要两次模型调用
+    // 阈值不超过主模型上下文的六成（系统提示、工具定义、本轮输出都要占地方）
+    let ctxWin = 0;
+    try { ctxWin = this.models.resolve(agent.model).contextWindow || 0; } catch { /* 模型没配好：这轮本来也跑不了 */ }
+    const limit = ctxWin ? Math.min(agent.compaction.max_tokens, Math.floor(ctxWin * 0.6)) : agent.compaction.max_tokens;
+    if (size <= limit) return;
+    // 冲刷一次 + 摘要按块各一次（见 compactNow），每次最多 timeoutSecs
+    const ms = this.opts.timeoutSecs * 1000 * Math.min(8, 1 + Math.ceil(size / this.compactChunk));
     const ac = new AbortController();
     let why = "";
     const onAbort = () => { why ||= "已取消"; ac.abort(); };
@@ -487,27 +499,54 @@ export class Runtime {
       catch (e: any) { console.log(`[agent] ⚠️  ${agent.id} 记忆冲刷失败: ${e.message}`); }
       if (signal?.aborted) throw new Error("已取消");
     }
-    const prev = store.getSession(key)?.summary ?? "";
-    const transcript = old.map((h) => {
+    // 分块滚动摘要：把要压的对话切成每块 COMPACT_CHUNK_TOKENS 左右，「上一版摘要 + 这一块」→ 新摘要。
+    // 以前一次塞几万 token 进去：推理型模型（MiniMax-M3 等）把输出额度花在思考上，正文为空 → 「摘要为空」，
+    // 而且每轮重试、历史越积越大（2026-10-24 真机：冲刷那次输入 6.9 万 token，连着两轮空摘要）
+    const lines = old.map((h) => {
       const who = h.msg.role === "user" ? "用户" : h.msg.role === "assistant" ? agent.name : "工具结果";
-      return `${who}：${messageText(h.msg).slice(0, 800)}`;
-    }).join("\n");
+      return `${who}：${messageText(h.msg).slice(0, h.msg.role === "toolResult" ? 600 : 1500)}`;
+    });
+    const chunks: string[][] = [[]];
+    let size = 0;
+    for (const ln of lines) {
+      const n = estimateTokens(ln);
+      if (size + n > this.compactChunk && chunks.at(-1)!.length) { chunks.push([]); size = 0; }
+      chunks.at(-1)!.push(ln); size += n;
+    }
     const model = this.models.resolve(agent.cheap_model || this.models.cheapRef() || agent.model);
-    if (signal?.aborted) throw new Error("已取消");
-    const res = await withScope({ agentId: agent.id, sessionKey: key, kind: "isolated", channel: "system", purpose: "compact", hop: 0, chain: [], meta: {}, trusted: false },
-      () => this.models.models.completeSimple(model, {
-        systemPrompt: "你负责把一段对话压缩成摘要，供之后继续对话时参考。保留：人物、约定、待办、偏好、未解决的问题、重要事实与数字。"
-          + "省略寒暄与重复。用第三人称、中文、条目式，不超过 600 字。",
-        messages: [{ role: "user", content: (prev ? `此前的摘要：\n${prev}\n\n` : "") + `需要压缩的对话：\n${transcript}`, timestamp: Date.now() }],
-      }, { signal }));
-    if (signal?.aborted) throw new Error("已取消");              // 放弃等待之后才回来：别再改历史（下一轮可能已经在用了）
-    if (res.stopReason === "error" || res.stopReason === "aborted") throw new Error(res.errorMessage || "摘要模型调用失败");
-    const summary = res.content.filter((c: any) => c.type === "text").map((c: any) => c.text).join("").trim();
-    if (!summary) throw new Error("摘要为空");
-    const u = res.usage;
-    if (u) store.recordUsage(key, "compact", { model: `${res.provider}/${res.model}`, input: u.input, output: u.output, cacheRead: u.cacheRead, cacheWrite: u.cacheWrite, cost: u.cost?.total ?? 0 });
+    const perCall = this.opts.timeoutSecs * 1000;
+    let summary = store.getSession(key)?.summary ?? "";
+    let failed = 0;
+    for (const [i, chunk] of chunks.entries()) {
+      if (signal?.aborted) throw new Error("已取消");
+      let text = "";
+      try {
+        const sig = signal ? AbortSignal.any([signal, AbortSignal.timeout(perCall)]) : AbortSignal.timeout(perCall);
+        const res = await withScope({ agentId: agent.id, sessionKey: key, kind: "isolated", channel: "system", purpose: "compact", hop: 0, chain: [], meta: {}, trusted: false },
+          () => this.models.models.completeSimple(model, {
+            systemPrompt: "你负责把一段对话压缩成摘要，供之后继续对话时参考。保留：人物、约定、待办、偏好、未解决的问题、重要事实与数字。"
+              + "省略寒暄与重复。用第三人称、中文、条目式，不超过 800 字。直接输出摘要本身，不要思考过程。",
+            messages: [{ role: "user", content: (summary ? `此前的摘要：\n${summary}\n\n` : "") + `需要并进摘要的对话${chunks.length > 1 ? `（第 ${i + 1}/${chunks.length} 段）` : ""}：\n${chunk.join("\n")}`, timestamp: Date.now() }],
+          }, { signal: sig, maxTokens: Math.max(model.maxTokens || 0, COMPACT_MAX_OUTPUT) }));
+        if (signal?.aborted) throw new Error("已取消");          // 放弃等待之后才回来：别再改历史（下一轮可能已经在用了）
+        const u = res.usage;
+        if (u) store.recordUsage(key, "compact", { model: `${res.provider}/${res.model}`, input: u.input, output: u.output, cacheRead: u.cacheRead, cacheWrite: u.cacheWrite, cost: u.cost?.total ?? 0 });
+        if (res.stopReason === "error" || res.stopReason === "aborted") throw new Error(res.errorMessage || "摘要模型调用失败");
+        text = res.content.filter((c: any) => c.type === "text").map((c: any) => c.text).join("").trim();
+        if (!text) throw new Error(`摘要为空（${res.stopReason === "length" ? "输出额度被思考用完了" : res.stopReason}）`);
+      } catch (e: any) {
+        if (signal?.aborted) throw new Error("已取消");
+        failed++;
+        console.log(`[agent] ⚠️  ${agent.id} 摘要第 ${i + 1}/${chunks.length} 段失败，这段改记要点: ${e.message}`);
+        // 兜底：不再每轮重试、让历史越积越大——留下这段里用户说过的话（各截一点），照样压掉
+        const said = chunk.filter((l) => l.startsWith("用户：")).map((l) => "- " + Array.from(l.slice(3).replace(/^\[[^\]]*\]\s*/, "")).slice(0, 60).join("")).slice(-12);
+        text = [summary, `（有一段较早的对话没能总结，用户当时说过：）`, ...said].filter(Boolean).join("\n");
+      }
+      summary = text;
+    }
+    if (failed === chunks.length && !summary.trim()) throw new Error("摘要为空");
     store.compact(key, old.at(-1)!.id, summary);
-    console.log(`[agent] 🗜️  ${agent.id} ${key} 压缩 ${old.length} 条 → 摘要 ${Array.from(summary).length} 字`);
+    console.log(`[agent] 🗜️  ${agent.id} ${key} 压缩 ${old.length} 条（${chunks.length} 段${failed ? `，${failed} 段没总结成` : ""}）→ 摘要 ${Array.from(summary).length} 字`);
     return true;
   }
 

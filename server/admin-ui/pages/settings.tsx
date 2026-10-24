@@ -110,8 +110,8 @@ function Models({ cfg, save }: { cfg: any; save: (p: any) => Promise<void> }) {
               return <tr>
                 <td><Input value={x.id} onInput={(v) => mm((o) => (o.id = v))} /></td>
                 <td><input type="checkbox" checked={(x.input ?? []).includes("image")} onChange={(e) => mm((o) => (o.input = (e.target as HTMLInputElement).checked ? ["text", "image"] : ["text"]))} /></td>
-                <td><Input type="number" value={x.context_window ?? ""} placeholder="64000" onInput={(v) => mm((o) => (o.context_window = v ? Number(v) : undefined))} /></td>
-                <td><Input type="number" value={x.max_tokens ?? ""} placeholder="4096" onInput={(v) => mm((o) => (o.max_tokens = v ? Number(v) : undefined))} /></td>
+                <td><Input type="number" value={x.context_window ?? ""} placeholder="128000" onInput={(v) => mm((o) => (o.context_window = v ? Number(v) : undefined))} /></td>
+                <td><Input type="number" value={x.max_tokens ?? ""} placeholder="8192" onInput={(v) => mm((o) => (o.max_tokens = v ? Number(v) : undefined))} /></td>
                 <td><Input type="number" value={x.cost?.input ?? ""} placeholder="¥/百万" onInput={(v) => mm((o) => (o.cost = { ...(o.cost ?? {}), input: Number(v) }))} /></td>
                 <td><Input type="number" value={x.cost?.output ?? ""} placeholder="¥/百万" onInput={(v) => mm((o) => (o.cost = { ...(o.cost ?? {}), output: Number(v) }))} /></td>
                 <td><Btn small onClick={() => testRef(ref(p, x))}>测试</Btn><Btn small kind="ghost" onClick={() => up((c) => c.providers[i].models.splice(j, 1))}>✕</Btn></td>

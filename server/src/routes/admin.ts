@@ -26,6 +26,7 @@ import { applyProxy, activeProxy } from "../util/proxy.ts";
 import { search } from "../agent/tools/web.ts";
 import { runShell, shellFor, clipOutput } from "../agent/tools/exec.ts";
 import { ModelRegistry } from "../agent/models.ts";
+import { gracefulExit } from "../util/shutdown.ts";
 import { OpenAIEmbedder } from "../agent/memory.ts";
 
 const LOCAL = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"]);
@@ -405,7 +406,7 @@ export function registerAdmin(r: Router, ctx: Ctx, sys: AgentSystem) {
   /** 退出服务端（托盘菜单「退出」用；只允许本机） */
   post("/api/admin/quit", () => {
     console.log("[admin] 收到退出请求，服务端即将结束");
-    setTimeout(() => process.exit(0), 200);
+    setTimeout(() => void gracefulExit(0), 200);       // 先关 IM 长连接再退（安装包更新前也调这个）
     return json({ status: "quitting" });
   });
   /** 试一下联网搜索（按当前设置） */

@@ -301,6 +301,11 @@ CoreS3 (MicroPython) ──HTTP──▶ server/（TypeScript 单文件可执行
   嵌套等待（手里拿着自己的锁去等别人）还有上限 `lockWaitMs.a2a`（90 秒），等不到就放弃——但排着的位置要等前面真完了才让出去，别让后面的插队。
   管理界面总览的「正在运行」卡片（`Runtime.activeRuns` / `cancelRun`，`/api/admin/runs`）：每个会话正在跑的那一轮、阶段 / 工具、排队数、在等谁，能手动终止。
   终止走每轮自己的 `AbortController`（调用方的 `req.signal` 也接在它上面），和取消同一条路：中止模型和工具，最多 2 秒放开会话锁。
+  ⑤ **压缩是分块滚动摘要**（LRN 2026-10-24，症状「压缩失败：摘要为空」连着好几轮、会话越积越大）：一次塞几万 token 给推理型模型（MiniMax-M3 等），
+  输出额度被思考用完、正文为空。现在按 `COMPACT_CHUNK_TOKENS`（1.6 万）切块，「上一版摘要 + 这一块」→ 新摘要，每次 `maxTokens` 至少 `COMPACT_MAX_OUTPUT`（8192）、
+  各自 `timeout_secs`；某块失败 / 为空就记下这段里用户说过的话**照样压掉**——别改回「失败就下轮重试」，那样历史只会越来越大、越来越压不动。
+  默认值（2026-10）：压缩阈值 6 万 / 保留 30 条（不超过主模型上下文的六成）；模型没填时上下文 12.8 万、单次输出 8192。
+  agent.json 里原样存着旧默认（16000 / 16）的当成没改过、跟新默认走。
 - **设备文件同步（`ota.py`，管理界面「设备 → 图片与代码」）**：服务端 `server/src/devicefiles.ts` 存
   `<数据目录>/device_files/`（自定义）+ 构建时打进来的 `device/src`（`virtual:device-fw`，版本 = 服务端版本）；
   MQTT `{"action":"sync","scope":"res|code|all"}` → 设备空闲时 `GET /device/files` 拿清单（路径/大小/sha256）
@@ -403,6 +408,10 @@ CoreS3 (MicroPython) ──HTTP──▶ server/（TypeScript 单文件可执行
   **Windows 安装期间服务端不先退出**：等用户点了 UAC「是」、安装包的 `PrepareToInstall` 才结束它，装完 `run-update.ps1` 再拉起；
   点「否」/ 装失败服务照常运行，进度看 `updates/update.log`（脚本用 Start-Process 起，别 spawn）。release.yml 有 Windows 在线更新冒烟。
   `main()` 装了 `installCrashLogging`：未捕获异常同步写进 kagura.log 再退出——托盘版没控制台，以前这类崩溃一个字都不留。大请求体只对本机来源放宽（`Router.bigBodyPaths`）。
+- **优雅退出（`util/shutdown.ts`，LRN 2026-10-24，症状「在线更新之后神乐的飞书十几分钟收不到消息，状态却显示在线」）**：
+  以前退出 / 重启 / 更新都是直接结束进程，飞书长连接没断开，飞书把事件继续投给死连接，直到租约过期。现在 `gracefulExit` 先跑 `onShutdown`
+  （关 IM 渠道，最多等 3 秒）再退；`/api/admin/quit`、`restartSelf`、SIGINT/SIGTERM 都走它。Windows 安装包的 `PrepareToInstall` 先
+  `POST /api/admin/quit`（端口由更新脚本 `/KAGURAPORT=` 传入，手动安装按 5000 试）、等 3 秒，再 taskkill 兜底。**新加要退出进程的地方别直接 `process.exit`。**
 - **新版本提醒（`util/update.ts`）**：启动 30 秒后、之后每 12 小时查一次 GitHub Releases，只提示不安装；
   预览版连预览版一起比，正式版只看正式版。`update_check: false` 关掉。
 - **`global` 声明必须有主**（LRN 2026-08-25）：`netsvc.mqtt_check` 里写过

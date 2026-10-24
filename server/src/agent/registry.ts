@@ -55,7 +55,8 @@ const DEFAULTS: Omit<AgentConfig, "id" | "name"> = {
   aliases: [], per: 111, tts_provider: "", tts_voice: "", device_role: "", order: 0, model: "", cheap_model: "",
   tools: ["*"], skills: ["*"], a2a: { allow: [] },
   heartbeat: { enabled: false, every_minutes: 30, active_hours: "08:00-23:00", delivery: "device:cores3" },
-  compaction: { max_tokens: 16000, keep_messages: 16 },
+  // 现在的模型上下文普遍 12.8 万起、有前缀缓存：攒到 6 万再压，保留最近 30 条原文（以前 1.6 万 / 16 条，压得太勤、丢细节）
+  compaction: { max_tokens: 60000, keep_messages: 30 },
   device_in_main: true,
   voice_max_chars: 80,
 };
@@ -95,6 +96,8 @@ function normalize(raw: any, id: string): AgentConfig {
   c.a2a = { allow: Array.isArray(raw?.a2a?.allow) ? raw.a2a.allow.map(String) : [] };
   c.heartbeat = { ...DEFAULTS.heartbeat, ...(raw?.heartbeat ?? {}) };
   c.compaction = { ...DEFAULTS.compaction, ...(raw?.compaction ?? {}) };
+  // 管理界面保存过就会把当时的默认值（16000 / 16）原样写进 agent.json：没改过的跟着新默认走
+  if (c.compaction.max_tokens === 16000 && c.compaction.keep_messages === 16) c.compaction = { ...DEFAULTS.compaction };
   return c as AgentConfig;
 }
 
