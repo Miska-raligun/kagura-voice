@@ -237,16 +237,17 @@ agent 侧的提醒用调度器的 `at` 任务。两者在管理 UI 里分开展�
 - 每 agent 白名单。
 - **本期不执行 skill 里的脚本**（产品版没有沙箱，执行任意脚本风险太大）。脚本执行、沙箱与
   授权留到「skill 迁移」那一期。
-- 设备相关的 `cores3-speak` / `cores3-camera` 不再是 skill，改成内置工具 `speak` / `take_photo`。
+- 设备相关的 `cores3-speak` / `cores3-camera` 不再是工具或 skill：拍照改成内置 `take_photo`；
+  **播报由出口（`agent/outbox.ts`）按语音策略自动处理，agent 没有 `speak`**，只在明确要传话时用 `announce`。
 
 ### 6.9 内置工具与设备事件
 
 | 工具 | 作用 | 替代 |
 |---|---|---|
-| `speak(text, device?)` | 主动播报到设备 | cores3-speak |
+| `announce(text, device?)` | 主人明确让「跟家里说一声」时传话（仅可信的非设备会话） | cores3-speak |
 | `take_photo(question)` | 对话中拍照看图（兼容做法见下） | `[PHOTO]` 前缀 |
 | `set_volume(dir)` | 调音量 | `X-Volume` |
-| `get_presence` | 在不在家 | workspace 状态文件 |
+| `get_presence` / `set_presence` | 查 / 改在家状态 | workspace 状态文件 |
 | `photo_schedule_*` | 每日定时拍照增删改 | 只能在网页配 |
 | `memory_*`、`cron_*`、`sessions_*`、`skill_read` | 见上文 | — |
 | `web_search` / `weather`（可选，需配 Key） | 早报内容来源 | OpenClaw 侧能力 |
@@ -256,7 +257,7 @@ agent 侧的提醒用调度器的 `at` 任务。两者在管理 UI 里分开展�
 拍照发 `/chat-vision`，服务端把照片连同原问题作为下一条消息交给 agent。设备端零改动。
 
 设备事件：shake / touch / presence 变化 → 作为 `systemEvent` 投进绑定 agent 的 main 会话，
-agent 决定是否 `speak`。现有提示词（摇一摇、触摸描述、`_SPEAK_HINT`）原样迁移；冷却与显著性
+agent 的回复本身就会被设备播出来（不用 `speak`）；这几类交互还会自动把在家状态记为 home。冷却与显著性
 筛选仍在设备端（`FEEL_NOTIFY_COOLDOWN` 不放宽）。
 
 ### 6.10 边生成边播
@@ -308,7 +309,7 @@ agent 配 `provider` + `model`（pi-ai 内置 DeepSeek、通义千问、任意 O
 
 **跨渠道**
 
-- `speak` 工具可以从 IM 里让设备开口（「跟家里说一声我晚点回」）。
+- `announce` 工具可以从 IM 里让设备开口（「跟家里说一声我晚点回」）；普通回复的播报由出口按策略自动处理。
 - 渠道断线自动重连，状态在管理 UI 总览里显示。
 
 ## 7. 管理 UI（`/admin`）
