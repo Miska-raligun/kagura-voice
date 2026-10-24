@@ -49,6 +49,41 @@ describe("sessions_send", () => {
     expect((a2a.log() as any[])[0].status).toBe("rejected");
   });
 
+  it("死锁防护：两个各自在跑的会话互相 sessions_send 等对方 → 后来的那个立刻失败，两边都能结束", async () => {
+    const { rt, fake } = setup();
+    // A：main:main（比如 heartbeat）问 mio；B：mio:main（比如它自己的 heartbeat）同时问 main。两条调用链互不知道对方
+    fake.queue.push(
+      { tool_calls: [{ name: "sessions_send", args: { agent: "mio", message: "在吗" } }], then: "A 结束" },
+      { tool_calls: [{ name: "sessions_send", args: { agent: "main", message: "你在吗" } }], then: "B 结束" },
+      "mio 回复：在",
+    );
+    const a = rt.run({ ...chat, agentId: "main", sessionKey: "main:main", text: "heartbeat A", kind: "main", channel: "heartbeat" });
+    const b = rt.run({ ...chat, agentId: "mio", sessionKey: "mio:main", text: "heartbeat B", kind: "main", channel: "heartbeat" });
+    const t0 = Date.now();
+    const [ra, rb] = await Promise.all([a, b]);
+    expect(Date.now() - t0).toBeLessThan(3000);
+    expect(ra.text).toBe("A 结束");
+    expect(rb.text).toBe("B 结束");
+    const tr = rt.store("mio").history("mio:main").map((h) => h.msg as any).find((m) => m.role === "toolResult");
+    expect(tr.content[0].text).toMatch(/互相等/);
+    expect(rt.busy("main", "main:main") || rt.busy("mio", "mio:main")).toBe(false);
+  }, 15_000);
+
+  it("对方会话一直被占着：sessions_send 等锁有上限，不会把自己也卡住", async () => {
+    const { rt, fake } = setup();
+    rt.lockWaitMs.a2a = 300;
+    let release: () => void = () => {};
+    const hold = (rt as any).serial("mio|mio:main", () => new Promise<void>((r) => (release = r)));   // 模拟 mio 在跑一个长任务
+    fake.queue.push({ tool_calls: [{ name: "sessions_send", args: { agent: "mio", message: "在吗" } }], then: "她在忙" });
+    const r = await rt.run({ ...chat, agentId: "main", sessionKey: "main:main", text: "x" });
+    expect(r.text).toBe("她在忙");
+    const tr = rt.store("main").history("main:main").map((h) => h.msg as any).find((m) => m.role === "toolResult");
+    expect(tr.content[0].text).toMatch(/正忙/);
+    release(); await hold;
+    fake.queue.push("我在");
+    expect((await rt.run({ ...chat, agentId: "mio", sessionKey: "mio:main", text: "y" })).text).toBe("我在");   // 排过队的位置没有插队、也没卡住
+  }, 15_000);
+
   it("死锁防护：B 被 A 问的时候反过来等 A → 拒绝（提示直接回复）", async () => {
     const { rt, fake } = setup();
     fake.queue.push(

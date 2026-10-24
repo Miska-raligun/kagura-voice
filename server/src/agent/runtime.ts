@@ -137,6 +137,10 @@ class Semaphore {
 export class Runtime {
   private stores = new Map<string, AgentStore>();
   private locks = new Map<string, Promise<unknown>>();
+  /** 正在跑（且手里拿着会话锁）的一轮在等哪个会话：「拿着 key 的那一轮 → 在等的会话」，查互相等待用 */
+  private waitsFor = new Map<string, string>();
+  /** 在别的会话里发起、要等这个会话的锁（a2a 等对方回复）最多等多久。拿着自己的锁干等别人，等久了谁都动不了 */
+  lockWaitMs = { a2a: 90_000 };
   /** 每个会话正在跑的那一轮：卡住时日志里说清楚是谁占着 */
   private running = new Map<string, { purpose: string; channel: string; since: number; tool: string; stage: string }>();
   private sem: Semaphore;
@@ -190,7 +194,7 @@ export class Runtime {
   }
 
   /** 同一会话串行。前面那轮迟迟不完就打一行日志，说清楚是谁占着（以前这种情况一声不吭，看起来就是「这个 agent 不理人了」） */
-  private serial<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  private serial<T>(key: string, fn: () => Promise<T>, waitMs = 0, busyMsg = ""): Promise<T> {
     const prev = this.locks.get(key) ?? Promise.resolve();
     if (this.locks.has(key)) {
       const t = setTimeout(() => {
@@ -201,8 +205,23 @@ export class Runtime {
       t.unref?.();
       prev.finally(() => clearTimeout(t));
     }
-    const run = prev.catch(() => {}).then(fn);
-    const tail = run.catch(() => {});
+    const gate = prev.catch(() => {});
+    let run: Promise<T>;
+    let tail: Promise<unknown>;
+    if (waitMs > 0 && this.locks.has(key)) {
+      // 等锁有上限：等不到就放弃，但排着的这个位置要等前面真的完了才让给下一个，不然后面的会插队、两轮同时跑
+      let gaveUp = false, timer: ReturnType<typeof setTimeout> | undefined;
+      const limit = new Promise<void>((r) => { timer = setTimeout(() => { gaveUp = true; r(); }, waitMs); });
+      run = Promise.race([gate, limit]).then(() => {
+        clearTimeout(timer);
+        if (gaveUp) throw new Error(busyMsg || `会话 ${key} 正忙，等了 ${Math.round(waitMs / 1000)} 秒还没轮到`);
+        return fn();
+      });
+      tail = Promise.all([gate, run.catch(() => {})]);
+    } else {
+      run = gate.then(fn);
+      tail = run.catch(() => {});
+    }
     this.locks.set(key, tail);
     tail.then(() => { if (this.locks.get(key) === tail) this.locks.delete(key); });
     return run;
@@ -212,12 +231,33 @@ export class Runtime {
   busy(agentId: string, sessionKey: string) { return this.locks.has(`${agentId}|${sessionKey}`); }
 
   async run(req: RunRequest): Promise<RunResult> {
-    const nested = !!runScope();      // 在另一轮运行里发起的（a2a 等待对方回复）
-    return this.serial(`${req.agentId}|${req.sessionKey}`, async () => {
-      if (!nested) await this.sem.acquire();
-      try { return await this.execute(req); }
-      finally { if (!nested) this.sem.release(); }
-    });
+    const parent = runScope();
+    const nested = !!parent;          // 在另一轮运行里发起的（a2a 等待对方回复）：发起方手里还拿着自己的会话锁
+    const key = `${req.agentId}|${req.sessionKey}`;
+    const from = parent ? `${parent.agentId}|${parent.sessionKey}` : "";
+    if (from && from !== key) {
+      // 互相等待：两条各自在跑的调用链（比如两个 agent 的 heartbeat 同时 sessions_send 对方）——调用链里看不出来，
+      // 要顺着「谁拿着锁在等谁」走一圈。成环就立刻失败，否则两边都永远等下去，后面这两个会话的消息全排不上
+      const mine = new Set([...parent!.chain, from]);
+      const path: string[] = [];
+      for (let k: string | undefined = key; k && !path.includes(k); k = this.waitsFor.get(k)) {
+        path.push(k);
+        if (mine.has(k)) {
+          console.log(`[agent] 🔁  互相等待：${from} → ${path.join(" → ")}，拒绝这次等待`);
+          throw new Error(`${req.agentId} 那边正在等你这边（互相等待会一起卡死），这次没发过去——先直接回答，或者用 wait=false 发`);
+        }
+      }
+      this.waitsFor.set(from, key);
+    }
+    try {
+      return await this.serial(key, async () => {
+        if (!nested) await this.sem.acquire();
+        try { return await this.execute(req); }
+        finally { if (!nested) this.sem.release(); }
+      }, nested ? this.lockWaitMs.a2a : 0, nested ? `${req.agentId} 正忙（它在处理别的事），等了 ${Math.round(this.lockWaitMs.a2a / 1000)} 秒还没空，稍后再试或者用 wait=false 发` : "");
+    } finally {
+      if (from && this.waitsFor.get(from) === key) this.waitsFor.delete(from);
+    }
   }
 
   /** 真正跑一轮。调用方负责串行（run 或压缩流程里的冲刷） */
