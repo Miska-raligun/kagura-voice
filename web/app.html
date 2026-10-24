@@ -20,76 +20,103 @@
 -->
 <style>
 :root {
-  --bg:#041c1c; --panel:#0b2323; --panel2:#102a29; --fg:#ffe6cb; --muted:#ffe6cb99; --faint:#ffe6cb59;
-  --line:#ffe6cb1f; --line2:#ffe6cb33; --accent:#ffbd38; --glow:#ffbd3826; --ok:#5fd4a0; --err:#ff7a6b;
+  --bg:#041c1c; --panel:#0b2323; --panel2:#102a29; --fg:#ffe6cb; --muted:#ffe6cbaa; --faint:#ffe6cb66;
+  --line:#ffe6cb1a; --line2:#ffe6cb2e; --accent:#ffbd38; --accent-fg:#1a1204; --ok:#5fd4a0; --err:#ff7a6b;
+  --glass:rgba(6,26,26,.62); --glass2:rgba(16,42,41,.78);
   --safe-b: env(safe-area-inset-bottom, 0px); --safe-t: env(safe-area-inset-top, 0px);
 }
 * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
 html, body { margin:0; height:100%; background:var(--bg); color:var(--fg); }
 body { font:15px/1.5 -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
   display:flex; flex-direction:column; overflow:hidden; -webkit-font-smoothing:antialiased; }
-button { font:inherit; color:inherit; border:0; background:none; cursor:pointer; }
-input, select, textarea { font:inherit; color:var(--fg); background:var(--panel2); border:1px solid var(--line2); border-radius:12px; padding:10px 12px; outline:none; min-width:0; }
-input:focus, select:focus { border-color:var(--accent); }
-.muted { color:var(--muted); } .faint { color:var(--faint); }
+button { font:inherit; color:inherit; border:0; background:none; cursor:pointer; padding:0; }
+input, select { font:inherit; color:var(--fg); outline:none; min-width:0; }
+svg { display:block; }
 .hidden { display:none !important; }
+.muted { color:var(--muted); } .faint { color:var(--faint); }
+.dot { width:7px; height:7px; border-radius:50%; background:var(--faint); flex:none; }
+.dot.on { background:var(--ok); box-shadow:0 0 6px var(--ok); } .dot.off { background:var(--err); }
 
-header { padding:calc(var(--safe-t) + 10px) 16px 10px; display:flex; align-items:center; gap:10px; border-bottom:1px solid var(--line); }
-header .title { font-weight:600; font-size:17px; flex:1; display:flex; align-items:center; gap:8px; min-width:0; }
-.dot { width:8px; height:8px; border-radius:50%; background:var(--faint); flex:none; }
-.dot.on { background:var(--ok); box-shadow:0 0 8px var(--ok); } .dot.off { background:var(--err); }
-header select { padding:6px 10px; border-radius:20px; font-size:14px; max-width:42vw; }
+/* ── 整体：角色图铺满做背景，聊天浮在上面 ── */
+.app { position:relative; flex:1; min-height:0; display:flex; flex-direction:column; }
+.backdrop { position:absolute; inset:0; overflow:hidden; background:radial-gradient(120% 70% at 50% 18%, #12403d 0%, var(--bg) 70%); }
+.backdrop img { position:absolute; left:0; right:0; top:0; width:100%; height:66%; object-fit:cover;
+  -webkit-mask-image:linear-gradient(180deg, #000 55%, transparent 100%); mask-image:linear-gradient(180deg, #000 55%, transparent 100%); }
+.backdrop .face { position:absolute; left:0; right:0; top:calc(var(--safe-t) + 18%); text-align:center; font-size:42px; color:var(--accent); opacity:.85; letter-spacing:.04em; }
+.backdrop .veil { position:absolute; inset:0;
+  background:linear-gradient(180deg, rgba(4,28,28,.5) 0%, rgba(4,28,28,0) 15%, rgba(4,28,28,0) 36%, rgba(4,28,28,.7) 56%, var(--bg) 72%); }
 
-main { flex:1; overflow:hidden; position:relative; }
-.page { position:absolute; inset:0; display:flex; flex-direction:column; overflow:hidden; }
+header { position:relative; z-index:2; display:flex; align-items:center; gap:10px; padding:calc(var(--safe-t) + 8px) 12px 8px 14px; }
+.who { position:relative; display:flex; align-items:center; gap:10px; min-width:0; flex:1; }
+.avatar { width:38px; height:38px; border-radius:50%; overflow:hidden; flex:none; background:var(--panel2); border:1.5px solid var(--line2); display:flex; align-items:center; justify-content:center; font-size:15px; color:var(--accent); }
+.avatar img { width:100%; height:100%; object-fit:cover; }
+.who-text { display:flex; flex-direction:column; min-width:0; line-height:1.25; text-shadow:0 1px 6px #0009; }
+.who-name { font-weight:600; font-size:16px; display:flex; align-items:center; gap:4px; }
+.who-name svg { width:14px; height:14px; opacity:.7; }
+.who-sub { font-size:12px; color:var(--muted); display:flex; align-items:center; gap:6px; }
+.who select { position:absolute; inset:0; opacity:0; width:100%; cursor:pointer; }
+.hbtn { width:38px; height:38px; border-radius:50%; display:flex; align-items:center; justify-content:center; background:var(--glass); border:1px solid var(--line); backdrop-filter:blur(10px); -webkit-backdrop-filter:blur(10px); flex:none; }
+.hbtn svg { width:20px; height:20px; }
 
-nav { display:flex; border-top:1px solid var(--line); padding-bottom:var(--safe-b); background:var(--panel); }
-nav button { flex:1; padding:10px 0 8px; font-size:12px; color:var(--muted); display:flex; flex-direction:column; align-items:center; gap:2px; }
-nav button.sel { color:var(--accent); }
-nav svg { width:22px; height:22px; }
+.notice { position:relative; z-index:2; margin:0 12px 6px; padding:8px 10px 8px 12px; border-radius:12px; background:var(--glass2); border:1px solid var(--line);
+  backdrop-filter:blur(10px); -webkit-backdrop-filter:blur(10px); font-size:12.5px; color:var(--muted); display:flex; gap:8px; align-items:flex-start; }
+.notice button { color:var(--faint); font-size:18px; line-height:1; padding:0 2px; }
+
+main { position:relative; z-index:1; flex:1; min-height:0; }
+.page { position:absolute; inset:0; display:flex; flex-direction:column; }
 
 /* ── 对话 ── */
-.stage { position:relative; height:34vh; min-height:170px; max-height:320px; flex:none; overflow:hidden; background:var(--panel); }
-.stage img { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; opacity:.92; }
-.stage .shade { position:absolute; inset:0; background:linear-gradient(180deg, transparent 45%, #041c1ccc); }
-.stage .face { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; font-size:44px; color:var(--accent); letter-spacing:.05em; }
-.stage .state { position:absolute; left:14px; bottom:12px; right:14px; font-size:13px; color:var(--fg); display:flex; align-items:center; gap:8px; }
-.bars { display:inline-flex; gap:3px; align-items:flex-end; height:16px; }
-.bars i { width:3px; background:var(--accent); border-radius:2px; height:4px; transition:height .08s; }
-
-.log { flex:1; overflow-y:auto; padding:14px 14px 8px; display:flex; flex-direction:column; gap:10px; -webkit-overflow-scrolling:touch; }
-.msg { max-width:84%; padding:9px 13px; border-radius:16px; white-space:pre-wrap; word-break:break-word; }
-.msg.me { align-self:flex-end; background:var(--accent); color:#041c1c; border-bottom-right-radius:5px; }
-.msg.her { align-self:flex-start; background:var(--panel2); border:1px solid var(--line); border-bottom-left-radius:5px; }
-.msg.sys { align-self:center; background:none; color:var(--faint); font-size:12.5px; padding:2px 8px; text-align:center; }
-.msg img { display:block; max-width:180px; max-height:180px; border-radius:10px; margin-bottom:6px; }
+.log { flex:1; overflow-y:auto; padding:12px 12px 8px; display:flex; flex-direction:column; gap:8px; -webkit-overflow-scrolling:touch; overscroll-behavior:contain; }
+.log::before { content:""; margin-top:auto; }       /* 消息从底部往上排，上面留出角色图 */
+.msg { max-width:78%; padding:8px 12px; border-radius:18px; white-space:pre-wrap; word-break:break-word; font-size:15px; line-height:1.45; }
+.msg.me { align-self:flex-end; background:var(--accent); color:var(--accent-fg); border-bottom-right-radius:6px; }
+.msg.her { align-self:flex-start; background:var(--glass2); border:1px solid var(--line); border-bottom-left-radius:6px;
+  backdrop-filter:blur(12px); -webkit-backdrop-filter:blur(12px); }
+.msg.sys { align-self:center; max-width:88%; background:rgba(4,28,28,.55); color:var(--muted); font-size:12px; padding:3px 10px; border-radius:10px; text-align:center; }
+.msg img { display:block; max-width:200px; max-height:220px; border-radius:12px; margin:-2px -6px 6px; }
 .msg .act { display:inline-block; margin-top:6px; color:var(--accent); font-weight:600; }
 
-.composer { flex:none; padding:8px 12px 10px; border-top:1px solid var(--line); background:var(--bg); }
-.attach { display:flex; align-items:center; gap:8px; margin-bottom:8px; font-size:13px; color:var(--muted); }
-.attach img { width:44px; height:44px; object-fit:cover; border-radius:8px; }
-.row { display:flex; gap:8px; align-items:center; }
-.row input { flex:1; }
-.icon-btn { width:44px; height:44px; flex:none; border-radius:50%; display:flex; align-items:center; justify-content:center; background:var(--panel2); border:1px solid var(--line2); }
-.icon-btn svg { width:22px; height:22px; }
-.talk { margin-top:10px; width:100%; height:64px; border-radius:32px; background:var(--panel2); border:1.5px solid var(--line2); font-size:16px; font-weight:600;
-  display:flex; align-items:center; justify-content:center; gap:10px; user-select:none; -webkit-user-select:none; -webkit-touch-callout:none; touch-action:none; transition:transform .1s, background .15s; }
-.talk.rec { background:var(--accent); color:#041c1c; transform:scale(.98); border-color:var(--accent); box-shadow:0 0 0 8px var(--glow); }
-.talk.busy { color:var(--muted); }
-.talk.cancel { background:var(--err); color:#fff; border-color:var(--err); }
+.status { align-self:center; margin:0 0 8px; display:flex; align-items:center; gap:8px; padding:6px 6px 6px 12px; border-radius:20px;
+  background:var(--glass2); border:1px solid var(--line); backdrop-filter:blur(12px); -webkit-backdrop-filter:blur(12px); font-size:13px; }
+.status .stop { padding:3px 10px; border-radius:14px; background:#ffffff14; font-size:12.5px; }
+.bars { display:inline-flex; gap:2.5px; align-items:center; height:14px; }
+.bars i { width:2.5px; background:var(--accent); border-radius:2px; height:4px; transition:height .08s; }
+.bars.idle i { animation:breathe 1.2s ease-in-out infinite; }
+.bars.idle i:nth-child(2) { animation-delay:.15s } .bars.idle i:nth-child(3) { animation-delay:.3s } .bars.idle i:nth-child(4) { animation-delay:.45s } .bars.idle i:nth-child(5) { animation-delay:.6s }
+@keyframes breathe { 0%,100% { height:4px } 50% { height:12px } }
+
+.composer { flex:none; padding:8px 10px calc(var(--safe-b) + 8px); background:linear-gradient(180deg, transparent, var(--bg) 40%); }
+.attach { display:flex; align-items:center; gap:10px; margin:0 4px 8px; padding:6px; border-radius:14px; background:var(--glass2); border:1px solid var(--line); font-size:13px; color:var(--muted); }
+.attach img { width:40px; height:40px; object-fit:cover; border-radius:9px; }
+.attach span { flex:1; }
+.attach button { width:28px; height:28px; border-radius:50%; background:#ffffff14; font-size:16px; }
+.cbar { display:flex; align-items:center; gap:6px; padding:5px; border-radius:26px; background:var(--glass2); border:1px solid var(--line2);
+  backdrop-filter:blur(14px); -webkit-backdrop-filter:blur(14px); }
+.cbtn { width:40px; height:40px; border-radius:50%; flex:none; display:flex; align-items:center; justify-content:center; color:var(--muted); }
+.cbtn svg { width:22px; height:22px; }
+.cbtn.send { background:var(--accent); color:var(--accent-fg); }
+.cbar input { flex:1; height:40px; padding:0 6px; background:none; border:0; font-size:16px; }   /* 16px：iOS 不会自动放大页面 */
+.cbar input::placeholder { color:var(--faint); }
+.talk { flex:1; height:40px; border-radius:20px; background:#ffffff0f; font-size:15px; font-weight:600; letter-spacing:.06em;
+  display:flex; align-items:center; justify-content:center; user-select:none; -webkit-user-select:none; -webkit-touch-callout:none; touch-action:none;
+  transition:background .15s, color .15s, transform .1s; }
+.talk.rec { background:var(--accent); color:var(--accent-fg); transform:scale(.98); }
+.talk.busy { color:var(--muted); font-weight:500; letter-spacing:0; }
 
 /* ── 看家 ── */
-.home { overflow-y:auto; padding:14px; display:flex; flex-direction:column; gap:12px; }
-.card { background:var(--panel); border:1px solid var(--line); border-radius:16px; padding:14px; }
-.card h3 { margin:0 0 10px; font-size:15px; display:flex; align-items:center; gap:8px; }
-.kv { display:flex; flex-wrap:wrap; gap:6px 16px; font-size:13.5px; color:var(--muted); }
+#homePage { background:var(--bg); }
+.home { flex:1; overflow-y:auto; padding:4px 12px calc(var(--safe-b) + 16px); display:flex; flex-direction:column; gap:12px; }
+.card { background:var(--panel); border:1px solid var(--line); border-radius:18px; padding:14px; }
+.card h3 { margin:0 0 10px; font-size:14px; font-weight:600; color:var(--muted); display:flex; align-items:center; gap:8px; }
+.card h3 select { background:var(--panel2); border:1px solid var(--line2); border-radius:14px; padding:3px 10px; font-size:14px; color:var(--fg); font-weight:600; }
+.kv { display:flex; flex-wrap:wrap; gap:4px 16px; font-size:13.5px; color:var(--muted); }
 .kv b { color:var(--fg); font-weight:500; }
 .live { position:relative; aspect-ratio:4/3; background:#000; border-radius:12px; overflow:hidden; display:flex; align-items:center; justify-content:center; }
 .live img { width:100%; height:100%; object-fit:contain; }
-.live .hint { position:absolute; color:var(--faint); font-size:13px; text-align:center; padding:0 20px; }
+.live .hint { position:absolute; color:var(--faint); font-size:13px; text-align:center; padding:0 24px; }
 .btns { display:flex; flex-wrap:wrap; gap:8px; margin-top:10px; }
-.btn { padding:9px 16px; border-radius:20px; background:var(--panel2); border:1px solid var(--line2); font-size:14px; }
-.btn.primary { background:var(--accent); border-color:var(--accent); color:#041c1c; font-weight:600; }
+.btn { height:34px; padding:0 14px; border-radius:17px; background:var(--panel2); border:1px solid var(--line2); font-size:13.5px; }
+.btn.primary { background:var(--accent); border-color:var(--accent); color:var(--accent-fg); font-weight:600; }
 .btn:disabled { opacity:.45; }
 .shots { display:grid; grid-template-columns:repeat(3, 1fr); gap:6px; }
 .shots img { width:100%; aspect-ratio:4/3; object-fit:cover; border-radius:8px; background:var(--panel2); }
@@ -97,12 +124,14 @@ nav svg { width:22px; height:22px; }
 
 /* ── 配对 ── */
 .pair { flex:1; display:flex; flex-direction:column; justify-content:center; padding:28px; gap:14px; }
-.pair h1 { margin:0; font-size:24px; } .pair ol { margin:0; padding-left:20px; color:var(--muted); line-height:1.9; }
+.pair h1 { margin:0; font-size:26px; } .pair ol { margin:0; padding-left:20px; color:var(--muted); line-height:1.9; }
+.pair .row { display:flex; gap:8px; }
+.pair input { flex:1; height:42px; padding:0 12px; border-radius:12px; background:var(--panel2); border:1px solid var(--line2); }
+.pair .btn { height:42px; }
 
-.toast { position:fixed; left:50%; bottom:calc(110px + var(--safe-b)); transform:translateX(-50%); background:var(--panel2); border:1px solid var(--line2);
-  padding:9px 16px; border-radius:20px; font-size:13.5px; max-width:88vw; z-index:9; box-shadow:0 6px 24px #0008; }
+.toast { position:fixed; left:50%; bottom:calc(var(--safe-b) + 84px); transform:translateX(-50%); background:var(--glass2); border:1px solid var(--line2);
+  backdrop-filter:blur(12px); -webkit-backdrop-filter:blur(12px); padding:8px 14px; border-radius:16px; font-size:13px; max-width:88vw; z-index:9; box-shadow:0 6px 24px #0008; }
 .toast.err { border-color:var(--err); }
-.warnbar { background:#ff7a6b1f; color:#ffb4a8; font-size:12.5px; padding:7px 14px; border-bottom:1px solid #ff7a6b33; }
 </style>
 </head>
 <body>
@@ -111,36 +140,41 @@ nav svg { width:22px; height:22px; }
   <h1>Kagura</h1>
   <p class="muted">这台手机还没配对。在电脑上：</p>
   <ol>
-    <li>打开 Kagura 管理界面 → <b>设备</b>，点右上角「<b>＋ 添加手机</b>」</li>
-    <li>点「添加手机」，用手机相机扫二维码</li>
+    <li>打开 Kagura 管理界面 → <b>设备</b></li>
+    <li>点「<b>＋ 添加手机</b>」，用手机相机扫二维码</li>
   </ol>
   <p class="faint" style="font-size:13px">也可以把管理界面给出的配对链接直接粘贴到下面：</p>
   <div class="row"><input id="pairInput" placeholder="https://…/app#pair=kc_…"><button class="btn primary" id="pairBtn">配对</button></div>
 </div>
 
-<div id="appView" class="hidden" style="display:flex; flex-direction:column; flex:1; min-height:0">
+<div id="appView" class="app hidden">
+  <div class="backdrop"><img id="bg" alt="" class="hidden"><div class="face" id="face">(｡･ω･｡)</div><div class="veil"></div></div>
   <header>
-    <div class="title"><span class="dot" id="conn" title="推送连接"></span><span id="meName">Kagura</span></div>
-    <select id="roleSel" aria-label="角色"></select>
+    <label class="who">
+      <span class="avatar" id="avatarBox"><img id="avatar" alt="" class="hidden"><span id="avatarText">神</span></span>
+      <span class="who-text">
+        <span class="who-name"><span id="meName">Kagura</span><svg id="roleChev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M7 10l5 5 5-5"/></svg></span>
+        <span class="who-sub"><span class="dot" id="conn"></span><span id="connText">连接中…</span></span>
+      </span>
+      <select id="roleSel" aria-label="换角色"></select>
+    </label>
+    <button class="hbtn" id="tabHome" aria-label="看家"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3.5 11L12 4l8.5 7"/><path d="M5.5 9.5V20h13V9.5"/><circle cx="12" cy="14.5" r="2.6"/></svg></button>
+    <button class="hbtn hidden" id="tabChat" aria-label="回到对话"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M5 6h14v10H10l-5 4z"/></svg></button>
   </header>
-  <div id="insecure" class="warnbar hidden">当前不是 HTTPS 地址，浏览器不让网页直接录音，「按住说话」用不了。打字、听她说话、收推送、拍照、看家都正常——想说话可以点键盘上的麦克风键（语音输入）转成文字发送。</div>
+  <div id="insecure" class="notice hidden"><span>当前不是 https 地址，浏览器不让网页录音：「按住说话」用不了，可以点键盘上的麦克风键语音输入。其它都正常。</span><button id="insecureX" aria-label="知道了">×</button></div>
   <main>
     <section class="page" id="chatPage">
-      <div class="stage">
-        <img id="bg" alt="" class="hidden">
-        <div class="face" id="face">(｡･ω･｡)</div>
-        <div class="shade"></div>
-        <div class="state"><span class="bars" id="bars"><i></i><i></i><i></i><i></i><i></i></span><span id="stateText">按住下面的按钮说话</span></div>
-      </div>
       <div class="log" id="log"></div>
+      <div class="status hidden" id="status"><span class="bars" id="bars"><i></i><i></i><i></i><i></i><i></i></span><span id="stateText"></span><button class="stop" id="stopBtn">停止</button></div>
       <div class="composer">
-        <div class="attach hidden" id="attach"><img id="attachImg" alt=""><span>这张照片会跟下一句话一起发给她</span><button class="btn" id="attachX" style="padding:4px 10px">移除</button></div>
-        <div class="row">
-          <button class="icon-btn" id="camBtn" aria-label="拍照"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg></button>
-          <input id="text" placeholder="打字也行…" enterkeyhint="send" autocomplete="off">
-          <button class="icon-btn" id="sendBtn" aria-label="发送"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 12l16-8-6 16-2-7z"/></svg></button>
+        <div class="attach hidden" id="attach"><img id="attachImg" alt=""><span>这张照片会和下一句一起发给她</span><button id="attachX" aria-label="移除">×</button></div>
+        <div class="cbar">
+          <button class="cbtn" id="modeBtn" aria-label="切换语音 / 键盘"><svg id="icoKbd" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3" y="6" width="18" height="12" rx="2.5"/><path d="M7 10h.01M10 10h.01M13 10h.01M16 10h.01M8 14h8"/></svg><svg id="icoMic" class="hidden" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="9" y="3.5" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0013 0M12 17.5V21"/></svg></button>
+          <button class="talk" id="talk"><span id="talkText">按住 说话</span></button>
+          <input id="text" class="hidden" placeholder="发消息…" enterkeyhint="send" autocomplete="off">
+          <button class="cbtn" id="camBtn" aria-label="拍照"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 8.5h3.2L9 6h6l1.8 2.5H20V18H4z"/><circle cx="12" cy="13" r="3.2"/></svg></button>
+          <button class="cbtn send hidden" id="sendBtn" aria-label="发送"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M4.5 11.2L19 4.5c.6-.3 1.2.3 1 .9l-5 14c-.2.6-1.1.7-1.4.1L11 13l-6.3-.8c-.6-.1-.8-.8-.2-1z"/></svg></button>
         </div>
-        <button class="talk" id="talk"><span id="talkText">按住说话</span></button>
         <input type="file" accept="image/*" capture="environment" id="camInput" class="hidden">
       </div>
     </section>
@@ -148,7 +182,7 @@ nav svg { width:22px; height:22px; }
     <section class="page hidden" id="homePage">
       <div class="home">
         <div class="card">
-          <h3><span class="dot" id="devDot"></span><select id="devSel" style="padding:4px 10px; border-radius:16px; font-size:14px"></select></h3>
+          <h3><span class="dot" id="devDot"></span><select id="devSel"></select></h3>
           <div class="kv" id="devKv"><span class="faint">读取中…</span></div>
         </div>
         <div class="card">
@@ -168,10 +202,6 @@ nav svg { width:22px; height:22px; }
       </div>
     </section>
   </main>
-  <nav>
-    <button id="tabChat" class="sel"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 5h16v11H9l-5 4z"/></svg>对话</button>
-    <button id="tabHome"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 11l9-7 9 7v9H3z"/><circle cx="12" cy="14" r="3"/></svg>看家</button>
-  </nav>
 </div>
 
 <script>
@@ -385,12 +415,19 @@ function meter(level) {
 }
 
 // ── 界面状态 ──
+/** vis：idle / recording / processing / playing。不是待机就在输入栏上方显示一个小胶囊（带「停止」） */
 function setState(text, talkText, cls, vis) {
-  showVis(vis || "idle");
+  vis = vis || "idle";
+  showVis(vis);
   $("stateText").textContent = text;
-  $("talkText").textContent = talkText || "按住说话";
-  $("talk").className = "talk" + (cls ? " " + cls : "");
+  $("status").classList.toggle("hidden", vis === "idle");
+  $("stopBtn").classList.toggle("hidden", vis === "recording");
+  $("bars").classList.toggle("idle", vis !== "recording");          // 录音时跟着音量，其余时候轻轻起伏
+  $("talkText").textContent = talkText || "按住 说话";
+  $("talk").classList.remove("rec", "busy", "cancel");          // 只动这几个，别把语音 / 键盘切换的 hidden 冲掉
+  if (cls) $("talk").classList.add(cls);
 }
+$("stopBtn").onclick = () => { if (S.busy) cancelTurn(); else if (S.player) { S.player.stop(); S.pending = []; } };
 function addMsg(kind, text, img) {
   const d = document.createElement("div");
   d.className = "msg " + kind;
@@ -442,11 +479,19 @@ function renderRoles() {
   sel.innerHTML = "";
   for (const r of S.roles) { const o = document.createElement("option"); o.value = r.id; o.textContent = r.name; sel.appendChild(o); }
   sel.value = S.role;
-  sel.classList.toggle("hidden", S.roles.length < 2);
+  sel.disabled = S.roles.length < 2;
+  $("roleChev").classList.toggle("hidden", S.roles.length < 2);
   const cur = S.roles.find((r) => r.id === S.role);
   $("meName").textContent = cur ? cur.name : "Kagura";
+  $("avatarText").textContent = (cur ? cur.name : "K").slice(0, 1);
   preloadImgs(S.role);
   showVis(S.vis || "idle");
+  const role = S.role;
+  resolveImg(role, "img_bg").then((url) => {
+    if (S.role !== role) return;
+    $("avatar").classList.toggle("hidden", !url); $("avatarText").classList.toggle("hidden", !!url);
+    if (url) $("avatar").src = url;
+  });
 }
 $("roleSel").onchange = async (e) => {
   const id = e.target.value;
@@ -565,13 +610,25 @@ function finishRec() {
 function sendText() {
   const t = $("text").value.trim();
   if (!t && !S.photo) return;
-  if (S.busy) return toast("她还在说，等一下或者先点按钮取消");
+  if (S.busy) return toast("她还在说，等一下或者先点「停止」");
   ac();
   $("text").value = "";
   const photo = S.photo; clearPhoto();
+  syncSend();
   converse({ text: t, image: photo });
 }
 $("sendBtn").onclick = sendText;
+$("text").addEventListener("input", () => syncSend());
+function syncSend() { $("sendBtn").classList.toggle("hidden", S.mode !== "text" || (!$("text").value.trim() && !S.photo)); }
+/** 语音 / 键盘两种输入：能录音默认语音；http 地址录不了音就只给键盘 */
+function setMode(m) {
+  S.mode = m;
+  $("talk").classList.toggle("hidden", m !== "voice"); $("text").classList.toggle("hidden", m !== "text");
+  $("icoKbd").classList.toggle("hidden", m !== "voice"); $("icoMic").classList.toggle("hidden", m !== "text");
+  syncSend();
+  if (m === "text") setTimeout(() => $("text").focus(), 0);
+}
+$("modeBtn").onclick = () => setMode(S.mode === "voice" ? "text" : "voice");
 $("text").addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.isComposing) { e.preventDefault(); sendText(); } });
 
 // 拍照：缩到长边 1280 的 JPEG（手机原图好几 MB，服务端上限 5MB）
@@ -582,12 +639,12 @@ $("camInput").onchange = async (e) => {
   if (!f) return;
   try {
     S.photo = await shrink(f);
-    $("attachImg").src = S.photo.url; $("attach").classList.remove("hidden");
+    $("attachImg").src = S.photo.url; $("attach").classList.remove("hidden"); syncSend();
     if (S.autoSendPhoto) { S.autoSendPhoto = false; const p = S.photo; clearPhoto(); converse({ text: S.photoQuestion || "", image: p }); }
   } catch (err) { toast("照片读不出来：" + err.message, true); }
 };
 $("attachX").onclick = clearPhoto;
-function clearPhoto() { S.photo = null; $("attach").classList.add("hidden"); }
+function clearPhoto() { S.photo = null; $("attach").classList.add("hidden"); syncSend(); }
 async function shrink(file) {
   const url = URL.createObjectURL(file);
   try {
@@ -613,8 +670,8 @@ function connectEvents() {
   if (S.es) S.es.close();
   const es = new EventSource("/client/events?ct=" + encodeURIComponent(S.token));
   S.es = es;
-  es.onopen = () => { $("conn").className = "dot on"; };
-  es.onerror = () => { $("conn").className = "dot off"; };
+  es.onopen = () => { $("conn").className = "dot on"; $("connText").textContent = S.me ? S.me.name : "已连接"; };
+  es.onerror = () => { $("conn").className = "dot off"; $("connText").textContent = "重新连接中…"; };
   es.addEventListener("push", (e) => { try { S.pending.push(JSON.parse(e.data)); drainPushes(); } catch {} });
   es.addEventListener("cmd", (e) => {
     let d = {}; try { d = JSON.parse(e.data); } catch {}
@@ -748,7 +805,7 @@ $("describeBtn").onclick = async () => {
 
 // ── 页签 ──
 function tab(name) {
-  $("tabChat").classList.toggle("sel", name === "chat"); $("tabHome").classList.toggle("sel", name === "home");
+  $("tabChat").classList.toggle("hidden", name === "chat"); $("tabHome").classList.toggle("hidden", name === "home");
   $("chatPage").classList.toggle("hidden", name !== "chat"); $("homePage").classList.toggle("hidden", name !== "home");
   if (name === "home") { loadMe().then(refreshHome); } else stopLive();
 }
@@ -757,7 +814,7 @@ $("tabHome").onclick = () => tab("home");
 // 离开前台（切 App、锁屏）就主动断开推送连接：iOS 会把后台页面挂起，连接却可能还挂着一阵——服务端以为页面开着，
 // 推过来的话就丢了。断开后服务端立刻知道「没开」，主动说的话改去别的设备；回到前台再连上
 document.addEventListener("visibilitychange", () => {
-  if (document.hidden) { stopLive(); if (S.es) { S.es.close(); S.es = null; $("conn").className = "dot"; } }
+  if (document.hidden) { stopLive(); if (S.es) { S.es.close(); S.es = null; $("conn").className = "dot"; $("connText").textContent = "已暂停"; } }
   else if (S.token) { connectEvents(); loadMe(); if (AC && AC.state !== "running") AC.resume().catch(() => {}); }
 });
 window.addEventListener("pagehide", () => { if (S.es) { S.es.close(); S.es = null; } });
@@ -776,15 +833,19 @@ async function boot() {
   try { await loadMe(); }
   catch (e) { if (S.token) { $("pairView").classList.remove("hidden"); toast("连不上服务端：" + e.message, true); } return; }
   $("pairView").classList.add("hidden"); $("appView").classList.remove("hidden");
-  $("insecure").classList.toggle("hidden", !!window.isSecureContext);
+  const canRec = !!window.isSecureContext && !!navigator.mediaDevices;
+  $("insecure").classList.toggle("hidden", canRec || store.get("kagura_insecure_ok") === "1");
+  $("modeBtn").classList.toggle("hidden", !canRec);
+  if (!S.mode) setMode(canRec ? "voice" : "text");
   if (!$("log").children.length) {
-    addMsg("sys", `已连接（${S.me.name}）。按住下面的按钮说话，或者直接打字。`);
-    if (/iPhone|iPad|iPod/.test(navigator.userAgent) && !navigator.audioSession) addMsg("sys", "听不到她的声音的话，看看手机侧面的静音开关（系统较旧时网页声音会被它静音）。");
+    addMsg("sys", canRec ? "按住说话，或者点左边切换成打字" : "打字跟她聊吧");
+    if (/iPhone|iPad|iPod/.test(navigator.userAgent) && !navigator.audioSession) addMsg("sys", "没声音的话，看看手机侧面的静音开关");
   }
   connectEvents();
 }
 // 已经开着页面时再打开配对链接（只改了 # 后面），页面不会重新加载
 window.addEventListener("hashchange", () => { if (/pair=kc_/.test(location.hash)) boot(); });
+$("insecureX").onclick = () => { store.set("kagura_insecure_ok", "1"); $("insecure").classList.add("hidden"); };
 boot();
 </script>
 </body>
