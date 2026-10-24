@@ -135,3 +135,22 @@ def test_away_reminder_goes_to_open_phone(srv):
         assert not [m for m in d.push if m.get("type") == "push"]
     finally:
         d.close()
+
+
+def test_admin_sets_cores3_volume(srv):
+    """管理界面调 CoreS3 音量：MQTT 下发 volume 命令（0.1~1.0），设备表显示心跳里的音量；试听用当前角色说一句"""
+    from conftest import Device
+    d = Device(srv, "vol1")
+    try:
+        assert srv.post("/heartbeat", json={"device_id": "vol1", "vol": 0.6}).status_code == 200
+        row = next(x for x in srv.get("/api/admin/devices").json() if x["id"] == "vol1")
+        assert row["vol"] == 60
+        assert srv.post("/api/admin/devices/vol1/volume", json={"level": 5}).status_code == 400
+        r = srv.post("/api/admin/devices/vol1/volume", json={"level": 85, "test": True})
+        assert r.status_code == 200, r.text
+        assert d.wait("cmd", lambda m: m.get("action") == "volume")["level"] == 0.85
+        assert d.wait("push")["type"] == "push"                  # 试听
+        row = next(x for x in srv.get("/api/admin/devices").json() if x["id"] == "vol1")
+        assert row["vol"] == 85                                  # 下一次心跳之前先显示调成的值
+    finally:
+        d.close()

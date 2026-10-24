@@ -291,6 +291,8 @@ export function registerAdmin(r: Router, ctx: Ctx, sys: AgentSystem) {
   });
 
   // ── 设备绑定（= 角色切换，改设备当前 agent）──
+  /** 管理界面刚调过的音量（下一次心跳来之前先显示它） */
+  const volSet = new Map<string, number>();
   /** 设备表：CoreS3（心跳）+ 配对过的手机（在线 = 页面开着、推送连接连着，受信靠配对令牌）。总览和设备页共用 */
   const deviceList = () => {
     const t = Date.now() / 1000;
@@ -298,17 +300,32 @@ export function registerAdmin(r: Router, ctx: Ctx, sys: AgentSystem) {
     const boards = [...ctx.hb.devices.entries()].map(([id, rec]) => ({
       id, kind: "board", name: "", agent: ctx.roles.get(id).agent, role: ctx.roles.get(id).id, online: t - rec.ts < 200, secs_ago: Math.trunc(t - rec.ts) as number | null,
       bat: rec.data.bat ?? null, rssi: rec.data.rssi ?? null, heap: rec.data.heap ?? null, wdt: rec.data.wdt ?? null,
+      // 音量：心跳里的 vol（0.1~1.0）；刚在这里调过、下一次心跳还没来的，先显示调成的值
+      vol: volSet.get(id) ?? (typeof rec.data.vol === "number" ? Math.round(rec.data.vol * 100) : null),
       trusted: ctx.cfg.deviceTrust === "all" || !!ctx.trust[id]?.trusted, ip: ctx.trust[id]?.ip ?? "", trust_mode: ctx.cfg.deviceTrust,
       held: held(id),
     }));
     const phones = (ctx.clients?.list() ?? []).map((c) => ({
       id: c.id, kind: "phone", name: c.name, agent: ctx.roles.get(c.id).agent, role: ctx.roles.get(c.id).id,
       online: ctx.clients!.online(c.id), secs_ago: c.last_seen ? Math.trunc(t - c.last_seen / 1000) : null,
-      bat: null, rssi: null, heap: null, wdt: null, trusted: true, ip: "", trust_mode: ctx.cfg.deviceTrust, held: held(c.id),
+      bat: null, rssi: null, heap: null, wdt: null, vol: null, trusted: true, ip: "", trust_mode: ctx.cfg.deviceTrust, held: held(c.id),
     }));
     return [...boards, ...phones];
   };
   get("/api/admin/devices", () => json(deviceList()));
+  /** CoreS3 音量：level 10~100（%）。MQTT 下发设备就地生效并存进 flash；test = 调完用当前角色的声音说一句试听 */
+  post("/api/admin/devices/<id>/volume", async (req) => {
+    const d = req.json() ?? {};
+    const level = Math.round(Number(d.level));
+    if (!(level >= 10 && level <= 100)) return json({ error: "音量要在 10~100 之间" }, 400);
+    if (!ctx.mqtt.ok) return json({ error: "MQTT 没连上，设备收不到" }, 503);
+    ctx.mqtt.publish(`kagura/cmd/${req.params.id}`, { action: "volume", level: level / 100 });
+    volSet.set(req.params.id, level);
+    setTimeout(() => volSet.delete(req.params.id), 90_000).unref?.();      // 之后以心跳为准
+    console.log(`[${req.params.id}] 🔊  [admin] 音量 → ${level}%`);
+    if (d.test) await ctx.sendPush(`现在的音量是百分之${level}。`, req.params.id).catch(() => false);
+    return json({ status: "ok", level });
+  });
   /** 清空留给这台设备的话（等切到对应角色才播的） */
   del("/api/admin/devices/<id>/held", (req) => { ctx.outbox?.clear(req.params.id); return json({ status: "ok" }); });
   post("/api/admin/devices/<id>/trust", (req) => {

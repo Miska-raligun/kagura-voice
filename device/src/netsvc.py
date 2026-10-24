@@ -100,6 +100,10 @@ def _mqtt_callback(topic, msg):
         except Exception as e:
             print("[mqtt] cmd parse error:", e)
             return
+        if cmd.get("action") == "volume":
+            # 管理界面调音量：只改一个数、写一个小文件，回调里就地做（入队的话要等空闲，紧跟的试听会按旧音量播）
+            hw._volume_set(cmd.get("level"))
+            return
         if cmd.get("action") == "role":
             _role_gen += 1
             # 就地换角色：只改一个变量、作废重绘缓存，不碰屏幕不碰网络，回调里做得起。

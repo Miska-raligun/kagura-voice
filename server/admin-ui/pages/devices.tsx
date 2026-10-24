@@ -20,7 +20,7 @@ export function Devices() {
       {tab === "list" && <>
         <Card title="设备" actions={<Btn small onClick={() => setAdding(!adding)}>{adding ? "收起" : "＋ 添加手机"}</Btn>}>
           {adding && <AddPhone onDone={reload} />}
-          {devs?.length ? <table class="hover"><thead><tr><th>设备</th><th>状态</th><th>电量</th><th>信号</th><th>看门狗</th><th title="受信设备的对话可使用执行命令等功能">受信</th><th>当前角色</th></tr></thead>
+          {devs?.length ? <table class="hover"><thead><tr><th>设备</th><th>状态</th><th>电量</th><th>信号</th><th>看门狗</th><th title="CoreS3 扬声器音量，调完会用当前角色的声音说一句">音量</th><th title="受信设备的对话可使用执行命令等功能">受信</th><th>当前角色</th></tr></thead>
             <tbody>{devs.map((d) => (
               <tr class={d.id === cur ? "on" : ""} onClick={() => setSel(d.id)}>
                 <td>{d.kind === "phone" ? <>📱 {d.name} <small class="muted">{d.id}</small></> : d.id}</td>
@@ -28,6 +28,7 @@ export function Devices() {
                   ? <><Badge s={d.online ? "online" : "stopped"} text={d.online ? "页面开着" : "未打开"} /> {d.secs_ago != null && <small class="muted">{ago(d.secs_ago)}</small>}</>
                   : <><Badge s={d.online ? "online" : "stopped"} text={d.online ? "在线" : "离线"} /> <small class="muted">{ago(d.secs_ago)}</small></>}</td>
                 <td>{d.bat != null ? `${d.bat}%` : "—"}</td><td>{d.rssi ?? "—"}</td><td>{d.wdt ?? "—"}</td>
+                <td onClick={(e) => e.stopPropagation()}>{d.kind === "phone" ? <span class="muted">跟手机走</span> : <Volume id={d.id} value={d.vol} online={d.online} onDone={reload} />}</td>
                 <td onClick={(e) => e.stopPropagation()}>{d.kind === "phone" ? <>
                   <Badge s="ok" text="配对令牌" />{" "}
                   <Btn small kind="ghost" onClick={async () => { const n = window.prompt("名称", d.name); if (!n) return; try { await api(`/clients/${enc(d.id)}/rename`, { body: { name: n } }); reload(); } catch (e: any) { toast(e.message, "err"); } }}>改名</Btn>
@@ -56,6 +57,26 @@ export function Devices() {
       {tab === "monitor" && <iframe class="monitor" src="/monitor" />}
       {tab === "crash" && <Crashes />}
     </>
+  );
+}
+
+/** 音量滑块：松手才下发，下发后设备用当前角色的声音说一句「现在的音量是…」 */
+function Volume({ id, value, online, onDone }: { id: string; value: number | null; online: boolean; onDone: () => void }) {
+  const [v, setV] = useState<number | null>(null);
+  const shown = v ?? value;
+  if (shown == null) return <span class="muted" title="设备代码更新后才会上报音量">—</span>;
+  const send = async (level: number) => {
+    try { await api(`/devices/${enc(id)}/volume`, { body: { level, test: true } }); toast(`音量 ${level}%`); onDone(); }
+    catch (e: any) { toast(e.message, "err"); }
+    finally { setV(null); }
+  };
+  return (
+    <span class="vol">
+      <input type="range" min={10} max={100} step={5} value={shown} disabled={!online} title={online ? "" : "设备离线"}
+        onInput={(e) => setV(Number((e.target as HTMLInputElement).value))}
+        onChange={(e) => send(Number((e.target as HTMLInputElement).value))} />
+      <small class="mono">{shown}%</small>
+    </span>
   );
 }
 

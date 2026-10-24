@@ -30,7 +30,7 @@ def _set_led(r, g, b):
             pass
 
 
-# ── 音量（语音可调："小声一点/大声一点"，服务端回 X-Volume 头） ──
+# ── 音量（语音可调："小声一点/大声一点"，服务端回 X-Volume 头；管理界面滑块经 MQTT volume 命令直接设） ──
 _VOLUME_PATH = cfg.data("volume.json")
 
 
@@ -42,10 +42,19 @@ def _volume_load():
     try:
         with open(_VOLUME_PATH, "r") as f:
             v = ujson.load(f).get("volume")
-        if isinstance(v, (int, float)) and 0.2 <= v <= 1.0:
+        if isinstance(v, (int, float)) and 0.1 <= v <= 1.0:
             _volume = v
     except Exception:
         pass   # 无存档用默认值
+
+
+def _volume_save():
+    try:
+        with open(_VOLUME_PATH, "w") as f:
+            ujson.dump({"volume": _volume}, f)
+    except Exception as e:
+        print("[vol] save err:", e)
+    print("[vol] volume =", _volume)
 
 
 def _volume_adjust(direction):
@@ -53,12 +62,25 @@ def _volume_adjust(direction):
     global _volume
     step = 0.2 if direction == "up" else -0.2
     _volume = max(0.2, min(1.0, round(_volume + step, 1)))
+    _volume_save()
+
+
+def _volume_set(level):
+    """管理界面直接设音量：0.1~1.0（也认 10~100 的百分数），立刻作用到扬声器并持久化。返回是否设成功。"""
+    global _volume
     try:
-        with open(_VOLUME_PATH, "w") as f:
-            ujson.dump({"volume": _volume}, f)
-    except Exception as e:
-        print("[vol] save err:", e)
-    print("[vol] volume =", _volume)
+        v = float(level)
+    except Exception:
+        return False
+    if v > 1.0:
+        v = v / 100.0
+    _volume = max(0.1, min(1.0, round(v, 2)))
+    try:
+        Speaker.setVolumePercentage(_volume)   # 正在播的也马上变（设备空闲时扬声器没开，设了也无妨）
+    except Exception:
+        pass
+    _volume_save()
+    return True
 
 
 _mic_active = False

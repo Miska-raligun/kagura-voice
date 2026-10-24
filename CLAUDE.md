@@ -76,7 +76,9 @@ CoreS3 (MicroPython) ──HTTP──▶ server/（TypeScript 单文件可执行
   （取景模式手动拍照，服务端用 `_PHOTO_ONLY_PROMPT` 当提问）、`text`+`image`
   （无 wav 时以 text 为提问）。`wav`/`image` 至少要有一个，否则 400。
 - **MQTT topic**：`kagura/push/{device_id}`（播报通知）、`kagura/cmd/{device_id}`
-  （`capture` / `stream_start` / `stream_stop` / `role` / `sync`）。
+  （`capture` / `stream_start` / `stream_stop` / `role` / `sync` / `volume`）。
+  `volume`（管理界面设备表的滑块，`POST /api/admin/devices/<id>/volume`，level 10~100 → 下发 0.1~1.0）和 `role` 一样**在回调里就地做**
+  （`hw._volume_set`：改变量、`setVolumePercentage`、写 `volume.json`），不入队——入队要等空闲，紧跟的试听推送会按旧音量播。当前音量随心跳 `vol` 上报。
 - **直播链路**：MQTT 下发 `stream_start` → 设备连 TCP :5002 → 每帧 `4 字节大端长度
   + RGB565 裸字节`（0 长度=结束）→ 服务端只留最新一帧 → 网页长轮询
   `/stream/<dev>/frame.jpg?after=<seq>`。三个别踩的点：

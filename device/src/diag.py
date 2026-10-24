@@ -239,6 +239,7 @@ def heartbeat_tick():
         "wdt": hw._wdt_ms,
         # 录音门槛：[底噪, 说话阈值, 唤醒阈值]。"说话不触发"先看这三个数
         "vad": [cfg.NOISE_FLOOR, cfg.SILENCE_THRESHOLD, cfg.WAKE_THRESHOLD],
+        "vol": hw._volume,     # 当前音量（0.1~1.0），管理界面的滑块显示它
     }
     payload.update(_ota_info)    # fw / res / fwv：管理界面据此判断设备文件是不是最新
     try:
