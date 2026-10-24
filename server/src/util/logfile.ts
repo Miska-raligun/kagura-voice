@@ -5,6 +5,7 @@ import path from "node:path";
 import util from "node:util";
 
 let stream: fs.WriteStream | null = null;
+let logPath = "";
 let maxBytes = 5 * 1024 * 1024;
 let keep = 3;
 
@@ -35,6 +36,7 @@ export function initLogFile(dataDir: string, opts: { maxBytes?: number; keep?: n
   try {
     fs.mkdirSync(dir, { recursive: true });
     rotate(dir, file);
+    logPath = file;
     stream = fs.createWriteStream(file, { flags: "a" });
     stream.on("error", () => { stream = null; });
   } catch { return; }
@@ -55,4 +57,20 @@ export function initLogFile(dataDir: string, opts: { maxBytes?: number; keep?: n
   console.error = (...a: any[]) => { orig.error(...a); line(" ERROR", a); };
   console.debug = (...a: any[]) => { orig.debug(...a); line(" DEBUG", a); };
   process.on("exit", () => { try { stream?.end(); } catch { /* 已关 */ } });
+}
+
+/**
+ * 进程要死了：同步写一行（异步流里排队的日志来不及落盘）。
+ * 托盘版没有控制台，以前未捕获的异常会让进程无声消失、日志里一个字都没有（在线更新下载到一半就这样没了）。
+ */
+export function logFatal(tag: string, e: unknown) {
+  const msg = `${new Date().toISOString()} ${tag} ${e instanceof Error ? e.stack || e.message : util.format(e)}\n`;
+  try { process.stderr.write(msg); } catch { /* 没有控制台 */ }
+  if (logPath) { try { fs.appendFileSync(logPath, msg); } catch { /* 写不了就算了 */ } }
+}
+
+/** 未捕获的异常记下来再退出（Node 默认行为，只是不再无声无息）；未处理的 Promise 拒绝只记录、不让整个服务挂掉 */
+export function installCrashLogging() {
+  process.on("uncaughtException", (e) => { logFatal("[crash] 未捕获的异常，退出：", e); process.exit(1); });
+  process.on("unhandledRejection", (e) => { logFatal("[crash] 未处理的 Promise 拒绝（已忽略，服务继续运行）：", e); });
 }

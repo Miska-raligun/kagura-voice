@@ -31,7 +31,7 @@ import { SelfUpdater, installKind } from "./util/selfupdate.ts";
 import { applyPending } from "./backup.ts";
 import { registerAdminSystem } from "./routes/admin-system.ts";
 import type { PackageManager } from "./agent/packages.ts";
-import { initLogFile } from "./util/logfile.ts";
+import { initLogFile, installCrashLogging } from "./util/logfile.ts";
 import { startTray } from "./tray.ts";
 import { isGuiProcess, messageBox } from "./util/wingui.ts";
 import { waitForOldProcess, takeRestartNotice, restartSelf } from "./util/restart.ts";
@@ -82,6 +82,7 @@ async function main() {
 
   const dirs = makeDirs(cfg);
   initLogFile(cfg.dataDir);
+  installCrashLogging();
   const proxy = applyProxy(cfg.tools.web.proxy);
   const fake = cfg.fakeProviders ? new FakeProviders(dirs.ttsCache) : null;
   const speech = fake ? null : new SpeechHub(cfg.baidu, dirs.ttsCache, cfg.speech);

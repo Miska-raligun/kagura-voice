@@ -125,15 +125,17 @@ export class SelfUpdater {
       if (!r.ok || !r.body) throw new Error(`HTTP ${r.status}`);
       if ((r.headers.get("content-type") ?? "").includes("text/html")) throw new Error("返回的是网页而不是文件");
       if (r.status !== 206) have = 0;                        // 源不支持续传：从头来
-      const out = fs.createWriteStream(dest, { flags: have ? "a" : "w" });
+      // 用 FileHandle 一块块 await 写：写盘出错就是普通的异常，被上层接住。
+      // （WriteStream 的 error 事件没人听会变成未捕获异常，托盘版里进程就无声消失了）
+      const out = await fs.promises.open(dest, have ? "a" : "w");
       this.state.done = have;
       try {
         for await (const chunk of r.body as any as AsyncIterable<Uint8Array>) {
           poke();
+          await out.write(chunk);
           this.state.done += chunk.length;
-          if (!out.write(chunk)) await new Promise<void>((res) => out.once("drain", () => res()));
         }
-      } finally { await new Promise<void>((res) => out.end(() => res())); }
+      } finally { await out.close(); }
       const size = fs.statSync(dest).size;
       if (total && size !== total) throw new Error(`文件不完整（${size}/${total} 字节）`);
     } finally { clearTimeout(timer); }
