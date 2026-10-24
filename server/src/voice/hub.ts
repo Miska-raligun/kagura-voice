@@ -2,7 +2,8 @@
 //
 //   baidu   百度（识别 + 合成，Key 在 config.json 的 baidu 里）
 //   openai  OpenAI 兼容接口（/audio/transcriptions、/audio/speech）：OpenAI、硅基流动、本机 VoiceStudio 等
-//   minimax MiniMax 语音合成（t2a_v2，支持复刻音色）
+//   minimax MiniMax（合成 t2a_v2，支持复刻音色；识别 speech_to_text / asr-1.0）
+//           文档：https://platform.minimax.cn/docs/api-reference/ ，默认域名 api.minimax.cn（api.minimaxi.com、华北 api-bj.minimaxi.com 也通）
 //
 // 每个 agent 可以单独指定合成服务商和音色（agent.json 的 tts_provider / tts_voice）；没指定用默认服务商。
 // 指定的那家失败时退回默认服务商，再不行才报错——别让换了家服务商就变成「没声音」。
@@ -23,15 +24,15 @@ export interface SpeechProvider {
   name?: string;
   base_url?: string;
   api_key?: string;
-  /** 合成模型（openai：tts-1 / 引擎 id；minimax：speech-02-turbo 等） */
+  /** 合成模型（openai：tts-1 / 引擎 id；minimax：speech-2.8-turbo / speech-2.8-hd / speech-02-turbo 等） */
   model?: string;
   /** 默认音色（openai：voice 名或 VoiceStudio 的声音 id；minimax：voice_id） */
   voice?: string;
-  /** 识别模型（openai：whisper-1、FunAudioLLM/SenseVoiceSmall 等） */
+  /** 识别模型（openai：whisper-1、FunAudioLLM/SenseVoiceSmall 等；minimax：asr-1.0） */
   asr_model?: string;
   /** 语速，1 = 正常 */
   speed?: number;
-  /** minimax 旧接口要 GroupId */
+  /** minimax 旧接口要 GroupId（现行接口只认 API Key，留着兼容老配置） */
   group_id?: string;
 }
 export interface SpeechConfig { asr: string; tts: string; providers: SpeechProvider[] }
@@ -48,6 +49,7 @@ export function parseSpeechConfig(raw: any): SpeechConfig {
 }
 
 const trimSlash = (s: string) => s.replace(/\/+$/, "");
+const MINIMAX_BASE = "https://api.minimax.cn/v1";
 
 async function fetchOk(url: string, init: RequestInit, timeoutMs: number, what: string): Promise<Response> {
   const r = await fetch(url, { ...init, signal: AbortSignal.timeout(timeoutMs) });
@@ -121,13 +123,14 @@ async function synthOther(p: SpeechProvider, text: string, voice: string): Promi
     return toPcm16k(Buffer.from(await r.arrayBuffer()));
   }
   if (p.kind === "minimax") {
-    const base = trimSlash(p.base_url || "https://api.minimaxi.com/v1");
+    const base = trimSlash(p.base_url || MINIMAX_BASE);
     const r = await fetchOk(`${base}/t2a_v2${p.group_id ? `?GroupId=${encodeURIComponent(p.group_id)}` : ""}`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${p.api_key ?? ""}` },
       body: JSON.stringify({
         model: p.model || "speech-02-turbo", text, stream: false,
-        voice_setting: { voice_id: voice || p.voice || "female-shaonv", speed: p.speed ?? 1, vol: 1, pitch: 0 },
+        // 语速只收 [0.5, 2]，超了接口直接报 2013
+        voice_setting: { voice_id: voice || p.voice || "female-shaonv", speed: Math.min(2, Math.max(0.5, p.speed || 1)), vol: 1, pitch: 0 },
         audio_setting: { sample_rate: SAMPLE_RATE, format: "pcm", channel: 1 },
       }),
     }, 60_000, `${p.id} 合成`);
@@ -142,6 +145,17 @@ async function synthOther(p: SpeechProvider, text: string, voice: string): Promi
 
 /** 非百度服务商的识别 */
 async function transcribeOther(p: SpeechProvider, wav: Buffer): Promise<string> {
+  if (p.kind === "minimax") {
+    // 一次性返回（stream=false、response_format=json）：{ text, duration }；出错时是真实 HTTP 状态码 + OpenAI 风格错误体
+    const base = trimSlash(p.base_url || MINIMAX_BASE);
+    const form = new FormData();
+    form.append("file", new Blob([new Uint8Array(wav)], { type: "audio/wav" }), "audio.wav");
+    form.append("model", p.asr_model || "asr-1.0");
+    const r = await fetchOk(`${base}/speech_to_text`, {
+      method: "POST", headers: { Authorization: `Bearer ${p.api_key ?? ""}`, language: "zh" }, body: form,
+    }, 30_000, `${p.id} 识别`);
+    return String(((await r.json()) as any)?.text ?? "").trim();
+  }
   if (p.kind !== "openai") throw new Error(`${p.id}（${p.kind}）不支持语音识别`);
   const base = trimSlash(p.base_url || "https://api.openai.com/v1");
   const form = new FormData();

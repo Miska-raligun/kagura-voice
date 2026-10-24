@@ -10,6 +10,7 @@ import { wavHeader } from "../src/util/wav.ts";
 let server: http.Server, base = "";
 const seen: { path: string; body: Buffer; auth: string }[] = [];
 let failOpenai = false;
+let mmLang = "";
 
 /** 24k 单声道 16 位 WAV：n 个样本 */
 function wav24k(n: number) {
@@ -32,6 +33,9 @@ beforeAll(async () => {
         res.setHeader("content-type", "audio/wav"); res.end(wav24k(2400));
       } else if (u.pathname === "/v1/audio/transcriptions") {
         res.setHeader("content-type", "application/json"); res.end(JSON.stringify({ text: " 你好呀 " }));
+      } else if (u.pathname === "/mm/speech_to_text") {
+        mmLang = String(req.headers.language ?? "");
+        res.setHeader("content-type", "application/json"); res.end(JSON.stringify({ text: "开灯。 ", duration: 1.2, trace_id: "t" }));
       } else if (u.pathname === "/mm/t2a_v2") {
         res.setHeader("content-type", "application/json");
         res.end(JSON.stringify({ data: { audio: Buffer.alloc(3200, 2).toString("hex") }, base_resp: { status_code: 0 } }));
@@ -110,6 +114,19 @@ describe("识别", () => {
     const r = seen.filter((s) => s.path === "/v1/audio/transcriptions").at(-1)!;
     expect(r.body.toString()).toContain('name="model"');
     expect(r.body.toString()).toContain("whisper-1");
+  });
+});
+
+describe("识别（MiniMax）", () => {
+  it("speech_to_text：multipart 带 asr-1.0、language: zh 头、Bearer key", async () => {
+    const hub = mk({ asr: "mm", providers: providers() });
+    expect(await hub.transcribe(wavHeader(0))).toBe("开灯。");
+    const r = seen.filter((s) => s.path === "/mm/speech_to_text").at(-1)!;
+    expect(r.body.toString()).toContain('name="model"');
+    expect(r.body.toString()).toContain("asr-1.0");
+    expect(r.body.toString()).toContain('filename="audio.wav"');
+    expect(r.auth).toBe("Bearer k2");
+    expect(mmLang).toBe("zh");
   });
 });
 

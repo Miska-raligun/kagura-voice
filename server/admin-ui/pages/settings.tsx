@@ -227,12 +227,12 @@ function Voice({ cfg, save }: { cfg: any; save: (p: any) => Promise<void> }) {
   );
 }
 
-const SPEECH_KINDS: [string, string][] = [["openai", "OpenAI 兼容（VoiceStudio、OpenAI、硅基流动等）"], ["minimax", "MiniMax（仅合成）"], ["baidu", "百度"]];
+const SPEECH_KINDS: [string, string][] = [["openai", "OpenAI 兼容（VoiceStudio、OpenAI、硅基流动等）"], ["minimax", "MiniMax"], ["baidu", "百度"]];
 const SPEECH_PRESETS: { name: string; p: any }[] = [
   { name: "VoiceStudio（本机）", p: { kind: "openai", name: "VoiceStudio", base_url: "http://127.0.0.1:3900/v1", model: "", voice: "" } },
   { name: "OpenAI", p: { kind: "openai", name: "OpenAI", base_url: "https://api.openai.com/v1", model: "gpt-4o-mini-tts", voice: "alloy", asr_model: "whisper-1" } },
   { name: "硅基流动", p: { kind: "openai", name: "硅基流动", base_url: "https://api.siliconflow.cn/v1", model: "FunAudioLLM/CosyVoice2-0.5B", voice: "FunAudioLLM/CosyVoice2-0.5B:anna", asr_model: "FunAudioLLM/SenseVoiceSmall" } },
-  { name: "MiniMax", p: { kind: "minimax", name: "MiniMax", base_url: "https://api.minimaxi.com/v1", model: "speech-02-turbo", voice: "female-shaonv" } },
+  { name: "MiniMax", p: { kind: "minimax", name: "MiniMax", base_url: "https://api.minimax.cn/v1", model: "speech-2.8-turbo", voice: "female-shaonv", asr_model: "asr-1.0" } },
 ];
 
 /** 语音识别 / 合成服务商：选默认的那家，增删改服务商 */
@@ -247,7 +247,7 @@ function Speech({ cfg, save }: { cfg: any; save: (p: any) => Promise<void> }) {
   const [text, setText] = useState("你好，我是你的桌面小助手。");
   const up = (fn: (x: any) => void) => { const c = JSON.parse(JSON.stringify(sp)); fn(c); setSp(c); };
   const name = (p: any) => p.name || p.id;
-  const asrOpts = sp.providers.filter((p: any) => p.kind !== "minimax").map((p: any) => [p.id, name(p)] as [string, string]);
+  const asrOpts = sp.providers.map((p: any) => [p.id, name(p)] as [string, string]);
   const ttsOpts = sp.providers.map((p: any) => [p.id, name(p)] as [string, string]);
   const add = (preset: any) => up((c) => {
     let id = (preset.name === "VoiceStudio（本机）" ? "voicestudio" : String(preset.p.name || preset.p.kind)).toLowerCase().replace(/[^a-z0-9_-]/g, "") || "tts";
@@ -278,9 +278,9 @@ function Speech({ cfg, save }: { cfg: any; save: (p: any) => Promise<void> }) {
               <Field label="类型"><Select value={p.kind} onChange={(v) => set("kind", v)} options={SPEECH_KINDS.filter(([k]) => k !== "baidu")} /></Field>
               <Field label="接口地址"><Input value={p.base_url ?? ""} onInput={(v) => set("base_url", v)} placeholder="https://…/v1" /></Field>
               <Field label="API Key" hint="*** 表示已保存；本机服务可留空"><Input type="password" value={p.api_key ?? ""} onInput={(v) => set("api_key", v)} /></Field>
-              <Field label="合成模型" hint={p.kind === "minimax" ? "如 speech-02-turbo" : "如 tts-1；VoiceStudio 填引擎 id 或留空"}><Input value={p.model ?? ""} onInput={(v) => set("model", v)} /></Field>
+              <Field label="合成模型" hint={p.kind === "minimax" ? "如 speech-2.8-turbo / speech-2.8-hd" : "如 tts-1；VoiceStudio 填引擎 id 或留空"}><Input value={p.model ?? ""} onInput={(v) => set("model", v)} /></Field>
               <Field label="默认音色" hint={p.kind === "minimax" ? "voice_id（含复刻的音色）" : "voice 名或 VoiceStudio 的声音 id"}><Input value={p.voice ?? ""} onInput={(v) => set("voice", v)} /></Field>
-              {p.kind === "openai" && <Field label="识别模型" hint="用作语音识别时填，如 whisper-1"><Input value={p.asr_model ?? ""} onInput={(v) => set("asr_model", v)} /></Field>}
+              {p.kind !== "baidu" && <Field label="识别模型" hint={p.kind === "minimax" ? "用作语音识别时填 asr-1.0（留空也是它）" : "用作语音识别时填，如 whisper-1"}><Input value={p.asr_model ?? ""} onInput={(v) => set("asr_model", v)} /></Field>}
               <Field label="语速" hint="1 为正常"><Input type="number" value={p.speed ?? ""} placeholder="1" onInput={(v) => set("speed", v ? Number(v) : undefined)} /></Field>
             </div>
             <div class="row">
