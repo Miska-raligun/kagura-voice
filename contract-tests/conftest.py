@@ -41,14 +41,14 @@ def _wait_http(url: str, proc: subprocess.Popen, log: Path, timeout: float = 20)
     deadline = time.time() + timeout
     while time.time() < deadline:
         if proc.poll() is not None:
-            raise RuntimeError(f"被测服务端启动即退出（rc={proc.returncode}）：\n{log.read_text(errors='replace')[-3000:]}")
+            raise RuntimeError(f"被测服务端启动即退出（rc={proc.returncode}）：\n{log.read_text(encoding='utf-8', errors='replace')[-3000:]}")
         try:
             if requests.get(url, timeout=1).status_code == 200:
                 return
         except requests.RequestException:
             pass
         time.sleep(0.2)
-    raise RuntimeError(f"等不到 {url}：\n{log.read_text(errors='replace')[-3000:]}")
+    raise RuntimeError(f"等不到 {url}：\n{log.read_text(encoding='utf-8', errors='replace')[-3000:]}")
 
 
 class Server:
@@ -101,9 +101,9 @@ class Server:
         if "broker" not in PROVIDES:
             p = self._spawn([sys.executable, str(HERE / "_broker.py"), str(self.mqtt_port)], "broker", env, HERE)
             deadline = time.time() + 10
-            while "BROKER-READY" not in (self.data / "broker.log").read_text(errors="replace"):
+            while "BROKER-READY" not in (self.data / "broker.log").read_text(encoding="utf-8", errors="replace"):
                 if time.time() > deadline or p.poll() is not None:
-                    raise RuntimeError("MQTT broker 起不来：" + (self.data / "broker.log").read_text(errors="replace"))
+                    raise RuntimeError("MQTT broker 起不来：" + (self.data / "broker.log").read_text(encoding="utf-8", errors="replace"))
                 time.sleep(0.1)
         if "discovery" not in PROVIDES:
             self._spawn([sys.executable, str(ROOT / "discovery_relay.py")], "discovery", env, ROOT)
@@ -135,7 +135,7 @@ class Server:
                 p.kill()
 
     def log(self) -> str:
-        return (self.data / "server.log").read_text(errors="replace")
+        return (self.data / "server.log").read_text(encoding="utf-8", errors="replace")
 
     # ── HTTP ──
     def _h(self, headers):
