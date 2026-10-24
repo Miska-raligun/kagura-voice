@@ -235,6 +235,64 @@ const SPEECH_PRESETS: { name: string; p: any }[] = [
   { name: "MiniMax", p: { kind: "minimax", name: "MiniMax", base_url: "https://api.minimax.cn/v1", model: "speech-2.8-turbo", voice: "female-shaonv", asr_model: "asr-1.0" } },
 ];
 
+/** 读本地文件成 base64（不带 data: 前缀） */
+const readB64 = (f: File) => new Promise<string>((ok, bad) => {
+  const r = new FileReader();
+  r.onload = () => ok(String(r.result).replace(/^data:[^,]*,/, ""));
+  r.onerror = () => bad(r.error);
+  r.readAsDataURL(f);
+});
+
+/** MiniMax 音色快速复刻：上传 10 秒~5 分钟的录音 → 得到 voice_id，自动填进「默认音色」 */
+function VoiceClone({ p, sp, onDone }: { p: any; sp: any; onDone: (voiceId: string) => void }) {
+  const [voiceId, setVoiceId] = useState("");
+  const [file, setFile] = useState<File | null>(null);
+  const [prompt, setPrompt] = useState<File | null>(null);
+  const [promptText, setPromptText] = useState("");
+  const [preview, setPreview] = useState("你好呀，我是你的桌面小助手，今天想聊点什么？");
+  const [busy, setBusy] = useState(false);
+  const [demo, setDemo] = useState("");
+  const run = async () => {
+    if (!file) return toast("先选一段录音", "err");
+    if (file.size > 20 * 1024 * 1024) return toast("录音不能超过 20MB", "err");
+    if (prompt && !promptText.trim()) return toast("示例音频要配上它的逐字稿", "err");
+    setBusy(true); setDemo("");
+    try {
+      const r = await api<any>("/voice-clone", { body: {
+        provider: p.id, speech: sp, voice_id: voiceId.trim(), preview_text: preview,
+        audio: { b64: await readB64(file), name: file.name },
+        ...(prompt ? { prompt: { b64: await readB64(prompt), name: prompt.name, text: promptText } } : {}),
+      } });
+      onDone(r.voice_id);
+      setDemo(r.demo_audio || "");
+      toast(`复刻成功：${r.voice_id}，已填入默认音色，记得保存`);
+    } catch (e) { toastErr(e); } finally { setBusy(false); }
+  };
+  return (
+    <details class="pkg" style="margin-top:10px">
+      <summary><b>复刻音色</b> <small class="muted">用自己的录音生成一个音色（需在 MiniMax 完成实名认证）</small></summary>
+      <div class="form" style="margin-top:10px">
+        <Field label="voice_id" hint="自己起名：8 位以上，字母开头，只含字母、数字、- 和 _，不能和已有的重名">
+          <Input value={voiceId} onInput={setVoiceId} placeholder="kagura_mio_v1" />
+        </Field>
+        <Field label="录音" hint="mp3 / m4a / wav，10 秒~5 分钟，不超过 20MB；安静环境、只有一个人说话，30 秒~1 分钟就够">
+          <input type="file" accept=".mp3,.m4a,.wav,audio/*" onChange={(e) => setFile((e.target as HTMLInputElement).files?.[0] ?? null)} />
+        </Field>
+        <Field label="示例音频（可选）" hint="8 秒以内的一小段，能让音色更像、更稳">
+          <input type="file" accept=".mp3,.m4a,.wav,audio/*" onChange={(e) => setPrompt((e.target as HTMLInputElement).files?.[0] ?? null)} />
+        </Field>
+        {prompt && <Field label="示例音频逐字稿"><Input value={promptText} onInput={setPromptText} /></Field>}
+        <Field label="试听文本" hint="用新音色念一遍给你听（按字数计费），留空就不生成试听"><Input value={preview} onInput={setPreview} /></Field>
+      </div>
+      <div class="row">
+        <Btn small kind="primary" disabled={busy || !voiceId.trim() || !file} onClick={run}>{busy ? "复刻中…" : "开始复刻"}</Btn>
+        {demo && <audio controls autoplay src={demo} />}
+      </div>
+      <small class="muted">复刻出的音色 <b>7 天内要正式合成一次</b>（保存后点上面的「试听」即可），否则 MiniMax 会删掉它；第一次正式使用时另收一次音色费。</small>
+    </details>
+  );
+}
+
 /** 语音识别 / 合成服务商：选默认的那家，增删改服务商 */
 function Speech({ cfg, save }: { cfg: any; save: (p: any) => Promise<void> }) {
   const init = () => {
@@ -283,6 +341,7 @@ function Speech({ cfg, save }: { cfg: any; save: (p: any) => Promise<void> }) {
               {p.kind !== "baidu" && <Field label="识别模型" hint={p.kind === "minimax" ? "用作语音识别时填 asr-1.0（留空也是它）" : "用作语音识别时填，如 whisper-1"}><Input value={p.asr_model ?? ""} onInput={(v) => set("asr_model", v)} /></Field>}
               <Field label="语速" hint="1 为正常"><Input type="number" value={p.speed ?? ""} placeholder="1" onInput={(v) => set("speed", v ? Number(v) : undefined)} /></Field>
             </div>
+            {p.kind === "minimax" && <VoiceClone p={p} sp={sp} onDone={(id) => set("voice", id)} />}
             <div class="row">
               <Btn small onClick={() => test(p.id)}>试听</Btn>
               <Btn small kind="danger" onClick={() => up((c) => {

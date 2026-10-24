@@ -188,7 +188,7 @@ MCP 服务器配置里加 `"allowUntrusted": true` 才给 IM 陌生人 / 群聊�
   被替换的先备份到 `backups/before-import-<时间>/`。端口等本机相关设置、包里空着的密钥保留本机的；npm / git 装的扩展包导入后重新下载。
 - **语音服务商可选**（「设置 → 语音 → 语音服务」，config.json 的 `speech`）：识别、合成各选一家——百度（默认）、
   OpenAI 兼容接口（OpenAI、硅基流动、本机 [VoiceStudio](https://github.com/debpalash/VoiceStudio) 等，`/audio/speech`、`/audio/transcriptions`）、
-  MiniMax（识别 + 合成，合成支持复刻音色）。每个 agent 可在「基本」里单独指定合成服务商和音色（`tts_provider` / `tts_voice`），
+  MiniMax（识别 + 合成，可在管理页直接复刻音色）。每个 agent 可在「基本」里单独指定合成服务商和音色（`tts_provider` / `tts_voice`），
   指定的那家失败时自动退回默认服务商；别家返回的音频统一转成设备要的 16k 单声道。改完即时生效。
   ```json
   "speech": { "asr": "baidu", "tts": "voicestudio", "providers": [

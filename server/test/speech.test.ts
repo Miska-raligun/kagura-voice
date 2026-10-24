@@ -4,7 +4,7 @@ import http from "node:http";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { SpeechHub, parseSpeechConfig, toPcm16k } from "../src/voice/hub.ts";
+import { SpeechHub, parseSpeechConfig, toPcm16k, minimaxClone } from "../src/voice/hub.ts";
 import { wavHeader } from "../src/util/wav.ts";
 
 let server: http.Server, base = "";
@@ -36,6 +36,15 @@ beforeAll(async () => {
       } else if (u.pathname === "/mm/speech_to_text") {
         mmLang = String(req.headers.language ?? "");
         res.setHeader("content-type", "application/json"); res.end(JSON.stringify({ text: "开灯。 ", duration: 1.2, trace_id: "t" }));
+      } else if (u.pathname === "/mm/files/upload") {
+        const purpose = /name="purpose"\r\n\r\n(\w+)/.exec(body.toString("latin1"))?.[1];
+        res.setHeader("content-type", "application/json");
+        res.end(JSON.stringify({ file: { file_id: purpose === "voice_clone" ? 111 : 222, purpose }, base_resp: { status_code: 0, status_msg: "success" } }));
+      } else if (u.pathname === "/mm/voice_clone") {
+        const j = JSON.parse(body.toString());
+        res.setHeader("content-type", "application/json");
+        if (j.voice_id === "Taken_voice1") { res.end(JSON.stringify({ base_resp: { status_code: 2039, status_msg: "voice id duplicate" } })); return; }
+        res.end(JSON.stringify({ input_sensitive: { type: j.voice_id === "Bad_voice01" ? 5 : 0 }, demo_audio: j.text ? "https://cdn/demo.mp3" : "", base_resp: { status_code: 0 } }));
       } else if (u.pathname === "/mm/t2a_v2") {
         res.setHeader("content-type", "application/json");
         res.end(JSON.stringify({ data: { audio: Buffer.alloc(3200, 2).toString("hex") }, base_resp: { status_code: 0 } }));
@@ -127,6 +136,30 @@ describe("识别（MiniMax）", () => {
     expect(r.body.toString()).toContain('filename="audio.wav"');
     expect(r.auth).toBe("Bearer k2");
     expect(mmLang).toBe("zh");
+  });
+});
+
+describe("音色复刻（MiniMax）", () => {
+  const mm = () => providers()[1] as any;
+  const wav = { data: Buffer.alloc(100, 1), filename: "me.wav" };
+  it("上传 → 复刻：file_id 是数字、示例音频与逐字稿一起带上、试听用服务商的模型", async () => {
+    const r = await minimaxClone(mm(), { voice_id: "Kagura_mio1", audio: wav, prompt: { audio: wav, text: "示例" }, preview_text: "你好", noise_reduction: true });
+    expect(r).toEqual({ voice_id: "Kagura_mio1", demo_audio: "https://cdn/demo.mp3", sensitive: 0 });
+    const ups = seen.filter((s) => s.path === "/mm/files/upload").slice(-2).map((s) => s.body.toString("latin1"));
+    expect(ups[0]).toContain("voice_clone");
+    expect(ups[1]).toContain("prompt_audio");
+    const req = JSON.parse(seen.filter((s) => s.path === "/mm/voice_clone").at(-1)!.body.toString());
+    expect(req).toEqual({ file_id: 111, voice_id: "Kagura_mio1", need_noise_reduction: true, need_volume_normalization: false,
+      clone_prompt: { prompt_audio: 222, prompt_text: "示例" }, text: "你好", model: "speech-02-turbo" });
+    expect(seen.at(-1)!.auth).toBe("Bearer k2");
+  });
+  it("voice_id 不合规在本地就拦下；重名、风控如实报错", async () => {
+    const n = seen.length;
+    for (const id of ["short1", "1abcdefgh", "abcdefgh_", "abc defgh"]) await expect(minimaxClone(mm(), { voice_id: id, audio: wav })).rejects.toThrow(/voice_id/);
+    expect(seen.length).toBe(n);
+    await expect(minimaxClone(mm(), { voice_id: "Taken_voice1", audio: wav })).rejects.toThrow(/2039/);
+    await expect(minimaxClone(mm(), { voice_id: "Bad_voice01", audio: wav })).rejects.toThrow(/风控.*谩骂/);
+    await expect(minimaxClone({ ...mm(), api_key: "" }, { voice_id: "Kagura_mio1", audio: wav })).rejects.toThrow(/API Key/);
   });
 });
 

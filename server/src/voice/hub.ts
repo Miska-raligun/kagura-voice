@@ -143,6 +143,70 @@ async function synthOther(p: SpeechProvider, text: string, voice: string): Promi
   throw new Error(`不支持的合成服务商类型 ${p.kind}`);
 }
 
+// ── MiniMax 音色快速复刻：上传录音（purpose=voice_clone）→（可选）上传示例音频（prompt_audio）→ voice_clone ──
+// 复刻出的音色 7 天内没正式合成过一次就会被 MiniMax 删掉；正式合成第一次时另收一次音色费。
+
+/** voice_id 规则（官方）：8~256 位，字母开头，只含字母数字 - _，不以 - _ 结尾 */
+export const MINIMAX_VOICE_ID_RE = /^[A-Za-z][A-Za-z0-9_-]{6,254}[A-Za-z0-9]$/;
+
+export interface CloneAudio { data: Buffer; filename: string }
+export interface CloneRequest {
+  voice_id: string;
+  audio: CloneAudio;
+  /** 可选的示例音频（< 8 秒）和它的逐字稿，两个要一起给 */
+  prompt?: { audio: CloneAudio; text: string };
+  /** 试听文本：给了就用 model 合成一段试听，返回链接（按字数计费） */
+  preview_text?: string;
+  model?: string;
+  noise_reduction?: boolean;
+  volume_normalization?: boolean;
+}
+export interface CloneResult { voice_id: string; demo_audio: string; sensitive: number }
+
+const MINIMAX_SENSITIVE = ["正常", "严重违规", "色情", "广告", "违禁", "谩骂", "暴恐", "其他"];
+
+/** MiniMax 的错误有两种外形：HTTP 200 + base_resp.status_code，或真实状态码 + OpenAI 风格错误体 */
+async function minimaxJson(url: string, init: RequestInit, what: string): Promise<any> {
+  const r = await fetch(url, { ...init, signal: AbortSignal.timeout(120_000) });
+  const text = await r.text();
+  let j: any = null;
+  try { j = JSON.parse(text); } catch { /* 下面按 HTTP 状态报 */ }
+  const code = j?.base_resp?.status_code;
+  if (!r.ok || code) throw new Error(`${what}失败：${code ? `${code} ${j.base_resp.status_msg ?? ""}` : j?.error?.message ?? `HTTP ${r.status} ${text.slice(0, 200)}`}`);
+  return j;
+}
+
+async function minimaxUpload(p: SpeechProvider, a: CloneAudio, purpose: "voice_clone" | "prompt_audio"): Promise<number> {
+  const form = new FormData();
+  form.append("purpose", purpose);
+  form.append("file", new Blob([new Uint8Array(a.data)]), a.filename || "audio.wav");
+  const j = await minimaxJson(`${trimSlash(p.base_url || MINIMAX_BASE)}/files/upload`,
+    { method: "POST", headers: { Authorization: `Bearer ${p.api_key ?? ""}` }, body: form }, purpose === "voice_clone" ? "上传复刻音频" : "上传示例音频");
+  const id = j?.file?.file_id;
+  if (id === undefined || id === null) throw new Error("上传成功但没有返回 file_id");
+  return id;
+}
+
+export async function minimaxClone(p: SpeechProvider, req: CloneRequest): Promise<CloneResult> {
+  if (p.kind !== "minimax") throw new Error(`${p.id} 不是 MiniMax 服务商`);
+  if (!p.api_key) throw new Error("先填 MiniMax 的 API Key");
+  if (!MINIMAX_VOICE_ID_RE.test(req.voice_id)) throw new Error("voice_id 要 8~256 位，字母开头，只含字母、数字、- 和 _，不能以 - 或 _ 结尾");
+  if (!req.audio?.data?.length) throw new Error("没收到录音");
+  if (req.audio.data.length > 20 * 1024 * 1024) throw new Error("录音不能超过 20MB");
+  const file_id = await minimaxUpload(p, req.audio, "voice_clone");
+  const body: any = { file_id, voice_id: req.voice_id, need_noise_reduction: !!req.noise_reduction, need_volume_normalization: !!req.volume_normalization };
+  if (req.prompt?.audio?.data?.length && req.prompt.text?.trim()) {
+    body.clone_prompt = { prompt_audio: await minimaxUpload(p, req.prompt.audio, "prompt_audio"), prompt_text: req.prompt.text.trim() };
+  }
+  if (req.preview_text?.trim()) { body.text = req.preview_text.trim().slice(0, 1000); body.model = req.model || p.model || "speech-2.8-turbo"; }
+  const j = await minimaxJson(`${trimSlash(p.base_url || MINIMAX_BASE)}/voice_clone`, {
+    method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${p.api_key}` }, body: JSON.stringify(body),
+  }, "音色复刻");
+  const sensitive = Number(j?.input_sensitive?.type ?? 0);
+  if (sensitive) throw new Error(`录音被 MiniMax 风控拦下（${MINIMAX_SENSITIVE[sensitive] ?? sensitive}）`);
+  return { voice_id: req.voice_id, demo_audio: String(j?.demo_audio ?? ""), sensitive };
+}
+
 /** 非百度服务商的识别 */
 async function transcribeOther(p: SpeechProvider, wav: Buffer): Promise<string> {
   if (p.kind === "minimax") {

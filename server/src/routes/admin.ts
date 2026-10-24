@@ -14,7 +14,7 @@ import { importOpenClaw, findOpenClawDirs, describeImport } from "../agent/impor
 import { scheduleFrom } from "../agent/tools/cron.ts";
 import { Roles } from "../roles.ts";
 import { parseToolsConfig, parseVoicePush } from "../config.ts";
-import { SpeechHub, parseSpeechConfig } from "../voice/hub.ts";
+import { SpeechHub, parseSpeechConfig, minimaxClone } from "../voice/hub.ts";
 import { GLOBAL_OWNER } from "../agent/skills.ts";
 import { registerAdminChat } from "./admin-chat.ts";
 import { registerAdminPlugins } from "./admin-plugins.ts";
@@ -441,6 +441,34 @@ export function registerAdmin(r: Router, ctx: Ctx, sys: AgentSystem) {
       if (!wav) return json({ error: "语音合成失败" }, 500);
       return { status: 200, headers: { "Content-Type": "audio/wav" }, body: fs.readFileSync(wav) };
     } catch (e: any) { return json({ error: `语音合成失败：${e.message}` }, 500); }
+  });
+
+  /**
+   * MiniMax 音色快速复刻。录音以 base64 随 JSON 传（最多 20MB，base64 后超出普通请求上限，所以只对本机放宽）；
+   * speech 同试听：用页面上还没保存的服务商设置（API Key 显示为 *** 时用已保存的）
+   */
+  r.bigBodyPaths.add("/api/admin/voice-clone");
+  post("/api/admin/voice-clone", async (req) => {
+    const d = req.json() ?? {};
+    const drafts: any[] = Array.isArray(d.speech?.providers) ? d.speech.providers : ctx.cfg.speech.providers;
+    const raw = drafts.find((p: any) => p.id === d.provider);
+    if (!raw) return json({ error: "找不到这个服务商" }, 400);
+    const old = ctx.cfg.speech.providers.find((o) => o.id === raw.id);
+    const p = raw.api_key === "***" && old ? { ...raw, api_key: old.api_key } : raw;
+    const audio = (a: any) => a?.b64 ? { data: Buffer.from(String(a.b64), "base64"), filename: String(a.name || "audio.wav").replace(/[^\w.\-]/g, "_") } : undefined;
+    try {
+      const out = await minimaxClone(p, {
+        voice_id: String(d.voice_id ?? "").trim(),
+        audio: audio(d.audio)!,
+        prompt: d.prompt?.b64 ? { audio: audio(d.prompt)!, text: String(d.prompt.text ?? "") } : undefined,
+        preview_text: d.preview_text ? String(d.preview_text) : undefined,
+        model: d.model ? String(d.model) : undefined,
+        noise_reduction: d.noise_reduction !== false,
+        volume_normalization: d.volume_normalization !== false,
+      });
+      console.log(`[tts] 🧬 MiniMax 复刻音色 ${out.voice_id}`);
+      return json(out);
+    } catch (e: any) { return json({ error: e.message }, 400); }
   });
 
   // ── 用量（全部 agent）──
