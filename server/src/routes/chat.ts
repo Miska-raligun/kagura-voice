@@ -223,7 +223,9 @@ export function registerChat(r: Router, ctx: Ctx) {
     if (!data || typeof data !== "object") return json({ error: "missing json body" }, 400);
     const wavB64: string = data.wav || "";
     const imageB64: string = data.image || "";
-    if (!wavB64 && !imageB64) return json({ error: "wav or image is required" }, 400);
+    // 配对过的手机可以只发文字（网页里打字聊天）；设备照旧要 wav 或 image（新旧两版共用的契约）
+    const textOnly = !!String(data.text || "").trim() && !!ctx.clients?.fromReq(req);
+    if (!wavB64 && !imageB64 && !textOnly) return json({ error: "wav or image is required" }, 400);
 
     let wav: Buffer | null = null;
     if (wavB64) {

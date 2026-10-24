@@ -4,7 +4,7 @@ import { VERSION } from "../cli.ts";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { json, type Req, type Res, type Router } from "../http/router.ts";
+import { json, viaProxy, type Req, type Res, type Router } from "../http/router.ts";
 import type { Ctx } from "../ctx.ts";
 import type { AgentSystem } from "../agent/system.ts";
 import { SOUL_FILES } from "../agent/registry.ts";
@@ -36,8 +36,10 @@ const LOCAL_HOST = /^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i;
  *   · DNS 重绑定能让恶意域名指向 127.0.0.1——Host 头必须是本机地址。
  * 这两条不挡住，恶意网页就能借管理接口装扩展包、执行命令。
  */
+
 export const isLocal = (req: Req) => {
   if (!LOCAL.has(req.remoteAddr)) return false;
+  if (viaProxy(req)) return false;
   if (!LOCAL_HOST.test(req.header("Host"))) return false;
   // 从别的网站点链接打开管理界面（顶层导航、GET）可以；跨站的其它请求不行
   if (req.header("Sec-Fetch-Site") === "cross-site" && !(req.method === "GET" && req.header("Sec-Fetch-Mode") === "navigate")) return false;

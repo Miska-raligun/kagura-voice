@@ -31,6 +31,7 @@ CoreS3 (MicroPython) ──HTTP──▶ server/（TypeScript 单文件可执行
 | `photo_schedules.py` | 每日定时拍照：`add`/`update`/`fire_due`，落盘 `photo_schedules.json`，`init(run_fn)` |
 | `stream_server.py` | 直播流接收（TCP :5002）。`_Reader` 带缓冲，`latest`/`stats`/`drop` 给路由用 |
 | `web/monitor.html` | Web 监控页（单文件，无外部依赖）。由 `/monitor` 路由 `send_file` 直出 |
+| `web/app.html` | 手机 / 平板网页客户端（单文件，无外部依赖），新服务端 `/app` 直出：对话 + 看家 |
 | `roles.py` | 角色（多 agent）：`get`/`set_role`/`session_key`/`match_switch`，落盘 `roles_state.json`，表来自 `config.ROLES` |
 | `baidu_tokens.py` | 百度 token 缓存（`BaiduTokenCache`，线程安全） |
 | `oc_utils.py` | `_extract_json`（raw_decode 提取 CLI stdout 里的 JSON）、`strip_markdown` |
@@ -344,6 +345,14 @@ CoreS3 (MicroPython) ──HTTP──▶ server/（TypeScript 单文件可执行
   **两把 Key 分开**（LRN 2026-10-24）：复刻音色首次正式合成收一次音色费，订阅 Key（Token Plan / M Plan）只扣套餐额度、付不了（报 1008），
   所以复刻 / 激活走 `billing_api_key`（按量计费，`billingKey(p)`），日常合成 / 识别走 `api_key`（可以是订阅 Key）；激活过后订阅 Key 也能用该音色。
   复刻过的音色记在 `minimax_voices.json`（`voice/minimax-voices.ts`，已登记进导出的 settings 项）——MiniMax 的 `get_voice` 只返回**已激活**的复刻音色，没激活的只能靠本地记录。
+- **手机 / 平板客户端（`web/app.html` = `/app`，`server/src/clients.ts`、`routes/client.ts`，LRN 2026-10-24）**：手机是和 CoreS3 并列的一台设备
+  （设备 id `phone-xxxxxx`），对话走同一套 `/chat` / `/chat-vision` / 异步长轮询，「看家」页用监控接口远程看 CoreS3。三个别改坏的点：
+  ① **鉴权靠配对令牌**（管理界面扫码发，`clients.json` 只存哈希）：`ctx.deviceTrusted` 里令牌判据放在 Origin 判据**之前**（手机是浏览器），
+  且令牌只给它自己的 id 受信（不能拿手机令牌冒充 CoreS3）；`ctx.tokenOk` 也认令牌（看家页要用监控接口，`<img>` 设不了头所以收 `?ct=`）；
+  ② **推送走 SSE**（`/client/events`）：浏览器连不了 MQTT，`MqttHub.taps` 把每条发布抄给 `Clients.onPublish`，`kagura/push|cmd/<手机 id>` 转过去——
+  新加发给设备的命令照常 `mqtt.publish` 就行，手机自动收到；手机不发心跳，所以 `Outbox.pick` 的在线设备里没有它，主动播报仍去 CoreS3；
+  ③ `/chat-vision` 纯文字只对配对过的手机放行（设备那边「wav 或 image 必须有一个」是新旧两版共用的契约）。
+  浏览器只在 HTTPS 下给麦克风 / 摄像头，局域网 http 只能打字——README 推荐 Tailscale `tailscale serve`。
 - **管理接口与设备信任（`routes/admin.ts` 的 `isLocal`、`ctx.deviceTrusted`，LRN 2026-10-23 安全检查）**：
   ① 管理接口光看「来源是 127.0.0.1」不够——你电脑上任何网页都能让浏览器往 127.0.0.1 发请求（跨站请求伪造），
   DNS 重绑定还能绕过同源。`isLocal` 同时要求 Host 是本机地址、跨站的 Origin / `Sec-Fetch-Site: cross-site` 一律拒绝

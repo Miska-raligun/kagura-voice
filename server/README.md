@@ -206,6 +206,28 @@ MCP 服务器配置里加 `"allowUntrusted": true` 才给 IM 陌生人 / 群聊�
 设备（绑定、日志、崩溃报告、录音试听、监控页、**传角色图片 / 在线更新设备代码**）、网页聊天、用量、设置（模型服务商、嵌入、百度、端口、首次设置向导）。
 不碰配置文件也能完成全部日常管理。前端在 `admin-ui/`（Preact，esbuild 编译后内联进单文件可执行）。
 
+### 手机客户端（iPhone / Android / iPad）
+
+手机用浏览器打开 `/app` 就是一台和 CoreS3 并列的设备：用**手机自己的**麦克风、喇叭、摄像头跟她对话（按住说话 / 打字 / 拍照提问，
+边生成边播，长任务同样异步等待），记忆和角色与 CoreS3 共用；「看家」页能远程看 CoreS3：在线状态、电量、实时画面、拍照、
+「让她说说看到了什么」。不用装 App——Safari / Chrome 里「添加到主屏幕」就和 App 一样。
+
+**配对**：管理界面 → 设备 → **手机** → 填「手机能访问到的地址」→ 生成二维码 → 手机相机扫码。每台手机一个令牌（只显示一次，
+只存哈希），凭令牌就是受信设备（对话能执行命令），不看 IP；手机丢了在同一页**吊销**。令牌也能代替 `API_TOKEN` 访问监控接口。
+
+**必须 HTTPS**：浏览器只在 HTTPS（或本机 localhost）下给麦克风和摄像头。用局域网 `http://192.168.x.x:5000` 打开时只能打字和看家。
+最省事的办法是 [Tailscale](https://tailscale.com)（个人免费）：
+1. 电脑和手机都装 Tailscale、登同一个账号；
+2. 电脑上执行 `tailscale serve --bg 5000`（把本机 5000 端口用 HTTPS 发布到你自己的 Tailscale 网络里，只有你的设备能访问；
+   第一次会提示去 Tailscale 后台打开 HTTPS 证书）；
+3. 用它给的 `https://你的电脑名.xxx.ts.net` 当「手机能访问到的地址」生成二维码。
+
+这样出门在外（4G / 别处 WiFi）也能连回家里的服务端。其它内网穿透（frp、Cloudflare Tunnel）也行，但请确保只有你自己能访问。
+经反向代理进来的请求（带 `X-Forwarded-For` 等转发头）不算「本机」：进不了管理界面，也不会因为来源是 127.0.0.1 自动受信——手机靠配对令牌。
+
+**限制**：页面开着才能收到她主动说的话（iOS 不允许网页在后台保持连接），主动播报默认仍在 CoreS3 上；
+「指名给这台手机」的（比如在手机上说「十分钟后提醒我」）会推到手机。CoreS3 的直播协议手机不需要，手机只当「看」的一方。
+
 ### IM 渠道（飞书 / QQ）
 
 在管理界面「渠道」页添加账号，配置存 `<数据目录>/channels.json`：
@@ -295,7 +317,8 @@ KAGURA_BRAIN=pi KAGURA_SERVER_CMD=server/dist/kagura KAGURA_SERVER_PROVIDES=brok
 | `src/main.ts` | 入口：读配置、起各服务、后台任务 |
 | `src/config.ts` | 配置与数据目录 |
 | `src/ctx.ts` | 共享上下文与跨路由的业务（推送、拍照、定时识别） |
-| `src/routes/` | `chat`（/chat、/chat-vision、/role/cycle）、`device`、`monitor` |
+| `src/routes/` | `chat`（/chat、/chat-vision、/role/cycle）、`device`、`monitor`、`client`（手机网页 /app、配对、SSE 推送） |
+| `src/clients.ts` + `../web/app.html` | 手机 / 平板客户端：配对令牌（只存哈希）、SSE 推送（MqttHub 每条发布抄一份）；页面单文件、无外部依赖 |
 | `src/http/router.ts` | 极简路由器（Flask 风格 `<param>`） |
 | `src/mqtt.ts` / `discovery.ts` / `stream.ts` | 内置 broker、UDP 发现、直播 TCP |
 | `src/shortcut/` | 快捷指令、提醒解析、触觉背景 |

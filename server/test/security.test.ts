@@ -18,6 +18,9 @@ describe("管理接口只许本机（防跨站请求 / DNS 重绑定）", () => 
     expect(isLocal(req({ Host: "127.0.0.1:5000", Origin: "https://evil.example" }))).toBe(false);      // 老浏览器没有 Sec-Fetch-*
     expect(isLocal(req({ Host: "127.0.0.1:5000", Origin: "null" }))).toBe(false);                      // 沙箱 iframe
     expect(isLocal(req({ Host: "evil.example:5000" }))).toBe(false);                                   // DNS 重绑定
+    // 经本机反向代理（tailscale serve 等）进来的：来源是 127.0.0.1，但人不在电脑前
+    expect(isLocal(req({ Host: "127.0.0.1:5000", "X-Forwarded-For": "100.64.0.9" }))).toBe(false);
+    expect(isLocal(req({ Host: "localhost:5000", "Tailscale-User-Login": "me@example.com" }))).toBe(false);
     // 从别的网站点链接打开管理页（顶层导航 GET）可以
     expect(isLocal(req({ Host: "127.0.0.1:5000", "Sec-Fetch-Site": "cross-site", "Sec-Fetch-Mode": "navigate" }, "127.0.0.1", "GET"))).toBe(true);
     expect(isLocal(req({ Host: "127.0.0.1:5000", "Sec-Fetch-Site": "cross-site", "Sec-Fetch-Mode": "cors" }, "127.0.0.1", "GET"))).toBe(false);
@@ -42,6 +45,7 @@ describe("受信设备", () => {
     expect(c.deviceTrusted(req({}, "192.168.1.66"), "guest")).toBe(true);
     expect(c.deviceTrusted(req({ Origin: "https://evil.example" }, "127.0.0.1"), "cores3")).toBe(false);
     expect(c.deviceTrusted(req({}, "127.0.0.1"), "anything")).toBe(true);
+    expect(c.deviceTrusted(req({ "X-Forwarded-For": "100.64.0.9" }, "127.0.0.1"), "anything")).toBe(false);   // 经本机代理转进来的不算
     expect(() => c.setDeviceTrusted("nope", true)).toThrow(/没见过/);
     // 落盘、重启后还在
     const c2: any = Object.create(Ctx.prototype);

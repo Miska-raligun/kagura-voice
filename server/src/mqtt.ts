@@ -29,7 +29,11 @@ export class MqttHub {
     }
   }
 
+  /** 每条发布抄一份（手机客户端的 SSE 推送靠它，见 clients.ts）；broker 没起来也照样抄 */
+  taps: ((topic: string, payload: unknown) => void)[] = [];
+
   publish(topic: string, payload: unknown, qos: 0 | 1 = 1): void {
+    for (const t of this.taps) { try { t(topic, payload); } catch { /* 抄送失败不影响设备 */ } }
     if (!this.broker) return;
     this.broker.publish({ cmd: "publish", topic, payload: Buffer.from(JSON.stringify(payload)), qos, dup: false, retain: false }, () => {});
   }

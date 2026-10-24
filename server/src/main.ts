@@ -14,6 +14,8 @@ import { rgb565ToJpeg } from "./util/image.ts";
 import { registerChat } from "./routes/chat.ts";
 import { registerDevice } from "./routes/device.ts";
 import { registerMonitor } from "./routes/monitor.ts";
+import { registerClient } from "./routes/client.ts";
+import { Clients } from "./clients.ts";
 import { registerAdmin } from "./routes/admin.ts";
 import { registerAdminUi } from "./routes/admin-ui.ts";
 import { registerDeviceFiles } from "./routes/devicefiles.ts";
@@ -129,6 +131,11 @@ async function main() {
   registerChat(r, ctx);
   registerDevice(r, ctx);
   registerMonitor(r, ctx);
+  // 手机 / 平板网页客户端：配对令牌 + SSE 推送（MQTT 每条发布抄一份过去）
+  const clients = new Clients(path.join(cfg.dataDir, "clients.json"));
+  ctx.clients = clients;
+  mqtt.taps.push((t, p) => clients.onPublish(t, p));
+  registerClient(r, ctx, clients);
   registerAdmin(r, ctx, sys);
   registerAdminSystem(r, ctx);
   registerAdminUi(r);

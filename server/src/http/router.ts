@@ -32,6 +32,13 @@ export class Req {
   }
 }
 
+/**
+ * 经本机反向代理（tailscale serve、frp、nginx……）进来的请求，来源地址也是 127.0.0.1——但人不在这台电脑前。
+ * 代理都会加转发头：带了就不算本机（管理接口不放行、设备也不因「本机来源」自动受信；手机照样凭配对令牌）。
+ */
+const PROXY_HEADERS = ["X-Forwarded-For", "Forwarded", "X-Real-IP", "Tailscale-User-Login", "CF-Connecting-IP"];
+export const viaProxy = (req: Req) => PROXY_HEADERS.some((h) => req.hasHeader(h));
+
 export interface Res {
   status: number;
   headers: Record<string, string | number>;

@@ -3,7 +3,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { Config, Dirs, RoleDef } from "./config.ts";
-import type { Req } from "./http/router.ts";
+import { viaProxy, type Req } from "./http/router.ts";
 import type { Voice, VoiceRef } from "./voice/types.ts";
 import type { Brain } from "./brain/types.ts";
 import type { MqttHub } from "./mqtt.ts";
@@ -84,8 +84,13 @@ export class Ctx {
     this.schedules = new PhotoSchedules(dirs.schedulesFile);
   }
 
-  /** API_TOKEN 未设置时永远放行；设置后校验 X-Api-Token 头 */
-  tokenOk(req: Req) { return !this.cfg.apiToken || req.header("X-Api-Token") === this.cfg.apiToken; }
+  /** 手机 / 平板客户端（配对令牌 + SSE 推送），main 里建好 */
+  clients: import("./clients.ts").Clients | null = null;
+
+  /** API_TOKEN 未设置时永远放行；设置后校验 X-Api-Token 头。配对过的手机凭令牌也放行（看家页要用监控接口） */
+  tokenOk(req: Req) {
+    return !this.cfg.apiToken || req.header("X-Api-Token") === this.cfg.apiToken || !!this.clients?.fromReq(req);
+  }
 
   /** 来源 IP 兜底桶：防 device_id 换名刷请求 */
   ipRateOk(req: Req) { return this.state.checkRate(req.remoteAddr, "ip", IP_RATE_MAX); }
@@ -368,9 +373,13 @@ export class Ctx {
   /** 这个请求能不能当作受信设备：批准过、从它心跳的 IP 来、不是浏览器跨站发来的。本机进程发的算可信 */
   deviceTrusted(req: Req, dev: string): boolean {
     if (this.cfg.deviceTrust === "all") return true;
+    // 配对过的手机：令牌对得上、且就是以它自己的 id 说话（不能拿手机的令牌冒充 CoreS3）。它是浏览器，所以放在 Origin 判据之前
+    const c = this.clients?.fromReq(req);
+    if (c) return c.id === dev;
     if (req.hasHeader("Origin") || req.hasHeader("Sec-Fetch-Site")) return false;   // 设备不会带这两个头，浏览器才会
     const ip = Ctx.normIp(req.remoteAddr);
-    if (ip === "127.0.0.1" || ip === "::1") return true;
+    // 本机来的算受信——经本机反向代理转进来的不算（来源也是 127.0.0.1，人却在外面）
+    if ((ip === "127.0.0.1" || ip === "::1") && !viaProxy(req)) return true;
     const rec = this.trust[dev];
     return !!rec?.trusted && rec.ip === ip;
   }

@@ -84,7 +84,7 @@ function filesOf(dataDir: string, id: string): { files: string[]; sqlite: string
       const up = recs.filter((r) => r.kind === "upload").flatMap((r) => dir(`packages/${r.id}`));
       return { files: [...file("packages.json"), ...up], sqlite: [] };
     }
-    case "channels": return { files: file("channels.json"), sqlite: [] };
+    case "channels": return { files: [...file("channels.json"), ...file("clients.json")], sqlite: [] };
     case "jobs": return { files: [...file("reminders.json"), ...file("photo_schedules.json")], sqlite: file("system.sqlite") };
     case "device": return { files: dir("device_files"), sqlite: [] };
     case "snapshots": return { files: dir("snapshots"), sqlite: [] };
@@ -112,7 +112,7 @@ export function catalog(dataDir: string): CatalogItem[] {
     { id: "skills", group: "全局", label: "全局技能", bytes: size("skills"), default: true },
     { id: "extensions", group: "全局", label: "全局扩展与 MCP 服务器配置", bytes: size("extensions"), secret: true, default: true },
     { id: "packages", group: "全局", label: "扩展包（npm / git 装的导入后重新下载）", bytes: size("packages"), default: true },
-    { id: "channels", group: "全局", label: "IM 渠道（飞书 / QQ 账号、白名单、绑定）", bytes: size("channels"), secret: true, default: true },
+    { id: "channels", group: "全局", label: "IM 渠道（飞书 / QQ 账号、白名单、绑定）与配对过的手机", bytes: size("channels"), secret: true, default: true },
     { id: "jobs", group: "全局", label: "定时任务、提醒、定时拍照（含运行记录）", bytes: size("jobs"), default: true },
     { id: "device", group: "设备", label: "传给设备的角色图片与代码", bytes: size("device"), default: true },
     { id: "snapshots", group: "设备", label: "设备拍的照片", bytes: size("snapshots"), default: false },
@@ -208,7 +208,7 @@ export function itemOf(rel: string): string | null {
   const top = rel.split("/")[0];
   const map: Record<string, string> = {
     "config.json": "settings", "roles_state.json": "settings", "minimax_voices.json": "settings", skills: "skills", extensions: "extensions", "mcp.json": "extensions",
-    "packages.json": "packages", packages: "packages", "channels.json": "channels", "system.sqlite": "jobs", "reminders.json": "jobs",
+    "packages.json": "packages", packages: "packages", "channels.json": "channels", "clients.json": "channels", "system.sqlite": "jobs", "reminders.json": "jobs",
     "photo_schedules.json": "jobs", device_files: "device", snapshots: "snapshots",
   };
   return map[top] ?? null;
