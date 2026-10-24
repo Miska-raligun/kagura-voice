@@ -185,8 +185,8 @@ curl -X POST http://localhost:5000/api/monitor/schedules \
 - 拍照失败（设备离线等）会留一条带错误信息的记录，不会静默消失
 - 照片与识别结果留档在 `snapshots/`，只保留最近 60 条
 
-> 播报由服务端负责，所以发给 agent 的提问里明确要求它**不要**调用 `cores3-speak`，
-> 否则设备会把同一句话念两遍。
+> 播报由服务端负责。内置 agent 没有 `speak` 工具（回复由出口自动播）；只有走旧 OpenClaw 大脑时，
+> 才需要在给 agent 的提问里明确要求它**不要**调用 `cores3-speak`，否则设备会把同一句话念两遍。
 
 ## BLE 在家感知
 
