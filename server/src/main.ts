@@ -25,7 +25,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { execFile, execFileSync, spawn } from "node:child_process";
 import { isWsl, toLinuxPath } from "./util/platform.ts";
-import { applyProxy, proxiedFetch } from "./util/proxy.ts";
+import { applyProxy, proxiedFetch, activeProxy } from "./util/proxy.ts";
+import { makeNodeFetch } from "./util/nodefetch.ts";
 import { UpdateChecker } from "./util/update.ts";
 import { SelfUpdater, installKind } from "./util/selfupdate.ts";
 import { applyPending } from "./backup.ts";
@@ -106,7 +107,8 @@ async function main() {
     ctx.updates = new UpdateChecker(VERSION, proxiedFetch, process.env.KAGURA_RELEASES_API || undefined);
     ctx.updates.start();
     const kind = installKind();
-    ctx.selfUpdater = new SelfUpdater(cfg.dataDir, proxiedFetch, kind, kind === "appimage" ? () => setTimeout(() => restartSelf(cfg.dataDir, null), 800) : undefined,
+    // 下载走 Node 自带的 http（undici 在对方断开 + 背压时会抛未捕获异常，见 util/nodefetch.ts）
+    ctx.selfUpdater = new SelfUpdater(cfg.dataDir, makeNodeFetch(activeProxy), kind, kind === "appimage" ? () => setTimeout(() => restartSelf(cfg.dataDir, null), 800) : undefined,
       { mirrors: cfg.updateMirrors });
   }
 

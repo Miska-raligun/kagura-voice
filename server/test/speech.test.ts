@@ -4,7 +4,8 @@ import http from "node:http";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { SpeechHub, parseSpeechConfig, toPcm16k, minimaxClone } from "../src/voice/hub.ts";
+import { SpeechHub, parseSpeechConfig, toPcm16k, minimaxClone, minimaxActivate, minimaxListCloned } from "../src/voice/hub.ts";
+import { ClonedVoices, CLONE_EXPIRE_MS } from "../src/voice/minimax-voices.ts";
 import { wavHeader } from "../src/util/wav.ts";
 
 let server: http.Server, base = "";
@@ -51,6 +52,10 @@ beforeAll(async () => {
       } else if (u.pathname === "/mmpoor/speech_to_text") {
         res.statusCode = 402; res.setHeader("content-type", "application/json");
         res.end(JSON.stringify({ type: "error", error: { type: "insufficient_balance_error", message: "insufficient balance (1008)", http_code: "402" } }));
+      } else if (u.pathname === "/mm/get_voice") {
+        res.setHeader("content-type", "application/json");
+        if (String(req.headers.authorization) === "Bearer plan") { res.end(JSON.stringify({ base_resp: { status_code: 1004, status_msg: "no" } })); return; }
+        res.end(JSON.stringify({ voice_cloning: [{ voice_id: "Mio_voice01", created_time: "2026-10-20" }, { voice_id: "Old_voice01", created_time: "2026-01-02" }], base_resp: { status_code: 0 } }));
       } else if (u.pathname === "/mm/t2a_v2") {
         res.setHeader("content-type", "application/json");
         res.end(JSON.stringify({ data: { audio: Buffer.alloc(3200, 2).toString("hex") }, base_resp: { status_code: 0 } }));
@@ -175,6 +180,41 @@ describe("MiniMax 错误码翻成人话", () => {
     await expect(mk({ tts: "mm", providers: [poor] }).synthesize("你好")).rejects.toThrow(/余额不足.*（1008）/);
     // 识别失败不抛错、返回空（当没听清），原因打日志
     expect(await mk({ asr: "mm", providers: [poor] }).transcribe(wavHeader(0))).toBe("");
+  });
+});
+
+describe("复刻音色清单与激活（MiniMax）", () => {
+  it("复刻、激活走按量计费 Key；查询订阅 Key 不行就换按量 Key", async () => {
+    const p: any = { ...providers()[1], api_key: "plan", billing_api_key: "paid" };
+    await minimaxClone(p, { voice_id: "Kagura_mio2", audio: { data: Buffer.alloc(10, 1), filename: "a.wav" } });
+    expect(seen.filter((x) => x.path === "/mm/voice_clone").at(-1)!.auth).toBe("Bearer paid");
+    await minimaxActivate(p, "Kagura_mio2");
+    const t2a = seen.filter((x) => x.path === "/mm/t2a_v2").at(-1)!;
+    expect(t2a.auth).toBe("Bearer paid");
+    expect(JSON.parse(t2a.body.toString()).voice_setting.voice_id).toBe("Kagura_mio2");
+    expect((await minimaxListCloned(p)).map((v) => v.voice_id)).toEqual(["Mio_voice01", "Old_voice01"]);
+    // 没填按量 Key 就用 api_key
+    await minimaxActivate({ ...p, billing_api_key: "" }, "Kagura_mio2");
+    expect(seen.filter((x) => x.path === "/mm/t2a_v2").at(-1)!.auth).toBe("Bearer plan");
+  });
+
+  it("本地记录与远端合并：远端有的标成已激活，没激活的 7 天后算过期，远端独有的也列出来", () => {
+    const store = new ClonedVoices(path.join(fs.mkdtempSync(path.join(os.tmpdir(), "cv-")), "minimax_voices.json"));
+    const now = Date.now();
+    store.add({ voice_id: "Mio_voice01", provider: "mm", name: "小澪", created_at: now - 3600_000 });
+    store.add({ voice_id: "New_voice01", provider: "mm", created_at: now - 3600_000 });
+    store.add({ voice_id: "Gone_voice1", provider: "mm", created_at: now - CLONE_EXPIRE_MS - 1 });
+    store.add({ voice_id: "Other_voice", provider: "other", created_at: now });
+    const rows = store.merge("mm", [{ voice_id: "Mio_voice01", created_time: "2026-10-20" }, { voice_id: "Old_voice01", created_time: "2026-01-02" }], now);
+    const by = Object.fromEntries(rows.map((r) => [r.voice_id, r]));
+    expect(Object.keys(by).sort()).toEqual(["Gone_voice1", "Mio_voice01", "New_voice01", "Old_voice01"]);
+    expect(by.Mio_voice01).toMatchObject({ status: "active", name: "小澪" });
+    expect(by.New_voice01).toMatchObject({ status: "pending", expires_at: now - 3600_000 + CLONE_EXPIRE_MS });
+    expect(by.Gone_voice1.status).toBe("expired");
+    expect(by.Old_voice01).toMatchObject({ status: "active", in_remote: true });
+    expect(store.list().find((v) => v.voice_id === "Mio_voice01")!.activated_at).toBe(now);   // 落盘
+    // 远端查不到（比如没网）：只看本地，不乱标
+    expect(store.merge("mm", null, now).find((r) => r.voice_id === "New_voice01")!.status).toBe("pending");
   });
 });
 

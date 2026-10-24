@@ -32,6 +32,11 @@ export interface SpeechProvider {
   asr_model?: string;
   /** 语速，1 = 正常 */
   speed?: number;
+  /**
+   * minimax：按量计费 API Key，只给复刻、激活音色用（扣账户余额）。日常合成 / 识别用上面的 api_key，可以是订阅 Key（Token Plan / M Plan）。
+   * 分开的原因：复刻音色首次正式合成要收一次音色费，订阅 Key 只扣套餐额度、付不了这笔钱（报 1008 余额不足）；付过之后订阅 Key 就能用这个音色
+   */
+  billing_api_key?: string;
   /** minimax 旧接口要 GroupId（现行接口只认 API Key，留着兼容老配置） */
   group_id?: string;
 }
@@ -196,7 +201,8 @@ async function minimaxUpload(p: SpeechProvider, a: CloneAudio, purpose: "voice_c
 
 export async function minimaxClone(p: SpeechProvider, req: CloneRequest): Promise<CloneResult> {
   if (p.kind !== "minimax") throw new Error(`${p.id} 不是 MiniMax 服务商`);
-  if (!p.api_key) throw new Error("先填 MiniMax 的 API Key");
+  p = { ...p, api_key: billingKey(p) };
+  if (!p.api_key) throw new Error("先填 MiniMax 的按量计费 Key（或 API Key）");
   if (!MINIMAX_VOICE_ID_RE.test(req.voice_id)) throw new Error("voice_id 要 8~256 位，字母开头，只含字母、数字、- 和 _，不能以 - 或 _ 结尾");
   if (!req.audio?.data?.length) throw new Error("没收到录音");
   if (req.audio.data.length > 20 * 1024 * 1024) throw new Error("录音不能超过 20MB");
@@ -212,6 +218,37 @@ export async function minimaxClone(p: SpeechProvider, req: CloneRequest): Promis
   const sensitive = Number(j?.input_sensitive?.type ?? 0);
   if (sensitive) throw new Error(`录音被 MiniMax 风控拦下（${MINIMAX_SENSITIVE[sensitive] ?? sensitive}）`);
   return { voice_id: req.voice_id, demo_audio: String(j?.demo_audio ?? ""), sensitive };
+}
+
+/** 复刻 / 激活用的 Key：按量计费 Key，没填就用 api_key */
+export const billingKey = (p: SpeechProvider) => (p.billing_api_key || p.api_key || "").trim();
+
+/**
+ * 激活复刻音色：用按量计费 Key 正式合成一句。这一下扣掉音色费（首次使用才收），
+ * 之后订阅 Key 也能用这个音色，而且不会再被「7 天内没用过」删掉
+ */
+export async function minimaxActivate(p: SpeechProvider, voiceId: string): Promise<void> {
+  if (p.kind !== "minimax") throw new Error(`${p.id} 不是 MiniMax 服务商`);
+  const key = billingKey(p);
+  if (!key) throw new Error("先填 MiniMax 的按量计费 Key");
+  const pcm = await synthOther({ ...p, api_key: key }, "你好。", voiceId);
+  if (!pcm.length) throw new Error("激活失败：没有返回音频");
+}
+
+/** MiniMax 账户里已经激活（正式合成过）的复刻音色。没激活的接口查不到 */
+export async function minimaxListCloned(p: SpeechProvider): Promise<{ voice_id: string; created_time: string }[]> {
+  const keys = [...new Set([p.api_key, p.billing_api_key].map((k) => (k ?? "").trim()).filter(Boolean))];
+  if (!keys.length) throw new Error("先填 MiniMax 的 Key");
+  let last: unknown;
+  for (const key of keys) {     // 订阅 Key 不一定能查，查不了换按量 Key
+    try {
+      const j = await minimaxJson(`${trimSlash(p.base_url || MINIMAX_BASE)}/get_voice`, {
+        method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` }, body: JSON.stringify({ voice_type: "voice_cloning" }),
+      }, "查询音色", 30_000);
+      return (j?.voice_cloning ?? []).map((v: any) => ({ voice_id: String(v.voice_id), created_time: String(v.created_time ?? "") }));
+    } catch (e) { last = e; }
+  }
+  throw last;
 }
 
 /** 非百度服务商的识别 */

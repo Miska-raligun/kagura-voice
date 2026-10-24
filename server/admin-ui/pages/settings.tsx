@@ -243,38 +243,66 @@ const readB64 = (f: File) => new Promise<string>((ok, bad) => {
   r.readAsDataURL(f);
 });
 
-/** MiniMax 音色快速复刻：上传 10 秒~5 分钟的录音 → 得到 voice_id，自动填进「默认音色」 */
+/** MiniMax 复刻音色：上传录音复刻、激活（付音色费），并列出复刻过的所有音色 */
 function VoiceClone({ p, sp, onDone }: { p: any; sp: any; onDone: (voiceId: string) => void }) {
   const [voiceId, setVoiceId] = useState("");
+  const [name, setName] = useState("");
   const [file, setFile] = useState<File | null>(null);
   const [prompt, setPrompt] = useState<File | null>(null);
   const [promptText, setPromptText] = useState("");
   const [preview, setPreview] = useState("你好呀，我是你的桌面小助手，今天想聊点什么？");
-  const [busy, setBusy] = useState(false);
+  const [activate, setActivate] = useState(true);
+  const [busy, setBusy] = useState("");
   const [demo, setDemo] = useState("");
+  const [list, setList] = useState<{ voices: any[]; remote_error: string } | null>(null);
+  const body = (x: any = {}) => ({ provider: p.id, speech: sp, ...x });
+  const load = async () => { try { setList(await api<any>("/minimax-voices", { body: body() })); } catch (e) { toastErr(e); } };
   const run = async () => {
     if (!file) return toast("先选一段录音", "err");
     if (file.size > 20 * 1024 * 1024) return toast("录音不能超过 20MB", "err");
     if (prompt && !promptText.trim()) return toast("示例音频要配上它的逐字稿", "err");
-    setBusy(true); setDemo("");
+    setBusy("clone"); setDemo("");
     try {
-      const r = await api<any>("/voice-clone", { body: {
-        provider: p.id, speech: sp, voice_id: voiceId.trim(), preview_text: preview,
+      const r = await api<any>("/voice-clone", { body: body({
+        voice_id: voiceId.trim(), name, preview_text: preview, activate,
         audio: { b64: await readB64(file), name: file.name },
         ...(prompt ? { prompt: { b64: await readB64(prompt), name: prompt.name, text: promptText } } : {}),
-      } });
+      }) });
       onDone(r.voice_id);
       setDemo(r.demo_audio || "");
-      toast(`复刻成功：${r.voice_id}，已填入默认音色，记得保存`);
-    } catch (e) { toastErr(e); } finally { setBusy(false); }
+      if (r.activate_error) toast(`复刻成功，但激活失败：${r.activate_error}。可以稍后在下面的列表里点「激活」`, "err");
+      else toast(`复刻成功：${r.voice_id}${r.activated ? "，已激活" : ""}，已填入默认音色，记得保存`);
+      setVoiceId(""); setName("");
+      load();
+    } catch (e) { toastErr(e); } finally { setBusy(""); }
   };
+  const act = async (id: string) => {
+    if (!window.confirm(`激活 ${id}？\n会用按量计费 Key 正式合成一句，扣一次音色费（MiniMax 目前 9.9 元/音色）。之后订阅 Key 也能用这个音色。`)) return;
+    setBusy(id);
+    try { await api("/minimax-voices/activate", { body: body({ voice_id: id }) }); toast(`${id} 已激活`); load(); }
+    catch (e) { toastErr(e); } finally { setBusy(""); }
+  };
+  const rename = async (v: any) => {
+    const n = window.prompt(`给 ${v.voice_id} 起个名字`, v.name ?? "");
+    if (n === null) return;
+    try { await api("/minimax-voices/update", { body: { provider: p.id, voice_id: v.voice_id, name: n } }); load(); } catch (e) { toastErr(e); }
+  };
+  const remove = async (v: any) => {
+    if (!window.confirm(`从列表里移除 ${v.voice_id}？\n（只删本地记录，MiniMax 账户里的音色不受影响）`)) return;
+    try { await api("/minimax-voices/remove", { body: { voice_id: v.voice_id } }); load(); } catch (e) { toastErr(e); }
+  };
+  const day = (ms: number) => (ms ? new Date(ms).toLocaleDateString() : "—");
+  const status = (v: any) => v.status === "active" ? <span class="badge ok">已激活</span>
+    : v.status === "expired" ? <span class="badge muted">未激活，已过期（MiniMax 已删除）</span>
+    : <span class="badge warn">未激活 · {day(v.expires_at)} 前要激活，否则会被删</span>;
   return (
-    <details class="pkg" style="margin-top:10px">
-      <summary><b>复刻音色</b> <small class="muted">用自己的录音生成一个音色（需在 MiniMax 完成实名认证）</small></summary>
+    <details class="pkg" style="margin-top:10px" onToggle={(e) => { if ((e.target as HTMLDetailsElement).open && !list) load(); }}>
+      <summary><b>复刻音色</b> <small class="muted">用自己的录音生成音色；复刻过的都记在这里</small></summary>
       <div class="form" style="margin-top:10px">
         <Field label="voice_id" hint="自己起名：8 位以上，字母开头，只含字母、数字、- 和 _，不能和已有的重名">
           <Input value={voiceId} onInput={setVoiceId} placeholder="kagura_mio_v1" />
         </Field>
+        <Field label="名称（可选）" hint="方便自己认，比如「小澪-温柔版」"><Input value={name} onInput={setName} /></Field>
         <Field label="录音" hint="mp3 / m4a / wav，10 秒~5 分钟，不超过 20MB；安静环境、只有一个人说话，30 秒~1 分钟就够">
           <input type="file" accept=".mp3,.m4a,.wav,audio/*" onChange={(e) => setFile((e.target as HTMLInputElement).files?.[0] ?? null)} />
         </Field>
@@ -284,11 +312,31 @@ function VoiceClone({ p, sp, onDone }: { p: any; sp: any; onDone: (voiceId: stri
         {prompt && <Field label="示例音频逐字稿"><Input value={promptText} onInput={setPromptText} /></Field>}
         <Field label="试听文本" hint="用新音色念一遍给你听（按字数计费），留空就不生成试听"><Input value={preview} onInput={setPreview} /></Field>
       </div>
+      <Toggle checked={activate} onChange={setActivate} label="复刻后立即激活（用按量计费 Key 扣一次音色费，之后订阅 Key 也能用；不激活的话 7 天后会被删）" />
       <div class="row">
-        <Btn small kind="primary" disabled={busy || !voiceId.trim() || !file} onClick={run}>{busy ? "复刻中…" : "开始复刻"}</Btn>
+        <Btn small kind="primary" disabled={!!busy || !voiceId.trim() || !file} onClick={run}>{busy === "clone" ? "复刻中…" : "开始复刻"}</Btn>
         {demo && <audio controls autoplay src={demo} />}
       </div>
-      <small class="muted">复刻出的音色 <b>7 天内要正式合成一次</b>（保存后点上面的「试听」即可），否则 MiniMax 会删掉它；第一次正式使用时另收一次音色费。</small>
+      <div class="row" style="margin-top:12px"><b>复刻过的音色</b><Btn small kind="ghost" onClick={load}>刷新</Btn></div>
+      {list?.remote_error && <small class="muted">没能从 MiniMax 查到已激活的音色（{list.remote_error}），下面只是本机的记录。</small>}
+      {list && !list.voices.length && <small class="muted">还没有复刻过音色。</small>}
+      {list && list.voices.length > 0 && <table>
+        <thead><tr><th>voice_id</th><th>名称</th><th>复刻于</th><th>状态</th><th></th></tr></thead>
+        <tbody>{list.voices.map((v) => (
+          <tr>
+            <td><code>{v.voice_id}</code>{v.voice_id === p.voice && <small class="muted"> · 默认</small>}</td>
+            <td>{v.name || <span class="muted">—</span>}</td>
+            <td>{day(v.created_at)}</td>
+            <td>{status(v)}</td>
+            <td><div class="row">
+              {v.status !== "expired" && <Btn small onClick={() => { onDone(v.voice_id); toast(`已设为默认音色，记得保存`); }}>设为默认</Btn>}
+              {v.status === "pending" && <Btn small kind="primary" disabled={!!busy} onClick={() => act(v.voice_id)}>{busy === v.voice_id ? "激活中…" : "激活"}</Btn>}
+              <Btn small kind="ghost" onClick={() => rename(v)}>改名</Btn>
+              <Btn small kind="ghost" onClick={() => { navigator.clipboard?.writeText(v.voice_id); toast("已复制"); }}>复制</Btn>
+              <Btn small kind="danger" onClick={() => remove(v)}>移除</Btn>
+            </div></td>
+          </tr>))}</tbody>
+      </table>}
     </details>
   );
 }
@@ -335,7 +383,8 @@ function Speech({ cfg, save }: { cfg: any; save: (p: any) => Promise<void> }) {
               <Field label="名称"><Input value={p.name ?? ""} onInput={(v) => set("name", v)} /></Field>
               <Field label="类型"><Select value={p.kind} onChange={(v) => set("kind", v)} options={SPEECH_KINDS.filter(([k]) => k !== "baidu")} /></Field>
               <Field label="接口地址"><Input value={p.base_url ?? ""} onInput={(v) => set("base_url", v)} placeholder="https://…/v1" /></Field>
-              <Field label="API Key" hint="*** 表示已保存；本机服务可留空"><Input type="password" value={p.api_key ?? ""} onInput={(v) => set("api_key", v)} /></Field>
+              <Field label="API Key" hint={p.kind === "minimax" ? "日常合成 / 识别用，可以填订阅 Key（Token Plan / M Plan）；*** 表示已保存" : "*** 表示已保存；本机服务可留空"}><Input type="password" value={p.api_key ?? ""} onInput={(v) => set("api_key", v)} /></Field>
+              {p.kind === "minimax" && <Field label="按量计费 Key" hint="复刻、激活音色用（扣账户余额）。订阅 Key 付不了复刻音色的音色费；留空就用上面的 API Key"><Input type="password" value={p.billing_api_key ?? ""} onInput={(v) => set("billing_api_key", v)} /></Field>}
               <Field label="合成模型" hint={p.kind === "minimax" ? "如 speech-2.8-turbo / speech-2.8-hd" : "如 tts-1；VoiceStudio 填引擎 id 或留空"}><Input value={p.model ?? ""} onInput={(v) => set("model", v)} /></Field>
               <Field label="默认音色" hint={p.kind === "minimax" ? "voice_id（含复刻的音色）" : "voice 名或 VoiceStudio 的声音 id"}><Input value={p.voice ?? ""} onInput={(v) => set("voice", v)} /></Field>
               {p.kind !== "baidu" && <Field label="识别模型" hint={p.kind === "minimax" ? "用作语音识别时填 asr-1.0（留空也是它）" : "用作语音识别时填，如 whisper-1"}><Input value={p.asr_model ?? ""} onInput={(v) => set("asr_model", v)} /></Field>}

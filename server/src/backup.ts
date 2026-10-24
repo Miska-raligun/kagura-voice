@@ -74,7 +74,7 @@ function filesOf(dataDir: string, id: string): { files: string[]; sqlite: string
     }
   }
   switch (id) {
-    case "settings": return { files: [...file("config.json"), ...file("roles_state.json")], sqlite: [] };
+    case "settings": return { files: [...file("config.json"), ...file("roles_state.json"), ...file("minimax_voices.json")], sqlite: [] };
     case "skills": return { files: dir("skills"), sqlite: [] };
     case "extensions": return { files: [...dir("extensions"), ...file("mcp.json")], sqlite: [] };
     case "packages": {
@@ -207,7 +207,7 @@ export function itemOf(rel: string): string | null {
   }
   const top = rel.split("/")[0];
   const map: Record<string, string> = {
-    "config.json": "settings", "roles_state.json": "settings", skills: "skills", extensions: "extensions", "mcp.json": "extensions",
+    "config.json": "settings", "roles_state.json": "settings", "minimax_voices.json": "settings", skills: "skills", extensions: "extensions", "mcp.json": "extensions",
     "packages.json": "packages", packages: "packages", "channels.json": "channels", "system.sqlite": "jobs", "reminders.json": "jobs",
     "photo_schedules.json": "jobs", device_files: "device", snapshots: "snapshots",
   };

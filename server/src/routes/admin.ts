@@ -14,7 +14,8 @@ import { importOpenClaw, findOpenClawDirs, describeImport } from "../agent/impor
 import { scheduleFrom } from "../agent/tools/cron.ts";
 import { Roles } from "../roles.ts";
 import { parseToolsConfig, parseVoicePush } from "../config.ts";
-import { SpeechHub, parseSpeechConfig, minimaxClone } from "../voice/hub.ts";
+import { SpeechHub, parseSpeechConfig, minimaxClone, minimaxActivate, minimaxListCloned } from "../voice/hub.ts";
+import { ClonedVoices } from "../voice/minimax-voices.ts";
 import { GLOBAL_OWNER } from "../agent/skills.ts";
 import { registerAdminChat } from "./admin-chat.ts";
 import { registerAdminPlugins } from "./admin-plugins.ts";
@@ -443,20 +444,28 @@ export function registerAdmin(r: Router, ctx: Ctx, sys: AgentSystem) {
     } catch (e: any) { return json({ error: `语音合成失败：${e.message}` }, 500); }
   });
 
+  // ── MiniMax 复刻音色 ──
+  const cloned = new ClonedVoices(path.join(ctx.cfg.dataDir, "minimax_voices.json"));
+  /** 页面传来的服务商设置（可能还没保存）：Key 显示为 *** 的用已保存的 */
+  const draftProvider = (d: any) => {
+    const drafts: any[] = Array.isArray(d.speech?.providers) ? d.speech.providers : ctx.cfg.speech.providers;
+    const raw = drafts.find((p: any) => p.id === d.provider);
+    if (!raw) throw new Error("找不到这个服务商");
+    const old: any = ctx.cfg.speech.providers.find((o) => o.id === raw.id) ?? {};
+    const keep = (k: string) => (raw[k] === "***" ? old[k] : raw[k]);
+    return { ...raw, api_key: keep("api_key"), billing_api_key: keep("billing_api_key") };
+  };
+  const err400 = (e: any) => json({ error: String(e?.message ?? e) }, 400);
   /**
-   * MiniMax 音色快速复刻。录音以 base64 随 JSON 传（最多 20MB，base64 后超出普通请求上限，所以只对本机放宽）；
-   * speech 同试听：用页面上还没保存的服务商设置（API Key 显示为 *** 时用已保存的）
+   * 音色快速复刻。录音以 base64 随 JSON 传（最多 20MB，base64 后超出普通请求上限，所以只对本机放宽）。
+   * 复刻用按量计费 Key；activate=true 时紧接着正式合成一句付掉音色费（之后订阅 Key 也能用）。成功就记进 minimax_voices.json
    */
   r.bigBodyPaths.add("/api/admin/voice-clone");
   post("/api/admin/voice-clone", async (req) => {
     const d = req.json() ?? {};
-    const drafts: any[] = Array.isArray(d.speech?.providers) ? d.speech.providers : ctx.cfg.speech.providers;
-    const raw = drafts.find((p: any) => p.id === d.provider);
-    if (!raw) return json({ error: "找不到这个服务商" }, 400);
-    const old = ctx.cfg.speech.providers.find((o) => o.id === raw.id);
-    const p = raw.api_key === "***" && old ? { ...raw, api_key: old.api_key } : raw;
     const audio = (a: any) => a?.b64 ? { data: Buffer.from(String(a.b64), "base64"), filename: String(a.name || "audio.wav").replace(/[^\w.\-]/g, "_") } : undefined;
     try {
+      const p = draftProvider(d);
       const out = await minimaxClone(p, {
         voice_id: String(d.voice_id ?? "").trim(),
         audio: audio(d.audio)!,
@@ -466,9 +475,47 @@ export function registerAdmin(r: Router, ctx: Ctx, sys: AgentSystem) {
         noise_reduction: d.noise_reduction !== false,
         volume_normalization: d.volume_normalization !== false,
       });
+      cloned.add({ voice_id: out.voice_id, provider: p.id, name: String(d.name ?? "").trim() || undefined, created_at: Date.now(), demo_audio: out.demo_audio || undefined });
       console.log(`[tts] 🧬 MiniMax 复刻音色 ${out.voice_id}`);
-      return json(out);
-    } catch (e: any) { return json({ error: e.message }, 400); }
+      let activated = false, activate_error = "";
+      if (d.activate) {
+        try { await minimaxActivate(p, out.voice_id); cloned.update(out.voice_id, { activated_at: Date.now() }); activated = true; }
+        catch (e: any) { activate_error = String(e.message ?? e); }
+      }
+      return json({ ...out, activated, activate_error });
+    } catch (e: any) { return err400(e); }
+  });
+  /** 复刻过的音色：本地记录 + MiniMax 远端已激活的，合并成一张表 */
+  post("/api/admin/minimax-voices", async (req) => {
+    const d = req.json() ?? {};
+    try {
+      const p = draftProvider(d);
+      let remote: { voice_id: string; created_time: string }[] | null = null, remote_error = "";
+      try { remote = await minimaxListCloned(p); } catch (e: any) { remote_error = String(e.message ?? e); }
+      return json({ voices: cloned.merge(p.id, remote), remote_error });
+    } catch (e: any) { return err400(e); }
+  });
+  post("/api/admin/minimax-voices/activate", async (req) => {
+    const d = req.json() ?? {};
+    try {
+      const p = draftProvider(d), id = String(d.voice_id ?? "");
+      await minimaxActivate(p, id);
+      if (!cloned.update(id, { activated_at: Date.now() })) cloned.add({ voice_id: id, provider: p.id, created_at: Date.now(), activated_at: Date.now() });
+      console.log(`[tts] 🧬 激活 MiniMax 复刻音色 ${id}`);
+      return json({ ok: true });
+    } catch (e: any) { return err400(e); }
+  });
+  post("/api/admin/minimax-voices/update", (req) => {
+    const d = req.json() ?? {};
+    const id = String(d.voice_id ?? ""), name = String(d.name ?? "").trim() || undefined;
+    if (!id) return json({ error: "缺 voice_id" }, 400);
+    // 远端有、本地没记的：改名时顺手记下来
+    if (!cloned.update(id, { name })) cloned.add({ voice_id: id, provider: String(d.provider ?? ""), name, created_at: Date.now(), activated_at: Date.now() });
+    return json({ ok: true });
+  });
+  post("/api/admin/minimax-voices/remove", (req) => {
+    cloned.remove(String(req.json()?.voice_id ?? ""));
+    return json({ ok: true });
   });
 
   // ── 用量（全部 agent）──
