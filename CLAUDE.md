@@ -299,6 +299,8 @@ CoreS3 (MicroPython) ──HTTP──▶ server/（TypeScript 单文件可执行
   手机设备 `device_in_main` 也走 `worker:main`，于是手机消息永远排不上）：`scope.chain` 只看得见同一条调用链，两条各自起头的链互等它看不出来。
   `Runtime.run` 记 `waitsFor`（拿着锁的会话 → 它在等的会话），发起嵌套等待前顺着走一圈，成环就立刻失败（日志 `🔁 互相等待`）；
   嵌套等待（手里拿着自己的锁去等别人）还有上限 `lockWaitMs.a2a`（90 秒），等不到就放弃——但排着的位置要等前面真完了才让出去，别让后面的插队。
+  管理界面总览的「正在运行」卡片（`Runtime.activeRuns` / `cancelRun`，`/api/admin/runs`）：每个会话正在跑的那一轮、阶段 / 工具、排队数、在等谁，能手动终止。
+  终止走每轮自己的 `AbortController`（调用方的 `req.signal` 也接在它上面），和取消同一条路：中止模型和工具，最多 2 秒放开会话锁。
 - **设备文件同步（`ota.py`，管理界面「设备 → 图片与代码」）**：服务端 `server/src/devicefiles.ts` 存
   `<数据目录>/device_files/`（自定义）+ 构建时打进来的 `device/src`（`virtual:device-fw`，版本 = 服务端版本）；
   MQTT `{"action":"sync","scope":"res|code|all"}` → 设备空闲时 `GET /device/files` 拿清单（路径/大小/sha256）

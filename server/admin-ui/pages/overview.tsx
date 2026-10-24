@@ -1,9 +1,35 @@
 import { api, ago, fmtTime, go, money } from "../api.ts";
-import { Badge, Card, Empty, Err, Stat, useInterval, useLoad } from "../ui.tsx";
+import { Badge, Btn, Card, Empty, Err, Stat, toast, useInterval, useLoad } from "../ui.tsx";
+
+const PURPOSE: Record<string, string> = { chat: "对话", heartbeat: "heartbeat", cron: "定时任务", a2a: "agent 间", spawn: "子任务", flush: "记忆整理" };
+const CHANNEL: Record<string, string> = { device: "设备 / 手机", webchat: "网页", a2a: "agent 间", system: "系统", feishu: "飞书", qq: "QQ" };
+
+/** 正在运行的轮次：看是谁占着会话，卡住了可以手动终止 */
+function Runs(p: { runs: any[]; reload: () => void }) {
+  if (!p.runs.length) return <Empty>没有正在运行的任务</Empty>;
+  const kill = async (r: any) => {
+    if (!confirm(`终止 ${r.agent} 的这一轮（${PURPOSE[r.purpose] ?? r.purpose}，已运行 ${ago(r.secs).replace("前", "")}）？\n正在执行的工具会被中止，后面排队的消息会接着处理。`)) return;
+    await api("/runs/cancel", { body: { key: r.key } });
+    toast("已终止");
+    setTimeout(p.reload, 2500);
+  };
+  return (
+    <table><thead><tr><th>Agent / 会话</th><th>在做什么</th><th>已运行</th><th>排队</th><th></th></tr></thead>
+      <tbody>{p.runs.map((r) => (
+        <tr>
+          <td><a href={`#/agents/${r.agent}`}>{r.agent}</a> <small class="muted">{r.session}</small></td>
+          <td>{PURPOSE[r.purpose] ?? r.purpose} · <span class="muted">{CHANNEL[r.channel] ?? r.channel}</span><br />
+            <small class="muted">{r.stage}{r.tool ? `：${r.tool}` : ""}{r.waiting_for ? ` · 在等 ${r.waiting_for}` : ""}</small></td>
+          <td>{r.secs >= 120 ? <Badge s="error" text={ago(r.secs).replace("前", "")} /> : <span class="mono">{r.secs} 秒</span>}</td>
+          <td class="mono">{r.queued ? <Badge s="running" text={`${r.queued} 条`} /> : "—"}</td>
+          <td>{r.cancelling ? <small class="muted">正在终止…</small> : <Btn small kind="danger" onClick={() => kill(r)}>终止</Btn>}</td>
+        </tr>))}</tbody></table>
+  );
+}
 
 export function Overview() {
   const [d, reload, err] = useLoad(() => api("/overview"));
-  useInterval(reload, 10_000);
+  useInterval(reload, 5_000);
   if (!d) return <Err msg={err} />;
   const calls = d.agents.reduce((n: number, a: any) => n + (a.today.calls ?? 0), 0);
   const cost = d.agents.reduce((n: number, a: any) => n + (a.today.cost ?? 0), 0);
@@ -32,6 +58,9 @@ export function Overview() {
         <Stat label="渠道在线" value={`${chOk}/${d.channels.length}`} />
       </div>
       <div class="grid">
+        <Card title={`正在运行${d.runs?.length ? `（${d.runs.length}）` : ""}`}>
+          <Runs runs={d.runs ?? []} reload={reload} />
+        </Card>
         <Card title="Agents">
           <table><thead><tr><th>Agent</th><th>模型</th><th>今日对话</th><th>今日费用</th></tr></thead>
             <tbody>{d.agents.map((a: any) => (

@@ -118,6 +118,8 @@ function saveImageRef(c: { data: string; mimeType: string }, workspace?: string)
   } catch { return "[图片]"; }
 }
 
+interface RunInfo { purpose: string; channel: string; since: number; tool: string; stage: string; abort: () => void; cancelled: boolean }
+
 /** 一个工具最多执行多久（工具自己不理超时、卡在网络上时的兜底；exec 自己的上限是 10 分钟） */
 export const TOOL_MAX_MS = 15 * 60_000;
 
@@ -142,7 +144,29 @@ export class Runtime {
   /** 在别的会话里发起、要等这个会话的锁（a2a 等对方回复）最多等多久。拿着自己的锁干等别人，等久了谁都动不了 */
   lockWaitMs = { a2a: 90_000 };
   /** 每个会话正在跑的那一轮：卡住时日志里说清楚是谁占着 */
-  private running = new Map<string, { purpose: string; channel: string; since: number; tool: string; stage: string }>();
+  private running = new Map<string, RunInfo>();
+  /** 每个会话后面排着几轮 */
+  private queued = new Map<string, number>();
+
+  /** 管理界面「正在运行」：每个会话正在跑的那一轮、后面排着几轮、它在等谁 */
+  activeRuns() {
+    const t = Date.now();
+    return [...this.running.entries()].map(([key, r]) => {
+      const [agent, session] = [key.slice(0, key.indexOf("|")), key.slice(key.indexOf("|") + 1)];
+      const w = this.waitsFor.get(key);
+      return { key, agent, session, purpose: r.purpose, channel: r.channel, stage: r.stage, tool: r.tool, secs: Math.round((t - r.since) / 1000),
+        queued: this.queued.get(key) ?? 0, waiting_for: w ? w.slice(w.indexOf("|") + 1) : "", cancelling: r.cancelled };
+    }).sort((a, b) => b.secs - a.secs);
+  }
+  /** 终止某个会话正在跑的那一轮（同取消：中止模型和工具，最多再等 2 秒就放开会话锁） */
+  cancelRun(key: string) {
+    const r = this.running.get(key);
+    if (!r) return false;
+    r.cancelled = true;
+    r.abort();
+    console.log(`[agent] 🛑  ${key} 被手动终止（${r.purpose}/${r.channel}，${r.stage}${r.tool ? `：${r.tool}` : ""}）`);
+    return true;
+  }
   private sem: Semaphore;
   private providers: ToolProvider[] = [];
   /** 扩展 / 扩展包 / MCP 的工具：排在所有内置工具后面，重名时内置的赢（不管谁先注册） */
@@ -197,6 +221,8 @@ export class Runtime {
   private serial<T>(key: string, fn: () => Promise<T>, waitMs = 0, busyMsg = ""): Promise<T> {
     const prev = this.locks.get(key) ?? Promise.resolve();
     if (this.locks.has(key)) {
+      this.queued.set(key, (this.queued.get(key) ?? 0) + 1);
+      prev.catch(() => {}).finally(() => { const n = (this.queued.get(key) ?? 1) - 1; if (n > 0) this.queued.set(key, n); else this.queued.delete(key); });
       const t = setTimeout(() => {
         const r = this.running.get(key);
         const who = r ? `${r.purpose}/${r.channel}，已跑 ${Math.round((Date.now() - r.since) / 1000)} 秒，${r.stage}${r.tool ? `：${r.tool}` : ""}` : "未知";
@@ -268,14 +294,19 @@ export class Runtime {
     const persist = req.persist !== false;
     const lockKey = `${agent.id}|${req.sessionKey}`;
     const nestedRun = this.running.has(lockKey);          // 冲刷等内部运行：别覆盖外面那一轮的登记
-    const info = { purpose: req.purpose ?? "chat", channel: req.channel, since: Date.now(), tool: "", stage: "准备" };
+    // 自己的中止信号：调用方取消（req.signal）和管理界面「终止」都走它
+    const ac = new AbortController();
+    const signal = ac.signal;
+    const onOuter = () => ac.abort();
+    if (req.signal?.aborted) ac.abort(); else req.signal?.addEventListener("abort", onOuter, { once: true });
+    const info: RunInfo = { purpose: req.purpose ?? "chat", channel: req.channel, since: Date.now(), tool: "", stage: "准备", abort: () => ac.abort(), cancelled: false };
     if (!nestedRun) this.running.set(lockKey, info);
     try {
     if (persist) {
       store.touchSession(req.sessionKey, req.kind, req.channel);
       info.stage = "压缩历史";
-      await this.maybeCompact(agent, store, req.sessionKey, req.signal);
-      if (req.signal?.aborted) throw new Error("已取消");
+      await this.maybeCompact(agent, store, req.sessionKey, signal);
+      if (signal.aborted) throw new Error(info.cancelled ? "已在管理界面终止" : "已取消");
     }
     info.stage = "生成回复";
     const parent = runScope();
@@ -358,7 +389,7 @@ export class Runtime {
     kick();
     const hardTimer = setTimeout(() => stop("max"), maxMs);
     const onCancel = () => stop("cancel");
-    if (req.signal?.aborted) onCancel(); else req.signal?.addEventListener("abort", onCancel, { once: true });
+    if (signal.aborted) onCancel(); else signal.addEventListener("abort", onCancel, { once: true });
     try {
       const work = withScope(scope, async () => {
         await pi.prompt({ role: "user", content, timestamp: Date.now() } as any);
@@ -366,13 +397,13 @@ export class Runtime {
       });
       work.catch(() => {});                          // 放弃等待之后它再报错也别变成未处理的 rejection
       await Promise.race([work, gaveUp]);
-    } finally { clearTimeout(hardTimer); if (idleTimer) clearTimeout(idleTimer); idleTimer = null; req.signal?.removeEventListener("abort", onCancel); }
+    } finally { clearTimeout(hardTimer); if (idleTimer) clearTimeout(idleTimer); idleTimer = null; signal.removeEventListener("abort", onCancel); }
 
     const fresh = pi.state.messages.slice(start).filter((m: any) => ["user", "assistant", "toolResult"].includes(m.role)) as Message[];
     const assistants = fresh.filter((m) => m.role === "assistant") as AssistantMessage[];
     const last = assistants.at(-1);
     const why = timedOut as "" | "idle" | "max" | "cancel";      // 在回调里赋值，TS 看不出来
-    if (why === "cancel") throw new Error("已取消");
+    if (why === "cancel") throw new Error(info.cancelled ? "已在管理界面终止" : "已取消");
     if (why === "idle") throw new Error(toolStuck ? `agent 超时（工具 ${toolStuck} 执行超过 ${Math.round(toolMs / 60000)} 分钟没有结束）` : `agent 超时（${idleMs / 1000} 秒没有任何进展）`);
     if (why === "max") throw new Error(`agent 超时（这一轮超过总时长上限 ${Math.round(maxMs / 60000)} 分钟）`);
     if (!last) throw new Error(pi.state.errorMessage || "模型没有返回内容");
@@ -391,7 +422,7 @@ export class Runtime {
     const text = textOf(last) || assistants.map(textOf).filter(Boolean).join("\n");
     if (persist && (!req.keepIf || req.keepIf(text))) store.append(req.sessionKey, fresh.map((m) => stripImages(m, agent.workspace)));
     return { text, meta: scope.meta, toolCalls, usage };
-    } finally { if (!nestedRun) this.running.delete(lockKey); }
+    } finally { if (!nestedRun) this.running.delete(lockKey); req.signal?.removeEventListener("abort", onOuter); }
   }
 
   /** 某个 agent 在普通会话里能看到的全部内置工具（管理界面白名单用，不过滤白名单本身） */

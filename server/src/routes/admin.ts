@@ -94,7 +94,14 @@ export function registerAdmin(r: Router, ctx: Ctx, sys: AgentSystem) {
       setup_needed: !models.defaultRef(),
       version: VERSION, update: ctx.updates?.info ?? null,
       channels: sys.channels.status(),
+      runs: runtime.activeRuns(),
     });
+  });
+  // ── 正在运行的任务：看谁占着会话、手动终止 ──
+  get("/api/admin/runs", () => json(runtime.activeRuns()));
+  post("/api/admin/runs/cancel", (req) => {
+    const key = String((req.json() ?? {}).key ?? "");
+    return runtime.cancelRun(key) ? json({ status: "ok" }) : json({ error: "这一轮已经结束了" }, 404);
   });
   get("/api/admin/meta", () => json({
     budgets: BUDGETS, soul_files: SOUL_FILES,

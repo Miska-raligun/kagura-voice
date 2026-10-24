@@ -184,6 +184,29 @@ describe("会话与压缩", () => {
     expect((await rt.run({ ...dev, agentId: "main", sessionKey: key, text: "嗯" })).text).toBe("好的");
   }, 20_000);
 
+  it("管理界面看得到正在跑的轮次和排队数，能手动终止，排着的消息接着处理", async () => {
+    const { rt, fake } = makeRuntime();
+    rt.addTools(() => [{
+      name: "slow_script", label: "慢脚本", description: "x", parameters: Type.Object({}),
+      execute: () => new Promise(() => {}),              // 永远不结束、也不理中止
+    } as any]);
+    const key = "main:main";
+    fake.queue.push({ tool_calls: [{ name: "slow_script", args: {} }] });
+    const stuck = rt.run({ ...dev, agentId: "main", sessionKey: key, text: "跑脚本", purpose: "heartbeat", channel: "system" } as any);
+    stuck.catch(() => {});
+    await new Promise((r) => setTimeout(r, 100));
+    fake.queue.push("在的");
+    const next = rt.run({ ...dev, agentId: "main", sessionKey: key, text: "在吗" });
+    await new Promise((r) => setTimeout(r, 50));
+    const [run] = rt.activeRuns();
+    expect(run).toMatchObject({ key: "main|main:main", agent: "main", session: key, purpose: "heartbeat", stage: "执行工具", tool: "slow_script", queued: 1 });
+    expect(rt.cancelRun(run.key)).toBe(true);
+    await expect(stuck).rejects.toThrow("已在管理界面终止");
+    expect((await next).text).toBe("在的");
+    expect(rt.activeRuns()).toEqual([]);
+    expect(rt.cancelRun(run.key)).toBe(false);
+  }, 15_000);
+
   it("同一会话串行：两条并发消息按到达顺序执行，历史不交错", async () => {
     const { rt, fake } = makeRuntime();
     fake.queue.push("一", "二");
