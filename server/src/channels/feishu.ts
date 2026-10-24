@@ -114,6 +114,21 @@ export class FeishuAdapter implements ChannelAdapter {
     };
   }
 
+  /** 收到消息先贴个「敲键盘」表情表示在处理（同 OpenClaw），回复后撤掉。需要应用开通「消息表情回复」权限，没开就静默跳过 */
+  async react(messageId: string): Promise<(() => Promise<void>) | null> {
+    const c = this.deps?.client;
+    if (!c || !messageId) return null;
+    try {
+      const r: any = await c.im.messageReaction.create({ path: { message_id: messageId }, data: { reaction_type: { emoji_type: "Typing" } } });
+      const id = r?.data?.reaction_id ?? r?.reaction_id;
+      if (r?.code || !id) { if (r?.code) console.log(`[feishu] 贴表情失败（检查应用权限 im:message.reactions:write_only）: ${r.code} ${r.msg ?? ""}`); return null; }
+      return async () => { try { await c.im.messageReaction.delete({ path: { message_id: messageId, reaction_id: id } }); } catch { /* 撤不掉就留着 */ } };
+    } catch (e: any) {
+      console.log(`[feishu] 贴表情失败（检查应用权限 im:message.reactions:write_only）: ${e.message}`);
+      return null;
+    }
+  }
+
   async send(chatId: string, text: string, opts: SendOpts = {}) {
     const c = this.deps?.client;
     if (!c) throw new Error("飞书账号未启动");

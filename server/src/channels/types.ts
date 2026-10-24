@@ -39,6 +39,11 @@ export interface ChannelAdapter {
   start(onMessage: (m: InboundMessage) => void): Promise<void>;
   stop(): Promise<void>;
   send(chatId: string, text: string, opts?: SendOpts): Promise<void>;
+  /**
+   * 给收到的消息贴一个「正在处理」的表情（飞书的消息表情回复），返回撤掉它的函数。
+   * 渠道不支持就不实现；贴失败（没开权限等）返回 null，不影响回复。
+   */
+  react?(messageId: string): Promise<(() => Promise<void>) | null>;
   status(): ChannelStatus;
 }
 

@@ -163,6 +163,23 @@ describe("飞书", () => {
     expect(JSON.parse(calls[0][1].data.content)).toEqual({ zh_cn: { content: [[{ tag: "md", text: "**好**" }]] } });
     expect(calls[1][1].data).toMatchObject({ receive_id: "oc1", msg_type: "image" });
   });
+
+  it("贴「正在处理」表情：Typing，返回的函数撤掉它；没开权限（报错码）就返回 null", async () => {
+    const calls: any[] = [];
+    let code = 0;
+    const client = { im: { messageReaction: {
+      create: async (p: any) => { calls.push(["create", p]); return code ? { code, msg: "no permission" } : { code: 0, data: { reaction_id: "r1" } }; },
+      delete: async (p: any) => { calls.push(["delete", p]); return { code: 0 }; },
+    } } };
+    const a = new FeishuAdapter("fs", { app_id: "cli", app_secret: "x" }, { client, ws: { start: async () => {}, close: () => {} }, dispatcher: () => ({}) });
+    await a.start(() => {});
+    const undo = await a.react("om9");
+    expect(calls[0][1]).toEqual({ path: { message_id: "om9" }, data: { reaction_type: { emoji_type: "Typing" } } });
+    await undo!();
+    expect(calls[1][1]).toEqual({ path: { message_id: "om9", reaction_id: "r1" } });
+    code = 99991672;
+    expect(await a.react("om10")).toBe(null);
+  });
 });
 
 // ── 路由层 ──
@@ -173,7 +190,9 @@ class FakeAdapter implements ChannelAdapter {
   constructor(readonly accountId: string, kind: string) { this.kind = kind; }
   async start(cb: any) { this.onMsg = cb; }
   async stop() {}
-  async send(chatId: string, text: string, opts: any = {}) { this.sent.push({ chatId, text, opts }); }
+  async send(chatId: string, text: string, opts: any = {}) { this.sent.push({ chatId, text, opts }); this.events.push(`send:${text}`); }
+  events: string[] = [];
+  async react(id: string) { this.events.push(`react:${id}`); return async () => { this.events.push(`unreact:${id}`); }; }
   status() { return { state: "online" as const, detail: "", since: 0 }; }
 }
 
@@ -190,6 +209,19 @@ const msg = (o: Partial<InboundMessage> = {}): InboundMessage => ({
 });
 
 describe("渠道路由", () => {
+  it("收到消息先贴「正在处理」表情，回复发出后撤掉；命令和配对提示不贴", async () => {
+    const { mgr, store, fake, ad } = setupMgr({ dm_policy: "allowlist" });
+    store.allow("fs", "ou_1", "主人", true);
+    await mgr.startAll();
+    fake.queue.push("好的");
+    await mgr.handle(msg({ messageId: "om5" }));
+    await new Promise((r) => setTimeout(r, 10));
+    expect(ad().events).toEqual(["react:om5", "send:好的", "unreact:om5"]);
+    ad().events.length = 0;
+    await mgr.handle(msg({ messageId: "om6", text: "/help" }));
+    expect(ad().events.some((e) => e.startsWith("react"))).toBe(false);
+  });
+
   it("私聊默认配对制：陌生人拿配对码、内容不进 agent；批准后正常聊天", async () => {
     const { mgr, store, fake, ad } = setupMgr();
     await mgr.startAll();

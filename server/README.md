@@ -209,7 +209,7 @@ MCP 服务器配置里加 `"allowUntrusted": true` 才给 IM 陌生人 / 群聊�
 
 | 渠道 | 需要 | 说明 |
 |---|---|---|
-| 飞书 / Lark | App ID、App Secret | 企业自建应用，事件订阅选「长连接」并加 `im.message.receive_v1`；不需要公网 |
+| 飞书 / Lark | App ID、App Secret | 企业自建应用，事件订阅选「长连接」并加 `im.message.receive_v1`；不需要公网。收到消息会先贴一个「敲键盘」表情、回复后撤掉，需要权限 `im:message.reactions:write_only`（没开就不贴，不影响聊天） |
 | QQ 官方机器人 | AppID、AppSecret | 回调方式选 WebSocket，开通单聊与群 @；不需要公网 |
 | OneBot v11（可选） | 正向 WebSocket 地址、token | NapCat / LLOneBot 等，**非官方协议有封号风险**，默认关闭 |
 

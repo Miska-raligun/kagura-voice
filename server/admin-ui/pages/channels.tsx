@@ -10,7 +10,7 @@ const CRED_FIELDS: Record<string, [string, string, string][]> = {
   onebot: [["url", "WebSocket 地址", "ws://127.0.0.1:3001"], ["token", "access_token", "可选"]],
 };
 const GUIDE: Record<string, string> = {
-  feishu: "飞书开放平台建「企业自建应用」→ 开启机器人能力 → 事件订阅选「使用长连接接收事件」并添加 im.message.receive_v1 → 权限加 im:message、im:message:send_as_bot、im:resource → 发布版本。不需要公网地址。",
+  feishu: "飞书开放平台建「企业自建应用」→ 开启机器人能力 → 事件订阅选「使用长连接接收事件」并添加 im.message.receive_v1 → 权限加 im:message、im:message:send_as_bot、im:resource、im:message.reactions:write_only（「正在处理」表情） → 发布版本。不需要公网地址。",
   qq: "QQ 开放平台建机器人 → 开发设置里拿 AppID / AppSecret → 回调方式选 WebSocket → 开通单聊、群聊 @ 消息。不需要公网地址。被动回复 5 分钟内有效，主动推送有频次限制。",
   onebot: "⚠️ OneBot 是非官方协议（NapCat、LLOneBot 等），有封号风险，请用小号。在 OneBot 实现里开「正向 WebSocket」，把地址和 token 填到这里。",
 };

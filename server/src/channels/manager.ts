@@ -143,6 +143,10 @@ export class ChannelManager {
     console.log(`[channel] 💬 ${a.kind}/${a.id} ${m.chatType} ${m.chatId} → ${agentId}: ${m.text.slice(0, 60)}`);
     // 主人私聊的回复同时交给出口念（播不播由系统按语音推送策略定）。群聊、陌生人的消息不往家里喇叭上念
     const ownerDm = m.chatType === "dm" && !!allowed?.owner;
+    // 先给这条消息贴个「正在处理」的表情（飞书），回复发出后撤掉。不等它：贴表情慢不能拖慢回复
+    const reacting = this.adapters.get(m.account)?.react?.(m.messageId).catch(() => null) ?? Promise.resolve(null);
+    let released = false;
+    const release = () => { if (!released) { released = true; void reacting.then((undo) => undo?.()); } };
     try {
       const r = await this.rt.run({
         agentId, sessionKey, kind: ownerMain ? "main" : "chat", channel: m.kind, purpose: "chat",
@@ -155,10 +159,13 @@ export class ChannelManager {
       // take_photo 在 IM 里触发时，照片直接发回聊天
       const photo = r.meta.photos?.[0];
       await this.reply(m, r.text, photo && fs.existsSync(photo) ? fs.readFileSync(photo) : undefined);
+      release();
       // 跑完才判断：主人这条消息里说了「我到家了」（set_presence）也算
       if (ownerDm) await this.voice?.say(agentId, r.text, r.meta);
     } catch (e: any) {
       await this.reply(m, `（出错了：${String(e.message).slice(0, 100)}）`);
+    } finally {
+      release();
     }
   }
 
