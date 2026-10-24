@@ -143,8 +143,14 @@ export class Runtime {
   /** 当前在家状态（presence 路由更新） */
   presence: () => string = () => "";
 
-  constructor(public agents: AgentRegistry, public models: ModelRegistry, private opts: { maxConcurrency: number; timeoutSecs: number }) {
+  constructor(public agents: AgentRegistry, public models: ModelRegistry, private opts: { maxConcurrency: number; timeoutSecs: number; maxSecs?: number }) {
     this.sem = new Semaphore(Math.max(1, opts.maxConcurrency));
+  }
+
+  /** 管理界面改了超时：就地生效（下一轮起） */
+  setLimits(l: { timeoutSecs?: number; maxSecs?: number }) {
+    if (l.timeoutSecs && l.timeoutSecs > 0) this.opts.timeoutSecs = l.timeoutSecs;
+    if (l.maxSecs && l.maxSecs > 0) this.opts.maxSecs = l.maxSecs;
   }
 
   addTools(p: ToolProvider, opts: { plugin?: boolean } = {}) { (opts.plugin ? this.pluginProviders : this.providers).push(p); }
@@ -244,8 +250,30 @@ export class Runtime {
     });
     const start = pi.state.messages.length;
     const toolCalls: string[] = [];
+    // 超时按「多久没有进展」算，不按一轮总时长：模型在出字、工具在执行都算在干活，长任务不会被半路掐掉。
+    // 工具执行期间不计时（命令有自己的超时）；另有总时长上限兜底，防卡死、防死循环
+    const idleMs = (req.timeoutSecs ?? this.opts.timeoutSecs) * 1000;
+    const maxMs = Math.max(idleMs, (this.opts.maxSecs ?? 1800) * 1000);
+    let timedOut: "" | "idle" | "max" = "";
+    let idleTimer: ReturnType<typeof setTimeout> | null = null;
+    let toolsRunning = 0;
+    // 超时后先 abort；有的工具不理会中止信号（卡在网络、扩展写得不好），给 2 秒宽限就不再等它
+    let giveUp: () => void = () => {};
+    const gaveUp = new Promise<void>((r) => (giveUp = r));
+    const stop = (why: "idle" | "max") => {
+      if (timedOut) return;
+      timedOut = why;
+      pi.abort();
+      setTimeout(giveUp, 2000).unref?.();
+    };
+    const kick = () => {
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = toolsRunning > 0 || timedOut ? null : setTimeout(() => stop("idle"), idleMs);
+    };
     pi.subscribe((e: any) => {
-      if (e.type === "tool_execution_start") toolCalls.push(e.toolName);
+      if (e.type === "tool_execution_start") { toolCalls.push(e.toolName); toolsRunning++; }
+      else if (e.type === "tool_execution_end") toolsRunning = Math.max(0, toolsRunning - 1);
+      kick();
       if (!req.onEvent) return;
       try {
         if (e.type === "message_update" && e.assistantMessageEvent?.type === "text_delta") req.onEvent({ type: "text", delta: e.assistantMessageEvent.delta });
@@ -255,20 +283,23 @@ export class Runtime {
       } catch (err: any) { console.log(`[agent] ⚠️  onEvent 出错: ${err.message}`); }
     });
 
-    const timeout = (req.timeoutSecs ?? this.opts.timeoutSecs) * 1000;
-    let timedOut = false;
-    const timer = setTimeout(() => { timedOut = true; pi.abort(); }, timeout);
+    kick();
+    const hardTimer = setTimeout(() => stop("max"), maxMs);
     try {
-      await withScope(scope, async () => {
+      const work = withScope(scope, async () => {
         await pi.prompt({ role: "user", content, timestamp: Date.now() } as any);
         await pi.waitForIdle();
       });
-    } finally { clearTimeout(timer); }
+      work.catch(() => {});                          // 放弃等待之后它再报错也别变成未处理的 rejection
+      await Promise.race([work, gaveUp]);
+    } finally { clearTimeout(hardTimer); if (idleTimer) clearTimeout(idleTimer); idleTimer = null; }
 
     const fresh = pi.state.messages.slice(start).filter((m: any) => ["user", "assistant", "toolResult"].includes(m.role)) as Message[];
     const assistants = fresh.filter((m) => m.role === "assistant") as AssistantMessage[];
     const last = assistants.at(-1);
-    if (timedOut) throw new Error(`agent 超时（${timeout / 1000}s）`);
+    const why = timedOut as "" | "idle" | "max";      // 在回调里赋值，TS 看不出来
+    if (why === "idle") throw new Error(`agent 超时（${idleMs / 1000} 秒没有任何进展）`);
+    if (why === "max") throw new Error(`agent 超时（这一轮超过总时长上限 ${Math.round(maxMs / 60000)} 分钟）`);
     if (!last) throw new Error(pi.state.errorMessage || "模型没有返回内容");
     if (last.stopReason === "error" || last.stopReason === "aborted") throw new Error(last.errorMessage || `模型调用失败（${last.stopReason}）`);
 

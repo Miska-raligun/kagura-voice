@@ -355,6 +355,10 @@ export function registerAdmin(r: Router, ctx: Ctx, sys: AgentSystem) {
     }
     if ("voice_push" in patch) { ctx.cfg.voicePush = parseVoicePush(next.voice_push); hot.push("voice_push"); }
     if ("role_push" in patch) { ctx.cfg.rolePush = next.role_push === "switch" ? "switch" : "hold"; hot.push("role_push"); }
+    if (patch.runtime) {
+      runtime.setLimits({ timeoutSecs: Number(next.runtime.timeout_secs) || undefined, maxSecs: Number(next.runtime.max_secs) || undefined });
+      hot.push("runtime");
+    }
     if (next.a2a) {
       if ("enabled" in next.a2a) a2a.cfg.enabled = !!next.a2a.enabled;
       if (next.a2a.max_hops) a2a.cfg.maxHops = Number(next.a2a.max_hops);
@@ -370,7 +374,9 @@ export function registerAdmin(r: Router, ctx: Ctx, sys: AgentSystem) {
       hot.push("tools");
     }
     if ("prompt_budgets" in patch) { applyBudgets(next.prompt_budgets); hot.push("prompt_budgets"); }
-    const restart = ["port", "mqtt_port", "stream_port", "disc_port", "baidu", "api_token", "stream_token", "brain", "runtime", "openclaw"].filter((k) => k in patch);
+    // 运行时里只有并发数要重启；超时就地生效
+    const restart = ["port", "mqtt_port", "stream_port", "disc_port", "baidu", "api_token", "stream_token", "brain", "openclaw"].filter((k) => k in patch);
+    if (patch.runtime && Number(patch.runtime.max_concurrency) !== Number(old.runtime?.max_concurrency ?? 4)) restart.push("最大并发");
     return json({ status: "ok", applied: hot, restart_needed: restart });
   });
   /** 重启服务端（设置页按钮；IM 里是 /restart） */

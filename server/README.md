@@ -88,7 +88,7 @@ kagura migrate <旧仓库目录>     # config.py → config.json，并复制提�
     "cheap": "deepseek/deepseek-chat"
   },
   "embedding": { "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1", "api_key": "sk-…", "model": "text-embedding-v3" },
-  "runtime": { "max_concurrency": 4, "timeout_secs": 120 },
+  "runtime": { "max_concurrency": 4, "timeout_secs": 120, "max_secs": 1800 },
   "a2a": { "enabled": true, "max_hops": 3, "per_pair_per_min": 10 }
 }
 ```
@@ -96,6 +96,9 @@ kagura migrate <旧仓库目录>     # config.py → config.json，并复制提�
 - `api`：`openai-completions`（DeepSeek / 通义 / Kimi / 智谱 / Ollama 等 OpenAI 兼容接口）、`anthropic-messages`、
   `openai-responses`、`google-generative-ai`。`cost` 单位是「每百万 token 的价格」，用于用量统计。
 - 设备拍照看图要求模型 `input` 含 `image`；纯文本模型收到图片会如实告诉用户看不了。
+- `runtime.timeout_secs` 是「多少秒没有任何进展就中断」：模型在出字、工具在执行都算进展，工具执行期间不计时；
+  `max_secs` 是一轮的总时长上限（默认 30 分钟）。两者在「设置 → 系统 → 运行时」可改，即时生效。
+  设备语音对话另受设备端 60 秒请求超时限制，长任务适合在网页聊天 / IM 里交代，或让她派后台子任务。
 - `cheap` 用于压缩、记忆冲刷、heartbeat；`embedding` 可选，不配就只用关键词检索记忆。
 
 ### Agent 目录

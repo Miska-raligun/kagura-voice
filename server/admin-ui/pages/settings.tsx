@@ -305,7 +305,7 @@ function Speech({ cfg, save }: { cfg: any; save: (p: any) => Promise<void> }) {
 
 function Misc({ cfg, dataDir, save }: { cfg: any; dataDir: string; save: (p: any) => Promise<void> }) {
   const [p, setP] = useState({ port: cfg.port ?? 5000, mqtt_port: cfg.mqtt_port ?? 1883, disc_port: cfg.disc_port ?? 5001, stream_port: cfg.stream_port ?? 5002 });
-  const [rt, setRt] = useState({ max_concurrency: cfg.runtime?.max_concurrency ?? 4, timeout_secs: cfg.runtime?.timeout_secs ?? 120 });
+  const [rt, setRt] = useState({ max_concurrency: cfg.runtime?.max_concurrency ?? 4, timeout_secs: cfg.runtime?.timeout_secs ?? 120, max_secs: cfg.runtime?.max_secs ?? 1800 });
   return (
     <>
       <Card title="数据目录"><code>{dataDir}</code></Card>
@@ -321,7 +321,8 @@ function Misc({ cfg, dataDir, save }: { cfg: any; dataDir: string; save: (p: any
       <Card title="运行时">
         <div class="form">
           <Field label="最大并发" hint="重启后生效"><Input type="number" value={rt.max_concurrency} onInput={(v) => setRt({ ...rt, max_concurrency: Number(v) })} /></Field>
-          <Field label="单轮超时（秒）"><Input type="number" value={rt.timeout_secs} onInput={(v) => setRt({ ...rt, timeout_secs: Number(v) })} /></Field>
+          <Field label="无进展超时（秒）" hint="多久没有出字、没有工具在执行就中断"><Input type="number" value={rt.timeout_secs} onInput={(v) => setRt({ ...rt, timeout_secs: Number(v) })} /></Field>
+          <Field label="单轮总时长上限（秒）" hint="长任务的兜底，默认 1800"><Input type="number" value={rt.max_secs} onInput={(v) => setRt({ ...rt, max_secs: Number(v) })} /></Field>
         </div>
         <Btn kind="primary" onClick={() => save({ runtime: rt })}>保存</Btn>
       </Card>

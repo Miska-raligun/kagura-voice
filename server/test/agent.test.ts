@@ -8,6 +8,7 @@ import { Runtime } from "../src/agent/runtime.ts";
 import { AgentRegistry } from "../src/agent/registry.ts";
 import { buildSystemPrompt, clip, applyBudgets, BUDGETS } from "../src/agent/soul.ts";
 import { PiBrain } from "../src/brain/pi.ts";
+import { Type } from "@earendil-works/pi-ai";
 
 function withDevice(rt: Runtime) {
   const pushed: any[] = [];
@@ -69,6 +70,33 @@ describe("内置工具", () => {
     const tr = rt.store("main").history("main:main").map((h) => h.msg).find((m) => m.role === "toolResult") as any;
     expect(tr.isError).toBe(true);
     expect(r.text).toBe("好");
+  });
+});
+
+describe("超时：按「没有进展」算，不按总时长", () => {
+  const slowTool = (ms: number) => () => [{
+    name: "slow", label: "慢", description: "慢工具", parameters: Type.Object({}),
+    async execute() { await new Promise((r) => setTimeout(r, ms)); return { content: [{ type: "text" as const, text: "ok" }], details: {} }; },
+  }] as any;
+
+  it("工具在执行就不算卡住：连续几个慢工具累计超过无进展超时也能跑完", async () => {
+    const { rt, fake } = makeRuntime();
+    rt.setLimits({ timeoutSecs: 0.4, maxSecs: 10 });
+    rt.addTools(slowTool(300));
+    fake.queue.push({ tool_calls: [{ name: "slow" }, { name: "slow" }, { name: "slow" }], then: "做完了" });
+    const r = await rt.run({ ...dev, agentId: "main", sessionKey: "main:main", text: "干活" });
+    expect(r.text).toBe("做完了");
+  });
+
+  it("模型很久不出字 → 无进展超时；工具一直不返回 → 总时长上限", async () => {
+    const { rt, fake } = makeRuntime();
+    rt.setLimits({ timeoutSecs: 0.3, maxSecs: 60 });
+    fake.queue.push({ text: "慢慢说", tps: 1 });
+    await expect(rt.run({ ...dev, agentId: "main", sessionKey: "main:a", text: "说" })).rejects.toThrow(/没有任何进展/);
+    rt.setLimits({ timeoutSecs: 0.3, maxSecs: 0.8 });
+    rt.addTools(slowTool(5000));
+    fake.queue.push({ tool_calls: [{ name: "slow" }], then: "x" });
+    await expect(rt.run({ ...dev, agentId: "main", sessionKey: "main:b", text: "卡住" })).rejects.toThrow(/总时长上限/);
   });
 });
 
