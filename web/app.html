@@ -83,6 +83,7 @@ main { position:relative; z-index:1; flex:1; min-height:0; }
 .status { align-self:center; margin:0 0 8px; display:flex; align-items:center; gap:8px; padding:6px 6px 6px 12px; border-radius:20px;
   background:var(--glass2); border:1px solid var(--line); backdrop-filter:blur(12px); -webkit-backdrop-filter:blur(12px); font-size:13px; }
 .status .stop { padding:3px 10px; border-radius:14px; background:#ffffff14; font-size:12.5px; }
+.status .stop.play { background:var(--accent); color:var(--accent-fg); font-weight:600; }
 .bars { display:inline-flex; gap:2.5px; align-items:center; height:14px; }
 .bars i { width:2.5px; background:var(--accent); border-radius:2px; height:4px; transition:height .08s; }
 .bars.idle i { animation:breathe 1.2s ease-in-out infinite; }
@@ -170,7 +171,7 @@ main { position:relative; z-index:1; flex:1; min-height:0; }
     <section class="page" id="chatPage">
       <div class="stagegap"></div>
       <div class="log" id="log"></div>
-      <div class="status hidden" id="status"><span class="bars" id="bars"><i></i><i></i><i></i><i></i><i></i></span><span id="stateText"></span><button class="stop" id="stopBtn">停止</button></div>
+      <div class="status hidden" id="status"><span class="bars" id="bars"><i></i><i></i><i></i><i></i><i></i></span><span id="stateText"></span><button class="stop play hidden" id="playBtn">▶ 点我播放</button><button class="stop" id="stopBtn">停止</button></div>
       <div class="composer">
         <div class="attach hidden" id="attach"><img id="attachImg" alt=""><span>这张照片会和下一句一起发给她</span><button id="attachX" aria-label="移除">×</button></div>
         <div class="cbar">
@@ -300,7 +301,14 @@ function unlockAudio(e) {
     a.setAttribute("playsinline", ""); a.play().catch(() => {});
   } catch {}
 }
-for (const ev of ["touchend", "click", "pointerdown"]) document.addEventListener(ev, unlockAudio, { capture: true, passive: true });
+// keydown 也算：拍完照用键盘上的「发送」键发出去，整个过程一次都没点屏幕
+for (const ev of ["touchend", "click", "pointerdown", "keydown"]) document.addEventListener(ev, unlockAudio, { capture: true, passive: true });
+/** 声音被系统暂停、自己恢复不了时，状态条上亮一个「点我播放」（点它本身就是解锁声音的那一下） */
+function needTap(on) { const b = $("playBtn"); if (b) b.classList.toggle("hidden", !on); }
+$("playBtn").onclick = () => { try { ac(); } catch {} needTap(false); };
+// 从相机 / 相册回来、切回前台：先试着恢复（不一定成功，不成功就等 drain 里亮按钮）
+window.addEventListener("pageshow", () => { if (AC && AC.state !== "running") AC.resume().catch(() => {}); });
+window.addEventListener("focus", () => { if (AC && AC.state !== "running") AC.resume().catch(() => {}); });
 
 /** 边收边播：WAV 头（长度可能是占位值）+ 16 位单声道 PCM，攒够一点就排进播放队列 */
 class Player {
@@ -328,8 +336,23 @@ class Player {
     src.onended = () => { this.srcs = this.srcs.filter((s) => s !== src); };
   }
   stop() { this.stopped = true; for (const s of this.srcs) { try { s.stop(); } catch {} } this.srcs = []; }
-  /** 等排好的都播完 */
-  async drain() { while (!this.stopped && AC && AC.currentTime < this.t) await new Promise((r) => setTimeout(r, 80)); }
+  /**
+   * 等排好的都播完。声音被系统暂停时（iOS：去拍了张照片、来电、切过 App，回来 AudioContext 是 suspended / interrupted），
+   * 播放时钟不走，以前这里就永远等下去——页面一直「她在说…」却没声音。现在先试着恢复；恢复不了（要点一下屏幕才行）
+   * 就亮出「点我播放」，点了接着播；两分钟没人点就算了。
+   */
+  async drain() {
+    let pausedAt = 0;
+    while (!this.stopped && AC && AC.currentTime < this.t) {
+      if (AC.state !== "running") {
+        if (!pausedAt) { pausedAt = Date.now(); AC.resume().catch(() => {}); }
+        else if (Date.now() - pausedAt > 800) needTap(true);
+        if (Date.now() - pausedAt > 120_000) { this.stop(); break; }
+      } else if (pausedAt) { pausedAt = 0; needTap(false); }
+      await new Promise((r) => setTimeout(r, 80));
+    }
+    needTap(false);
+  }
 }
 
 /** 把一个 WAV 响应体边下边播（头里的采样率照着用） */
@@ -641,6 +664,7 @@ $("text").addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.isCom
 // 拍照：缩到长边 1280 的 JPEG（手机原图好几 MB，服务端上限 5MB）
 $("camBtn").onclick = () => $("camInput").click();
 $("camInput").onchange = async (e) => {
+  if (AC && AC.state !== "running") AC.resume().catch(() => {});      // 刚从相机回来，声音多半被系统暂停了
   const f = e.target.files && e.target.files[0];
   e.target.value = "";
   if (!f) return;

@@ -376,6 +376,10 @@ CoreS3 (MicroPython) ──HTTP──▶ server/（TypeScript 单文件可执行
   **iOS 声音**（症状「看到回复、浏览器有小喇叭，手机却没声」）：iOS 的 Web Audio 默认是「环境音」，侧面静音开关一开就静音。
   `unlockAudio()` 在点击 / 抬手里设 `navigator.audioSession.type = "playback"`（iOS 17+）并用 `<audio>` 播一小段静音（老 iOS 靠它切到媒体播放类别）；
   `Player.feed` 先把 16k 重采样到 `AudioContext.sampleRate` 再建 buffer（iOS Safari 对 16k AudioBuffer 挑剔）。别删这两处。
+  **声音被系统暂停**（LRN 2026-10-24，症状「发图片加一句话后一直『她在说…』，看得到几个字、没声音」）：去拍照 / 选相册时页面进了后台，
+  iOS 把 AudioContext 暂停（suspended / interrupted）；回来用键盘「发送」键发出去，一次都没点屏幕，没人恢复它。暂停时播放时钟不走，
+  `Player.drain()` 以前就永远等。现在：解锁也认 `keydown`；`pageshow` / `focus` / 选完照片先试 `resume()`；`drain()` 里恢复不了就亮状态条上的
+  「▶ 点我播放」（点它就是那次手势），两分钟没人点就放弃。**新加任何「等播放时钟」的循环都要考虑时钟不走的情况。**
   管理界面里手机和 CoreS3 在同一张设备表（`/api/admin/devices` 带 `kind: "phone"`），配对入口是表上的「＋ 添加手机」。
   舞台图跟着状态换，规则抄设备端 `ui._IMG_MAP`（待机 img_bg / 录音 img_recording / 思考 img_streaming / 说话 img_playing，角色目录优先、缺了退 img_bg）——
   改设备端的映射要同步改 `app.html` 的 `IMG_MAP`；图预先解码好、复用同一个 `<img>` 换 src。
