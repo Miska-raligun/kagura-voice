@@ -111,7 +111,7 @@ nav svg { width:22px; height:22px; }
   <h1>Kagura</h1>
   <p class="muted">这台手机还没配对。在电脑上：</p>
   <ol>
-    <li>打开 Kagura 管理界面 → <b>设备</b> → <b>手机</b></li>
+    <li>打开 Kagura 管理界面 → <b>设备</b>，点右上角「<b>＋ 添加手机</b>」</li>
     <li>点「添加手机」，用手机相机扫二维码</li>
   </ol>
   <p class="faint" style="font-size:13px">也可以把管理界面给出的配对链接直接粘贴到下面：</p>
@@ -240,10 +240,31 @@ $("pairBtn").onclick = () => {
 let AC = null;
 function ac() {
   if (!AC) AC = new (window.AudioContext || window.webkitAudioContext)();
-  if (AC.state === "suspended") AC.resume();
+  if (AC.state === "suspended" || AC.state === "interrupted") AC.resume();   // interrupted：iOS 来电 / 切 App 后
   return AC;
 }
-document.addEventListener("pointerdown", () => { try { ac(); } catch {} }, { once: true, capture: true });
+/**
+ * iOS 上网页的 Web Audio 默认按「环境音」处理：侧面静音开关一开就完全没声（浏览器照样显示小喇叭）。
+ * iOS 17+ 用 Audio Session API 声明成媒体播放；更早的版本在第一次点屏幕时用 <audio> 播一小段静音，
+ * 系统会把整个页面切到媒体播放类别，之后 Web Audio 也不受静音开关影响。只有在点击 / 抬手里做才算数。
+ */
+let unlocked = false;
+function unlockAudio() {
+  try { if (navigator.audioSession) navigator.audioSession.type = "playback"; } catch {}
+  try { ac(); } catch {}
+  if (unlocked) return;
+  unlocked = true;
+  try {
+    const n = 800, buf = new ArrayBuffer(44 + n * 2), v = new DataView(buf);       // 0.1 秒 8kHz 静音 WAV
+    const w = (o, t) => { for (let i = 0; i < t.length; i++) v.setUint8(o + i, t.charCodeAt(i)); };
+    w(0, "RIFF"); v.setUint32(4, 36 + n * 2, true); w(8, "WAVE"); w(12, "fmt "); v.setUint32(16, 16, true); v.setUint16(20, 1, true);
+    v.setUint16(22, 1, true); v.setUint32(24, 8000, true); v.setUint32(28, 16000, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+    w(36, "data"); v.setUint32(40, n * 2, true);
+    const a = new Audio(URL.createObjectURL(new Blob([buf], { type: "audio/wav" })));
+    a.setAttribute("playsinline", ""); a.play().catch(() => {});
+  } catch {}
+}
+for (const ev of ["touchend", "click", "pointerdown"]) document.addEventListener(ev, unlockAudio, { capture: true, passive: true });
 
 /** 边收边播：WAV 头（长度可能是占位值）+ 16 位单声道 PCM，攒够一点就排进播放队列 */
 class Player {
@@ -251,9 +272,16 @@ class Player {
   feed(int16) {
     if (this.stopped || !int16.length) return;
     const ctx = ac();
-    const f = new Float32Array(int16.length);
-    for (let i = 0; i < int16.length; i++) f[i] = int16[i] / 32768;
-    const buf = ctx.createBuffer(1, f.length, this.rate);
+    // 先转成设备原生采样率（通常 48k）再交给浏览器：iOS Safari 对 16k 的 AudioBuffer 很挑剔
+    const out = ctx.sampleRate, k = this.rate / out;
+    const n = Math.floor(int16.length / k);
+    const f = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+      const p = i * k, j = Math.floor(p), t = p - j;
+      const a = int16[j] / 32768, b = (j + 1 < int16.length ? int16[j + 1] : int16[j]) / 32768;
+      f[i] = a + (b - a) * t;
+    }
+    const buf = ctx.createBuffer(1, n, out);
     buf.copyToChannel(f, 0);
     const src = ctx.createBufferSource();
     src.buffer = buf; src.connect(ctx.destination);
@@ -701,7 +729,7 @@ $("tabHome").onclick = () => tab("home");
 // 推过来的话就丢了。断开后服务端立刻知道「没开」，主动说的话改去别的设备；回到前台再连上
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) { stopLive(); if (S.es) { S.es.close(); S.es = null; $("conn").className = "dot"; } }
-  else if (S.token) { connectEvents(); loadMe(); }
+  else if (S.token) { connectEvents(); loadMe(); if (AC && AC.state !== "running") AC.resume().catch(() => {}); }
 });
 window.addEventListener("pagehide", () => { if (S.es) { S.es.close(); S.es = null; } });
 
@@ -720,7 +748,10 @@ async function boot() {
   catch (e) { if (S.token) { $("pairView").classList.remove("hidden"); toast("连不上服务端：" + e.message, true); } return; }
   $("pairView").classList.add("hidden"); $("appView").classList.remove("hidden");
   $("insecure").classList.toggle("hidden", !!window.isSecureContext);
-  if (!$("log").children.length) addMsg("sys", `已连接（${S.me.name}）。按住下面的按钮说话，或者直接打字。`);
+  if (!$("log").children.length) {
+    addMsg("sys", `已连接（${S.me.name}）。按住下面的按钮说话，或者直接打字。`);
+    if (/iPhone|iPad|iPod/.test(navigator.userAgent) && !navigator.audioSession) addMsg("sys", "听不到她的声音的话，看看手机侧面的静音开关（系统较旧时网页声音会被它静音）。");
+  }
   connectEvents();
 }
 // 已经开着页面时再打开配对链接（只改了 # 后面），页面不会重新加载

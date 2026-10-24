@@ -17,7 +17,7 @@ export function registerClient(r: Router, ctx: Ctx, clients: Clients) {
     if (!isLocal(req)) return json({ error: "管理接口只允许本机访问" }, 403);
     try { return await h(req); } catch (e: any) { return json({ error: String(e.message || e) }, e.status ?? 400); }
   };
-  const unauthorized = () => json({ error: "未配对或令牌已失效：请在电脑上打开管理界面 → 设备 → 手机，重新扫码" }, 401);
+  const unauthorized = () => json({ error: "未配对或令牌已失效：请在电脑上打开管理界面 → 设备 → ＋ 添加手机，重新扫码" }, 401);
 
   // ── 页面 ──
   r.get("/app", () => bytes(Buffer.from(APP_HTML), "text/html; charset=utf-8", { "Cache-Control": "no-cache" }));

@@ -286,12 +286,20 @@ export function registerAdmin(r: Router, ctx: Ctx, sys: AgentSystem) {
   // ── 设备绑定（= 角色切换，改设备当前 agent）──
   get("/api/admin/devices", () => {
     const t = Date.now() / 1000;
-    return json([...ctx.hb.devices.entries()].map(([id, rec]) => ({
-      id, agent: ctx.roles.get(id).agent, role: ctx.roles.get(id).id, online: t - rec.ts < 200, secs_ago: Math.trunc(t - rec.ts),
+    const held = (id: string) => (ctx.outbox?.heldFor(id) ?? []).map((h) => ({ agent: h.agentId, text: h.text, at: h.at }));
+    const boards = [...ctx.hb.devices.entries()].map(([id, rec]) => ({
+      id, kind: "board", agent: ctx.roles.get(id).agent, role: ctx.roles.get(id).id, online: t - rec.ts < 200, secs_ago: Math.trunc(t - rec.ts),
       bat: rec.data.bat ?? null, rssi: rec.data.rssi ?? null, heap: rec.data.heap ?? null, wdt: rec.data.wdt ?? null,
       trusted: ctx.cfg.deviceTrust === "all" || !!ctx.trust[id]?.trusted, ip: ctx.trust[id]?.ip ?? "", trust_mode: ctx.cfg.deviceTrust,
-      held: (ctx.outbox?.heldFor(id) ?? []).map((h) => ({ agent: h.agentId, text: h.text, at: h.at })),
-    })));
+      held: held(id),
+    }));
+    // 配对过的手机也是设备：同一张表里选角色；在线 = 页面开着（推送连接连着），受信靠配对令牌
+    const phones = (ctx.clients?.list() ?? []).map((c) => ({
+      id: c.id, kind: "phone", name: c.name, agent: ctx.roles.get(c.id).agent, role: ctx.roles.get(c.id).id,
+      online: ctx.clients!.online(c.id), secs_ago: c.last_seen ? Math.trunc(t - c.last_seen / 1000) : null,
+      bat: null, rssi: null, heap: null, wdt: null, trusted: true, ip: "", trust_mode: ctx.cfg.deviceTrust, held: held(c.id),
+    }));
+    return json([...boards, ...phones]);
   });
   /** 清空留给这台设备的话（等切到对应角色才播的） */
   del("/api/admin/devices/<id>/held", (req) => { ctx.outbox?.clear(req.params.id); return json({ status: "ok" }); });

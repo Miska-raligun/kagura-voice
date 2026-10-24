@@ -42,6 +42,10 @@ def test_pair_identity_push_monitor_revoke(token_server):
     assert _bare(s, "GET", "/client/me").status_code == 401
     me = _bare(s, "GET", "/client/me", token).json()
     assert me["id"] == cid and me["name"] == "测试手机" and me["roles"]
+    # 手机和 CoreS3 在同一张设备表里（管理界面选角色）
+    devs = s.get("/api/admin/devices").json()
+    phone = next(d for d in devs if d["id"] == cid)
+    assert phone["kind"] == "phone" and phone["name"] == "测试手机" and phone["trusted"] is True and phone["online"] is False
 
     # SSE：服务端推给这台手机的话经 /client/events 到达
     got, ready = [], threading.Event()
