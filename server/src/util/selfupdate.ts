@@ -208,7 +208,9 @@ export class SelfUpdater {
       // 没有 digest 的老发布：SHA256SUMS 只能从同一批源拿，镜像拿到的不可信——这种情况只走直连
       const mirrors = /^sha256:/i.test(asset.digest ?? "") ? this.mirrors : [];
       const want = await this.expectedSha(asset, sums, mirrors);
+      console.log(`[update] ⬇️  开始下载 ${asset.name}（${(asset.size / 1048576).toFixed(1)}MB）`);
       const got = await this.download(asset, dest + ".part", want, mirrors);
+      console.log(`[update] ✅ 下载完成，校验通过`);
       this.state = { ...this.state, phase: "verifying", message: "正在校验" };
       if (want && want !== got) throw new Error("校验失败：下载的文件和发布的不一致，已丢弃");
       fs.renameSync(dest + ".part", dest);
@@ -216,8 +218,9 @@ export class SelfUpdater {
         // 不在这里退出：等用户在「用户账户控制」里点了「是」、安装包真正开始装时，由安装包关掉本进程，装完脚本再拉起来。
         // 先退出的话，脚本没跑起来 / 确认框没点 / 安装失败，服务就再也起不来了（rc.11 之前就是这样）
         this.state = { ...this.state, phase: "installing", message: UAC_HINT };
+        console.log(`[update] ⬆️  正在更新到 ${info.latest}：启动安装脚本`);
         this.runWindowsInstaller(dest);
-        console.log(`[update] ⬆️  正在更新到 ${info.latest}（等待安装包启动）`);
+        console.log(`[update] 安装脚本已启动，等待安装包（用户账户控制确认后开始）`);
         this.watchWindowsInstall();
         return this.state;
       }
