@@ -96,3 +96,38 @@ def test_text_only_chat(token_server):
     # 三样都没有还是 400；没配对的只发文字也是 400（设备的契约不变）
     assert _bare(s, "POST", "/chat-vision", token, json={}, headers={"X-Device-Id": cid}).status_code == 400
     assert _bare(s, "POST", "/chat-vision", json={"text": "x"}, headers={"X-Device-Id": cid}).status_code == 400
+
+
+@pytest.mark.skipif(os.environ.get("KAGURA_BRAIN") != "pi", reason="出口（主动说话选设备）只有内置 agent 有")
+def test_away_reminder_goes_to_open_phone(srv):
+    """在 CoreS3 上设的提醒，人出门了：推到开着页面的手机，不推给 CoreS3；手机页面关了就不推"""
+    from conftest import Device, wav
+    d = Device(srv, "home1")
+    try:
+        srv.post("/heartbeat", json={"device_id": "home1"})
+        cid, token = _pair(srv, "出门的手机")
+        srv.fake_asr("5秒后提醒我喝水")
+        r = srv.post("/chat", data=wav(), headers={"X-Device-Id": "home1"})
+        assert r.status_code == 200
+        assert srv.post("/presence", json={"status": "away", "device_id": "home1"}).status_code == 200
+
+        got = []
+        with requests.get(srv.base + f"/client/events?ct={token}", stream=True, timeout=20) as ev:
+            for line in ev.iter_lines(decode_unicode=True):
+                got.append(line)
+                if line.startswith("data:") and "push-audio" in line:
+                    break
+        assert "event: push" in got
+        assert not [m for m in d.push if m.get("type") == "push"], "人不在家，不该推给 CoreS3"
+
+        # 手机页面关着：再来一条提醒，谁都不推
+        srv.fake_asr("5秒后提醒我关窗")
+        assert srv.post("/chat", data=wav(), headers={"X-Device-Id": "home1"}).status_code == 200
+        srv.post("/presence", json={"status": "away", "device_id": "home1"})
+        deadline = time.time() + 12
+        while time.time() < deadline and "主人不在家，也没有开着的手机页面" not in srv.log():
+            time.sleep(0.5)
+        assert "主人不在家，也没有开着的手机页面" in srv.log()
+        assert not [m for m in d.push if m.get("type") == "push"]
+    finally:
+        d.close()

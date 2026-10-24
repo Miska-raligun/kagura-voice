@@ -350,7 +350,9 @@ CoreS3 (MicroPython) ──HTTP──▶ server/（TypeScript 单文件可执行
   ① **鉴权靠配对令牌**（管理界面扫码发，`clients.json` 只存哈希）：`ctx.deviceTrusted` 里令牌判据放在 Origin 判据**之前**（手机是浏览器），
   且令牌只给它自己的 id 受信（不能拿手机令牌冒充 CoreS3）；`ctx.tokenOk` 也认令牌（看家页要用监控接口，`<img>` 设不了头所以收 `?ct=`）；
   ② **推送走 SSE**（`/client/events`）：浏览器连不了 MQTT，`MqttHub.taps` 把每条发布抄给 `Clients.onPublish`，`kagura/push|cmd/<手机 id>` 转过去——
-  新加发给设备的命令照常 `mqtt.publish` 就行，手机自动收到；手机不发心跳，所以 `Outbox.pick` 的在线设备里没有它，主动播报仍去 CoreS3；
+  新加发给设备的命令照常 `mqtt.publish` 就行，手机自动收到。**出口选设备**（`Outbox.target`）：在线 = 心跳没断的设备 + SSE 连着的手机
+  （页面离开前台就主动断开，iOS 后台连接会挂着却收不到）；推给绑定说话角色的设备，同样合适时家里的优先（在家不两边一起响）；
+  手机 `portable`，不受「不在家不播」限制（不在家时主动说的话去开着的手机），但不收 mirror / relay；
   ③ `/chat-vision` 纯文字只对配对过的手机放行（设备那边「wav 或 image 必须有一个」是新旧两版共用的契约）。
   浏览器只在 HTTPS 下给麦克风 / 摄像头，局域网 http 只能打字——README 推荐 Tailscale `tailscale serve`。
 - **管理接口与设备信任（`routes/admin.ts` 的 `isLocal`、`ctx.deviceTrusted`，LRN 2026-10-23 安全检查）**：

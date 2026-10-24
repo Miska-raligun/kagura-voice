@@ -104,15 +104,20 @@ export function attachAgentSystem(sys: AgentSystem, ctx: Ctx) {
   };
   // 出口：agent 说给主人听的每一句话都经它，播不播、播到哪由系统定（agent 没有 speak 工具，也不用管）
   const presence = () => (ctx.presence?.status === "home" ? "home" as const : ctx.presence?.status === "away" ? "away" as const : null);
+  // 在线 = 心跳没断的设备 + 页面开着（SSE 连着）的手机。手机没开页面推了也收不到，就不算
   const online = () => {
     const t = Date.now() / 1000;
-    return [...ctx.hb.devices.entries()].filter(([, r]) => t - r.ts < HB_SILENT_SECS).map(([d]) => d);
+    const devs = [...ctx.hb.devices.entries()].filter(([, r]) => t - r.ts < HB_SILENT_SECS).map(([d]) => d);
+    const phones = (ctx.clients?.list() ?? []).map((c) => c.id).filter((id) => ctx.clients!.online(id));
+    return [...devs, ...phones];
   };
   ctx.agentVoice = (id) => { const a = registry.get(id); return a ? roleVoice(a) : undefined; };
   const outbox = new Outbox({
     policy: () => ctx.cfg.voicePush ?? "presence",
     rolePush: () => ctx.cfg.rolePush ?? "hold",
-    presence, onlineDevices: online, knownDevices: () => [...ctx.hb.devices.keys()],
+    presence, onlineDevices: online,
+    knownDevices: () => [...ctx.hb.devices.keys(), ...(ctx.clients?.list() ?? []).map((c) => c.id)],
+    portable: (dev) => !!ctx.clients?.list().some((c) => c.id === dev),
     roleAgent: (dev) => ctx.roles.get(dev).agent,
     hasRole: (agentId) => ctx.roles.all().some((r) => r.agent === agentId),
     busy: (dev) => (ctx.activeChats.get(dev) ?? 0) > 0,

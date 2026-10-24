@@ -4,12 +4,13 @@ import { Outbox, type PushPolicy, type RolePush } from "../src/agent/outbox.ts";
 import { Roles } from "../src/roles.ts";
 import { tmpdir } from "./helpers.ts";
 
-function setup(o: { presence?: "home" | "away" | null; online?: string[]; role?: Record<string, string>; policy?: PushPolicy; rolePush?: RolePush; file?: string } = {}) {
+function setup(o: { presence?: "home" | "away" | null; online?: string[]; role?: Record<string, string>; policy?: PushPolicy; rolePush?: RolePush; file?: string; phones?: string[] } = {}) {
   const st = { presence: o.presence === undefined ? "home" : o.presence, online: o.online ?? ["cores3"], role: o.role ?? { cores3: "main" } as Record<string, string>,
     policy: o.policy ?? "presence" as PushPolicy, rolePush: o.rolePush ?? "hold" as RolePush, busy: false, pushed: [] as any[] };
   const box = new Outbox({
     policy: () => st.policy, rolePush: () => st.rolePush, presence: () => st.presence,
-    onlineDevices: () => st.online, knownDevices: () => ["cores3", "kitchen"],
+    onlineDevices: () => st.online, knownDevices: () => ["cores3", "kitchen", ...(o.phones ?? [])],
+    portable: (d) => (o.phones ?? []).includes(d),
     roleAgent: (d) => st.role[d] ?? "main", hasRole: (a) => a !== "norole", busy: () => st.busy,
     push: async (text, dev, agentId) => { st.pushed.push({ text, dev, agentId }); return true; },
   }, o.file);
@@ -84,5 +85,37 @@ describe("出口：设备当前不是说话的角色", () => {
     const { box } = setup({ file });
     await box.say({ text: "给小澪", agentId: "mio", source: "x" });
     expect(setup({ file }).box.heldFor("cores3").map((h) => h.text)).toEqual(["给小澪"]);
+  });
+});
+
+describe("出口：手机（页面开着才算在线）", () => {
+  const phones = ["phone-1"];
+  it("在家：CoreS3 和手机都绑着同一个角色 → 只在 CoreS3 上说（不两边一起响）", async () => {
+    const { box, st } = setup({ online: ["cores3", "phone-1"], role: { cores3: "main", "phone-1": "main" }, phones });
+    expect(await box.say({ text: "早", agentId: "main", source: "job" })).toEqual({ played: true, device: "cores3" });
+    expect(st.pushed.map((p) => p.dev)).toEqual(["cores3"]);
+  });
+  it("不在家：去开着的手机；手机页面没开就不播", async () => {
+    const { box, st } = setup({ presence: "away", online: ["cores3", "phone-1"], role: { cores3: "main", "phone-1": "main" }, phones });
+    expect(await box.say({ text: "该出发了", agentId: "main", source: "job" })).toEqual({ played: true, device: "phone-1" });
+    // 在 CoreS3 上设的提醒，人出门了：转到手机
+    expect((await box.say({ text: "提醒", agentId: null, device: "cores3", source: "reminder" })).device).toBe("phone-1");
+    st.online = ["cores3"];                       // 手机页面关了
+    expect(await box.say({ text: "x", agentId: "main", source: "job" })).toEqual({ played: false, reason: "away" });
+    expect(await box.say({ text: "y", agentId: null, device: "phone-1", source: "reminder" })).toEqual({ played: false, reason: "away" });
+  });
+  it("角色绑在手机上：那个 agent 主动说话去手机（在家也是）", async () => {
+    const { box } = setup({ online: ["cores3", "phone-1"], role: { cores3: "main", "phone-1": "mio" }, phones });
+    expect((await box.say({ text: "我是小澪", agentId: "mio", source: "job" })).device).toBe("phone-1");
+    expect((await box.say({ text: "我是神乐", agentId: "main", source: "job" })).device).toBe("cores3");
+  });
+  it("顺带朗读（mirror）和传话（relay）不去手机；never 哪都不去", async () => {
+    const { box, st } = setup({ presence: "away", online: ["phone-1"], role: { "phone-1": "main" }, phones });
+    expect((await box.say({ text: "聊天回复", agentId: "main", mirror: true, source: "im" })).played).toBe(false);
+    st.presence = "home"; st.online = ["phone-1"];
+    expect((await box.say({ text: "跟家里说一声", agentId: "main", relay: true, source: "announce" })).played).toBe(false);
+    st.policy = "never"; st.presence = "away";
+    expect(await box.say({ text: "z", agentId: "main", source: "job" })).toEqual({ played: false, reason: "policy" });
+    expect(st.pushed).toEqual([]);
   });
 });

@@ -697,10 +697,13 @@ function tab(name) {
 }
 $("tabChat").onclick = () => tab("chat");
 $("tabHome").onclick = () => tab("home");
+// 离开前台（切 App、锁屏）就主动断开推送连接：iOS 会把后台页面挂起，连接却可能还挂着一阵——服务端以为页面开着，
+// 推过来的话就丢了。断开后服务端立刻知道「没开」，主动说的话改去别的设备；回到前台再连上
 document.addEventListener("visibilitychange", () => {
-  if (document.hidden) stopLive();
+  if (document.hidden) { stopLive(); if (S.es) { S.es.close(); S.es = null; $("conn").className = "dot"; } }
   else if (S.token) { connectEvents(); loadMe(); }
 });
+window.addEventListener("pagehide", () => { if (S.es) { S.es.close(); S.es = null; } });
 
 // ── 启动 ──
 async function loadMe() {

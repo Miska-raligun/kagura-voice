@@ -4,7 +4,10 @@
 //     presence = 在家播、不在家不播（默认；在家状态未知按在家）
 //     always   = 总是播
 //     never    = 从不播
-//   设备：点名的设备 → 当前就是这个角色的在线设备 → 任意在线设备。
+//   设备：点名的设备 → 当前绑定这个角色的在线设备 → 任意在线设备；同样合适时家里的设备（CoreS3）优先于手机，
+//         所以在家时只在 CoreS3 上说，不会两边一起响。
+//   手机 / 平板（portable）：页面开着才算在线（没开推了也收不到）；跟着主人走，所以「不在家不播」只管家里的设备——
+//         不在家时主动说的话去开着的手机。顺带朗读（mirror，文字已经在 IM / 网页里）和传话（relay，说给家里人听）只走家里的设备。
 //   设备当前不是说话的那个角色时（role_push）：
 //     hold   = 先留着，设备切到这个角色（问候之后）再播（默认）。mirror（文字已经发到 IM / 网页）的不留，直接不念
 //     switch = 照样推，推送带 role，设备播放期间临时换成那个角色的图和音色，播完换回
@@ -34,6 +37,8 @@ export interface OutboxDeps {
   presence(): "home" | "away" | null;
   onlineDevices(): string[];
   knownDevices(): string[];
+  /** 随身设备（配对过的手机 / 平板）：不受「不在家不播」限制，同样合适时排在家里的设备后面 */
+  portable?(dev: string): boolean;
   /** 设备当前角色对应的 agent */
   roleAgent(dev: string): string;
   /** 这个 agent 在设备上有没有自己的角色（没有就谈不上「换成它」，直接用当前的图播） */
@@ -64,12 +69,31 @@ export class Outbox {
     return p === "always" || (p === "presence" && this.d.presence() !== "away");
   }
 
-  /** 选设备：点名的（除非见过且已掉线）→ 当前角色就是它的 → 任意在线 */
-  pick(agentId: string | null, device?: string): string | undefined {
-    const online = this.d.onlineDevices();
-    if (device && (online.includes(device) || !this.d.knownDevices().includes(device))) return device;
-    return (agentId ? online.find((d) => this.d.roleAgent(d) === agentId) : undefined) ?? online[0];
+  private portable(dev: string) { return this.d.portable?.(dev) ?? false; }
+
+  /** 这句话能去的在线设备：家里的看策略和在家状态；手机只要不是 never，但不收顺带朗读和传话 */
+  private eligible(s: Pick<Say, "relay" | "mirror">): string[] {
+    const homeOk = s.relay ? this.d.policy() !== "never" : this.allowed();
+    const portOk = this.d.policy() !== "never" && !s.relay && !s.mirror;
+    return this.d.onlineDevices().filter((d) => (this.portable(d) ? portOk : homeOk));
   }
+
+  /** 选设备：点名的（能去、或是还没见过的新设备）→ 当前绑定这个角色的 → 任意能去的；同样合适时家里的设备优先 */
+  target(s: Pick<Say, "agentId" | "device" | "relay" | "mirror">): string | undefined {
+    const ok = this.eligible(s);
+    if (s.device) {
+      if (ok.includes(s.device)) return s.device;
+      // 还没发过心跳的新设备照样推（但没开页面的手机、不在家时的家里设备不算）
+      const fresh = !this.d.knownDevices().includes(s.device) && !this.portable(s.device);
+      if (fresh && (s.relay ? this.d.policy() !== "never" : this.allowed())) return s.device;
+    }
+    const homeFirst = (list: string[]) => list.find((d) => !this.portable(d)) ?? list[0];
+    const bound = s.agentId ? ok.filter((d) => this.d.roleAgent(d) === s.agentId) : [];
+    return homeFirst(bound) ?? homeFirst(ok);
+  }
+
+  /** 兼容旧调用：按默认（非 relay、非 mirror）选设备 */
+  pick(agentId: string | null, device?: string): string | undefined { return this.target({ agentId, device }); }
 
   heldFor(dev?: string) { return dev ? this.held.filter((h) => h.dev === dev) : [...this.held]; }
   clear(dev: string) { this.held = this.held.filter((h) => h.dev !== dev); this.save(); }
@@ -77,13 +101,19 @@ export class Outbox {
   async say(s: Say): Promise<SayResult> {
     const text = s.text.trim();
     if (!text) return { played: false };
-    if (s.relay ? this.d.policy() === "never" : !this.allowed()) {
-      const reason = this.d.policy() === "never" ? "policy" : "away";
-      console.log(`[outbox] 🔇 不播（${reason === "away" ? "主人不在家" : "已关闭语音推送"}）：${text.slice(0, 40)}`);
-      return { played: false, reason };
+    if (this.d.policy() === "never") {
+      console.log(`[outbox] 🔇 不播（已关闭语音推送）：${text.slice(0, 40)}`);
+      return { played: false, reason: "policy" };
     }
-    const dev = this.pick(s.agentId, s.device);
-    if (!dev) return { played: false, reason: "no-device" };
+    const dev = this.target(s);
+    if (!dev) {
+      // 不在家、手机也没开着页面
+      if (!s.relay && !this.allowed()) {
+        console.log(`[outbox] 🔇 不播（主人不在家，也没有开着的手机页面）：${text.slice(0, 40)}`);
+        return { played: false, reason: "away" };
+      }
+      return { played: false, reason: "no-device" };
+    }
     const other = !!s.agentId && this.d.roleAgent(dev) !== s.agentId && this.d.hasRole(s.agentId);
     if (other && !s.relay && this.d.rolePush() === "hold") {
       if (s.mirror) return { played: false, device: dev, reason: "role" };
