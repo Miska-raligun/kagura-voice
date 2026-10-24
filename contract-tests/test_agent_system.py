@@ -471,7 +471,8 @@ def test_async_chat_returns_id_then_streams(a):
 def test_async_wait_then_segments(a):
     """还没想好：长轮询到点回 204 X-Reply-Wait。说了一句再去跑工具（这里跑 2 秒命令）：
     那一句先播（不等普通工具），停顿久了先收一段，工具跑完后的话下一段取"""
-    a.fake_llm({"text": "我查一下。", "tool_calls": [{"name": "exec", "args": {"command": "sleep 2"}}], "then": "查到了。"})
+    # tps：第一句要 1 秒多才出完，保证第一次 wait=0 的轮询一定落在「还没想好」（不限速的话快机器上第一句已经好了，Windows CI 踩过）
+    a.fake_llm({"text": "我查一下。", "tool_calls": [{"name": "exec", "args": {"command": "sleep 2"}}], "then": "查到了。", "tps": 4})
     r = a.post("/chat", data=wav(), headers={"X-Device-Id": "as2", **ASYNC})
     rid = r.headers["X-Reply-Id"]
     first = a.get(f"/chat/reply/{rid}?wait=0", headers={"X-Device-Id": "as2"})

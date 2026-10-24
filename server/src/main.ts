@@ -104,7 +104,8 @@ async function main() {
     ctx.updates = new UpdateChecker(VERSION, proxiedFetch);
     ctx.updates.start();
     const kind = installKind();
-    ctx.selfUpdater = new SelfUpdater(cfg.dataDir, proxiedFetch, kind, kind === "appimage" ? () => setTimeout(() => restartSelf(cfg.dataDir, null), 800) : undefined);
+    ctx.selfUpdater = new SelfUpdater(cfg.dataDir, proxiedFetch, kind, kind === "appimage" ? () => setTimeout(() => restartSelf(cfg.dataDir, null), 800) : undefined,
+      { mirrors: cfg.updateMirrors });
   }
 
   console.log("=".repeat(50));

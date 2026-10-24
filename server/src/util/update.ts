@@ -3,7 +3,8 @@
 import semver from "semver";
 
 export const RELEASES_API = "https://api.github.com/repos/Miska-raligun/kagura-voice/releases?per_page=30";
-export interface UpdateAsset { name: string; url: string; size: number }
+/** digest 是 GitHub 接口给的「sha256:<hex>」，走镜像下载时靠它校验（镜像返回的东西不可信） */
+export interface UpdateAsset { name: string; url: string; size: number; digest?: string }
 export interface UpdateInfo { current: string; latest: string; url: string; notes: string; publishedAt: string; checkedAt: number; newer: boolean; error?: string; assets?: UpdateAsset[] }
 
 export function pickLatest(current: string, releases: any[]): { tag: string; url: string; notes: string; publishedAt: string; assets: UpdateAsset[] } | null {
@@ -16,7 +17,7 @@ export function pickLatest(current: string, releases: any[]): { tag: string; url
   const top = ok[0];
   return top ? {
     tag: top.v, url: top.r.html_url ?? "", notes: String(top.r.body ?? "").slice(0, 800), publishedAt: top.r.published_at ?? "",
-    assets: (top.r.assets ?? []).map((a: any) => ({ name: String(a.name), url: String(a.browser_download_url), size: Number(a.size ?? 0) })),
+    assets: (top.r.assets ?? []).map((a: any) => ({ name: String(a.name), url: String(a.browser_download_url), size: Number(a.size ?? 0), ...(a.digest ? { digest: String(a.digest) } : {}) })),
   } : null;
 }
 

@@ -359,7 +359,9 @@ CoreS3 (MicroPython) ──HTTP──▶ server/（TypeScript 单文件可执行
   导出数据库用 `VACUUM INTO` 拍快照（WAL 里的也在），不用停服务。新加数据目录里的东西时记得在 `catalog`/`filesOf`/`itemOf`
   三处登记，不然导出时就悄悄漏掉；带密钥的文件要在 `stripFile` 里清空、在 `applyPending` 里「空着就保留本机的」。
   在线更新：Windows 由一个独立的隐藏 PowerShell 跑安装包再拉起托盘版（本进程先退出，安装包会强制结束它）；
-  装失败也要把原来的拉起来，不然用户点一下更新服务就没了。大请求体只对本机来源放宽（`Router.bigBodyPaths`）。
+  装失败也要把原来的拉起来，不然用户点一下更新服务就没了。下载（LRN 2026-10-24，症状「卡在 1KB 然后 fetch failed」）：安装包实际在
+  release-assets.githubusercontent.com，国内常连不上——按「直连 → 加速镜像（`UPDATE_MIRRORS`，`update_mirrors` 可覆盖）」依次试，
+  断点续传、30 秒没数据换源；**镜像下的文件只认 GitHub 接口给的 `digest` 校验**，没有 digest 的老发布不走镜像。大请求体只对本机来源放宽（`Router.bigBodyPaths`）。
 - **新版本提醒（`util/update.ts`）**：启动 30 秒后、之后每 12 小时查一次 GitHub Releases，只提示不安装；
   预览版连预览版一起比，正式版只看正式版。`update_check: false` 关掉。
 - **`global` 声明必须有主**（LRN 2026-08-25）：`netsvc.mqtt_check` 里写过

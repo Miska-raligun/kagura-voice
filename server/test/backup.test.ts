@@ -6,7 +6,7 @@ import { DatabaseSync } from "node:sqlite";
 import { tmpdir } from "./helpers.ts";
 import { zip, unzip } from "../src/util/zip.ts";
 import { catalog, exportBackup, inspectBackup, stageImport, applyPending, itemOf } from "../src/backup.ts";
-import { SelfUpdater, installKind, assetFor } from "../src/util/selfupdate.ts";
+import { SelfUpdater, installKind, assetFor, downloadSources, netReason } from "../src/util/selfupdate.ts";
 
 const w = (root: string, rel: string, c: string | Buffer) => { const p = path.join(root, rel); fs.mkdirSync(path.dirname(p), { recursive: true }); fs.writeFileSync(p, c); };
 const db = (file: string, rows: string[]) => { fs.mkdirSync(path.dirname(file), { recursive: true }); const d = new DatabaseSync(file); d.exec("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS t(x TEXT)"); for (const r of rows) d.prepare("INSERT INTO t VALUES (?)").run(r); return d; };
@@ -143,5 +143,77 @@ describe("在线更新", () => {
     expect(bad.message).toContain("校验失败");
     expect((await new SelfUpdater(dir, f, "unsupported").install(info)).message).toContain("不支持");
     expect((await new SelfUpdater(dir, f, "deb").install({ ...info, newer: false })).message).toContain("最新");
+  });
+});
+
+describe("在线更新：下载源与断点续传", () => {
+  const body = Buffer.alloc(100_000);
+  for (let i = 0; i < body.length; i++) body[i] = i % 251;
+  const sha = crypto.createHash("sha256").update(body).digest("hex");
+  const GH = "https://github.com/o/r/releases/download/v1/kagura_1.0.0_amd64.deb";
+  const info = (digest = `sha256:${sha}`): any => ({ newer: true, latest: "1.0.0", assets: [{ name: "kagura_1.0.0_amd64.deb", url: GH, size: body.length, digest }] });
+  const reset = () => Object.assign(new TypeError("fetch failed"), { cause: Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET" }) });
+  /** 一个响应：从 range 起点开始给，给到 cut 字节后断开 */
+  const partial = (start: number, cut = Infinity) => {
+    const data = body.subarray(start, Math.min(body.length, start + cut));
+    let sent = false;
+    const stream = new ReadableStream({
+      // 先把数据交出去，下一次读的时候再断（start 里直接 error 会把排队的数据一起丢掉）
+      pull(c) { if (sent) { if (start + cut < body.length) c.error(new Error("terminated")); else c.close(); } else { sent = true; c.enqueue(new Uint8Array(data)); } },
+    });
+    return new Response(stream, { status: start ? 206 : 200, headers: { "content-length": String(body.length - start) } });
+  };
+  const startOf = (init: any) => Number(/bytes=(\d+)-/.exec(init?.headers?.range ?? "")?.[1] ?? 0);
+
+  it("只对 github.com 的地址套镜像；报错翻成人话", () => {
+    expect(downloadSources(GH, ["https://m1.com", "https://m2.com/"]).map((s) => s.url)).toEqual([GH, `https://m1.com/${GH}`, `https://m2.com/${GH}`]);
+    expect(downloadSources("https://example.com/x", ["https://m1.com"])).toHaveLength(1);
+    expect(netReason(reset())).toBe("连接被重置（ECONNRESET）");
+    expect(netReason(Object.assign(new Error("x"), { name: "AbortError" }))).toContain("没有收到数据");
+  });
+
+  it("直连被重置 → 换镜像；镜像中途断开 → 同一个镜像续传；按 GitHub 给的 digest 校验", async () => {
+    const calls: string[] = [];
+    let mirrorHits = 0;
+    const f = (async (url: string, init: any) => {
+      calls.push(`${url.startsWith("https://m1") ? "m1" : "gh"}@${startOf(init)}`);
+      if (!url.startsWith("https://m1")) throw reset();
+      return partial(startOf(init), mirrorHits++ === 0 ? 40_000 : Infinity);
+    }) as any;
+    const dir = tmpdir("upd");
+    const st = await new SelfUpdater(dir, f, "deb", undefined, { mirrors: ["https://m1.com"] }).install(info());
+    expect(st.phase).toBe("manual");
+    expect(fs.readFileSync(path.join(dir, "updates", "kagura_1.0.0_amd64.deb")).equals(body)).toBe(true);
+    expect(calls).toEqual(["gh@0", "m1@0", "m1@40000"]);
+  });
+
+  it("镜像给的文件对不上 digest 就丢掉换下一个；全部失败时列出每个源的原因", async () => {
+    const f = (async (url: string, init: any) => {
+      if (url.startsWith("https://bad")) return new Response(new Uint8Array(body.length), { status: 200 });
+      if (url.startsWith("https://good")) return partial(startOf(init));
+      throw reset();
+    }) as any;
+    const dir = tmpdir("upd");
+    expect((await new SelfUpdater(dir, f, "deb", undefined, { mirrors: ["https://bad.com", "https://good.com"] }).install(info())).phase).toBe("manual");
+    const fail = await new SelfUpdater(tmpdir("upd"), f, "deb", undefined, { mirrors: ["https://bad.com"] }).install(info());
+    expect(fail.phase).toBe("error");
+    expect(fail.message).toMatch(/GitHub 直连（连接被重置（ECONNRESET））；bad\.com（校验不符）/);
+    expect(fail.message).toContain("代理");
+  });
+
+  it("没有 digest 的老发布不走镜像（SHA256SUMS 从镜像拿不可信）", async () => {
+    const seen: string[] = [];
+    const f = (async (url: string) => { seen.push(url); throw reset(); }) as any;
+    await new SelfUpdater(tmpdir("upd"), f, "deb", undefined, { mirrors: ["https://m1.com"] }).install(info(""));
+    expect(seen.every((u) => !u.startsWith("https://m1"))).toBe(true);
+  });
+
+  it("连上了但一直不给数据：超时换下一个源", async () => {
+    const f = (async (url: string, init: any) => {
+      if (url.startsWith("https://m1")) return partial(startOf(init));
+      return new Promise((_, rej) => init.signal.addEventListener("abort", () => rej(Object.assign(new Error("aborted"), { name: "AbortError" }))));
+    }) as any;
+    const st = await new SelfUpdater(tmpdir("upd"), f, "deb", undefined, { mirrors: ["https://m1.com"], stallMs: 50 }).install(info());
+    expect(st.phase).toBe("manual");
   });
 });
