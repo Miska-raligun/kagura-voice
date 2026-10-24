@@ -385,7 +385,8 @@ function meter(level) {
 }
 
 // ── 界面状态 ──
-function setState(text, talkText, cls) {
+function setState(text, talkText, cls, vis) {
+  showVis(vis || "idle");
   $("stateText").textContent = text;
   $("talkText").textContent = talkText || "按住说话";
   $("talk").className = "talk" + (cls ? " " + cls : "");
@@ -399,15 +400,42 @@ function addMsg(kind, text, img) {
   $("log").scrollTop = $("log").scrollHeight;
   return d;
 }
-function setBg(roleId) {
-  const tryLoad = (paths) => {
-    if (!paths.length) { $("bg").classList.add("hidden"); $("face").classList.remove("hidden"); return; }
+/**
+ * 舞台图跟着状态换，规则同 CoreS3（device/src/ui.py 的 _IMG_MAP）：待机 img_bg、录音 img_recording、
+ * 思考 img_streaming、说话 img_playing；先找 resource/<角色>/ 下的，没有用默认目录的，再没有退回 img_bg，都没有就显示颜文字。
+ * 当前角色的几张图提前加载并解码好，切换时只换 src、复用同一个 <img>（没解码完就换上去会闪，见 CLAUDE.md「频闪」）。
+ */
+const IMG_MAP = { idle: "img_bg", recording: "img_recording", processing: "img_streaming", playing: "img_playing" };
+const imgCache = new Map();      // "角色|图名" → Promise<url | null>
+function loadImg(path) {
+  return new Promise((ok) => {
     const img = new Image();
-    img.onload = async () => { try { await img.decode(); } catch {} $("bg").src = img.src; $("bg").classList.remove("hidden"); $("face").classList.add("hidden"); };
-    img.onerror = () => tryLoad(paths.slice(1));
-    img.src = "/device/file?p=" + encodeURIComponent(paths[0]);
-  };
-  tryLoad([roleId ? `resource/${roleId}/img_bg.jpg` : "", "resource/img_bg.jpg"].filter(Boolean));
+    img.onload = async () => { try { await img.decode(); } catch {} ok(img.src); };
+    img.onerror = () => ok(null);
+    img.src = "/device/file?p=" + encodeURIComponent(path);
+  });
+}
+function resolveImg(role, name) {
+  const key = role + "|" + name;
+  if (!imgCache.has(key)) imgCache.set(key, (async () => {
+    for (const p of [role ? `resource/${role}/${name}.jpg` : "", `resource/${name}.jpg`].filter(Boolean)) {
+      const url = await loadImg(p);
+      if (url) return url;
+    }
+    return null;
+  })());
+  return imgCache.get(key);
+}
+function preloadImgs(role) { for (const n of new Set(Object.values(IMG_MAP))) resolveImg(role, n); }
+async function showVis(vis) {
+  S.vis = vis;
+  const role = S.role, name = IMG_MAP[vis] || "img_bg";
+  let url = await resolveImg(role, name);
+  if (!url && name !== "img_bg") url = await resolveImg(role, "img_bg");
+  if (S.vis !== vis || S.role !== role) return;          // 等图的时候状态又变了
+  if (!url) { $("bg").classList.add("hidden"); $("face").classList.remove("hidden"); return; }
+  if ($("bg").src !== url) $("bg").src = url;
+  $("bg").classList.remove("hidden"); $("face").classList.add("hidden");
 }
 function renderRoles() {
   const sel = $("roleSel");
@@ -417,7 +445,8 @@ function renderRoles() {
   sel.classList.toggle("hidden", S.roles.length < 2);
   const cur = S.roles.find((r) => r.id === S.role);
   $("meName").textContent = cur ? cur.name : "Kagura";
-  setBg(S.role);
+  preloadImgs(S.role);
+  showVis(S.vis || "idle");
 }
 $("roleSel").onchange = async (e) => {
   const id = e.target.value;
@@ -435,7 +464,7 @@ async function converse({ wav, text, image }) {
   S.busy = true; S.cancelled = false; S.replyId = ""; S.herMsg = null;
   const h = devH({ "X-Stream": "1", "X-Async": "1", "X-Local-Time": localTime() });
   const meMsg = text || image ? addMsg("me", text || "", image ? image.url : null) : addMsg("me", "…");
-  setState("她在想…", "点一下取消", "busy");
+  setState("她在想…", "点一下取消", "busy", "processing");
   let needPhoto = false, lastText = "";
   try {
     let r;
@@ -490,10 +519,10 @@ async function playSegment(resp, needPhoto) {
   if (t) setHerText(t + (resp.headers.get("X-Reply-Partial") ? "…" : ""));
   const role = resp.headers.get("X-Role");
   if (role && role !== S.role) { S.role = role; renderRoles(); }
-  setState("她在说…", "点一下停下", "busy");
+  setState("她在说…", "点一下停下", "busy", "playing");
   S.player = new Player();
   await playResponse(resp, S.player);
-  setState("她在想…", "点一下取消", "busy");
+  setState("她在想…", "点一下取消", "busy", "processing");
   return { needPhoto: needPhoto || resp.headers.get("X-Need-Photo") === "1", lastText: t };
 }
 function cancelTurn() {
@@ -516,7 +545,7 @@ $("talk").addEventListener("pointerdown", async (e) => {
   if (!window.isSecureContext || !navigator.mediaDevices) { toast("http 地址下浏览器不让网页录音：可以用键盘上的语音输入，转成文字发送", true); return; }
   pressing = true;
   try { $("talk").setPointerCapture(e.pointerId); } catch {}
-  setState("在听…松开就发送", "松开发送", "rec");
+  setState("在听…松开就发送", "松开发送", "rec", "recording");
   try { await startRec(); } catch (err) { pressing = false; setState("按住下面的按钮说话"); toast("用不了麦克风：" + (err.message || err.name), true); return; }
   if (!pressing) finishRec();            // 按得太快，录音刚起来手已经抬了
 });
@@ -604,7 +633,7 @@ async function drainPushes() {
         const r = await fetch(p.url);
         if (!r.ok) continue;
         addMsg("sys", "🔔 她有话说");
-        setState("她在说…");
+        setState("她在说…", "", "", "playing");
         S.player = new Player();
         await playResponse(r, S.player);
       } catch {}

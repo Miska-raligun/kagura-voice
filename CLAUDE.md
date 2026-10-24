@@ -360,6 +360,8 @@ CoreS3 (MicroPython) ──HTTP──▶ server/（TypeScript 单文件可执行
   `unlockAudio()` 在点击 / 抬手里设 `navigator.audioSession.type = "playback"`（iOS 17+）并用 `<audio>` 播一小段静音（老 iOS 靠它切到媒体播放类别）；
   `Player.feed` 先把 16k 重采样到 `AudioContext.sampleRate` 再建 buffer（iOS Safari 对 16k AudioBuffer 挑剔）。别删这两处。
   管理界面里手机和 CoreS3 在同一张设备表（`/api/admin/devices` 带 `kind: "phone"`），配对入口是表上的「＋ 添加手机」。
+  舞台图跟着状态换，规则抄设备端 `ui._IMG_MAP`（待机 img_bg / 录音 img_recording / 思考 img_streaming / 说话 img_playing，角色目录优先、缺了退 img_bg）——
+  改设备端的映射要同步改 `app.html` 的 `IMG_MAP`；图预先解码好、复用同一个 `<img>` 换 src。
 - **管理接口与设备信任（`routes/admin.ts` 的 `isLocal`、`ctx.deviceTrusted`，LRN 2026-10-23 安全检查）**：
   ① 管理接口光看「来源是 127.0.0.1」不够——你电脑上任何网页都能让浏览器往 127.0.0.1 发请求（跨站请求伪造），
   DNS 重绑定还能绕过同源。`isLocal` 同时要求 Host 是本机地址、跨站的 Origin / `Sec-Fetch-Site: cross-site` 一律拒绝
