@@ -321,7 +321,8 @@ describe("内部小任务关思考", () => {
     expect(autoNoThinking("https://api.deepseek.com/v1")).toEqual({ thinking: { type: "disabled" } });
     expect(autoNoThinking("https://open.bigmodel.cn/api/paas/v4")).toEqual({ thinking: { type: "disabled" } });
     expect(autoNoThinking("https://dashscope.aliyuncs.com/compatible-mode/v1")).toEqual({ enable_thinking: false });
-    expect(autoNoThinking("https://api.openai.com/v1", "openai", "gpt-x")).toBeUndefined();
+    expect(autoNoThinking("https://api.openai.com/v1", "openai", "gpt-x")).toEqual({ reasoning_effort: "minimal" });
+    expect(autoNoThinking("https://example.com/v1")).toBeUndefined();
     expect(stripThinkText("<think>想了很久</think>摘要正文")).toBe("摘要正文");
     expect(stripThinkText("<think>想到一半被截断")).toBe("");
 
@@ -369,6 +370,47 @@ describe("关思考字段真的进了请求体", () => {
       expect(r.errorMessage ?? "").toBe("");
       expect(body.thinking).toEqual({ type: "disabled" });
       expect(body.max_tokens ?? body.max_completion_tokens).toBe(8192);
+    } finally { srv.close(); }
+  });
+});
+
+describe("模型的思考等级", () => {
+  it("各服务商的写法；回复上限之外按等级加思考预留", async () => {
+    const http = await import("node:http");
+    const { ModelRegistry, thinkingParams } = await import("../src/agent/models.ts");
+    expect(thinkingParams("https://api.minimaxi.com/v1", "high")).toEqual({ thinking: { type: "enabled" } });
+    expect(thinkingParams("https://api.deepseek.com", "low")).toEqual({ thinking: { type: "enabled" }, reasoning_effort: "low" });
+    expect(thinkingParams("https://open.bigmodel.cn/api/paas/v4", "off")).toEqual({ thinking: { type: "disabled" } });
+    expect(thinkingParams("https://dashscope.aliyuncs.com/compatible-mode/v1", "medium")).toEqual({ enable_thinking: true, thinking_budget: 6144 });
+    expect(thinkingParams("https://example.com/v1", "off")).toBeUndefined();              // 认不出怎么关：不乱发
+    expect(thinkingParams("https://example.com/v1", "high")).toEqual({ reasoning_effort: "high" });
+    expect(thinkingParams("https://api.minimaxi.com/v1", "")).toBeUndefined();              // 默认：什么都不发
+
+    const bodies: any[] = [];
+    const srv = http.createServer((req, res) => {
+      let raw = ""; req.on("data", (c) => (raw += c)); req.on("end", () => {
+        bodies.push(JSON.parse(raw));
+        res.writeHead(200, { "content-type": "text/event-stream" });
+        const chunk = (o: any) => res.write(`data: ${JSON.stringify({ id: "x", object: "chat.completion.chunk", created: 1, model: "m", ...o })}\n\n`);
+        chunk({ choices: [{ index: 0, delta: { role: "assistant", content: "好" }, finish_reason: null }] });
+        chunk({ choices: [{ index: 0, delta: {}, finish_reason: "stop" }] });
+        res.end("data: [DONE]\n\n");
+      });
+    });
+    await new Promise<void>((r) => srv.listen(0, "127.0.0.1", r));
+    const port = (srv.address() as any).port;
+    try {
+      const reg = new ModelRegistry({ providers: [{ id: "minimax", api: "openai-completions", base_url: `http://127.0.0.1:${port}/v1`, api_key: "k",
+        models: [{ id: "M3", thinking: "high", max_tokens: 4000 }, { id: "flash", thinking: "off" }, { id: "plain" }] }], default: "minimax/M3", cheap: "" } as any);
+      const ctx = { systemPrompt: "s", messages: [{ role: "user", content: "hi", timestamp: Date.now() }] };
+      for (const id of ["M3", "flash", "plain"]) { const s = reg.chatStream(reg.resolve(`minimax/${id}`), ctx); for await (const _ of s as any) { /* 读完 */ } }
+      const mt = (b: any) => b.max_tokens ?? b.max_completion_tokens;
+      expect(bodies[0].thinking).toEqual({ type: "enabled" });
+      expect(mt(bodies[0])).toBe(4000 + 16384);             // 回复 4000 + 高档思考预留
+      expect(bodies[1].thinking).toEqual({ type: "disabled" });
+      expect(mt(bodies[1])).toBe(8192);                      // 关思考：不加预留
+      expect(bodies[2].thinking).toBeUndefined();            // 默认：不发，服务商自己决定
+      expect(mt(bodies[2])).toBe(8192 + 4096);
     } finally { srv.close(); }
   });
 });

@@ -346,7 +346,7 @@ export class Runtime {
 
     const pi = new Agent({
       initialState: { systemPrompt, model, tools, messages: history as any },
-      streamFn: this.models.models.streamSimple.bind(this.models.models),
+      streamFn: this.models.chatStream,              // 按模型配置的思考等级加字段、给思考预留
       sessionId: `${agent.id}:${req.sessionKey}`,
       toolExecution: "sequential",
     });

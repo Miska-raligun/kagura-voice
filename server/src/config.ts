@@ -110,7 +110,10 @@ export function parseToolsConfig(t: any = {}): ToolsConfig {
 
 export interface ModelDef {
   id: string; name?: string; input?: ("text" | "image")[]; reasoning?: boolean;
+  /** max_tokens：回复本身的上限（不含思考）——发请求时按思考等级另加预留，思考不会挤掉回复 */
   context_window?: number; max_tokens?: number;
+  /** 正常对话的思考：不填 = 服务商默认；off 关；low / medium / high 开并按等级给预留。内部小任务（压缩、念稿）一律关 */
+  thinking?: "" | "off" | "low" | "medium" | "high";
   cost?: { input?: number; output?: number; cache_read?: number; cache_write?: number };
 }
 export interface ProviderDef {

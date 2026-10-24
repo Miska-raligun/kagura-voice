@@ -311,7 +311,11 @@ CoreS3 (MicroPython) ──HTTP──▶ server/（TypeScript 单文件可执行
   ⑥ **内部小任务关思考**（`ModelRegistry.quick`，症状「压缩经常超时 / 思考把输出额度占满」）：压缩摘要、长回复压成口语都走 `quick`，
   按服务商地址自动加关思考的字段（MiniMax / DeepSeek / 智谱 → `thinking: {type: "disabled"}`，通义 → `enable_thinking: false`），经 pi-ai 的
   `samplingParams` 原样并进请求体；服务商报错里提到这个字段就去掉重试、本次运行不再发；正文里的 `<think>…</think>` 剥掉。
-  `ProviderDef.no_thinking` 可手动指定字段或 `false`（不发）。只用于内部小任务，**正常对话不动**（要不要思考是对话质量的事）。
+  `ProviderDef.no_thinking` 可手动指定字段或 `false`（不发）。
+  **正常对话的思考等级**是每个模型自己的设置（`ModelDef.thinking`：空 = 服务商默认 / off / low / medium / high，管理界面模型表「思考」列），
+  agent 每轮走 `ModelRegistry.chatStream`（Agent 的 `streamFn`）按 `thinkingParams` 加字段：MiniMax / 智谱只有开关，DeepSeek 加 `reasoning_effort`，
+  通义加 `thinking_budget`，认不出的服务商「关」就不发（别乱发不认识的字段）。**思考在这几家都算进 max_tokens，改不了**——所以 `max_tokens` 的含义是
+  「回复本身的上限」，请求时另加 `THINK_RESERVE`（默认 +4k / 低 +2k / 中 +6k / 高 +16k / 关 0），思考就挤不掉回复。
 - **设备文件同步（`ota.py`，管理界面「设备 → 图片与代码」）**：服务端 `server/src/devicefiles.ts` 存
   `<数据目录>/device_files/`（自定义）+ 构建时打进来的 `device/src`（`virtual:device-fw`，版本 = 服务端版本）；
   MQTT `{"action":"sync","scope":"res|code|all"}` → 设备空闲时 `GET /device/files` 拿清单（路径/大小/sha256）

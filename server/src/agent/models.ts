@@ -43,12 +43,44 @@ export function stripThinkText(t: string): string {
   return t.replace(/<think>[\s\S]*?<\/think>/gi, "").replace(/<think>[\s\S]*$/i, "").trim();
 }
 
-/** 按服务商地址认出怎么关思考；认不出就不发（有的接口见到不认识的字段会直接报错） */
-export function autoNoThinking(baseUrl: string, provider = "", model = ""): Record<string, unknown> | undefined {
+export type ThinkingLevel = "" | "off" | "low" | "medium" | "high";
+
+/**
+ * 思考预留：加在「回复上限」之上的 token。这几家（MiniMax / DeepSeek / 智谱 / OpenAI 兼容）都把思考算进 max_tokens，
+ * 改不了；我们把用户填的上限当成回复本身的额度，另按等级加一笔给思考，思考就挤不掉回复了。
+ * 不填（服务商默认）时多数推理型模型照样会想，也留一些。
+ */
+export const THINK_RESERVE: Record<ThinkingLevel, number> = { "": 4096, off: 0, low: 2048, medium: 6144, high: 16384 };
+
+/** 服务商怎么开关思考（按地址 / id 认） */
+function family(baseUrl: string, provider = "", model = ""): "toggle" | "deepseek" | "qwen" | "openai" | "" {
   const u = `${baseUrl} ${provider} ${model}`.toLowerCase();
-  if (/minimax|deepseek|bigmodel|zhipu|z\.ai|\bglm/.test(u)) return { thinking: { type: "disabled" } };
-  if (/dashscope|aliyuncs|qwen/.test(u)) return { enable_thinking: false };
-  return undefined;
+  if (/deepseek/.test(u)) return "deepseek";
+  if (/minimax|bigmodel|zhipu|z\.ai|\bglm/.test(u)) return "toggle";
+  if (/dashscope|aliyuncs|qwen/.test(u)) return "qwen";
+  if (/api\.openai\.com/.test(u)) return "openai";
+  return "";
+}
+
+/** 按思考等级要加进请求体的字段；认不出服务商、又不是「关」以外能安全表达的，就不发（有的接口见到不认识的字段会报错） */
+export function thinkingParams(baseUrl: string, level: ThinkingLevel, provider = "", model = ""): Record<string, unknown> | undefined {
+  if (!level) return undefined;
+  const f = family(baseUrl, provider, model);
+  if (level === "off") {
+    if (f === "toggle" || f === "deepseek") return { thinking: { type: "disabled" } };
+    if (f === "qwen") return { enable_thinking: false };
+    if (f === "openai") return { reasoning_effort: "minimal" };
+    return undefined;
+  }
+  if (f === "deepseek") return { thinking: { type: "enabled" }, reasoning_effort: level };
+  if (f === "toggle") return { thinking: { type: "enabled" } };             // MiniMax / 智谱：只有开关，等级只影响预留
+  if (f === "qwen") return { enable_thinking: true, thinking_budget: THINK_RESERVE[level] };
+  return { reasoning_effort: level };                                       // OpenAI 及其它兼容接口的通用写法
+}
+
+/** 按服务商地址认出怎么关思考（内部小任务用）；认不出就不发 */
+export function autoNoThinking(baseUrl: string, provider = "", model = ""): Record<string, unknown> | undefined {
+  return thinkingParams(baseUrl, "off", provider, model);
 }
 
 export class ModelRegistry {
@@ -59,6 +91,8 @@ export class ModelRegistry {
   private noThinkCfg = new Map<string, Record<string, unknown> | false>();
   /** 发了关思考字段却被拒的服务商：本次运行不再发 */
   private noThinkRejected = new Set<string>();
+  /** 各模型正常对话的思考等级（ModelDef.thinking） */
+  private thinkCfg = new Map<string, ThinkingLevel>();
 
   constructor(private cfg: ModelsConfig) {
     this.models = createModels();
@@ -70,6 +104,7 @@ export class ModelRegistry {
       if (!p.id) continue;
       const api = APIS[p.api];
       if (!api) { console.log(`[models] ⚠️  服务商 ${p.id}: 不支持的 api「${p.api}」（可用：${Object.keys(APIS).join(", ")}）`); continue; }
+      for (const m of p.models) if (m.thinking) this.thinkCfg.set(`${p.id}/${m.id}`, m.thinking);
       const models = (p.models ?? []).map((m) => ({
         id: m.id, name: m.name ?? m.id, api: p.api, provider: p.id, baseUrl: p.base_url,
         reasoning: !!m.reasoning, input: m.input ?? ["text"],
@@ -129,6 +164,23 @@ export class ModelRegistry {
     core.setResponses([reply]);
     return core.streamSimple(m, ctx, opts);
   }
+
+  /** 这个模型正常对话的思考等级 */
+  thinkingOf(m: Model<any>): ThinkingLevel { return this.thinkCfg.get(`${m.provider}/${m.id}`) ?? ""; }
+
+  /**
+   * 正常对话（agent 每一轮）用的流式调用：按模型配置的思考等级加字段，回复上限之上加思考预留。
+   * 调用方显式给了 maxTokens / samplingParams 的照旧以调用方为准。
+   */
+  chatStream = (model: Model<any>, ctx: any, opts?: SimpleStreamOptions) => {
+    const level = this.thinkingOf(model);
+    const extra = model.provider === "fake" ? undefined : thinkingParams(model.baseUrl ?? "", level, model.provider, model.id);
+    return this.models.streamSimple(model, ctx, {
+      ...opts,
+      maxTokens: opts?.maxTokens ?? (model.maxTokens || DEFAULT_MAX_TOKENS) + THINK_RESERVE[level],
+      ...(extra || opts?.samplingParams ? { samplingParams: { ...(extra ?? {}), ...(opts?.samplingParams ?? {}) } as any } : {}),
+    });
+  };
 
   /** 内部小任务要加的「关思考」字段 */
   noThinkingParams(m: Model<any>): Record<string, unknown> | undefined {

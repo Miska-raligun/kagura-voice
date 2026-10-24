@@ -2,6 +2,9 @@
 // 不预设任何模型——首次向导只给常见服务商的接口地址做参考，模型名和 Key 由用户自己填。
 import { useEffect, useRef, useState } from "preact/hooks";
 import { api, go } from "../api.ts";
+
+/** 模型的思考等级（正常对话）。MiniMax / 智谱只有开关，等级只影响给思考留多少额度；DeepSeek / 通义 / OpenAI 还会按等级控制想多深 */
+const THINKING: [string, string][] = [["", "默认（服务商决定）"], ["off", "关"], ["low", "低"], ["medium", "中"], ["high", "高"]];
 import { Btn, Card, Err, Field, Input, Select, Tabs, Toggle, toast, toastErr, useInterval, useLoad } from "../ui.tsx";
 
 const APIS: [string, string][] = [
@@ -104,7 +107,7 @@ function Models({ cfg, save }: { cfg: any; save: (p: any) => Promise<void> }) {
             <Field label="接口地址"><Input value={p.base_url} onInput={(v) => up((c) => (c.providers[i].base_url = v))} /></Field>
             <Field label="API Key" hint="*** 表示已保存"><Input type="password" value={p.api_key} onInput={(v) => up((c) => (c.providers[i].api_key = v))} /></Field>
           </div>
-          <table><thead><tr><th>模型名</th><th>图片</th><th>上下文</th><th>最大输出</th><th>输入价</th><th>输出价</th><th></th></tr></thead>
+          <table><thead><tr><th>模型名</th><th>图片</th><th>上下文</th><th title="回复本身的上限，不含思考：发请求时按思考等级另加预留（低 +2k / 中 +6k / 高 +16k / 默认 +4k）">回复上限</th><th title="正常对话要不要思考。压缩历史、长回复压成口语这类内部小任务一律关思考">思考</th><th>输入价</th><th>输出价</th><th></th></tr></thead>
             <tbody>{(p.models ?? []).map((x: any, j: number) => {
               const mm = (fn: (o: any) => void) => up((c) => fn(c.providers[i].models[j]));
               return <tr>
@@ -112,6 +115,7 @@ function Models({ cfg, save }: { cfg: any; save: (p: any) => Promise<void> }) {
                 <td><input type="checkbox" checked={(x.input ?? []).includes("image")} onChange={(e) => mm((o) => (o.input = (e.target as HTMLInputElement).checked ? ["text", "image"] : ["text"]))} /></td>
                 <td><Input type="number" value={x.context_window ?? ""} placeholder="128000" onInput={(v) => mm((o) => (o.context_window = v ? Number(v) : undefined))} /></td>
                 <td><Input type="number" value={x.max_tokens ?? ""} placeholder="8192" onInput={(v) => mm((o) => (o.max_tokens = v ? Number(v) : undefined))} /></td>
+                <td><Select value={x.thinking ?? ""} onChange={(v) => mm((o) => (o.thinking = v || undefined))} options={THINKING} /></td>
                 <td><Input type="number" value={x.cost?.input ?? ""} placeholder="¥/百万" onInput={(v) => mm((o) => (o.cost = { ...(o.cost ?? {}), input: Number(v) }))} /></td>
                 <td><Input type="number" value={x.cost?.output ?? ""} placeholder="¥/百万" onInput={(v) => mm((o) => (o.cost = { ...(o.cost ?? {}), output: Number(v) }))} /></td>
                 <td><Btn small onClick={() => testRef(ref(p, x))}>测试</Btn><Btn small kind="ghost" onClick={() => up((c) => c.providers[i].models.splice(j, 1))}>✕</Btn></td>
