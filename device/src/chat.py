@@ -89,9 +89,108 @@ _post_mv_ok = True    # 固件 requests 能直接发 memoryview（不能就退�
 
 
 def _want_stream(hdrs):
-    """边生成边播：只在内存流式播放可用时请求（见 cfg.STREAM_REPLY）"""
+    """边生成边播：只在内存流式播放可用时请求（见 cfg.STREAM_REPLY）；异步对话跟着它走（cfg.ASYNC_CHAT）"""
     if cfg.STREAM_REPLY and cfg.PLAY_STREAMING and not snd._stream_bad:
         hdrs["X-Stream"] = "1"
+        if cfg.ASYNC_CHAT:
+            hdrs["X-Async"] = "1"
+
+
+def _cancel_reply(rid):
+    """告诉服务端别再做了（按住屏幕取消、播放中被点停）"""
+    try:
+        r = urequests.post(cfg.SERVER_BASE + "/chat/cancel/" + rid,
+                           headers={"X-Device-Id": cfg.DEVICE_ID}, timeout=cfg.REQUEST_TIMEOUT_SHORT)
+        r.close()
+    except Exception as e:
+        print("cancel err:", e)
+
+
+def _poll_reply(rid):
+    """异步对话：长轮询取回复的下一段（见 cfg.ASYNC_CHAT）。
+
+    返回 (resp, why)：有 resp 就是一段流式音频，照常 stream_play；没有时 why 说明原因：
+    "done" 说完了 / "cancel" 按住屏幕取消 / "error" / "timeout"。
+    每次最多阻塞 ASYNC_POLL_WAIT 秒，两次之间保活 MQTT、喂狗、看触摸——任务多长都不掉线。
+    """
+    url = cfg.SERVER_BASE + "/chat/reply/" + rid + "?wait=" + str(cfg.ASYNC_POLL_WAIT)
+    t_end = time.time() + cfg.ASYNC_MAX_SECS
+    errors = 0
+    cfg.St.awaiting = True       # 等的这段时间收到的推送入队，别当重复推送丢掉
+    try:
+        while time.time() < t_end:
+            hw._wdt_feed()
+            netsvc.mqtt_check()
+            if snd._touched():
+                diag.dbg("async cancel")
+                _cancel_reply(rid)
+                hw.drain_touch()
+                hw.touch_reset()
+                return None, "cancel"
+            netsvc.mqtt_ping()
+            try:
+                r = urequests.get(url, headers={"X-Device-Id": cfg.DEVICE_ID},
+                                  timeout=cfg.REQUEST_TIMEOUT_CHAT)
+            except OSError as e:
+                errors += 1
+                print("poll err:", e)
+                if errors >= 3:
+                    return None, "error"
+                time.sleep(1)
+                continue
+            errors = 0
+            # 长任务期间设备一直在跟服务端说话：别让死人开关 / 网络自愈误判失联
+            cfg.St.last_ok_ms = time.ticks_ms()
+            if r.status_code == 200:
+                return r, "ok"
+            done = r.headers.get("X-Reply-Done", "") == "1"
+            code = r.status_code
+            r.close()
+            if code == 204 and not done:
+                continue
+            return None, ("done" if code == 204 else "error")
+        return None, "timeout"
+    finally:
+        cfg.St.awaiting = False
+
+
+def _start_reply(resp):
+    """POST 的回应：202 = 异步对话，拿编号、先显示自己说的话，再取第一段；其余原样返回。
+    返回 (resp, rid, why)，rid 为 None 表示同步回复。"""
+    if resp.status_code != 202:
+        return resp, None, "ok"
+    rid = resp.headers.get("X-Reply-Id", "")
+    user = resp.headers.get("X-User-Text", "")
+    ui.set_role(resp.headers.get("X-Role", ""))
+    resp.close()
+    ui._update_chat_text(user, "")
+    ui.draw_state("processing")
+    r, why = _poll_reply(rid)
+    return r, rid, why
+
+
+def _play_rest(rid):
+    """异步回复的后续段：agent 中途去跑工具，前面说完的已经播了，剩下的一段段取来接着播。
+    播放中被点停 = 不想听了，通知服务端取消。返回播放的字节数。"""
+    total = 0
+    while True:
+        if snd.last_play.get("stopped"):
+            _cancel_reply(rid)
+            return total
+        ui.draw_state("processing")
+        r, why = _poll_reply(rid)
+        if r is None:
+            return total
+        more = r.headers.get("X-Reply-More", "") == "1"
+        ui._update_chat_text(r.headers.get("X-User-Text", ""), r.headers.get("X-Reply-Text", ""))
+        ui.draw_state("playing")
+        n = snd.stream_play(r)
+        r.close()
+        diag.dbg(snd.stream_summary())
+        if n > 0:
+            total += n
+        if not more:
+            return total
 
 
 def _fetch_full_text(partial):
@@ -183,6 +282,15 @@ def record_and_send():
                 _want_stream(hdrs)
                 netsvc.mqtt_ping()            # 下面最多阻塞 60 秒，先保活
                 resp = _post_wav(wav, hdrs)
+                resp, rid, why = _start_reply(resp)
+                if resp is None:
+                    # 异步回复：取消了 / 没话说（done）/ 出错。取消不算错误，不闪错误屏
+                    if why in ("error", "timeout"):
+                        ui.draw_state("error")
+                        time.sleep(2)
+                    if not cfg.St.continuous:
+                        break
+                    continue
                 if resp.status_code != 200:
                     print("chat err:", resp.text)
                     resp.close()
@@ -214,11 +322,16 @@ def record_and_send():
                 # 边下边播：收到 2 秒就出声，播放期间 MQTT 照常保活。
                 # 不用 resp.content（整段进堆 + 读完前喂不上狗，见 snd.py 播放段口径）
                 partial = resp.headers.get("X-Reply-Partial", "") == "1"
+                more = rid is not None and resp.headers.get("X-Reply-More", "") == "1"
                 ui.draw_state("playing")
                 n = snd.stream_play(resp)
                 resp.close()
                 diag.dbg(snd.stream_summary())
-                _fetch_full_text(partial)
+                if more:
+                    rest = _play_rest(rid)
+                    if n > 0:
+                        n += rest
+                _fetch_full_text(partial or more)
             except OSError as e:
                 print("network err:", e)
                 ui.draw_state("error")
@@ -269,13 +382,21 @@ def record_and_send():
                         headers=v_hdrs,
                         timeout=cfg.REQUEST_TIMEOUT_CHAT,
                     )
-                    if resp2.status_code == 200:
+                    resp2, rid2, why2 = _start_reply(resp2)
+                    if resp2 is None:
+                        if why2 in ("error", "timeout"):
+                            ui.draw_state("error")
+                            time.sleep(2)
+                    elif resp2.status_code == 200:
                         partial2 = resp2.headers.get("X-Reply-Partial", "") == "1"
+                        more2 = rid2 is not None and resp2.headers.get("X-Reply-More", "") == "1"
                         ui._update_chat_text(resp2.headers.get("X-User-Text", ""), resp2.headers.get("X-Reply-Text", ""))
                         ui.draw_state("playing")
                         n2 = snd.stream_play(resp2)
                         resp2.close()
-                        _fetch_full_text(partial2)
+                        if more2:
+                            _play_rest(rid2)
+                        _fetch_full_text(partial2 or more2)
                         if n2 <= 0:
                             ui.draw_state("error")
                             time.sleep(2)

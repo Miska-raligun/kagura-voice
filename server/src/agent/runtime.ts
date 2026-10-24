@@ -41,6 +41,8 @@ export interface RunRequest {
   /** 在 agent 白名单之上再收窄一层 */
   toolAllow?: (name: string) => boolean;
   timeoutSecs?: number;
+  /** 外部取消（设备上点屏幕取消正在等的回复） */
+  signal?: AbortSignal;
   /** 不在消息前附 [时间…]（a2a 转述等） */
   noTurnContext?: boolean;
   /** 覆盖 agent 的模型（heartbeat 用便宜模型） */
@@ -60,7 +62,7 @@ export interface RunRequest {
 /** 给边生成边播的事件：文本增量；一条助手消息结束（带不带工具调用）；一次工具执行结束 */
 export type AgentStreamEvent =
   | { type: "text"; delta: string }
-  | { type: "message_end"; toolCalls: number }
+  | { type: "message_end"; toolCalls: number; toolNames: string[] }
   | { type: "tool_end"; name: string }
   | { type: "tool_start"; name: string; args: unknown };
 
@@ -254,13 +256,13 @@ export class Runtime {
     // 工具执行期间不计时（命令有自己的超时）；另有总时长上限兜底，防卡死、防死循环
     const idleMs = (req.timeoutSecs ?? this.opts.timeoutSecs) * 1000;
     const maxMs = Math.max(idleMs, (this.opts.maxSecs ?? 1800) * 1000);
-    let timedOut: "" | "idle" | "max" = "";
+    let timedOut: "" | "idle" | "max" | "cancel" = "";
     let idleTimer: ReturnType<typeof setTimeout> | null = null;
     let toolsRunning = 0;
     // 超时后先 abort；有的工具不理会中止信号（卡在网络、扩展写得不好），给 2 秒宽限就不再等它
     let giveUp: () => void = () => {};
     const gaveUp = new Promise<void>((r) => (giveUp = r));
-    const stop = (why: "idle" | "max") => {
+    const stop = (why: "idle" | "max" | "cancel") => {
       if (timedOut) return;
       timedOut = why;
       pi.abort();
@@ -277,7 +279,10 @@ export class Runtime {
       if (!req.onEvent) return;
       try {
         if (e.type === "message_update" && e.assistantMessageEvent?.type === "text_delta") req.onEvent({ type: "text", delta: e.assistantMessageEvent.delta });
-        else if (e.type === "message_end" && e.message?.role === "assistant") req.onEvent({ type: "message_end", toolCalls: (e.message.content ?? []).filter((c: any) => c.type === "toolCall").length });
+        else if (e.type === "message_end" && e.message?.role === "assistant") {
+          const calls = (e.message.content ?? []).filter((c: any) => c.type === "toolCall");
+          req.onEvent({ type: "message_end", toolCalls: calls.length, toolNames: calls.map((c: any) => String(c.name)) });
+        }
         else if (e.type === "tool_execution_end") req.onEvent({ type: "tool_end", name: e.toolName });
         else if (e.type === "tool_execution_start") req.onEvent({ type: "tool_start", name: e.toolName, args: e.args });
       } catch (err: any) { console.log(`[agent] ⚠️  onEvent 出错: ${err.message}`); }
@@ -285,6 +290,8 @@ export class Runtime {
 
     kick();
     const hardTimer = setTimeout(() => stop("max"), maxMs);
+    const onCancel = () => stop("cancel");
+    if (req.signal?.aborted) onCancel(); else req.signal?.addEventListener("abort", onCancel, { once: true });
     try {
       const work = withScope(scope, async () => {
         await pi.prompt({ role: "user", content, timestamp: Date.now() } as any);
@@ -292,12 +299,13 @@ export class Runtime {
       });
       work.catch(() => {});                          // 放弃等待之后它再报错也别变成未处理的 rejection
       await Promise.race([work, gaveUp]);
-    } finally { clearTimeout(hardTimer); if (idleTimer) clearTimeout(idleTimer); idleTimer = null; }
+    } finally { clearTimeout(hardTimer); if (idleTimer) clearTimeout(idleTimer); idleTimer = null; req.signal?.removeEventListener("abort", onCancel); }
 
     const fresh = pi.state.messages.slice(start).filter((m: any) => ["user", "assistant", "toolResult"].includes(m.role)) as Message[];
     const assistants = fresh.filter((m) => m.role === "assistant") as AssistantMessage[];
     const last = assistants.at(-1);
-    const why = timedOut as "" | "idle" | "max";      // 在回调里赋值，TS 看不出来
+    const why = timedOut as "" | "idle" | "max" | "cancel";      // 在回调里赋值，TS 看不出来
+    if (why === "cancel") throw new Error("已取消");
     if (why === "idle") throw new Error(`agent 超时（${idleMs / 1000} 秒没有任何进展）`);
     if (why === "max") throw new Error(`agent 超时（这一轮超过总时长上限 ${Math.round(maxMs / 60000)} 分钟）`);
     if (!last) throw new Error(pi.state.errorMessage || "模型没有返回内容");

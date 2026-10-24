@@ -277,6 +277,17 @@ CoreS3 (MicroPython) ──HTTP──▶ server/（TypeScript 单文件可执行
   才发——`take_photo`/`set_volume` 往往跟在「我看看。」后面，早发头 `X-Need-Photo` 就丢了；
   ② 落盘播放路径（`save_stream`）遇到长度未知的流，写完要回填真实长度，否则 `playWavFile`
   按占位长度读到文件外。老固件不带头、快捷指令短路，都照旧整段返回。
+- **异步对话（`server/src/speech/async-reply.ts` ↔ `chat._poll_reply`，`cfg.ASYNC_CHAT`，LRN 2026-10-24，症状「对着设备交代长任务，60 秒一到就断」）**：
+  设备单线程，同步 `/chat` 等多久主循环就停多久（发不了 MQTT 保活、喂不上狗、点屏幕没反应），所以同步路径只能等 60 秒。
+  请求带 `X-Async: 1`（跟着 `X-Stream` 走，只对内置 agent）时，走大脑的请求立刻回 **202 + `X-Reply-Id`**，设备用
+  `GET /chat/reply/<id>?wait=ASYNC_POLL_WAIT` 长轮询：204 + `X-Reply-Wait` = 还在想；200 = 一段流式音频（同 stream-reply 协议）；
+  204 + `X-Reply-Done` = 说完了。两次轮询之间设备回来泵 MQTT、喂狗、看触摸（**按住屏幕 = `POST /chat/cancel/<id>`**，经
+  `RunRequest.signal` 中止 agent）。**分段**：已生成的句子写完、agent 还没说完（多半在跑工具）就等 `SEG_IDLE_MS`，等不到先收这一段，
+  头里 `X-Reply-More: 1`，设备播完再取（`_play_rest`）。别改坏的点：① 首段的头只等**会改响应头的工具**（`HEADER_TOOLS`：take_photo / set_volume），
+  其它工具不等——否则「我查一下。」要憋到工具跑完；② 一条助手消息结束就 `split.flush()`（它说完「我查一下。」就去跑工具了，句子不能压在缓冲里）；
+  ③ 最后一条消息没调工具 = 最终回复，头里按完整回复写（否则短回复也被标成未完，多取一次全文）；④ 等待期间 `St.awaiting=True`，
+  推送入队而不是按「重复推送」丢掉（这也是只对内置 agent 开的原因：OpenClaw 的 cores3-speak 会重复推送）；⑤ 每次成功轮询刷新
+  `St.last_ok_ms`，否则任务超过 30 分钟死人开关会把正在等回复的设备复位。快捷指令短路、老服务端照旧同步返回。
 - **设备文件同步（`ota.py`，管理界面「设备 → 图片与代码」）**：服务端 `server/src/devicefiles.ts` 存
   `<数据目录>/device_files/`（自定义）+ 构建时打进来的 `device/src`（`virtual:device-fw`，版本 = 服务端版本）；
   MQTT `{"action":"sync","scope":"res|code|all"}` → 设备空闲时 `GET /device/files` 拿清单（路径/大小/sha256）

@@ -28,6 +28,12 @@ export interface StreamReplyOpts {
   log?: (s: string) => void;
 }
 
+/**
+ * 会改响应头的工具：首句要等它们执行完才能发头（X-Need-Photo / X-Volume）。
+ * 其它工具（搜网页、跑命令……）不等——否则「我查一下。」要憋到工具跑完才出声
+ */
+export const HEADER_TOOLS = new Set(["take_photo", "set_volume"]);
+
 /** 预合成的句子数（当前这句 + 往后一句），既不让扬声器断粮，也不一口气打满 TTS 接口 */
 const LOOKAHEAD = 2;
 
@@ -39,6 +45,8 @@ export async function streamReply(res: http.ServerResponse, o: StreamReplyOpts):
   let first: string | null = null;
   let textAfterFirst = false;
   let lastMsgEnded = false, pendingTools = 0, toolsDone = 0;
+  /** 最后一条助手消息结束了、而且没调工具：这就是最终回复（整轮马上结束），头里按完整回复写 */
+  let finalMsg = false;
   let done = false, finalText = "", error: Error | null = null;
   let wake: (() => void) | null = null;
   const notify = () => { const w = wake; wake = null; w?.(); };
@@ -51,10 +59,13 @@ export async function streamReply(res: http.ServerResponse, o: StreamReplyOpts):
   const onEvent = (e: AgentStreamEvent) => {
     if (e.type === "text") {
       if (first !== null && e.delta.trim()) textAfterFirst = true;
-      lastMsgEnded = false;
+      lastMsgEnded = false; finalMsg = false;
       for (const s of split.push(e.delta)) enqueue(s);
-    } else if (e.type === "message_end") { lastMsgEnded = true; pendingTools += e.toolCalls; }
-    else if (e.type === "tool_end") toolsDone++;
+    } else if (e.type === "message_end") {
+      // 一条助手消息结束就是句子边界：「我查一下。」之后它去跑工具了，别把这句压在缓冲里
+      for (const s of split.flush()) enqueue(s);
+      lastMsgEnded = true; finalMsg = e.toolCalls === 0; pendingTools += e.toolNames.filter((n) => HEADER_TOOLS.has(n)).length; }
+    else if (e.type === "tool_end" && HEADER_TOOLS.has(e.name)) toolsDone++;
     notify();
   };
 
@@ -71,8 +82,9 @@ export async function streamReply(res: http.ServerResponse, o: StreamReplyOpts):
 
   let sent = false, firstAudioMs: number | null = null, played = 0;
   const sendHeaders = () => {
-    const partial = !done;
-    const reply = done ? (finalText || items.map((x) => x.text).join("")) : (first ?? "");
+    const complete = done || finalMsg;
+    const partial = !complete;
+    const reply = done ? (finalText || items.map((x) => x.text).join("")) : complete ? items.map((x) => x.text).join("") : (first ?? "");
     const h: Record<string, string> = {
       ...o.headers, "Content-Type": "audio/wav", Connection: "close",
       "X-User-Text": b64Header(o.userText), "X-Reply-Text": b64Header(reply),

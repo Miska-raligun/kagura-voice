@@ -426,6 +426,97 @@ def test_stream_error_before_audio_is_500(a):
     assert r.status_code == 500 and "模型挂了" in r.json()["error"]
 
 
+# ── 异步对话（X-Async：设备不再被一个长请求卡住）──────────────────────────────
+
+ASYNC = {"X-Stream": "1", "X-Async": "1"}
+
+
+def _segments(a, rid, dev, wait=10, seg=None, limit=30):
+    """按设备的方式把回复一段段取完：返回 [(headers, body)]"""
+    out = []
+    for _ in range(limit):
+        q = f"/chat/reply/{rid}?wait={wait}" + (f"&seg={seg}" if seg else "")
+        r = a.get(q, headers={"X-Device-Id": dev})
+        if r.status_code == 204:
+            if r.headers.get("X-Reply-Done") == "1":
+                return out
+            continue
+        assert r.status_code == 200, r.text
+        out.append((r.headers, r.content))
+        if r.headers.get("X-Reply-More") != "1":
+            # 没说还有：再取一次应当是 Done
+            r2 = a.get(f"/chat/reply/{rid}?wait=1", headers={"X-Device-Id": dev})
+            assert r2.status_code == 204 and r2.headers.get("X-Reply-Done") == "1"
+            return out
+    raise AssertionError("取不完")
+
+
+def test_async_chat_returns_id_then_streams(a):
+    """X-Async：走大脑的请求立刻回 202 + 编号；长轮询取到边生成边播的音频，取完是 Done"""
+    text = "你好呀！今天天气很好。"
+    a.fake_llm({"text": text, "tps": 30})
+    r = a.post("/chat", data=wav(), headers={"X-Device-Id": "as1", **ASYNC})
+    assert r.status_code == 202, r.text
+    rid = r.headers["X-Reply-Id"]
+    assert r.json()["id"] == rid and r.headers.get("X-User-Text")
+    segs = _segments(a, rid, "as1")
+    body = b"".join(b[44:] for _, b in segs)
+    assert segs[0][1][:4] == b"RIFF"
+    sentences = [t["text"] for t in a.fake_log()["tts"]]
+    assert sentences == ["你好呀！", "今天天气很好。"]
+    assert len(body) == sum(len(s) * FAKE_BYTES_PER_CHAR for s in sentences)
+    assert a.get("/chat/last", headers={"X-Device-Id": "as1"}).json()["reply"] == text
+
+
+def test_async_wait_then_segments(a):
+    """还没想好：长轮询到点回 204 X-Reply-Wait。说了一句再去跑工具（这里跑 2 秒命令）：
+    那一句先播（不等普通工具），停顿久了先收一段，工具跑完后的话下一段取"""
+    a.fake_llm({"text": "我查一下。", "tool_calls": [{"name": "exec", "args": {"command": "sleep 2"}}], "then": "查到了。"})
+    r = a.post("/chat", data=wav(), headers={"X-Device-Id": "as2", **ASYNC})
+    rid = r.headers["X-Reply-Id"]
+    first = a.get(f"/chat/reply/{rid}?wait=0", headers={"X-Device-Id": "as2"})
+    assert first.status_code == 204 and first.headers.get("X-Reply-Wait") == "1"
+    t0 = time.time()
+    segs = _segments(a, rid, "as2", wait=10, seg=300)
+    assert len(segs) == 2, [(h.get("X-Reply-More"), len(b)) for h, b in segs]
+    assert segs[0][0].get("X-Reply-More") == "1" and b64text(segs[0][0]["X-Reply-Text"]) == "我查一下。"
+    assert len(segs[0][1]) == 44 + len("我查一下。") * FAKE_BYTES_PER_CHAR
+    assert len(segs[1][1]) == 44 + len("查到了。") * FAKE_BYTES_PER_CHAR
+    assert time.time() - t0 >= 1.5          # 第二段确实是等命令跑完才来的
+
+
+def test_async_take_photo_header(a):
+    a.fake_llm({"text": "我看看。", "tool_calls": [{"name": "take_photo", "args": {"question": "这是什么"}}], "tps": 20})
+    r = a.post("/chat", data=wav(), headers={"X-Device-Id": "as3", **ASYNC})
+    segs = _segments(a, r.headers["X-Reply-Id"], "as3")
+    assert segs[0][0].get("X-Need-Photo") == "1"
+
+
+def test_async_short_circuit_stays_sync(a):
+    a.fake_asr("现在几点")
+    r = a.post("/chat", data=wav(), headers={"X-Device-Id": "as4", **ASYNC})
+    assert r.status_code == 200 and r.headers.get("Content-Length")
+
+
+def test_async_cancel(a):
+    """设备上点屏幕取消：之后取回复是 Done，不再出声"""
+    a.fake_llm({"text": "这是一段很长很长的回答，" * 6, "tps": 3})
+    r = a.post("/chat", data=wav(), headers={"X-Device-Id": "as5", **ASYNC})
+    rid = r.headers["X-Reply-Id"]
+    assert a.post(f"/chat/cancel/{rid}").json()["cancelled"] is True
+    time.sleep(0.5)
+    r2 = a.get(f"/chat/reply/{rid}?wait=5", headers={"X-Device-Id": "as5"})
+    assert r2.status_code == 204 and r2.headers.get("X-Reply-Done") == "1"
+
+
+def test_async_vision(a):
+    a.fake_llm("这是一个杯子。")
+    r = a.post("/chat-vision", json={"text": "这是什么", "image": b64(rgb565())}, headers={"X-Device-Id": "as6", **ASYNC})
+    assert r.status_code == 202
+    segs = _segments(a, r.headers["X-Reply-Id"], "as6")
+    assert segs and segs[0][1][:4] == b"RIFF"
+
+
 def test_admin_loopback_port():
     """WSL 场景：额外的管理端口只绑 127.0.0.1，管理界面与接口在上面可用（主端口照常）。"""
     import requests

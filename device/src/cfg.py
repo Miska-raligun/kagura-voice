@@ -194,6 +194,20 @@ PLAY_STREAMING   = True
 STREAM_REPLY     = True
 
 
+# 异步对话（LRN 2026-10-24，症状「对着设备交代长任务，60 秒一到就断」）：请求带 X-Async: 1，
+# 走大脑的回复服务端立刻回 202 + 编号，设备用 GET /chat/reply/<id>?wait=ASYNC_POLL_WAIT 长轮询分段取。
+# 每次最多阻塞 ASYNC_POLL_WAIT 秒，两次之间回来保活 MQTT、喂狗、看触摸（按住屏幕 = 取消），
+# 所以任务多长都行（服务端单轮上限默认 30 分钟）。只和 STREAM_REPLY 一起用（分段音频同一套流式协议）。
+# 老服务端不认这个头，照旧同步返回。出问题改 False 即恢复同步。
+ASYNC_CHAT       = True
+
+
+ASYNC_POLL_WAIT  = 6        # 秒。越短「按住取消」越灵，代价是多几次 HTTP 往返
+
+
+ASYNC_MAX_SECS   = 1900     # 设备最多等多久（比服务端 30 分钟上限略长）
+
+
 STREAM_BLOCK_BYTES = 32000  # 每块 1 秒（16k×16bit）。三块轮转共 96KB 堆
 
 
@@ -239,6 +253,9 @@ class St:
     # 用 cores3-speak 回复时的重复推送，直播期间收到的推送是真要播的
     # （比如你在网页抓拍后让它说一句），丢掉就变成"日志里回复了但没声音"。
     streaming     = False
+    # 异步对话等回复中。也在 busy 里，但这期间收到的推送是主动消息（任务可能要等很久），
+    # 不能当成重复推送丢掉：入队，对话结束后照常播
+    awaiting      = False
     continuous    = False   # 连续对话模式
     wake          = False   # 声控唤醒模式（与 continuous 互斥）
     sleeping      = False   # 息屏休眠中

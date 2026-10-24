@@ -79,7 +79,7 @@ def _mqtt_callback(topic, msg):
     topic_str = topic.decode("utf-8") if isinstance(topic, bytes) else topic
 
     if "/push/" in topic_str:
-        if cfg.St.busy and not cfg.St.streaming:
+        if cfg.St.busy and not cfg.St.streaming and not cfg.St.awaiting:
             # 保留去重语义：对话期间 OpenClaw 触发的重复 push 直接丢弃。
             # 直播期间不算"对话中"，照收——由推流循环负责播出来。
             print("push skipped: device busy")

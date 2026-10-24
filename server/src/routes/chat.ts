@@ -3,6 +3,7 @@ import fs from "node:fs";
 import { bytes, json, type Req, type Res, type Router } from "../http/router.ts";
 import { roleVoice, type Role } from "../roles.ts";
 import { streamReply, type StreamReplyOpts } from "../speech/stream-reply.ts";
+import { PendingReplies, type PendingOpts } from "../speech/async-reply.ts";
 import {
   type Ctx, validateDeviceId, preview, MAX_AUDIO_BYTES, ASR_EMPTY_REPLY, CONT_EXIT_REPLY, PHOTO_ONLY_PROMPT,
 } from "../ctx.ts";
@@ -33,6 +34,42 @@ export function registerChat(r: Router, ctx: Ctx) {
       },
     }),
   });
+
+  /**
+   * 异步对话：设备带 X-Async: 1（且能边下边播，X-Stream: 1）时，走大脑的请求立刻回 202 + 回复编号，
+   * 设备用 GET /chat/reply/<id> 长轮询分段取回复（见 speech/async-reply.ts）。短路命中的照旧直接回 WAV。
+   */
+  const replies = new PendingReplies();
+  // 只对内置 agent：OpenClaw 用 cores3-speak 回复时会同时推送，异步等待期间设备不再丢推送，会播两遍
+  const wantsAsync = (req: Req) => req.header("X-Async") === "1" && req.header("X-Stream") === "1" && ctx.brain.kind === "pi";
+  const startAsync = (dev: string, role: Role, userText: string, headers: Record<string, string>, t0: number, tAsr: number,
+    run: PendingOpts["run"]): Res => {
+    const p = replies.start({
+      dev, userText, voice: ctx.voice, per: roleVoice(role), headers, run,
+      log: (s) => console.log(`[${dev}] ${s}`),
+      done: (r) => {
+        ctx.hb.seen(dev);
+        ctx.lastReply.set(dev, { user: userText, reply: r.reply || (r.error ? "（出错了）" : ""), ts: now() });
+        console.log(`[${dev}] 💬  ${preview(r.reply)}`);
+        console.log(`[${dev}] ⏱️  asr=${(tAsr - t0).toFixed(1)}s 总=${(now() - t0).toFixed(1)}s（异步）${r.cancelled ? "  🛑 已取消" : r.error ? `  ⚠️ ${r.error}` : ""}`);
+      },
+    });
+    console.log(`[${dev}] ⏳  异步回复 ${p.id}`);
+    return { status: 202, headers: { "Content-Type": "application/json", "X-Reply-Id": p.id, "X-User-Text": b64Header(userText), ...headers }, body: JSON.stringify({ id: p.id }) };
+  };
+
+  /** 取异步回复的下一段：?wait=秒（最多 25）。204 + X-Reply-Wait = 还在想；204 + X-Reply-Done = 说完了 */
+  r.get("/chat/reply/<id>", (req): Res => {
+    const p = replies.get(req.params.id);
+    if (!p) return { status: 204, headers: { "X-Reply-Done": "1" }, body: "" };     // 早就取完被清掉了
+    ctx.hb.seen(validateDeviceId(req.header("X-Device-Id") || "cores3"));
+    const wait = Math.max(0, Number(req.query.get("wait") ?? 20)) * 1000;
+    // seg：一段写完后等新句子的毫秒数（只能调小，测试用）
+    const seg = Number(req.query.get("seg") ?? 0) || undefined;
+    return { status: 200, headers: {}, body: "", raw: (res) => p.serve(res, wait, seg) };
+  });
+  /** 设备上点屏幕取消正在等的回复 */
+  r.post("/chat/cancel/<id>", (req) => json({ cancelled: replies.cancel(req.params.id) }));
 
   /** 边生成边播时 X-Reply-Text 只有首句：设备播完来取完整文本更新屏幕 */
   r.get("/chat/last", (req) => {
@@ -132,6 +169,10 @@ export function registerChat(r: Router, ctx: Ctx) {
         const prev = ctx.state.popLastQuick(sid);
         if (prev) llmText = `[背景：用户刚才问「${prev[0]}」，快捷指令已回复「${prev[1]}」]\n${userText}`;
         llmText = withTouch(llmText, req.header("X-Touch"));
+        if (wantsAsync(req)) {
+          return startAsync(dev, role, userText, { ...extra, "X-Role": role.id }, t0, tAsr, (onEvent, meta, signal) =>
+            ctx.inChat(dev, () => ctx.brain.chat({ message: llmText, sessionId: sid, localTime, agent: role.agent, deviceId: dev, spoken: true, trusted: ctx.deviceTrusted(req, dev), meta, onEvent, signal })));
+        }
         if (wantsStream(req)) {
           // 边生成边播：新固件带 X-Stream: 1，首句合成好就开始出声
           return streamed(dev, role, userText, { ...extra, "X-Role": role.id }, t0, tAsr, (onEvent, meta) =>
@@ -199,6 +240,10 @@ export function registerChat(r: Router, ctx: Ctx) {
       const tAsr = now();
       console.log(`[${dev}] 🗣️  ${userText}`);
       const imagePath = imageB64 ? ctx.decodeImageB64(imageB64, dev, "vision") : null;
+      if (wantsAsync(req)) {
+        return startAsync(dev, role, userText, { "X-Role": role.id }, t0, tAsr, (onEvent, meta, signal) =>
+          ctx.inChat(dev, () => ctx.brain.chat({ message: withTouch(userText, req.header("X-Touch")), sessionId: sid, imagePath, localTime, agent: role.agent, deviceId: dev, spoken: true, trusted: ctx.deviceTrusted(req, dev), meta, onEvent, signal })));
+      }
       if (wantsStream(req)) {
         return streamed(dev, role, userText, { "X-Role": role.id }, t0, tAsr, (onEvent, meta) =>
           ctx.inChat(dev, () => ctx.brain.chat({ message: withTouch(userText, req.header("X-Touch")), sessionId: sid, imagePath, localTime, agent: role.agent, deviceId: dev, spoken: true, trusted: ctx.deviceTrusted(req, dev), meta, onEvent })));

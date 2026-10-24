@@ -688,4 +688,71 @@ assert "cfg.SERVER_URL" in src and "\nSERVER_URL" not in src
 print("  chat.py 引用方式            = cfg.SERVER_URL（属性访问，能看到改写）✓")
 cfg.SERVER_BASE = before
 
+# 异步对话：长轮询取回复（等的时候回主循环保活）、分段接着播、按住取消、出错退出
+print("\n=== 异步对话（X-Async）===")
+class _R:
+    def __init__(self, code, hdrs=None):
+        self.status_code = code; self.headers = hdrs or {}; self.closed = False
+    def close(self): self.closed = True
+_script = []; _calls = []
+def _aget(url, **kw):
+    _calls.append(("get", url))
+    r = _script.pop(0)
+    if isinstance(r, Exception): raise r
+    return r
+def _apost(url, **kw):
+    _calls.append(("post", url)); return _R(200)
+_saved_async = (chat.urequests, chat.netsvc.mqtt_check, chat.netsvc.mqtt_ping, chat.snd._touched, chat.snd.stream_play, chat.time.sleep)
+chat.urequests = types.SimpleNamespace(get=_aget, post=_apost)
+_pumps = [0]
+chat.netsvc.mqtt_check = lambda: _pumps.__setitem__(0, _pumps[0] + 1)
+chat.netsvc.mqtt_ping = lambda: None
+chat.time.sleep = lambda s: None
+_touch = [False]
+chat.snd._touched = lambda: _touch[0]
+_played = []
+def _sp(r):
+    _played.append(r.headers.get("X-Reply-Text")); chat.snd.last_play = {"stopped": False}; return 100
+chat.snd.stream_play = _sp
+
+# ① 202 → 两次「还在想」→ 第一段（还有更多）→ 后续：再等一次 → 第二段 → 取完
+_script[:] = [_R(204, {"X-Reply-Wait": "1"}), _R(204, {"X-Reply-Wait": "1"}), _R(200, {"X-Reply-Text": "seg1", "X-Reply-More": "1"})]
+r, rid, why = chat._start_reply(_R(202, {"X-Reply-Id": "abc", "X-User-Text": ""}))
+assert rid == "abc" and why == "ok" and r.headers["X-Reply-Text"] == "seg1", (rid, why)
+assert _pumps[0] == 3 and all("/chat/reply/abc?wait=" in u for k, u in _calls if k == "get"), "每次轮询之间都要泵 MQTT"
+assert cfg.St.awaiting is False, "等完要复位 awaiting"
+_script[:] = [_R(204, {"X-Reply-Wait": "1"}), _R(200, {"X-Reply-Text": "seg2"})]
+chat.snd.last_play = {"stopped": False}
+assert chat._play_rest("abc") == 100 and _played == ["seg2"]
+# ② 同步回复（老服务端 / 快捷指令）原样返回
+r, rid, why = chat._start_reply(_R(200))
+assert rid is None and r.status_code == 200
+# ③ 按住屏幕取消：通知服务端，不再轮询
+_calls.clear(); _touch[0] = True
+_saved_drain = (chat.hw.drain_touch, chat.hw.touch_reset)
+chat.hw.drain_touch = lambda *a, **k: None; chat.hw.touch_reset = lambda: None
+r, why = chat._poll_reply("xyz")
+assert r is None and why == "cancel" and _calls == [("post", cfg.SERVER_BASE + "/chat/cancel/xyz")]
+_touch[0] = False
+# ④ 说完了（Done）/ 连续三次网络错误
+_script[:] = [_R(204, {"X-Reply-Done": "1"})]
+assert chat._poll_reply("d")[1] == "done"
+_script[:] = [OSError("x"), OSError("y"), OSError("z")]
+assert chat._poll_reply("e")[1] == "error"
+# ⑤ 播放中被点停：后续段不取了，通知服务端取消
+_calls.clear(); chat.snd.last_play = {"stopped": True}
+assert chat._play_rest("st") == 0 and _calls == [("post", cfg.SERVER_BASE + "/chat/cancel/st")]
+# ⑥ 等待期间收到推送：入队，不当重复推送丢掉
+chat.netsvc._pending_push[:] = []
+cfg.St.busy = True; cfg.St.awaiting = True
+chat.netsvc._mqtt_callback(b"kagura/push/x", b'{"type":"push","url":"/p"}')
+assert chat.netsvc._pending_push == [("/p", None)]
+cfg.St.awaiting = False
+chat.netsvc._mqtt_callback(b"kagura/push/x", b'{"type":"push","url":"/q"}')
+assert chat.netsvc._pending_push == [("/p", None)], "普通对话中照旧丢重复推送"
+cfg.St.busy = False; chat.netsvc._pending_push[:] = []
+(chat.urequests, chat.netsvc.mqtt_check, chat.netsvc.mqtt_ping, chat.snd._touched, chat.snd.stream_play, chat.time.sleep) = _saved_async
+(chat.hw.drain_touch, chat.hw.touch_reset) = _saved_drain
+print("  长轮询 / 分段 / 取消 / 推送  = 轮询间泵 MQTT ✓ 分段接着播 ✓ 按住取消 ✓ 点停取消 ✓ 等待中推送入队 ✓ 同步回复兼容 ✓")
+
 print("\n✅ 全部模块 import 成功，行为验证通过")
