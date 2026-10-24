@@ -154,6 +154,36 @@ describe("会话与压缩", () => {
     expect(fake.calls.at(-1).system).toContain("earlier_conversation_summary");
   });
 
+  it("压缩时摘要模型卡住：有时限，这轮照常回复，会话不会被永远锁住", async () => {
+    const { rt, reg, fake } = makeRuntime();
+    rt.setLimits({ timeoutSecs: 1 });                        // 压缩上限 = 2 × timeoutSecs
+    reg.update("main", { compaction: { max_tokens: 30, keep_messages: 2 } });
+    const key = "main:main";
+    for (let i = 0; i < 3; i++) { fake.queue.push(`回复${i}，`.repeat(5)); await rt.run({ ...dev, agentId: "main", sessionKey: key, text: `第${i}句话`.repeat(3) }); }
+    fake.queue.push({ text: "摘要", tps: 0.001 }, "这轮照常回复");   // 摘要那次：1000 秒才吐一个字，也不理中止
+    const t0 = Date.now();
+    const r = await rt.run({ ...dev, agentId: "main", sessionKey: key, text: "还在吗" });
+    expect(r.text).toBe("这轮照常回复");
+    expect(Date.now() - t0).toBeLessThan(6000);
+    expect(rt.busy("main", key)).toBe(false);
+    fake.queue.push("摘要", "下一轮也正常");                    // 上次没压成，这轮再压一次（这回正常）
+    expect((await rt.run({ ...dev, agentId: "main", sessionKey: key, text: "嗯" })).text).toBe("下一轮也正常");
+  }, 20_000);
+
+  it("压缩中途取消：立刻结束、放开会话锁", async () => {
+    const { rt, reg, fake } = makeRuntime();
+    reg.update("main", { compaction: { max_tokens: 30, keep_messages: 2 } });
+    const key = "main:main";
+    for (let i = 0; i < 3; i++) { fake.queue.push(`回复${i}，`.repeat(5)); await rt.run({ ...dev, agentId: "main", sessionKey: key, text: `第${i}句话`.repeat(3) }); }
+    fake.queue.push({ text: "摘要", tps: 0.001 });
+    const ac = new AbortController();
+    const p = rt.run({ ...dev, agentId: "main", sessionKey: key, text: "还在吗", signal: ac.signal });
+    setTimeout(() => ac.abort(), 200);
+    await expect(p).rejects.toThrow("已取消");
+    fake.queue.push("摘要", "好的");
+    expect((await rt.run({ ...dev, agentId: "main", sessionKey: key, text: "嗯" })).text).toBe("好的");
+  }, 20_000);
+
   it("同一会话串行：两条并发消息按到达顺序执行，历史不交错", async () => {
     const { rt, fake } = makeRuntime();
     fake.queue.push("一", "二");

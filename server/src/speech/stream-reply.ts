@@ -99,7 +99,12 @@ export async function streamReply(res: http.ServerResponse, o: StreamReplyOpts):
     res.write(wavHeader(0x7ffffff0 - 36));
     sent = true;
   };
-  const write = (buf: Buffer) => new Promise<void>((r) => { if (!res.write(buf)) res.once("drain", r); else r(); });
+  // 对方断开时 drain 永远不来：也要听 close，不然这一段卡死在这儿（异步回复会一直回「还在想」）
+  const write = (buf: Buffer) => new Promise<void>((r) => {
+    if (res.write(buf) || res.destroyed) return r();
+    const done = () => { res.off("drain", done); res.off("close", done); r(); };
+    res.once("drain", done); res.once("close", done);
+  });
 
   for (let i = 0; ; ) {
     if (res.destroyed) break;          // 设备断开（用户点屏幕停播）：不再合成

@@ -118,6 +118,9 @@ function saveImageRef(c: { data: string; mimeType: string }, workspace?: string)
   } catch { return "[图片]"; }
 }
 
+/** 一个工具最多执行多久（工具自己不理超时、卡在网络上时的兜底；exec 自己的上限是 10 分钟） */
+export const TOOL_MAX_MS = 15 * 60_000;
+
 class Semaphore {
   private queue: (() => void)[] = [];
   constructor(private n: number) {}
@@ -134,6 +137,8 @@ class Semaphore {
 export class Runtime {
   private stores = new Map<string, AgentStore>();
   private locks = new Map<string, Promise<unknown>>();
+  /** 每个会话正在跑的那一轮：卡住时日志里说清楚是谁占着 */
+  private running = new Map<string, { purpose: string; channel: string; since: number; tool: string; stage: string }>();
   private sem: Semaphore;
   private providers: ToolProvider[] = [];
   /** 扩展 / 扩展包 / MCP 的工具：排在所有内置工具后面，重名时内置的赢（不管谁先注册） */
@@ -184,9 +189,18 @@ export class Runtime {
     return `${agentId}:${channel}:${peer}`;
   }
 
-  /** 同一会话串行 */
+  /** 同一会话串行。前面那轮迟迟不完就打一行日志，说清楚是谁占着（以前这种情况一声不吭，看起来就是「这个 agent 不理人了」） */
   private serial<T>(key: string, fn: () => Promise<T>): Promise<T> {
     const prev = this.locks.get(key) ?? Promise.resolve();
+    if (this.locks.has(key)) {
+      const t = setTimeout(() => {
+        const r = this.running.get(key);
+        const who = r ? `${r.purpose}/${r.channel}，已跑 ${Math.round((Date.now() - r.since) / 1000)} 秒，${r.stage}${r.tool ? `：${r.tool}` : ""}` : "未知";
+        console.log(`[agent] ⏳  ${key} 在排队：上一轮还没结束（${who}）`);
+      }, 20_000);
+      t.unref?.();
+      prev.finally(() => clearTimeout(t));
+    }
     const run = prev.catch(() => {}).then(fn);
     const tail = run.catch(() => {});
     this.locks.set(key, tail);
@@ -212,10 +226,18 @@ export class Runtime {
     if (!agent) throw new Error(`没有 agent ${req.agentId}`);
     const store = this.store(agent.id);
     const persist = req.persist !== false;
+    const lockKey = `${agent.id}|${req.sessionKey}`;
+    const nestedRun = this.running.has(lockKey);          // 冲刷等内部运行：别覆盖外面那一轮的登记
+    const info = { purpose: req.purpose ?? "chat", channel: req.channel, since: Date.now(), tool: "", stage: "准备" };
+    if (!nestedRun) this.running.set(lockKey, info);
+    try {
     if (persist) {
       store.touchSession(req.sessionKey, req.kind, req.channel);
-      await this.maybeCompact(agent, store, req.sessionKey);
+      info.stage = "压缩历史";
+      await this.maybeCompact(agent, store, req.sessionKey, req.signal);
+      if (req.signal?.aborted) throw new Error("已取消");
     }
+    info.stage = "生成回复";
     const parent = runScope();
     const scope: RunScope = {
       agentId: agent.id, sessionKey: req.sessionKey, kind: req.kind, channel: req.channel,
@@ -268,13 +290,18 @@ export class Runtime {
       pi.abort();
       setTimeout(giveUp, 2000).unref?.();
     };
+    // 工具执行期间不按 idleMs 算（命令可以跑好几分钟），但也不能无限等：工具自己不理超时的话，最多等 toolMs
+    const toolMs = Math.max(idleMs, TOOL_MAX_MS);
+    let toolStuck = "";
     const kick = () => {
       if (idleTimer) clearTimeout(idleTimer);
-      idleTimer = toolsRunning > 0 || timedOut ? null : setTimeout(() => stop("idle"), idleMs);
+      idleTimer = timedOut ? null
+        : toolsRunning > 0 ? setTimeout(() => { toolStuck = info.tool; stop("idle"); }, toolMs)
+        : setTimeout(() => stop("idle"), idleMs);
     };
     pi.subscribe((e: any) => {
-      if (e.type === "tool_execution_start") { toolCalls.push(e.toolName); toolsRunning++; }
-      else if (e.type === "tool_execution_end") toolsRunning = Math.max(0, toolsRunning - 1);
+      if (e.type === "tool_execution_start") { toolCalls.push(e.toolName); toolsRunning++; info.tool = e.toolName; info.stage = "执行工具"; }
+      else if (e.type === "tool_execution_end") { toolsRunning = Math.max(0, toolsRunning - 1); if (!toolsRunning) { info.tool = ""; info.stage = "生成回复"; } }
       kick();
       if (!req.onEvent) return;
       try {
@@ -306,7 +333,7 @@ export class Runtime {
     const last = assistants.at(-1);
     const why = timedOut as "" | "idle" | "max" | "cancel";      // 在回调里赋值，TS 看不出来
     if (why === "cancel") throw new Error("已取消");
-    if (why === "idle") throw new Error(`agent 超时（${idleMs / 1000} 秒没有任何进展）`);
+    if (why === "idle") throw new Error(toolStuck ? `agent 超时（工具 ${toolStuck} 执行超过 ${Math.round(toolMs / 60000)} 分钟没有结束）` : `agent 超时（${idleMs / 1000} 秒没有任何进展）`);
     if (why === "max") throw new Error(`agent 超时（这一轮超过总时长上限 ${Math.round(maxMs / 60000)} 分钟）`);
     if (!last) throw new Error(pi.state.errorMessage || "模型没有返回内容");
     if (last.stopReason === "error" || last.stopReason === "aborted") throw new Error(last.errorMessage || `模型调用失败（${last.stopReason}）`);
@@ -324,6 +351,7 @@ export class Runtime {
     const text = textOf(last) || assistants.map(textOf).filter(Boolean).join("\n");
     if (persist && (!req.keepIf || req.keepIf(text))) store.append(req.sessionKey, fresh.map((m) => stripImages(m, agent.workspace)));
     return { text, meta: scope.meta, toolCalls, usage };
+    } finally { if (!nestedRun) this.running.delete(lockKey); }
   }
 
   /** 某个 agent 在普通会话里能看到的全部内置工具（管理界面白名单用，不过滤白名单本身） */
@@ -345,12 +373,29 @@ export class Runtime {
   // ── 压缩 ──
 
   /** 估算当前上下文大小，超过阈值就压缩 */
-  private async maybeCompact(agent: AgentInfo, store: AgentStore, key: string) {
+  /**
+   * 回复之前顺带做的压缩：有时限、能取消。它在会话锁里跑——以前摘要那次模型调用既没超时也不理取消，
+   * 接口一卡住，这个 agent 的这个会话就永远排不上队（症状「某个 agent 不理人了，换个 agent 正常」）。
+   * 超时 / 失败就跳过，这轮照常回复，下轮再试。
+   */
+  private async maybeCompact(agent: AgentInfo, store: AgentStore, key: string, signal?: AbortSignal) {
     const hist = store.history(key);
     const summary = store.getSession(key)?.summary ?? "";
     const size = estimateTokens(summary) + hist.reduce((n, h) => n + estimateTokens(messageText(h.msg)), 0);
     if (size <= agent.compaction.max_tokens) return;
-    await this.compactNow(agent, store, key).catch((e) => console.log(`[agent] ⚠️  ${agent.id} 压缩失败（下轮再试）: ${e.message}`));
+    const ms = this.opts.timeoutSecs * 1000 * 2;            // 冲刷 + 摘要两次模型调用
+    const ac = new AbortController();
+    let why = "";
+    const onAbort = () => { why ||= "已取消"; ac.abort(); };
+    if (signal?.aborted) return;
+    signal?.addEventListener("abort", onAbort, { once: true });
+    const timer = setTimeout(() => { why ||= `超过 ${ms / 1000} 秒`; ac.abort(); }, ms);
+    const aborted = new Promise<never>((_, rej) => ac.signal.addEventListener("abort", () => rej(new Error(why)), { once: true }));
+    const work = this.compactNow(agent, store, key, ac.signal);
+    work.catch(() => {});                                     // 放弃等待之后它再报错也别变成未处理的 rejection
+    try { await Promise.race([work, aborted]); }
+    catch (e: any) { console.log(`[agent] ⚠️  ${agent.id} 压缩${why === "已取消" ? "被取消" : "失败"}（下轮再试）: ${e.message}`); }
+    finally { clearTimeout(timer); signal?.removeEventListener("abort", onAbort); }
   }
 
   /** 手动或自动压缩。保留最近 keep_messages 条（从一条用户消息开始，不把工具调用和结果拆开） */
@@ -360,7 +405,7 @@ export class Runtime {
     return this.serial(`${agentId}|${key}`, () => this.compactNow(agent, this.store(agentId), key));
   }
 
-  private async compactNow(agent: AgentInfo, store: AgentStore, key: string): Promise<boolean> {
+  private async compactNow(agent: AgentInfo, store: AgentStore, key: string, signal?: AbortSignal): Promise<boolean> {
     const hist = store.history(key);
     let cut = Math.max(0, hist.length - agent.compaction.keep_messages);
     while (cut > 0 && hist[cut].msg.role !== "user") cut--;
@@ -369,6 +414,7 @@ export class Runtime {
     if (this.beforeCompact) {
       try { await this.beforeCompact(agent, key); }
       catch (e: any) { console.log(`[agent] ⚠️  ${agent.id} 记忆冲刷失败: ${e.message}`); }
+      if (signal?.aborted) throw new Error("已取消");
     }
     const prev = store.getSession(key)?.summary ?? "";
     const transcript = old.map((h) => {
@@ -376,12 +422,14 @@ export class Runtime {
       return `${who}：${messageText(h.msg).slice(0, 800)}`;
     }).join("\n");
     const model = this.models.resolve(agent.cheap_model || this.models.cheapRef() || agent.model);
+    if (signal?.aborted) throw new Error("已取消");
     const res = await withScope({ agentId: agent.id, sessionKey: key, kind: "isolated", channel: "system", purpose: "compact", hop: 0, chain: [], meta: {}, trusted: false },
       () => this.models.models.completeSimple(model, {
         systemPrompt: "你负责把一段对话压缩成摘要，供之后继续对话时参考。保留：人物、约定、待办、偏好、未解决的问题、重要事实与数字。"
           + "省略寒暄与重复。用第三人称、中文、条目式，不超过 600 字。",
         messages: [{ role: "user", content: (prev ? `此前的摘要：\n${prev}\n\n` : "") + `需要压缩的对话：\n${transcript}`, timestamp: Date.now() }],
-      }));
+      }, { signal }));
+    if (signal?.aborted) throw new Error("已取消");              // 放弃等待之后才回来：别再改历史（下一轮可能已经在用了）
     if (res.stopReason === "error" || res.stopReason === "aborted") throw new Error(res.errorMessage || "摘要模型调用失败");
     const summary = res.content.filter((c: any) => c.type === "text").map((c: any) => c.text).join("").trim();
     if (!summary) throw new Error("摘要为空");
