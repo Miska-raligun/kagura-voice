@@ -123,7 +123,7 @@ nav svg { width:22px; height:22px; }
     <div class="title"><span class="dot" id="conn" title="推送连接"></span><span id="meName">Kagura</span></div>
     <select id="roleSel" aria-label="角色"></select>
   </header>
-  <div id="insecure" class="warnbar hidden">当前不是 HTTPS 地址，浏览器不允许用麦克风和摄像头（只能打字）。用 Tailscale 等给的 https 地址打开，见 README「手机客户端」。</div>
+  <div id="insecure" class="warnbar hidden">当前不是 HTTPS 地址，浏览器不让网页直接录音，「按住说话」用不了。打字、听她说话、收推送、拍照、看家都正常——想说话可以点键盘上的麦克风键（语音输入）转成文字发送。</div>
   <main>
     <section class="page" id="chatPage">
       <div class="stage">
@@ -485,7 +485,7 @@ $("talk").addEventListener("pointerdown", async (e) => {
   e.preventDefault();
   if (S.busy) { cancelTurn(); return; }
   if (S.draining && S.player) S.player.stop();           // 正在播推送：先停
-  if (!window.isSecureContext || !navigator.mediaDevices) { toast("要用 https 地址打开才能用麦克风（现在可以先打字）", true); return; }
+  if (!window.isSecureContext || !navigator.mediaDevices) { toast("http 地址下浏览器不让网页录音：可以用键盘上的语音输入，转成文字发送", true); return; }
   pressing = true;
   try { $("talk").setPointerCapture(e.pointerId); } catch {}
   setState("在听…松开就发送", "松开发送", "rec");

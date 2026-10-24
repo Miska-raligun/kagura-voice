@@ -354,7 +354,8 @@ CoreS3 (MicroPython) ──HTTP──▶ server/（TypeScript 单文件可执行
   （页面离开前台就主动断开，iOS 后台连接会挂着却收不到）；推给绑定说话角色的设备，同样合适时家里的优先（在家不两边一起响）；
   手机 `portable`，不受「不在家不播」限制（不在家时主动说的话去开着的手机），但不收 mirror / relay；
   ③ `/chat-vision` 纯文字只对配对过的手机放行（设备那边「wav 或 image 必须有一个」是新旧两版共用的契约）。
-  浏览器只在 HTTPS 下给麦克风 / 摄像头，局域网 http 只能打字——README 推荐 Tailscale `tailscale serve`。
+  浏览器只在 HTTPS 下让网页录音（`getUserMedia`）：局域网 http 下打字、听回复（Web Audio 不受限）、SSE 推送、拍照（`<input capture>` 走系统相机）、
+  看家都正常，只有「按住说话」不行——README 推荐 Tailscale `tailscale serve`。
 - **管理接口与设备信任（`routes/admin.ts` 的 `isLocal`、`ctx.deviceTrusted`，LRN 2026-10-23 安全检查）**：
   ① 管理接口光看「来源是 127.0.0.1」不够——你电脑上任何网页都能让浏览器往 127.0.0.1 发请求（跨站请求伪造），
   DNS 重绑定还能绕过同源。`isLocal` 同时要求 Host 是本机地址、跨站的 Origin / `Sec-Fetch-Site: cross-site` 一律拒绝

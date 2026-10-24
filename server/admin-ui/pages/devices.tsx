@@ -109,7 +109,7 @@ function Phones() {
       <Card title="添加手机 / 平板">
         <p class="muted">手机用浏览器打开后就是一台新设备：用手机的麦克风、喇叭、摄像头跟她对话（记忆和角色与 CoreS3 共用），「看家」页能远程看 CoreS3 的画面、拍照。</p>
         <div class="form">
-          <Field label="手机能访问到的地址" wide hint={https ? "HTTPS 地址：麦克风和摄像头都能用。" : <>⚠️ 浏览器只在 <b>HTTPS</b> 地址下允许用麦克风和摄像头，局域网 http 地址只能打字和看家。推荐装 Tailscale，用它给的 https 地址（出门在外也能连），见 README「手机客户端」。</>}>
+          <Field label="手机能访问到的地址" wide hint={https ? "HTTPS 地址：麦克风和摄像头都能用。" : <>局域网 http 地址：打字、听她说话、收推送、拍照、看家都能用，只有「按住说话」不行（浏览器只在 <b>HTTPS</b> 下让网页录音），且只能在家里 WiFi 下用。想按住说话、出门在外也能连：装 Tailscale 用它给的 https 地址，见 README「手机客户端」。</>}>
             <Input value={base} placeholder={guess || "https://你的电脑.tail1234.ts.net"} onInput={setBase} />
           </Field>
           <Field label="名称"><Input value={name} placeholder="我的手机" onInput={setName} /></Field>
