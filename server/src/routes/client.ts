@@ -23,7 +23,7 @@ export function registerClient(r: Router, ctx: Ctx, clients: Clients) {
   r.get("/app", () => bytes(Buffer.from(APP_HTML), "text/html; charset=utf-8", { "Cache-Control": "no-cache" }));
   r.get("/app/manifest.webmanifest", () => json({
     name: "Kagura", short_name: "Kagura", start_url: "/app", scope: "/app", display: "standalone",
-    background_color: "#0b1418", theme_color: "#0b1418",
+    background_color: "#111113", theme_color: "#111113",
     icons: [{ src: "/app/icon.svg", sizes: "any", type: "image/svg+xml", purpose: "any maskable" }],
   }));
   r.get("/app/icon.svg", () => bytes(Buffer.from(ICON_SVG), "image/svg+xml", { "Cache-Control": "max-age=86400" }));
