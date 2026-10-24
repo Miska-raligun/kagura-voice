@@ -337,7 +337,7 @@ CoreS3 (MicroPython) ──HTTP──▶ server/（TypeScript 单文件可执行
 - **语音服务商（`server/src/voice/hub.ts`）**：识别、合成不写死百度——`speech.asr` / `speech.tts` 选默认服务商（baidu / openai 兼容 / minimax），
   agent 的 `tts_provider` / `tts_voice` 经 `roleVoice(role)` 变成 `VoiceRef` 传给 `synthesize`（**新加合成调用点一律传 `roleVoice(...)`，别再只传 `per`**，
   否则角色单独选的服务商被悄悄丢掉）。音色只给它所属的那家；指定的那家失败退回默认服务商（百度时用 per）。别家音频统一 `toPcm16k`（设备只认 16k 单声道 16 位），
-  缓存 key 含服务商 / 模型 / 音色，**百度的 key 保持原样**（旧 tts_cache 照样命中）。管理界面改 speech 就地 `configure`，不用重启。
+  缓存 key 含服务商 / 模型 / 音色，**百度的 key 保持原样**（旧 tts_cache 照样命中）。别家合成后过 `normalizeLoudness`（`util/wav.ts`：有声段 RMS 补到约 -18dBFS，最多 ×4、峰值不过 0.9，只放大不压低；MiniMax 复刻音色常偏小），key 带 `|norm1`——改这个处理要换后缀。管理界面改 speech 就地 `configure`，不用重启。
   MiniMax（文档 platform.minimax.cn/docs/api-reference）：识别 `speech_to_text`（asr-1.0），合成 `t2a_v2`；错误有两种外形
   （HTTP 200 + `base_resp.status_code` / 真实状态码 + OpenAI 风格错误体），都要认。管理页「复刻音色」走 `minimaxClone`
   （`files/upload` → `voice_clone`，录音 base64 进 JSON，`/api/admin/voice-clone` 只对本机放宽请求体）；复刻音色 7 天内不正式合成会被删。

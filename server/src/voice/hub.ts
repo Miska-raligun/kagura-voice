@@ -12,7 +12,7 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { stripMarkdown, pyHead, pyLen } from "../util/text.ts";
-import { wavHeader, SAMPLE_RATE } from "../util/wav.ts";
+import { wavHeader, SAMPLE_RATE, normalizeLoudness } from "../util/wav.ts";
 import { BaiduVoice, pruneDir, TTS_CACHE_MAX_FILES, type BaiduEndpoints, BAIDU_ENDPOINTS } from "./baidu.ts";
 import type { Voice, VoiceRef } from "./types.ts";
 
@@ -318,7 +318,8 @@ export class SpeechHub implements Voice {
     if (!clean) return null;
     // 音色只给它所属的那家：指定了服务商就只认那家，没指定就是给默认服务商的
     const voice = (ref.provider ? ref.provider === p.id : p.id === this.cfg.tts) ? (ref.voice || "") : "";
-    const key = crypto.createHash("md5").update(`${clean}|${p.kind}|${p.id}|${p.base_url ?? ""}|${p.model ?? ""}|${voice || p.voice || ""}|${p.speed ?? 1}`, "utf8").digest("hex");
+    // |norm1：加了响度补偿后换 key，旧的（没补偿、偏小的）缓存不再命中
+    const key = crypto.createHash("md5").update(`${clean}|${p.kind}|${p.id}|${p.base_url ?? ""}|${p.model ?? ""}|${voice || p.voice || ""}|${p.speed ?? 1}|norm1`, "utf8").digest("hex");
     const cachePath = path.join(this.cacheDir, `${key}.wav`);
     if (fs.existsSync(cachePath)) {
       const t = new Date();
@@ -326,7 +327,7 @@ export class SpeechHub implements Voice {
       console.log(`[tts] ♻️  缓存命中（${p.id}）: ${pyHead(clean, 30)}${pyLen(clean) > 30 ? "..." : ""}`);
       return cachePath;
     }
-    const pcm = await synthOther(p, clean, voice);
+    const pcm = normalizeLoudness(await synthOther(p, clean, voice));
     if (!pcm.length) throw new Error(`${p.id} 返回了空音频`);
     const tmp = path.join(this.cacheDir, `${crypto.randomUUID()}.part`);
     fs.writeFileSync(tmp, Buffer.concat([wavHeader(pcm.length), pcm]));

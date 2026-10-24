@@ -53,3 +53,32 @@ export function audioStats(wav: Buffer): AudioStats | null {
     dc: Math.trunc(mean),
   };
 }
+
+/**
+ * 响度补偿（16 位单声道 PCM）：只看有声段（20ms 一帧、比 -40dBFS 响的帧）的平均能量，比目标小就放大，
+ * 最多 ×4（+12dB），且放大后峰值不超过 0.9 满幅（不削波）。本来够响的不动（不压低）。
+ * 为什么：别家合成——尤其 MiniMax 复刻音色——常比百度小一截（复刻会把原始录音的音量一起学过去），设备上听着「声音好小」。
+ */
+export const LOUDNESS_TARGET_RMS = 0.12;   // 约 -18dBFS，和百度合成的说话音量差不多
+export function normalizeLoudness(pcm: Buffer, target = LOUDNESS_TARGET_RMS, maxGain = 4): Buffer {
+  const n = Math.floor(pcm.length / 2);
+  if (n < 320) return pcm;
+  let peak = 0, voicedSum = 0, voicedN = 0;
+  for (let f = 0; f + 320 <= n; f += 320) {
+    let e = 0;
+    for (let i = f; i < f + 320; i++) {
+      const v = pcm.readInt16LE(i * 2) / 32768;
+      e += v * v;
+      const a = Math.abs(v);
+      if (a > peak) peak = a;
+    }
+    if (e / 320 > 1e-4) { voicedSum += e; voicedN += 320; }   // 1e-4 = (0.01)² ≈ -40dBFS
+  }
+  if (!voicedN || !peak) return pcm;
+  const rms = Math.sqrt(voicedSum / voicedN);
+  const gain = Math.min(target / rms, maxGain, 0.9 / peak);
+  if (gain < 1.12) return pcm;                                  // 不到 1dB 的差别不折腾
+  const out = Buffer.alloc(n * 2);
+  for (let i = 0; i < n; i++) out.writeInt16LE(Math.max(-32768, Math.min(32767, Math.round(pcm.readInt16LE(i * 2) * gain))), i * 2);
+  return out;
+}

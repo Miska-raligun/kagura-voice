@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { SpeechHub, parseSpeechConfig, toPcm16k, minimaxClone, minimaxActivate, minimaxListCloned } from "../src/voice/hub.ts";
 import { ClonedVoices, CLONE_EXPIRE_MS } from "../src/voice/minimax-voices.ts";
-import { wavHeader } from "../src/util/wav.ts";
+import { wavHeader, normalizeLoudness, LOUDNESS_TARGET_RMS } from "../src/util/wav.ts";
 
 let server: http.Server, base = "";
 const seen: { path: string; body: Buffer; auth: string }[] = [];
@@ -228,5 +228,35 @@ describe("toPcm16k", () => {
     const out = toPcm16k(Buffer.concat([h, d]));
     expect(out.length).toBe(1600 * 2);
     expect(Math.abs(out.readInt16LE(800) - 16383)).toBeLessThan(3);
+  });
+});
+
+describe("响度补偿", () => {
+  const tone = (amp: number, n = 16000, silenceFirst = 0) => {
+    const b = Buffer.alloc(n * 2);
+    for (let i = silenceFirst; i < n; i++) b.writeInt16LE(Math.round(amp * 32767 * Math.sin(i / 7)), i * 2);
+    return b;
+  };
+  const rms = (b: Buffer, from = 0) => { let e = 0, k = 0; for (let i = from; i < b.length / 2; i++) { const v = b.readInt16LE(i * 2) / 32768; e += v * v; k++; } return Math.sqrt(e / k); };
+  const peak = (b: Buffer) => { let m = 0; for (let i = 0; i < b.length / 2; i++) m = Math.max(m, Math.abs(b.readInt16LE(i * 2)) / 32768); return m; };
+
+  it("小声的放大到目标响度；只按有声段算（前面一半静音不影响）", () => {
+    const quiet = tone(0.05, 32000, 16000);             // 有声段 RMS ≈ 0.035，前一秒是静音
+    const out = normalizeLoudness(quiet);
+    expect(rms(out, 16000)).toBeGreaterThan(LOUDNESS_TARGET_RMS * 0.95);
+    expect(rms(out, 16000)).toBeLessThan(LOUDNESS_TARGET_RMS * 1.05);
+  });
+  it("够响的不动；最多放大 4 倍；有尖峰时不削波", () => {
+    const loud = tone(0.3);
+    expect(normalizeLoudness(loud)).toBe(loud);
+    expect(peak(normalizeLoudness(tone(0.01)))).toBeLessThan(0.01 * 4 + 0.001);
+    const spiky = tone(0.03); spiky.writeInt16LE(20000, 1000);         // 尖峰 0.61：放大受它限制
+    const out = normalizeLoudness(spiky);
+    expect(peak(out)).toBeLessThanOrEqual(0.9 + 1e-4);
+    expect(peak(out)).toBeGreaterThan(0.85);
+  });
+  it("全是静音不放大", () => {
+    const silent = Buffer.alloc(32000);
+    expect(normalizeLoudness(silent)).toBe(silent);
   });
 });
