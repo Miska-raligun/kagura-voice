@@ -45,6 +45,12 @@ beforeAll(async () => {
         res.setHeader("content-type", "application/json");
         if (j.voice_id === "Taken_voice1") { res.end(JSON.stringify({ base_resp: { status_code: 2039, status_msg: "voice id duplicate" } })); return; }
         res.end(JSON.stringify({ input_sensitive: { type: j.voice_id === "Bad_voice01" ? 5 : 0 }, demo_audio: j.text ? "https://cdn/demo.mp3" : "", base_resp: { status_code: 0 } }));
+      } else if (u.pathname === "/mmpoor/t2a_v2") {
+        res.setHeader("content-type", "application/json");
+        res.end(JSON.stringify({ base_resp: { status_code: 1008, status_msg: "insufficient balance" } }));
+      } else if (u.pathname === "/mmpoor/speech_to_text") {
+        res.statusCode = 402; res.setHeader("content-type", "application/json");
+        res.end(JSON.stringify({ type: "error", error: { type: "insufficient_balance_error", message: "insufficient balance (1008)", http_code: "402" } }));
       } else if (u.pathname === "/mm/t2a_v2") {
         res.setHeader("content-type", "application/json");
         res.end(JSON.stringify({ data: { audio: Buffer.alloc(3200, 2).toString("hex") }, base_resp: { status_code: 0 } }));
@@ -160,6 +166,15 @@ describe("音色复刻（MiniMax）", () => {
     await expect(minimaxClone(mm(), { voice_id: "Taken_voice1", audio: wav })).rejects.toThrow(/2039/);
     await expect(minimaxClone(mm(), { voice_id: "Bad_voice01", audio: wav })).rejects.toThrow(/风控.*谩骂/);
     await expect(minimaxClone({ ...mm(), api_key: "" }, { voice_id: "Kagura_mio1", audio: wav })).rejects.toThrow(/API Key/);
+  });
+});
+
+describe("MiniMax 错误码翻成人话", () => {
+  it("合成（HTTP 200 + base_resp）和识别（402 + OpenAI 风格错误体）都认得出余额不足", async () => {
+    const poor = { id: "mm", kind: "minimax", base_url: `${base}/mmpoor`, api_key: "k" };
+    await expect(mk({ tts: "mm", providers: [poor] }).synthesize("你好")).rejects.toThrow(/余额不足.*（1008）/);
+    // 识别失败不抛错、返回空（当没听清），原因打日志
+    expect(await mk({ asr: "mm", providers: [poor] }).transcribe(wavHeader(0))).toBe("");
   });
 });
 

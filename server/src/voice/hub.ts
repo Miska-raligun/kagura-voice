@@ -124,7 +124,7 @@ async function synthOther(p: SpeechProvider, text: string, voice: string): Promi
   }
   if (p.kind === "minimax") {
     const base = trimSlash(p.base_url || MINIMAX_BASE);
-    const r = await fetchOk(`${base}/t2a_v2${p.group_id ? `?GroupId=${encodeURIComponent(p.group_id)}` : ""}`, {
+    const j = await minimaxJson(`${base}/t2a_v2${p.group_id ? `?GroupId=${encodeURIComponent(p.group_id)}` : ""}`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${p.api_key ?? ""}` },
       body: JSON.stringify({
@@ -133,9 +133,7 @@ async function synthOther(p: SpeechProvider, text: string, voice: string): Promi
         voice_setting: { voice_id: voice || p.voice || "female-shaonv", speed: Math.min(2, Math.max(0.5, p.speed || 1)), vol: 1, pitch: 0 },
         audio_setting: { sample_rate: SAMPLE_RATE, format: "pcm", channel: 1 },
       }),
-    }, 60_000, `${p.id} 合成`);
-    const j: any = await r.json();
-    if (j?.base_resp?.status_code) throw new Error(`${p.id} 合成失败: ${j.base_resp.status_code} ${j.base_resp.status_msg ?? ""}`);
+    }, `${p.id} 合成`, 60_000);
     const hex = j?.data?.audio;
     if (!hex) throw new Error(`${p.id} 合成失败：没有返回音频`);
     return toPcm16k(Buffer.from(hex, "hex"), SAMPLE_RATE);
@@ -165,15 +163,24 @@ export interface CloneResult { voice_id: string; demo_audio: string; sensitive: 
 
 const MINIMAX_SENSITIVE = ["正常", "严重违规", "色情", "广告", "违禁", "谩骂", "暴恐", "其他"];
 
-/** MiniMax 的错误有两种外形：HTTP 200 + base_resp.status_code，或真实状态码 + OpenAI 风格错误体 */
-async function minimaxJson(url: string, init: RequestInit, what: string): Promise<any> {
-  const r = await fetch(url, { ...init, signal: AbortSignal.timeout(120_000) });
+/** MiniMax 常见错误码的人话（https://platform.minimax.cn/docs/api-reference/errorcode） */
+const MINIMAX_ERRORS: Record<number, string> = {
+  1000: "MiniMax 服务端未知错误，稍后再试", 1001: "MiniMax 请求超时，稍后再试", 1002: "请求太频繁被限流，稍后再试",
+  1004: "鉴权失败：API Key 不对或已失效", 1008: "MiniMax 账户余额不足，请到开放平台（platform.minimax.cn）充值",
+  1026: "内容涉及敏感信息被拦下", 1039: "触发每分钟用量（TPM）限流，稍后再试", 1042: "文本里无法识别的字符太多（超过 10%）",
+  1043: "录音内容和校验文本对不上", 2013: "参数不对（检查模型名、音色、语速）", 2039: "这个 voice_id 已经存在，换一个名字",
+};
+
+/** MiniMax 的错误有两种外形：HTTP 200 + base_resp.status_code，或真实状态码 + OpenAI 风格错误体（message 末尾括号里是错误码） */
+async function minimaxJson(url: string, init: RequestInit, what: string, timeoutMs = 120_000): Promise<any> {
+  const r = await fetch(url, { ...init, signal: AbortSignal.timeout(timeoutMs) });
   const text = await r.text();
   let j: any = null;
   try { j = JSON.parse(text); } catch { /* 下面按 HTTP 状态报 */ }
-  const code = j?.base_resp?.status_code;
-  if (!r.ok || code) throw new Error(`${what}失败：${code ? `${code} ${j.base_resp.status_msg ?? ""}` : j?.error?.message ?? `HTTP ${r.status} ${text.slice(0, 200)}`}`);
-  return j;
+  const code = Number(j?.base_resp?.status_code || /\((\d{4})\)\s*$/.exec(j?.error?.message ?? "")?.[1] || 0);
+  if (r.ok && !code) return j;
+  const raw = j?.base_resp?.status_msg || j?.error?.message || `HTTP ${r.status} ${text.slice(0, 200)}`;
+  throw new Error(`${what}失败：${MINIMAX_ERRORS[code] ? `${MINIMAX_ERRORS[code]}（${code}）` : code ? `${code} ${raw}` : raw}`);
 }
 
 async function minimaxUpload(p: SpeechProvider, a: CloneAudio, purpose: "voice_clone" | "prompt_audio"): Promise<number> {
@@ -215,10 +222,10 @@ async function transcribeOther(p: SpeechProvider, wav: Buffer): Promise<string> 
     const form = new FormData();
     form.append("file", new Blob([new Uint8Array(wav)], { type: "audio/wav" }), "audio.wav");
     form.append("model", p.asr_model || "asr-1.0");
-    const r = await fetchOk(`${base}/speech_to_text`, {
+    const j = await minimaxJson(`${base}/speech_to_text`, {
       method: "POST", headers: { Authorization: `Bearer ${p.api_key ?? ""}`, language: "zh" }, body: form,
-    }, 30_000, `${p.id} 识别`);
-    return String(((await r.json()) as any)?.text ?? "").trim();
+    }, `${p.id} 识别`, 30_000);
+    return String(j?.text ?? "").trim();
   }
   if (p.kind !== "openai") throw new Error(`${p.id}（${p.kind}）不支持语音识别`);
   const base = trimSlash(p.base_url || "https://api.openai.com/v1");
