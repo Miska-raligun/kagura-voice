@@ -9,7 +9,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
-import { spawn } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import type { UpdateInfo } from "./update.ts";
 
 export type InstallKind = "windows" | "appimage" | "deb" | "unsupported";
@@ -65,6 +65,36 @@ const sha256File = (file: string) => new Promise<string>((ok, bad) => {
   const h = crypto.createHash("sha256");
   fs.createReadStream(file).on("data", (d) => h.update(d)).on("error", bad).on("end", () => ok(h.digest("hex")));
 });
+
+const psq = (s: string) => `'${s.replace(/'/g, "''")}'`;
+
+export const UAC_HINT = "等待安装：请在弹出的「用户账户控制」窗口里点「是」。没看到的话，看看任务栏上有没有闪烁的盾牌图标";
+
+/** Windows 更新脚本：跑安装包 → 关掉残留 → 拉起托盘版。每步写日志，服务端靠它判断进度 */
+export function windowsUpdateScript(setup: string, exe: string, log: string): string {
+  return [
+    "$ErrorActionPreference = 'Continue'",
+    `$log = ${psq(log)}`,
+    "function Log($m) { Add-Content -Path $log -Value ((Get-Date -Format 'yyyy-MM-dd HH:mm:ss') + ' ' + $m) }",
+    "Log 'script-start'",
+    // 安装包要管理员权限：这里会弹「用户账户控制」。选了「否」会抛错——服务端还在跑，记一笔就走
+    `try { $p = Start-Process -FilePath ${psq(setup)} -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-' -PassThru -ErrorAction Stop }`,
+    "catch { Log ('uac-declined ' + $_.Exception.Message); exit 1 }",
+    "$null = $p.Handle",          // 先拿句柄，否则提权进程退出后读不到 ExitCode
+    "Log 'installer-started'",
+    "$p.WaitForExit()",
+    "Log ('installer exit ' + $p.ExitCode)",
+    // 安装失败而服务端还活着：什么都不动
+    "$alive = Get-Process -Name 'kagura','kagura-tray' -ErrorAction SilentlyContinue",
+    "if ($p.ExitCode -ne 0 -and $alive) { Log 'server still running, leave it'; exit 1 }",
+    // 旧的托盘图标脚本还占着互斥量的话，新托盘会起不来图标
+    "Get-CimInstance Win32_Process -Filter \"Name='powershell.exe'\" | Where-Object { $_.CommandLine -like '*tray.ps1*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }",
+    "Get-Process -Name 'kagura','kagura-tray' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue",
+    "Start-Sleep -Seconds 1",
+    `Start-Process -FilePath ${psq(exe)} -ArgumentList '--tray','--no-browser'`,
+    "Log 'relaunched'",
+  ].join("\r\n");
+}
 
 export class SelfUpdater {
   state: UpdateState = { phase: "idle", done: 0, total: 0, message: "" };
@@ -182,9 +212,17 @@ export class SelfUpdater {
       this.state = { ...this.state, phase: "verifying", message: "正在校验" };
       if (want && want !== got) throw new Error("校验失败：下载的文件和发布的不一致，已丢弃");
       fs.renameSync(dest + ".part", dest);
+      if (this.kind === "windows") {
+        // 不在这里退出：等用户在「用户账户控制」里点了「是」、安装包真正开始装时，由安装包关掉本进程，装完脚本再拉起来。
+        // 先退出的话，脚本没跑起来 / 确认框没点 / 安装失败，服务就再也起不来了（rc.11 之前就是这样）
+        this.state = { ...this.state, phase: "installing", message: UAC_HINT };
+        this.runWindowsInstaller(dest);
+        console.log(`[update] ⬆️  正在更新到 ${info.latest}（等待安装包启动）`);
+        this.watchWindowsInstall();
+        return this.state;
+      }
       this.state = { ...this.state, phase: "installing", message: "正在安装，服务端马上会重启" };
-      if (this.kind === "windows") this.runWindowsInstaller(dest);
-      else if (this.kind === "appimage") this.replaceAppImage(dest);
+      if (this.kind === "appimage") this.replaceAppImage(dest);
       else {
         this.state = { ...this.state, phase: "manual", file: dest, message: "deb 包需要管理员权限安装：在终端里执行下面这条命令，装完服务会自动用新版本", command: `sudo apt install ${dest} && systemctl --user restart kagura` };
         return this.state;
@@ -198,22 +236,43 @@ export class SelfUpdater {
     return this.state;
   }
 
-  /** 静默跑安装包（它会结束正在运行的 Kagura），装完不管成败都把托盘版拉起来 */
+  private get updateLog() { return path.join(this.dataDir, "updates", "update.log"); }
+
+  /**
+   * 静默跑安装包。脚本是个独立的隐藏 PowerShell（照托盘的做法用 Start-Process 起；直接 spawn 的子进程会被带走/静默退出），
+   * 每一步写进 updates/update.log：uac-declined（确认框选了否）/ installer-started / installer exit N / relaunched。
+   * 安装包会结束正在运行的 Kagura（kagura.iss 的 PrepareToInstall），装完脚本再把托盘版拉起来。
+   */
   private runWindowsInstaller(setup: string) {
     const app = path.dirname(process.execPath);
     const tray = path.join(app, "kagura-tray.exe");
     const exe = fs.existsSync(tray) ? tray : process.execPath;
-    const q = (s: string) => `'${s.replace(/'/g, "''")}'`;
-    const script = [
-      "$ErrorActionPreference = 'Continue'",
-      "Start-Sleep -Seconds 2",
-      `$p = Start-Process -FilePath ${q(setup)} -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-' -Wait -PassThru`,
-      `Add-Content -Path ${q(path.join(this.dataDir, "updates", "update.log"))} -Value ("installer exit " + $p.ExitCode)`,
-      `Start-Process -FilePath ${q(exe)} -ArgumentList '--tray','--no-browser'`,
-    ].join("\r\n");
+    fs.writeFileSync(this.updateLog, "");
     const ps1 = path.join(this.dataDir, "updates", "run-update.ps1");
-    fs.writeFileSync(ps1, "﻿" + script, "utf16le");
-    spawn("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File", ps1], { detached: true, stdio: "ignore", windowsHide: true }).unref();
+    fs.writeFileSync(ps1, "\ufeff" + windowsUpdateScript(setup, exe, this.updateLog), "utf16le");
+    const cmd = `Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',${psq(ps1)}) -WindowStyle Hidden`;
+    execFileSync("powershell.exe", ["-NoProfile", "-Command", cmd], { windowsHide: true, timeout: 15_000 });
+  }
+
+  /** 安装包没把本进程关掉之前，看着 update.log：确认框点了否、安装失败、一直没人确认，都要回到页面上说清楚 */
+  private watchWindowsInstall(timeoutMs = 20 * 60_000) {
+    const t0 = Date.now();
+    const timer = setInterval(() => {
+      let log = "";
+      try { log = fs.readFileSync(this.updateLog, "utf8"); } catch { /* 还没写 */ }
+      const exit = /installer exit (-?\d+)/.exec(log);
+      let err = "";
+      if (/uac-declined/.test(log)) err = "安装被取消：「用户账户控制」里选了「否」（或没有管理员权限）。服务照常运行，可以再点一次更新";
+      else if (exit && exit[1] !== "0") err = `安装没有完成（安装程序退出码 ${exit[1]}），服务照常运行。可以再试一次，或到发布页手动下载安装`;
+      else if (/installer-started/.test(log)) this.state = { ...this.state, message: "正在安装，服务端马上会重启，页面会自动刷新" };
+      else if (Date.now() - t0 > timeoutMs) err = "一直没有开始安装：「用户账户控制」确认框可能被挡住了（看看任务栏上有没有闪烁的盾牌图标）。服务照常运行，可以再点一次更新";
+      if (err) {
+        clearInterval(timer);
+        this.state = { ...this.state, phase: "error", message: err };
+        console.log(`[update] ⚠️  ${err}`);
+      }
+    }, 2000);
+    timer.unref?.();
   }
 
   /** AppImage：换掉自己（Linux 下正在运行的文件可以被替换），然后重启 */

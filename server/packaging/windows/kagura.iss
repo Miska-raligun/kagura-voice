@@ -80,3 +80,17 @@ Filename: "{sys}\taskkill.exe"; Parameters: "/IM kagura.exe /F"; Flags: runhidde
 Filename: "{sys}\taskkill.exe"; Parameters: "/IM kagura-tray.exe /F"; Flags: runhidden; RunOnceId: "StopKaguraTray"
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""Kagura Tray"""; Flags: runhidden; RunOnceId: "DelFirewallTray"
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""Kagura"""; Flags: runhidden; RunOnceId: "DelFirewall"
+
+[Code]
+// 升级前结束正在运行的 Kagura（服务端、托盘版）。在线更新时服务端故意不先退出——
+// 等用户在「用户账户控制」里点了「是」、安装真正开始时才在这里结束它，这样取消或失败时服务照常运行。
+// CloseApplications=force 也会尝试关，但没有窗口的进程不一定关得掉，这里兜底。
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  Code: Integer;
+begin
+  Exec(ExpandConstant('{sys}\taskkill.exe'), '/IM kagura-tray.exe /F', '', SW_HIDE, ewWaitUntilTerminated, Code);
+  Exec(ExpandConstant('{sys}\taskkill.exe'), '/IM kagura.exe /F', '', SW_HIDE, ewWaitUntilTerminated, Code);
+  Sleep(1000);
+  Result := '';
+end;

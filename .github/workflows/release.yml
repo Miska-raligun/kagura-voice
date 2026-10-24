@@ -153,6 +153,50 @@ jobs:
           exe='"C:/Program Files/Kagura/kagura.exe"'
           KAGURA_SERVER_CMD="$exe" KAGURA_SERVER_PROVIDES=broker,discovery python -m pytest -q
           KAGURA_BRAIN=pi KAGURA_SERVER_CMD="$exe" KAGURA_SERVER_PROVIDES=broker,discovery python -m pytest -q
+      - name: 在线更新冒烟：运行中的托盘版下载安装包、静默重装、自己重新拉起
+        shell: pwsh
+        run: |
+          # 本地假发布源：「新版本」就是刚打好的这个安装包，digest 按 GitHub 的格式给
+          $feed = Join-Path $env:RUNNER_TEMP "feed"; New-Item -ItemType Directory -Force $feed | Out-Null
+          Copy-Item (Get-ChildItem server\dist\Kagura-Setup-*.exe).FullName "$feed\Kagura-Setup-99.0.0.exe"
+          $f = Get-Item "$feed\Kagura-Setup-99.0.0.exe"
+          $sha = (Get-FileHash $f.FullName -Algorithm SHA256).Hash.ToLower()
+          $rel = @(@{ tag_name = "v99.0.0"; draft = $false; html_url = ""; body = "smoke"; published_at = ""
+            assets = @(@{ name = $f.Name; size = $f.Length; digest = "sha256:$sha"; browser_download_url = "http://127.0.0.1:8765/$($f.Name)" }) })
+          ConvertTo-Json -InputObject $rel -Depth 5 | Set-Content -Encoding utf8 "$feed\releases.json"
+          $srv = Start-Process python -ArgumentList '-m','http.server','8765','--bind','127.0.0.1','--directory',$feed -PassThru -WindowStyle Hidden
+
+          $data = Join-Path $env:RUNNER_TEMP "kagura-update-smoke"
+          $env:KAGURA_DATA_DIR = $data; $env:KAGURA_PORT = "5391"; $env:KAGURA_MQTT_PORT = "11391"; $env:KAGURA_STREAM_PORT = "15392"
+          $env:KAGURA_DISC_PORT = "15393"; $env:KAGURA_NO_TRAY = "1"; $env:KAGURA_NO_PROMPT = "1"
+          $env:KAGURA_RELEASES_API = "http://127.0.0.1:8765/releases.json"
+          $base = "http://127.0.0.1:5391"
+          function Up { try { (Invoke-RestMethod "$base/health" -TimeoutSec 2).app -eq 'kagura' } catch { $false } }
+          function ListenPid { (Get-NetTCPConnection -LocalPort 5391 -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1).OwningProcess }
+          function Dump { Write-Host "--- update.log"; Get-Content "$data\updates\update.log" -ErrorAction SilentlyContinue
+            Write-Host "--- kagura.log"; Get-Content "$data\logs\kagura.log" -Tail 60 -ErrorAction SilentlyContinue }
+
+          Start-Process "$env:ProgramFiles\Kagura\kagura-tray.exe" -ArgumentList '--tray','--no-browser' | Out-Null
+          for ($i = 0; $i -lt 30 -and -not (Up); $i++) { Start-Sleep 1 }
+          if (-not (Up)) { Dump; throw "托盘版没起来" }
+          $pid0 = ListenPid
+          Invoke-RestMethod -Method Post "$base/api/admin/update/check" -ContentType 'application/json' -Body '{}' | Out-Null
+          $u = Invoke-RestMethod "$base/api/admin/update"
+          if (-not $u.info.newer) { $u | ConvertTo-Json -Depth 5; Dump; throw "没查到假发布源里的新版本" }
+          Invoke-RestMethod -Method Post "$base/api/admin/update/install" -ContentType 'application/json' -Body '{}' | Out-Null
+
+          $ok = $false
+          for ($i = 0; $i -lt 240; $i++) {
+            Start-Sleep 1
+            $log = Get-Content "$data\updates\update.log" -Raw -ErrorAction SilentlyContinue
+            if ($log -match 'relaunched' -and (Up) -and (ListenPid) -ne $pid0) { $ok = $true; break }
+            if ($log -match 'uac-declined|server still running') { break }
+          }
+          Dump
+          if (-not $ok) { throw "在线更新后服务没有被重新拉起" }
+          if ($log -notmatch 'installer exit 0') { throw "安装程序没有正常退出" }
+          Invoke-RestMethod -Method Post "$base/api/admin/quit" -TimeoutSec 5 | Out-Null
+          Stop-Process $srv -Force -ErrorAction SilentlyContinue
       - name: 静默卸载，规则一并删掉
         shell: pwsh
         run: |

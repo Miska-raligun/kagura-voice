@@ -101,7 +101,8 @@ async function main() {
   ctx.loadPresence();
   ctx.loadTrust();
   if (cfg.updateCheck) {
-    ctx.updates = new UpdateChecker(VERSION, proxiedFetch);
+    // KAGURA_RELEASES_API：CI 的在线更新冒烟用本地假发布源
+    ctx.updates = new UpdateChecker(VERSION, proxiedFetch, process.env.KAGURA_RELEASES_API || undefined);
     ctx.updates.start();
     const kind = installKind();
     ctx.selfUpdater = new SelfUpdater(cfg.dataDir, proxiedFetch, kind, kind === "appimage" ? () => setTimeout(() => restartSelf(cfg.dataDir, null), 800) : undefined,

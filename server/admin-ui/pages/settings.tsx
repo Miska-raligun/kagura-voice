@@ -1,6 +1,6 @@
 // 设置：模型服务商与 Key、默认/便宜模型、嵌入接口、语音推送、百度 Key、端口、token、更新、备份。
 // 不预设任何模型——首次向导只给常见服务商的接口地址做参考，模型名和 Key 由用户自己填。
-import { useEffect, useState } from "preact/hooks";
+import { useEffect, useRef, useState } from "preact/hooks";
 import { api, go } from "../api.ts";
 import { Btn, Card, Err, Field, Input, Select, Tabs, Toggle, toast, toastErr, useInterval, useLoad } from "../ui.tsx";
 
@@ -409,7 +409,14 @@ const fmtMB = (n: number) => (n < 1024 * 1024 ? `${Math.max(1, Math.round(n / 10
 export function Update() {
   const [d, reload, err] = useLoad(() => api("/update"));
   const busy = ["downloading", "verifying", "installing"].includes(d?.state?.phase);
-  useInterval(() => { if (busy) reload(); }, 1000);
+  // 安装时服务端会被安装包关掉、装完再拉起来：轮询失败 = 正在重启；回来后版本变了就整页刷新
+  const ver0 = useRef("");
+  if (d?.current && !ver0.current) ver0.current = d.current;
+  const restarting = d?.state?.phase === "installing" && !!err;
+  useInterval(() => { if (busy) reload(); }, restarting ? 2000 : 1000);
+  useEffect(() => {
+    if (d?.current && ver0.current && d.current !== ver0.current) { toast(`已更新到 ${d.current}`); setTimeout(() => location.reload(), 800); }
+  }, [d?.current]);
   if (!d) return <Err msg={err} />;
   const st = d.state, info = d.info;
   const kindText: Record<string, string> = { windows: "静默安装后自动重启（需管理员确认一次）", appimage: "替换 AppImage 后自动重启", deb: "下载后给出安装命令（需管理员权限）", unsupported: "当前运行方式不支持在线更新，请从发布页下载" };
@@ -432,7 +439,7 @@ export function Update() {
       {st && st.phase !== "idle" && <div class={st.phase === "error" ? "errbox" : "card"}>
         <p>{st.message}{st.phase === "downloading" && st.total ? `：${fmtMB(st.done)} / ${fmtMB(st.total)}（${Math.round(st.done * 100 / st.total)}%）` : ""}</p>
         {st.phase === "downloading" && st.total ? <progress max={st.total} value={st.done} style="width:100%" /> : null}
-        {st.phase === "installing" && <p class="muted">服务端重启中，稍后刷新页面。</p>}
+        {st.phase === "installing" && <p class="muted">{restarting ? "服务端正在重启，好了会自动刷新…（超过 3 分钟还没好，请从开始菜单启动「Kagura 服务端」）" : "装好后服务端会重启，页面会自动刷新。"}</p>}
         {st.command && <pre>{st.command}</pre>}
       </div>}
     </Card>

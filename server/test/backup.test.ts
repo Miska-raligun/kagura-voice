@@ -6,7 +6,7 @@ import { DatabaseSync } from "node:sqlite";
 import { tmpdir } from "./helpers.ts";
 import { zip, unzip } from "../src/util/zip.ts";
 import { catalog, exportBackup, inspectBackup, stageImport, applyPending, itemOf } from "../src/backup.ts";
-import { SelfUpdater, installKind, assetFor, downloadSources, netReason } from "../src/util/selfupdate.ts";
+import { SelfUpdater, installKind, assetFor, downloadSources, netReason, windowsUpdateScript } from "../src/util/selfupdate.ts";
 
 const w = (root: string, rel: string, c: string | Buffer) => { const p = path.join(root, rel); fs.mkdirSync(path.dirname(p), { recursive: true }); fs.writeFileSync(p, c); };
 const db = (file: string, rows: string[]) => { fs.mkdirSync(path.dirname(file), { recursive: true }); const d = new DatabaseSync(file); d.exec("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS t(x TEXT)"); for (const r of rows) d.prepare("INSERT INTO t VALUES (?)").run(r); return d; };
@@ -215,5 +215,18 @@ describe("在线更新：下载源与断点续传", () => {
     }) as any;
     const st = await new SelfUpdater(tmpdir("upd"), f, "deb", undefined, { mirrors: ["https://m1.com"], stallMs: 50 }).install(info());
     expect(st.phase).toBe("manual");
+  });
+});
+
+describe("在线更新：Windows 安装脚本", () => {
+  it("选了「否」只记一笔不动服务端；装失败且服务端还活着不动；装完关掉旧托盘图标再拉起", () => {
+    const ps = windowsUpdateScript("C:\\Users\\o'k\\Kagura-Setup-1.exe", "C:\\Program Files\\Kagura\\kagura-tray.exe", "C:\\d\\update.log");
+    expect(ps).toContain("'C:\\Users\\o''k\\Kagura-Setup-1.exe'");                  // 单引号转义
+    expect(ps).toMatch(/catch \{ Log \('uac-declined/);
+    expect(ps.indexOf("installer exit")).toBeLessThan(ps.indexOf("server still running"));
+    expect(ps.indexOf("tray.ps1")).toBeLessThan(ps.indexOf("Start-Process -FilePath 'C:\\Program Files"));
+    expect(ps).toContain("'--tray','--no-browser'");
+    expect(ps).not.toMatch(/-Wait/);                                                    // 用 WaitForExit，先取句柄才读得到退出码
+    expect(ps).toContain("$null = $p.Handle");
   });
 });
