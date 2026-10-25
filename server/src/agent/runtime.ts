@@ -445,7 +445,11 @@ export class Runtime {
     const seen = new Set<string>();
     const all = this.allProviders().flatMap((p) => p(scope, agent)).filter((t) => (seen.has(t.name) ? false : (seen.add(t.name), true)));
     const allow = agent.tools.includes("*") ? null : new Set(agent.tools);
-    return all.filter((t) => (!allow || allow.has(t.name)) && (!req.toolAllow || req.toolAllow(t.name)));
+    // 这条消息已经带着照片（设备取景拍照 / 「看看这是什么」拍完发来的 / 手机发的图）：这一轮不给 take_photo。
+    // 不然模型看到「这是什么」就又去调拍照，设备对话里拍照工具只会说「下一条再拍」然后结束这一轮，
+    // 可设备刚拍完、不会再拍——对话就断在「我看看」上（2026-10-25 真机）
+    const hasImage = !!req.images?.length;
+    return all.filter((t) => (!allow || allow.has(t.name)) && (!req.toolAllow || req.toolAllow(t.name)) && !(hasImage && t.name === "take_photo"));
   }
 
   // ── 压缩 ──

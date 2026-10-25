@@ -50,6 +50,26 @@ describe("内置工具", () => {
     expect(raw).not.toContain("/9j/");
   });
 
+  it("消息已经带着照片：这一轮没有 take_photo，模型直接看图回答，不会再让设备拍一次", async () => {
+    const { rt, fake } = makeRuntime();
+    withDevice(rt);
+    const brain = new PiBrain(rt);
+    const img = path.join(fs.mkdtempSync("/tmp/kimg-"), "a.jpg");
+    fs.writeFileSync(img, Buffer.from([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3]));
+    // 模型还是想调 take_photo：工具不存在，它拿到报错后照常作答
+    fake.queue.push({ tool_calls: [{ name: "take_photo", args: { question: "这是什么" } }], then: "是一只猫" });
+    const meta: any = {};
+    const r = await brain.chat({ message: "这是什么", sessionId: "x", agent: "main", deviceId: "cores3", spoken: true, imagePath: img, meta });
+    expect(meta.needPhoto).toBeUndefined();
+    expect(r).toBe("是一只猫");
+    expect(fake.calls[0].image).toBe(true);
+    // 没带照片的普通一轮，take_photo 还在
+    fake.queue.push({ text: "我看看", tool_calls: [{ name: "take_photo", args: { question: "这是什么" } }] });
+    const meta2: any = {};
+    await brain.chat({ message: "这是什么", sessionId: "y", agent: "main", deviceId: "cores3", spoken: true, meta: meta2 });
+    expect(meta2.needPhoto).toBe(true);
+  });
+
   it("set_volume → meta.volume；没有 speak 工具（说不说出声由系统决定）", async () => {
     const { rt, fake } = makeRuntime();
     withDevice(rt);

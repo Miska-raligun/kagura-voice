@@ -72,6 +72,9 @@ CoreS3 (MicroPython) ──HTTP──▶ server/（TypeScript 单文件可执行
   `X-User-Text`/`X-Reply-Text`（b64 UTF-8，屏显用；`/chat` 与 `/chat-vision`
   都会带）。请求头：`X-Device-Id`、`X-Local-Time`、`X-Touch`（体感摘要）、
   （可选）`X-Api-Token`。
+- **带图的那一轮不给 `take_photo`**（`Runtime.toolsFor`，LRN 2026-10-25，症状「CoreS3 拍照发过去，她只说『我看看』就没下文」）：
+  照片已经随消息发给模型了，模型看到「这是什么」仍会去调 take_photo；设备对话里它只会 `needPhoto` 并结束本轮，可设备刚拍完不会再拍。
+  `req.images` 非空时把 take_photo 从这一轮的工具里拿掉，逼模型直接看图答。
 - **`/chat-vision` 三种入参形态**：`wav`+`image`（语音触发拍照）、仅 `image`
   （取景模式手动拍照，服务端用 `_PHOTO_ONLY_PROMPT` 当提问）、`text`+`image`
   （无 wav 时以 text 为提问）。`wav`/`image` 至少要有一个，否则 400。
