@@ -11,6 +11,8 @@ import { parseLocalTime, strftime } from "../util/time.ts";
 export const DEFAULT_BUDGETS: Record<string, number> = {
   "SOUL.md": 20000, "IDENTITY.md": 20000, "USER.md": 20000, "AGENTS.md": 20000, "TOOLS.md": 20000,
   "MEMORY.md": 20000, "HEARTBEAT.md": 20000, daily: 8000,
+  // 近况：别的会话 / 别的 agent 最近跟主人说过的话（字数上限；0 = 不注入）
+  recent: 4000,
 };
 export const BUDGETS: Record<string, number> = { ...DEFAULT_BUDGETS };
 

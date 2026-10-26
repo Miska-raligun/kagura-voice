@@ -57,7 +57,8 @@ export const MISS_WINDOW = 15 * 60;
 const BUSY_DELAY = 60;
 
 export const HEARTBEAT_PROMPT = "[heartbeat] 现在是例行检查时间。按 HEARTBEAT.md 的清单看看有没有需要主动告诉主人的事。"
-  + "有就直接说那句话（会被投递给主人）；没有就只回 HEARTBEAT_OK，不要寒暄。";
+  + "开口前先看对话历史和 <recent_activity>（最近在别处跟主人说过的话）：主人已经回答过的别再问，你或别人刚说过的话题别再提，"
+  + "要说就接着之前的内容往下说。有就直接说那句话（会被投递给主人）；没有新东西就只回 HEARTBEAT_OK，不要寒暄。";
 
 const nowS = () => Date.now() / 1000;
 

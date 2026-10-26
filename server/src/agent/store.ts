@@ -27,7 +27,10 @@ export class AgentStore {
         id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL NOT NULL, session TEXT NOT NULL, purpose TEXT NOT NULL,
         model TEXT NOT NULL, input INTEGER, output INTEGER, cache_read INTEGER, cache_write INTEGER, cost REAL);
       CREATE INDEX IF NOT EXISTS usage_ts ON usage(ts);
+      CREATE INDEX IF NOT EXISTS messages_ts ON messages(ts);
     `);
+    // owner：主人本人参与的会话（可信的那几种：设备、网页、主人私聊）。「近况」只从这些会话里摘，陌生人 / 群聊不混进来
+    try { this.db.exec("ALTER TABLE sessions ADD COLUMN owner INTEGER NOT NULL DEFAULT 0"); } catch { /* 已有 */ }
   }
 
   close() { try { this.db.close(); } catch { /* 已关 */ } }
@@ -36,6 +39,20 @@ export class AgentStore {
     const t = Date.now() / 1000;
     this.db.prepare(`INSERT INTO sessions(key, kind, channel, created, updated) VALUES (?, ?, ?, ?, ?)
       ON CONFLICT(key) DO UPDATE SET updated = excluded.updated`).run(key, kind, channel, t, t);
+  }
+
+  /** 这个会话里有主人本人参与（可信的一轮跑过） */
+  markOwner(key: string) { this.db.prepare("UPDATE sessions SET owner = 1 WHERE key = ? AND owner = 0").run(key); }
+
+  /**
+   * 近况用：since 之后、主人参与的会话里（除了 exclude 这个会话）的用户 / 助手消息，新的在前。
+   * 主会话、设备、网页聊天不管标没标 owner 都算（升级前的老会话没标过）；子任务会话不算。
+   */
+  recentOwnerMessages(since: number, exclude: string, limit = 300): { ts: number; role: string; data: string; channel: string; key: string }[] {
+    return this.db.prepare(`SELECT m.ts, m.role, m.data, s.channel, s.key FROM messages m JOIN sessions s ON s.key = m.session
+      WHERE m.ts > ? AND m.session != ? AND m.role IN ('user', 'assistant') AND s.key NOT LIKE '%:sub:%'
+        AND (s.owner = 1 OR s.channel IN ('device', 'webchat') OR s.key LIKE '%:main')
+      ORDER BY m.id DESC LIMIT ?`).all(since, exclude, limit) as any[];
   }
 
   getSession(key: string): SessionRow | undefined {

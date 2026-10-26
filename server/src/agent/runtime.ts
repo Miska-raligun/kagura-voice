@@ -13,7 +13,7 @@ import type { AgentRegistry, AgentInfo } from "./registry.ts";
 import type { ModelRegistry } from "./models.ts";
 import { AgentStore } from "./store.ts";
 import { toSpoken } from "../util/text.ts";
-import { buildSystemPrompt, turnContext, type SessionKind } from "./soul.ts";
+import { BUDGETS, buildSystemPrompt, turnContext, type SessionKind } from "./soul.ts";
 import { runScope, withScope, type RunScope } from "./scope.ts";
 
 /** IM 渠道：消息可能来自陌生人，默认不可信（主人私聊由渠道层显式标 trusted） */
@@ -80,6 +80,21 @@ export function estimateTokens(text: string): number {
   let cjk = 0, other = 0;
   for (const ch of text) (/[　-鿿豈-﫿＀-￯]/.test(ch) ? cjk++ : other++);
   return cjk + Math.ceil(other / 4);
+}
+
+const SILENT = /^\s*(HEARTBEAT_OK|NO_REPLY)\s*[。.!！]?\s*$/i;
+/** 系统替主人发起的那些「用户消息」（heartbeat、定时任务、系统事件、别的 agent 传话）：不是主人说的，近况里不算 */
+const NOT_OWNER = /^\s*\[(heartbeat|定时任务|系统事件|来自 |子任务|这条消息是)/;
+const CHANNEL_NAME: Record<string, string> = { device: "设备", webchat: "网页", feishu: "飞书", qq: "QQ", onebot: "QQ", system: "定时", a2a: "agent 间" };
+/** 近况看多久以内的 */
+export const RECENT_HOURS = 48;
+
+/** 一条消息里给人看的那段话：用户消息取最后一段文字（前面那段是系统自动附的 [时间…]），助手消息取正文 */
+function plainOf(m: any): string {
+  if (!m) return "";
+  if (typeof m.content === "string") return m.content;
+  const texts = (m.content ?? []).filter((c: any) => c.type === "text").map((c: any) => String(c.text));
+  return (m.role === "user" ? texts.at(-1) ?? "" : texts.join("")).trim();
 }
 
 export function messageText(m: any): string {
@@ -330,9 +345,12 @@ export class Runtime {
     const session = store.getSession(req.sessionKey);
     const tools = this.toolsFor(scope, agent, req);
     const peers = this.agents.list().filter((p) => this.agents.canContact(agent.id, p.id)).map((p) => ({ id: p.id, name: p.name }));
+    if (persist && scope.trusted) store.markOwner(req.sessionKey);
+    // 近况：这个会话看不到的、最近在别处跟主人说过的话。只给可信的会话（主人本人），陌生人 / 群聊不给
+    const recent = scope.trusted && req.kind !== "sub" && req.purpose !== "flush" ? this.recentActivity(agent, req.sessionKey) : "";
     const systemPrompt = buildSystemPrompt({
       agent, kind: req.kind, channel: req.channel, summary: session?.summary,
-      extra: req.extraSystem, skills: this.skillCatalog(agent), voiceDelivery: req.voiceDelivery,
+      extra: [...(req.extraSystem ?? []), recent], skills: this.skillCatalog(agent), voiceDelivery: req.voiceDelivery,
       peers: tools.some((t) => t.name.startsWith("sessions_")) ? peers : [],
     });
 
@@ -430,6 +448,49 @@ export class Runtime {
     if (persist && (!req.keepIf || req.keepIf(text))) store.append(req.sessionKey, fresh.map((m) => stripImages(m, agent.workspace)));
     return { text, meta: scope.meta, toolCalls, usage };
     } finally { if (!nestedRun) this.running.delete(lockKey); req.signal?.removeEventListener("abort", onOuter); }
+  }
+
+  /**
+   * 近况（LRN 2026-10-26，症状「heartbeat 主动聊天老问已经说过的事；另一个 agent 又问一遍」）：
+   * 每个会话只看得见自己的历史——飞书私聊、网页聊天、独立定时任务、别的 agent 各说各的，跨会话只能靠 agent 自己写记忆文件。
+   * 这里直接从库里摘最近 RECENT_HOURS 小时、别处（自己的其它会话 + 其他 agent）跟主人的往来，按时间排好放进系统提示，
+   * 并明说「说过的别再问、别再重复」。零额外模型调用；字数上限 BUDGETS.recent（0 = 关）。
+   */
+  recentActivity(agent: AgentInfo, currentKey: string): string {
+    const budget = BUDGETS.recent ?? 0;
+    if (budget <= 0) return "";
+    const since = Date.now() / 1000 - RECENT_HOURS * 3600;
+    const items: { ts: number; line: string }[] = [];
+    for (const a of this.agents.list()) {
+      let rows: ReturnType<AgentStore["recentOwnerMessages"]>;
+      try { rows = this.store(a.id).recentOwnerMessages(since, a.id === agent.id ? currentKey : "", 200); } catch { continue; }
+      const mine = a.id === agent.id;
+      for (const r of rows) {
+        let msg: any;
+        try { msg = JSON.parse(r.data); } catch { continue; }
+        const text = plainOf(msg).replace(/\s+/g, " ");
+        if (!text || SILENT.test(text)) continue;
+        if (r.role === "user" && NOT_OWNER.test(text)) continue;
+        const where = CHANNEL_NAME[r.channel] ?? r.channel;
+        const who = r.role === "user" ? "主人" : mine ? "你" : a.name;
+        const tag = mine ? where : `${a.name}·${where}`;
+        const d = new Date(r.ts * 1000);
+        const when = `${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+        items.push({ ts: r.ts, line: `- ${when} [${tag}] ${who}：${Array.from(text).slice(0, 160).join("")}` });
+      }
+    }
+    if (!items.length) return "";
+    items.sort((x, y) => y.ts - x.ts);
+    const out: string[] = [];
+    let used = 0;
+    for (const it of items) {
+      used += it.line.length + 1;
+      if (used > budget) break;
+      out.push(it.line);
+    }
+    return "<recent_activity>\n最近两天在别的对话里（你在其它渠道、以及家里其他 agent）跟主人的往来，按时间排列、已截断。"
+      + "这些都已经发生过：主人说过的事别再问，你或别人已经说过的话别再重复，需要时自然地接上。\n"
+      + out.reverse().join("\n") + "\n</recent_activity>";
   }
 
   /** 某个 agent 在普通会话里能看到的全部内置工具（管理界面白名单用，不过滤白名单本身） */

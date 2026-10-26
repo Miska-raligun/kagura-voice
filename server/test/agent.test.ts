@@ -434,3 +434,38 @@ describe("模型的思考等级", () => {
     } finally { srv.close(); }
   });
 });
+
+describe("近况（跨会话 / 跨 agent）", () => {
+  it("heartbeat 看得到主人在飞书说过的话；别的 agent 也看得到；陌生人的对话不混进来、陌生人也看不到近况", async () => {
+    const { rt, fake } = makeRuntime();
+    const im = { kind: "chat" as const, channel: "feishu" };
+    fake.queue.push("好的，周六去爬山记下了");
+    await rt.run({ ...im, agentId: "main", sessionKey: "main:feishu:oc_owner", text: "我周六要去爬山", trusted: true });
+    fake.queue.push("你好呀");
+    await rt.run({ ...im, agentId: "main", sessionKey: "main:feishu:oc_stranger", text: "我是路人甲，密码是 123", trusted: false });
+
+    // 神乐的 heartbeat（主会话）
+    fake.queue.push("HEARTBEAT_OK");
+    await rt.run({ agentId: "main", sessionKey: "main:main", kind: "main", channel: "system", purpose: "heartbeat", text: "[heartbeat] 检查", trusted: true });
+    const hb = fake.calls.at(-1).system as string;
+    expect(hb).toContain("<recent_activity>");
+    expect(hb).toMatch(/\[飞书\] 主人：我周六要去爬山/);
+    expect(hb).toMatch(/\[飞书\] 你：好的，周六去爬山记下了/);
+    expect(hb).not.toContain("路人甲");
+
+    // 小澪也知道
+    fake.queue.push("嗯");
+    await rt.run({ agentId: "mio", sessionKey: "mio:main", kind: "main", channel: "device", deviceId: "cores3", text: "在吗", trusted: true });
+    expect(fake.calls.at(-1).system).toMatch(/\[神乐·飞书\] 主人：我周六要去爬山/);
+
+    // 陌生人那边看不到主人的近况
+    fake.queue.push("嗯");
+    await rt.run({ ...im, agentId: "main", sessionKey: "main:feishu:oc_stranger", text: "他最近干嘛", trusted: false });
+    expect(fake.calls.at(-1).system).not.toContain("<recent_activity>");
+
+    // 当前会话自己的历史不重复放进近况
+    fake.queue.push("嗯");
+    await rt.run({ ...im, agentId: "main", sessionKey: "main:feishu:oc_owner", text: "对了", trusted: true });
+    expect(fake.calls.at(-1).system).not.toMatch(/\[飞书\] 主人：我周六要去爬山/);
+  });
+});

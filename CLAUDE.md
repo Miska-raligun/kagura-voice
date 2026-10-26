@@ -319,6 +319,12 @@ CoreS3 (MicroPython) ──HTTP──▶ server/（TypeScript 单文件可执行
   agent 每轮走 `ModelRegistry.chatStream`（Agent 的 `streamFn`）按 `thinkingParams` 加字段：MiniMax / 智谱只有开关，DeepSeek 加 `reasoning_effort`，
   通义加 `thinking_budget`，认不出的服务商「关」就不发（别乱发不认识的字段）。**思考在这几家都算进 max_tokens，改不了**——所以 `max_tokens` 的含义是
   「回复本身的上限」，请求时另加 `THINK_RESERVE`（默认 +4k / 低 +2k / 中 +6k / 高 +16k / 关 0），思考就挤不掉回复。
+- **近况（`Runtime.recentActivity`，LRN 2026-10-26，症状「heartbeat / 主动聊天老问已经说过的事；换个 agent 又问一遍」）**：
+  每个会话只看得见自己的历史——飞书私聊（没开 owner_main 时）、网页聊天、独立定时任务、别的 agent 各说各的，跨会话以前只能靠 agent 自己写记忆文件。
+  现在每轮（只给可信会话、不给子任务 / 记忆冲刷）从库里摘最近 `RECENT_HOURS`（48）小时、**别处**跟主人的往来：本 agent 的其它会话 + 其他 agent 的，
+  按时间排、每条截 160 字、总量 `BUDGETS.recent`（4000 字，`prompt_budgets.recent` 可调，0 = 关），作为 `<recent_activity>` 放进系统提示，明说「说过的别再问、别再重复」。
+  只摘「主人参与的会话」：`sessions.owner`（可信的一轮跑过就标上）或主会话 / 设备 / 网页；**陌生人、群聊的对话不混进来，不可信会话也拿不到近况**——别放宽，
+  否则就是把主人的事讲给路人听。heartbeat 们的「用户消息」（`[heartbeat]` / `[定时任务` 等）不算主人说的话。零额外模型调用。
 - **设备文件同步（`ota.py`，管理界面「设备 → 图片与代码」）**：服务端 `server/src/devicefiles.ts` 存
   `<数据目录>/device_files/`（自定义）+ 构建时打进来的 `device/src`（`virtual:device-fw`，版本 = 服务端版本）；
   MQTT `{"action":"sync","scope":"res|code|all"}` → 设备空闲时 `GET /device/files` 拿清单（路径/大小/sha256）
