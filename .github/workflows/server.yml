@@ -51,7 +51,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: "24"            # 发布产物用 Node 24 LTS（node:sqlite 已转正）
+          node-version: "24.22.1"       # 发布产物用 Node 24 LTS，锁到具体版本：只写 "24" 会用到运行器缓存里的旧版（rc.24 用的 24.21.0 有 RCE 漏洞）
           cache: npm
           cache-dependency-path: server/package-lock.json
       - uses: actions/setup-python@v5
