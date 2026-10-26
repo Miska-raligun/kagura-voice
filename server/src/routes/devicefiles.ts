@@ -180,7 +180,7 @@ function registerAppImages(r: Router, ctx: Ctx, files: DeviceFiles, imgs: AppIma
     return {
       name: s.base, desc: s.desc,
       phone: own ? { ext: own.ext, n: imgs.read(role, s.base)?.data.length ?? 0 } : null,
-      using: own ? "phone" : !hit ? "none" : `${hit.src === "app" ? "phone" : "cores3"}${hit.role === role ? "" : "-default"}${hit.name === s.base ? "" : "-bg"}`,
+      using: own ? "phone" : !hit ? "none" : `${hit.src === "app" ? "phone" : "device"}${hit.role === role ? "" : "-default"}${hit.name === s.base ? "" : "-bg"}`,
     };
   });
 

@@ -104,7 +104,7 @@ export function DeviceFiles() {
       </Card>
 
       <Card title="角色图片" actions={<>
-        <Select value={target} onChange={setTarget} options={[["cores3", "CoreS3"], ["phone", "手机 / 平板"]]} />
+        <Select value={target} onChange={setTarget} options={[["cores3", "硬件设备"], ["phone", "手机 / 平板"]]} />
         <Select value={role} onChange={setRole}
           options={d.roles.map((r: any) => [r.id, r.id ? `${r.name}（${r.id}）` : `${r.name}（默认）`] as [string, string])} /></>}>
         {target === "phone" ? <PhoneImages role={role} slots={d.slots} coreFiles={files} /> : <>
@@ -165,17 +165,17 @@ function PhoneImages(p: { role: string; slots: any[]; coreFiles: Map<string, any
   const fallback = (name: string): { src: string; text: string } | null => {
     for (const ro of p.role ? [p.role, ""] : [""]) {
       for (const n of name === "img_bg" ? [name] : [name, "img_bg"]) {
-        if ((ro !== p.role || n !== name) && has(ro, n)) return { src: raw(ro, n), text: `沿用手机${ro === p.role ? "" : "默认角色"}${n === name ? "" : "的待机图"}` };
+        if ((ro !== p.role || n !== name) && has(ro, n)) return { src: raw(ro, n), text: "沿用" };
       }
       for (const n of name === "img_bg" ? [name] : [name, "img_bg"]) {
         const f = core(ro, n);
-        if (f) return { src: `/api/admin/device-files/raw?p=${enc(f.p)}&t=${bust}`, text: `沿用 CoreS3${ro === p.role ? "" : "默认角色"}${n === name ? "" : "的待机图"}` };
+        if (f) return { src: `/api/admin/device-files/raw?p=${enc(f.p)}&t=${bust}`, text: "沿用" };
       }
     }
     return null;
   };
   return <>
-    <p class="muted">手机 / 平板网页上显示的图，和 CoreS3 分开存：不裁切、不限比例（竖图也行），单张最大 4MB，太大的会自动缩到长边 {PHONE_SIDE}。没传的沿用 CoreS3 那套。手机上点右上角「形象」也能改。</p>
+    <p class="muted">不裁切、不限比例；没传的沿用硬件设备那套。</p>
     <div class="slots">{p.slots.map((s: any) => {
       const own = has(p.role, s.base), fb = own ? null : fallback(s.base);
       return (
@@ -183,14 +183,14 @@ function PhoneImages(p: { role: string; slots: any[]; coreFiles: Map<string, any
           {own ? <img class="tall" src={raw(p.role, s.base)} />
             : fb ? <div class="ph tall"><img class="dim" src={fb.src} /><span>{fb.text}</span></div>
               : <div class="ph tall"><span>未设置</span></div>}
-          <div class="row"><b>{s.base}</b><small class="muted grow">{s.desc}{own && ` · ${own.ext.toUpperCase()} ${(own.n / 1024).toFixed(0)}KB`}</small></div>
+          <div class="row"><b>{s.base}</b><small class="muted grow">{s.desc}</small></div>
           <div class="row">
             <Btn small onClick={async () => {
               const [file] = await pick("image/*");
               if (!file) return;
-              try { await api("/app-images", { method: "PUT", body: { role: p.role, name: s.base, b64: await toPhoneImage(file) } }); toast("已上传，开着的手机页面会自动换上"); refresh(); } catch (e) { toastErr(e); }
+              try { await api("/app-images", { method: "PUT", body: { role: p.role, name: s.base, b64: await toPhoneImage(file) } }); toast("已上传"); refresh(); } catch (e) { toastErr(e); }
             }}>{own ? "替换" : "上传"}</Btn>
-            {own && <Btn small kind="danger" onClick={confirmDo(`删除手机的 ${p.role || "默认"}/${s.base}？之后沿用 CoreS3 那套。`, async () => {
+            {own && <Btn small kind="danger" onClick={confirmDo(`删除 ${s.base}？`, async () => {
               try { await api(`/app-images?role=${enc(p.role)}&name=${s.base}`, { method: "DELETE" }); refresh(); } catch (e) { toastErr(e); }
             })}>删除</Btn>}
           </div>

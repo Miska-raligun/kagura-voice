@@ -402,7 +402,7 @@ CoreS3 (MicroPython) ──HTTP──▶ server/（TypeScript 单文件可执行
   管理界面里手机和 CoreS3 在同一张设备表（`/api/admin/devices` 带 `kind: "phone"`），配对入口是表上的「＋ 添加手机」。
   舞台图跟着状态换，规则抄设备端 `ui._IMG_MAP`（待机 img_bg / 录音 img_recording / 思考 img_streaming / 说话 img_playing，角色目录优先、缺了退 img_bg）——
   改设备端的映射要同步改 `app.html` 的 `IMG_MAP`；图预先解码好、复用同一个 `<img>` 换 src。
-  **手机有自己的一套图**（`server/src/appimages.ts`，`<数据目录>/app_images/[角色/]<图名>.<jpg|png|webp>`，LRN 2026-10-26）：CoreS3 那套受设备内存所限是 320×240 JPEG，
+  **手机有自己的一套图**（界面上别写「CoreS3」，硬件设备不止这一种，统称「硬件设备」；也别加大段说明小字）（`server/src/appimages.ts`，`<数据目录>/app_images/[角色/]<图名>.<jpg|png|webp>`，LRN 2026-10-26）：CoreS3 那套受设备内存所限是 320×240 JPEG，
   手机屏幕大、竖着拿，两套分开存，手机这套不裁、不限比例、单张 4MB。手机只请求 `GET /app/img?role=&name=`，**挑图在服务端 `resolve`**：
   先角色的、再默认的（角色对不上比画质差更糟）；同一层手机的优先；手机这套缺了某个状态用手机这套的待机图（别和 320×240 的混着闪）；再退 CoreS3 那套。
   改这个顺序要同步管理界面 `PhoneImages.fallback`。入口：手机右上角「形象」（`/client/images`，配对令牌）、管理界面「设备 → 图片与代码」切到「手机 / 平板」。

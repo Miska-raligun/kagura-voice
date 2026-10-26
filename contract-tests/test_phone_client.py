@@ -215,7 +215,7 @@ def test_phone_images_separate_from_cores3(token_server):
         # 恢复：删掉手机的，回到 CoreS3 那套
         assert _bare(s, "DELETE", "/client/images?role=&name=img_bg", token).status_code == 200
         assert _bare(s, "GET", "/app/img?name=img_bg").headers["X-Img-Src"] == "device"
-        assert _bare(s, "GET", "/client/images?role=", token).json()["slots"][0]["using"] == "cores3"
+        assert _bare(s, "GET", "/client/images?role=", token).json()["slots"][0]["using"] == "device"
     finally:
         s.request("DELETE", "/api/admin/device-files?p=resource/img_bg.jpg")
         s.request("DELETE", "/api/admin/app-images?role=&name=img_bg")

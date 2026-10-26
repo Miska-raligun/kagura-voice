@@ -20,7 +20,7 @@ export function Devices() {
       {tab === "list" && <>
         <Card title="设备" actions={<Btn small onClick={() => setAdding(!adding)}>{adding ? "收起" : "＋ 添加手机"}</Btn>}>
           {adding && <AddPhone onDone={reload} />}
-          {devs?.length ? <table class="hover"><thead><tr><th>设备</th><th>状态</th><th>电量</th><th>信号</th><th>看门狗</th><th title="CoreS3 扬声器音量，调完会用当前角色的声音说一句">音量</th><th title="受信设备的对话可使用执行命令等功能">受信</th><th>当前角色</th></tr></thead>
+          {devs?.length ? <table class="hover"><thead><tr><th>设备</th><th>状态</th><th>电量</th><th>信号</th><th>看门狗</th><th title="扬声器音量">音量</th><th title="受信设备的对话可使用执行命令等功能">受信</th><th>当前角色</th></tr></thead>
             <tbody>{devs.map((d) => (
               <tr class={d.id === cur ? "on" : ""} onClick={() => setSel(d.id)}>
                 <td>{d.kind === "phone" ? <>📱 {d.name} <small class="muted">{d.id}</small></> : d.id}</td>
@@ -133,7 +133,7 @@ function AddPhone({ onDone }: { onDone: () => void }) {
   };
   return (
     <div class="card" style="margin-bottom:12px">
-      <p class="muted">手机用浏览器打开后就是一台新设备：用手机的麦克风、喇叭、摄像头跟她对话（记忆和角色与 CoreS3 共用），「看家」页能远程看 CoreS3 的画面、拍照。配好后它会出现在下面的表里，角色在那里选。</p>
+      <p class="muted">手机扫码打开即可对话，记忆和角色与其它设备共用。</p>
       <div class="form">
         <Field label="手机能访问到的地址" wide hint={https ? "HTTPS 地址：按住说话也能用。" : <>局域网 http 地址：打字、听她说话、收推送、拍照、看家都能用，只有「按住说话」不行（浏览器只在 <b>HTTPS</b> 下让网页录音），且只能在家里 WiFi 下用。想按住说话、出门在外也能连：装 Tailscale 用它给的 https 地址，见 README「手机客户端」。</>}>
           <Input value={base} placeholder={guess || "https://你的电脑.tail1234.ts.net"} onInput={setBase} />

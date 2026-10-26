@@ -137,7 +137,6 @@ main { position:relative; z-index:1; flex:1; min-height:0; }
 .look .tag { position:absolute; left:6px; top:6px; padding:1px 8px; border-radius:10px; font-size:11.5px; background:var(--glass2); border:1px solid var(--line); backdrop-filter:blur(8px); -webkit-backdrop-filter:blur(8px); }
 .look .tag.own { background:var(--accent); color:var(--accent-fg); border-color:var(--accent); font-weight:600; }
 .look .meta { padding:8px 10px 2px; font-size:14px; font-weight:600; }
-.look .meta small { display:block; font-weight:400; font-size:12px; color:var(--faint); }
 .look .btns { margin:6px 8px 10px; gap:6px; }
 .look .btn { height:30px; padding:0 12px; font-size:13px; }
 .look.busy .pic::after { content:"上传中…"; position:absolute; inset:0; display:flex; align-items:center; justify-content:center; background:#0008; color:var(--fg); }
@@ -218,7 +217,7 @@ main { position:relative; z-index:1; flex:1; min-height:0; }
         </div>
         <div class="card">
           <h3>实时画面</h3>
-          <div class="live"><img id="liveImg" alt="" class="hidden"><div class="hint" id="liveHint">点「开始看」，CoreS3 的摄像头会开始推流（离开这页会自动停）</div></div>
+          <div class="live"><img id="liveImg" alt="" class="hidden"><div class="hint" id="liveHint">点「开始看」</div></div>
           <div class="btns">
             <button class="btn primary" id="liveBtn">开始看</button>
             <button class="btn" id="snapBtn">拍一张</button>
@@ -236,8 +235,7 @@ main { position:relative; z-index:1; flex:1; min-height:0; }
     <section class="page hidden" id="lookPage">
       <div class="home">
         <div class="card">
-          <h3>手机上的样子<select id="lookRole" aria-label="角色"></select></h3>
-          <div class="faint" style="font-size:13px;margin:-2px 0 12px">这套图只在手机 / 平板上显示，和 CoreS3 那套分开存，可以传高清、竖着的图。哪张没传，就沿用 CoreS3 那套。</div>
+          <h3>形象<select id="lookRole" aria-label="角色"></select></h3>
           <div class="looks" id="looks"></div>
         </div>
       </div>
@@ -748,7 +746,7 @@ async function chooseImage(title, extra = []) {
 
 // 聊天里发照片：缩到长边 1280 的 JPEG（手机原图好几 MB，服务端上限 5MB）
 $("camBtn").onclick = async () => {
-  const f = await chooseImage("发一张照片给她");
+  const f = await chooseImage("");
   if (f instanceof File) attachPhoto(f);
 };
 async function attachPhoto(f) {
@@ -830,7 +828,7 @@ async function refreshHome() {
     if (!devs.length) { const o = document.createElement("option"); o.value = ""; o.textContent = "还没有设备连上来"; sel.appendChild(o); }
   }
   const dev = selDev();
-  if (!dev) { $("devKv").innerHTML = '<span class="faint">CoreS3 开机连上服务端后会出现在这里</span>'; return; }
+  if (!dev) { $("devKv").innerHTML = '<span class="faint">还没有设备</span>'; return; }
   try {
     const st = await apiJson("/api/monitor/state?device_id=" + encodeURIComponent(dev));
     const d = st.devices[dev] || {};
@@ -860,7 +858,7 @@ async function startLive() {
   try { await apiJson("/api/monitor/stream", { method: "POST", json: { device_id: dev, action: "start" } }); }
   catch (e) { return toast("开不了：" + e.message, true); }
   H.live = true; H.dev = dev; H.seq = -1;
-  $("liveBtn").textContent = "停止"; $("liveHint").textContent = "连接中…（CoreS3 要几秒才开始推流）";
+  $("liveBtn").textContent = "停止"; $("liveHint").textContent = "连接中…";
   // 网页每 20 秒续期一次，设备 45 秒没续期就自己停——关掉页面摄像头也不会一直开着
   H.renew = setInterval(() => api("/api/monitor/stream", { method: "POST", json: { device_id: dev, action: "start" } }).catch(() => {}), 20000);
   pollFrames(dev);
@@ -898,7 +896,7 @@ async function capture(hires) {
     const d = await apiJson("/api/monitor/capture", { method: "POST", json: { device_id: dev, hires } });
     H.rid = d.request_id;
     if (d.status !== "done") {
-      toast("CoreS3 正在拍…");
+      toast("正在拍…");
       for (let i = 0; i < 50; i++) {
         await new Promise((r) => setTimeout(r, 1000));
         const r = await api("/capture-result/" + H.rid);
@@ -919,23 +917,14 @@ function showPhoto(src, rid) {
 $("snapBtn").onclick = () => capture(false);
 $("hiresBtn").onclick = () => capture(true);
 $("describeBtn").onclick = async () => {
-  try { await apiJson("/api/monitor/describe", { method: "POST", json: { request_id: H.rid, device_id: selDev() } }); toast("好，她会在 CoreS3 上说"); }
+  try { await apiJson("/api/monitor/describe", { method: "POST", json: { request_id: H.rid, device_id: selDev() } }); toast("好"); }
   catch (e) { toast(e.message, true); }
 };
 
 // ── 形象：手机上显示的角色图（GET/PUT/DELETE /client/images，存在服务端 app_images/，和 CoreS3 那套分开） ──
-const SLOT_NAMES = { img_bg: ["待机", "平时 / 头像 / 底色都用它"], img_recording: ["在听", "按住说话的时候"], img_streaming: ["在想", "等她回复的时候"], img_playing: ["在说", "她说话的时候"], img_shake: ["摇一摇", "摇手机的彩蛋"] };
+const SLOT_NAMES = { img_bg: "待机", img_recording: "在听", img_streaming: "在想", img_playing: "在说", img_shake: "摇一摇" };
 const MAX_UP = 3.5 * 1024 * 1024, MAX_SIDE = 2560;
 let lookRole = null;
-function usingText(u) {
-  if (u === "phone") return "手机";
-  if (u === "none") return "未设置";
-  const parts = u.split("-");
-  let t = parts[0] === "phone" ? "沿用" : "沿用 CoreS3";
-  if (parts.includes("default")) t += parts[0] === "phone" ? "默认角色" : "（默认角色）";
-  if (parts.includes("bg")) t = (parts.includes("default") || parts[0] !== "phone" ? t + " · " : "") + "用待机图";
-  return t;
-}
 async function renderLooks() {
   const sel = $("lookRole");
   if (lookRole === null || !S.roles.some((r) => r.id === lookRole)) lookRole = S.role;
@@ -948,18 +937,17 @@ async function renderLooks() {
   catch (e) { box.innerHTML = ""; box.textContent = "读取失败：" + e.message; return; }
   box.innerHTML = "";
   for (const sl of d.slots) {
-    const [label, hint] = SLOT_NAMES[sl.name] || [sl.name, sl.desc];
+    const label = SLOT_NAMES[sl.name] || sl.name;
     const el = document.createElement("div"); el.className = "look";
     const pic = document.createElement("div"); pic.className = "pic" + (sl.using === "phone" ? "" : " borrowed");
     if (sl.using !== "none") { const i = document.createElement("img"); i.alt = label; i.src = imgUrl(lookRole, sl.name); pic.appendChild(i); }
     else pic.textContent = "没有图";
-    const tag = document.createElement("span"); tag.className = "tag" + (sl.using === "phone" ? " own" : ""); tag.textContent = usingText(sl.using); pic.appendChild(tag);
+    if (sl.using !== "phone" && sl.using !== "none") { const tag = document.createElement("span"); tag.className = "tag"; tag.textContent = "沿用"; pic.appendChild(tag); }
     const meta = document.createElement("div"); meta.className = "meta"; meta.textContent = label;
-    const sm = document.createElement("small"); sm.textContent = hint; meta.appendChild(sm);
     const btns = document.createElement("div"); btns.className = "btns";
     const up = document.createElement("button"); up.className = "btn" + (sl.phone ? "" : " primary"); up.textContent = sl.phone ? "换一张" : "传一张";
     up.onclick = async () => {
-      const f = await chooseImage(`${label} · 手机上显示`);
+      const f = await chooseImage(label);
       if (!(f instanceof File)) return;
       el.classList.add("busy");
       try {
@@ -974,7 +962,7 @@ async function renderLooks() {
     if (sl.phone) {
       const rm = document.createElement("button"); rm.className = "btn"; rm.textContent = "恢复";
       rm.onclick = async () => {
-        if (!(await sheet(`删掉手机上的「${label}」图，沿用 CoreS3 那套？`, [{ label: "删掉，恢复", value: "y", danger: true }]))) return;
+        if (!(await sheet("", [{ label: "恢复默认", value: "y", danger: true }]))) return;
         try { await apiJson(`/client/images?role=${encodeURIComponent(lookRole)}&name=${sl.name}`, { method: "DELETE" }); } catch (e) { toast(e.message, true); }
         imagesChanged();
       };
