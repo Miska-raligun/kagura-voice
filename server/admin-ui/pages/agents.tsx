@@ -25,9 +25,9 @@ export function Agents({ arg }: { arg: string }) {
 }
 
 function NewAgent({ list, done }: { list: any[]; done: (id?: string) => void }) {
-  const [f, set] = useState({ id: "", name: "", per: "111", copy_from: "" });
+  const [f, set] = useState({ id: "", name: "", per: "111", copy_from: "", workspace_dir: "" });
   const create = async () => {
-    await api("/agents", { body: { id: f.id, name: f.name || f.id, per: Number(f.per), copy_from: f.copy_from || undefined } });
+    await api("/agents", { body: { id: f.id, name: f.name || f.id, per: Number(f.per), copy_from: f.copy_from || undefined, workspace_dir: f.workspace_dir.trim() || undefined } });
     toast("已创建");
     done(f.id);
   };
@@ -38,6 +38,7 @@ function NewAgent({ list, done }: { list: any[]; done: (id?: string) => void }) 
         <Field label="名字"><Input value={f.name} onInput={(v) => set({ ...f, name: v })} /></Field>
         <Field label="百度音色 per"><Input value={f.per} onInput={(v) => set({ ...f, per: v })} /></Field>
         <Field label="复制人设自"><Select value={f.copy_from} onChange={(v) => set({ ...f, copy_from: v })} options={[["", "不复制（模板）"], ...list.map((a) => [a.id, a.name] as [string, string])]} /></Field>
+        <Field label="工作目录" hint="留空用默认位置；可以指向已有的工作区"><Input value={f.workspace_dir} placeholder="默认" onInput={(v) => set({ ...f, workspace_dir: v })} /></Field>
       </div>
       <Btn kind="primary" onClick={create} disabled={!f.id}>创建</Btn>
     </Card>
@@ -56,7 +57,7 @@ function AgentDetail({ id, onChange }: { id: string; onChange: () => void }) {
         <div class="actions">
           <Btn kind="ghost" onClick={() => go("sessions", `${id}|${id}:webchat:${Date.now().toString(36)}`)}>新对话</Btn>
           <Btn kind="ghost" onClick={() => go("sessions", id)}>会话</Btn>
-          <Btn kind="danger" onClick={confirmDo(`删除 ${a.name}？目录将移至 agents/.trash/。`, async () => { await api(`/agents/${enc(id)}`, { method: "DELETE" }); toast("已删除"); onChange(); go("agents"); })}>删除</Btn>
+          <Btn kind="danger" onClick={confirmDo(`删除 ${a.name}？目录将移至 agents/.trash/${a.workspace_dir ? "（自定义工作目录不会动）" : ""}。`, async () => { await api(`/agents/${enc(id)}`, { method: "DELETE" }); toast("已删除"); onChange(); go("agents"); })}>删除</Btn>
         </div>
       </div>
       <Tabs value={tab} onChange={setTab} tabs={[["basic", "基本"], ["soul", "人设文件"], ["tools", "工具与技能"], ["heartbeat", "Heartbeat"], ["a2a", "通信权限"]]} />
@@ -102,12 +103,15 @@ function Basic({ a, save }: { a: any; save: (p: any) => Promise<void> }) {
         <Field label="语音回复字数" hint="设备语音回复、IM 回复朗读的字数上限"><Input type="number" value={f.voice_max_chars} onInput={(v) => set({ ...f, voice_max_chars: v })} /></Field>
         <Field label="压缩阈值（token）" hint="历史超出后压缩为摘要"><Input type="number" value={f.compaction.max_tokens} onInput={(v) => set({ ...f, compaction: { ...f.compaction, max_tokens: v } })} /></Field>
         <Field label="压缩后保留条数"><Input type="number" value={f.compaction.keep_messages} onInput={(v) => set({ ...f, compaction: { ...f.compaction, keep_messages: v } })} /></Field>
+        <Field label="工作目录" wide hint={a.workspace_error ? <span class="over">{a.workspace_error}</span> : <>当前：<code>{a.workspace}</code></>}>
+          <Input value={f.workspace_dir ?? ""} placeholder="默认（数据目录 agents/ 下）" onInput={(v) => set({ ...f, workspace_dir: v })} /></Field>
         <Field label="会话" wide><Toggle checked={f.device_in_main} onChange={(v) => set({ ...f, device_in_main: v })} label="设备对话并入 main 会话" /></Field>
       </div>
       <Btn kind="primary" onClick={() => save({
         name: f.name, aliases: String(f.aliases).split(/[,，\s]+/).filter(Boolean), per: Number(f.per), tts_provider: f.tts_provider ?? "", tts_voice: f.tts_voice ?? "", device_role: f.device_role,
         model: f.model, cheap_model: f.cheap_model, order: Number(f.order), voice_max_chars: Number(f.voice_max_chars),
         compaction: { max_tokens: Number(f.compaction.max_tokens), keep_messages: Number(f.compaction.keep_messages) }, device_in_main: f.device_in_main,
+        workspace_dir: String(f.workspace_dir ?? "").trim(),
       })}>保存</Btn>
     </Card>
   );

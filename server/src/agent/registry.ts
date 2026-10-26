@@ -5,8 +5,12 @@
 //                                   memory/YYYY-MM-DD.md  skills/  files/
 //   agents/<id>/agent.sqlite        会话、消息、用量、记忆索引（AgentStore）
 //
+// 工作目录可以改到别处（agent.json 的 workspace_dir，绝对路径或 ~/…；空 = 上面的默认位置）：
+// 人设、记忆、技能、exec 的默认目录都跟着走；agent.json 和 agent.sqlite 始终留在数据目录。
+//
 // 首次启动（agents/ 为空）按 config.roles 建：每个角色一个 agent，id = 角色的 agent 名。
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import type { RoleDef } from "../config.ts";
 
@@ -44,12 +48,29 @@ export interface AgentConfig {
   device_in_main: boolean;
   /** 语音回复的字数提示 */
   voice_max_chars: number;
+  /** 自定义工作目录（绝对路径或 ~/…）；空 = agents/<id>/workspace */
+  workspace_dir: string;
 }
 
 export interface AgentInfo extends AgentConfig {
   dir: string;
+  /** 实际在用的工作目录 */
   workspace: string;
+  /** 自定义工作目录用不了（盘没插、没权限）时的原因；这时临时退回默认目录 */
+  workspace_error?: string;
 }
+
+/** 工作目录：自定义的（展开 ~、规范化）或默认的 agents/<id>/workspace */
+export function resolveWorkspace(agentDir: string, custom: string): string {
+  const c = String(custom ?? "").trim();
+  if (!c) return path.join(agentDir, "workspace");
+  const expanded = c === "~" || c.startsWith("~/") || c.startsWith("~\\") ? path.join(os.homedir(), c.slice(1)) : c;
+  return path.resolve(expanded);
+}
+const inside = (parent: string, child: string) => {
+  const r = path.relative(parent, child);
+  return r === "" || (!r.startsWith("..") && !path.isAbsolute(r));
+};
 
 const DEFAULTS: Omit<AgentConfig, "id" | "name"> = {
   aliases: [], per: 111, tts_provider: "", tts_voice: "", device_role: "", order: 0, model: "", cheap_model: "",
@@ -59,6 +80,7 @@ const DEFAULTS: Omit<AgentConfig, "id" | "name"> = {
   compaction: { max_tokens: 60000, keep_messages: 30 },
   device_in_main: true,
   voice_max_chars: 80,
+  workspace_dir: "",
 };
 
 export function templates(name: string): Record<string, string> {
@@ -91,6 +113,10 @@ function normalize(raw: any, id: string): AgentConfig {
   c.device_role = String(c.device_role ?? "");
   if (!ROLE_ID_RE.test(c.device_role)) throw new Error(`agent ${id} 的 device_role 只能用字母/数字/_-: ${c.device_role}`);
   c.order = Number(c.order ?? 0);
+  c.workspace_dir = String(c.workspace_dir ?? "").trim();
+  if (c.workspace_dir && !(path.isAbsolute(c.workspace_dir) || c.workspace_dir === "~" || /^~[\\/]/.test(c.workspace_dir))) {
+    throw new Error(`工作目录要写完整路径（例如 D:\\Kagura\\${id} 或 /home/me/${id}），也可以用 ~/ 开头`);
+  }
   c.tools = Array.isArray(c.tools) ? c.tools.map(String) : ["*"];
   c.skills = Array.isArray(c.skills) ? c.skills.map(String) : ["*"];
   c.a2a = { allow: Array.isArray(raw?.a2a?.allow) ? raw.a2a.allow.map(String) : [] };
@@ -128,10 +154,48 @@ export class AgentRegistry {
 
   private read(id: string): AgentInfo {
     const dir = path.join(this.root, id);
-    const raw = JSON.parse(fs.readFileSync(path.join(dir, "agent.json"), "utf8"));
-    const ws = path.join(dir, "workspace");
-    for (const sub of ["memory", "skills", "files"]) fs.mkdirSync(path.join(ws, sub), { recursive: true });
-    return { ...normalize(raw, id), dir, workspace: ws };
+    const conf = normalize(JSON.parse(fs.readFileSync(path.join(dir, "agent.json"), "utf8")), id);
+    const mk = (ws: string) => { for (const sub of ["memory", "skills", "files"]) fs.mkdirSync(path.join(ws, sub), { recursive: true }); };
+    const ws = resolveWorkspace(dir, conf.workspace_dir);
+    try { mk(ws); return { ...conf, dir, workspace: ws }; }
+    catch (e: any) {
+      if (!conf.workspace_dir) throw e;
+      // 自定义目录暂时用不了（移动硬盘没插、网络盘断开）：先用默认目录顶上，别让整个 agent 加载失败
+      const fallback = path.join(dir, "workspace");
+      mk(fallback);
+      const why = `${ws} 用不了（${e.code || e.message}），暂时用默认目录`;
+      console.log(`[agent] ⚠️  ${id} 的工作目录 ${why}`);
+      return { ...conf, dir, workspace: fallback, workspace_error: why };
+    }
+  }
+
+  /** 检查自定义工作目录：不能包住数据目录，也不能和别的 agent 的工作目录重叠（记忆会串） */
+  private checkWorkspace(id: string, custom: string) {
+    if (!custom) return;
+    const ws = resolveWorkspace(path.join(this.root, id), custom);
+    if (inside(ws, this.root)) throw new Error("工作目录不能是数据目录或它的上级目录");
+    for (const a of this.list()) {
+      if (a.id === id) continue;
+      if (inside(ws, a.workspace) || inside(a.workspace, ws)) throw new Error(`工作目录和 ${a.name}（${a.id}）的工作目录重叠了`);
+    }
+    if (fs.existsSync(ws) && !fs.statSync(ws).isDirectory()) throw new Error(`${ws} 不是文件夹`);
+  }
+
+  /**
+   * 换工作目录：新目录是空的（或不存在）就把旧目录里的东西整个复制过去；已经有东西（比如原来 OpenClaw 的工作区）就原样用，
+   * 只补上缺的人设文件。旧目录不删，留着当备份。
+   */
+  private migrateWorkspace(from: string, to: string) {
+    if (path.resolve(from) === path.resolve(to) || !fs.existsSync(from)) return;
+    fs.mkdirSync(to, { recursive: true });
+    // 只有空文件夹（默认目录建好的 memory/ skills/ files/ 空壳也算空）才整个搬
+    const hasFiles = (d: string): boolean => fs.readdirSync(d, { withFileTypes: true }).some((e) => e.isFile() || (e.isDirectory() && hasFiles(path.join(d, e.name))));
+    const empty = !hasFiles(to);
+    if (empty) { fs.cpSync(from, to, { recursive: true, errorOnExist: false, force: false }); return; }
+    for (const f of SOUL_FILES) {
+      const src = path.join(from, f), dst = path.join(to, f);
+      if (fs.existsSync(src) && !fs.existsSync(dst)) fs.copyFileSync(src, dst);
+    }
   }
 
   private bootstrap(roles: RoleDef[] | null) {
@@ -157,11 +221,14 @@ export class AgentRegistry {
     // 没指定设备图片目录就用 id（"" 留给默认 agent，重复了角色表会冲突）
     const conf = normalize({ ...cfg, order: cfg.order ?? this.list().length, device_role: cfg.device_role ?? id.slice(0, 24) }, id);
     if (this.list().some((a) => a.device_role === conf.device_role)) throw new Error(`设备图片目录「${conf.device_role}」已被别的 agent 占用`);
-    const ws = path.join(dir, "workspace");
+    this.checkWorkspace(id, conf.workspace_dir);
+    const ws = resolveWorkspace(dir, conf.workspace_dir);
     fs.mkdirSync(ws, { recursive: true });
+    fs.mkdirSync(dir, { recursive: true });
     const { id: _id, ...rest } = conf;
     fs.writeFileSync(path.join(dir, "agent.json"), JSON.stringify(rest, null, 2));
-    for (const [f, t] of Object.entries(templates(conf.name))) fs.writeFileSync(path.join(ws, f), t);
+    // 指到一个已有的工作区（比如 OpenClaw 的）时别覆盖里面的人设
+    for (const [f, t] of Object.entries(templates(conf.name))) if (!fs.existsSync(path.join(ws, f))) fs.writeFileSync(path.join(ws, f), t);
     const info = this.read(id);
     this.agents.set(id, info);
     return info;
@@ -171,11 +238,16 @@ export class AgentRegistry {
   update(id: string, patch: Partial<AgentConfig>): AgentInfo {
     const cur = this.get(id);
     if (!cur) throw new Error(`没有 agent ${id}`);
-    const { dir, workspace, id: _i, ...base } = cur;
+    const { dir, workspace, workspace_error: _we, id: _i, ...base } = cur;
     const merged: any = { ...base, ...patch };
     for (const k of ["a2a", "heartbeat", "compaction"] as const) if (patch[k]) merged[k] = { ...(base as any)[k], ...patch[k] };
     const conf = normalize(merged, id);
     if (patch.device_role !== undefined && this.list().some((a) => a.id !== id && a.device_role === conf.device_role)) throw new Error(`设备图片目录「${conf.device_role}」已被别的 agent 占用`);
+    const newWs = resolveWorkspace(dir, conf.workspace_dir);
+    if (newWs !== workspace) {
+      this.checkWorkspace(id, conf.workspace_dir);
+      this.migrateWorkspace(workspace, newWs);
+    }
     const { id: _id, ...rest } = conf;
     fs.writeFileSync(path.join(dir, "agent.json"), JSON.stringify(rest, null, 2));
     const info = this.read(id);

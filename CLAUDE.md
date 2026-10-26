@@ -335,6 +335,11 @@ CoreS3 (MicroPython) ──HTTP──▶ server/（TypeScript 单文件可执行
   才删标记——别提前到 `setup()` 结束，那时还不知道新代码能不能跟服务端说上话；
   ④ `ota_state.json` 只记自己装过的文件，删除只删这些（手动传的文件不碰）；换了图要清 `ui._role_hit`/`_img_missing`；
   ⑤ `rev` 算法两边必须一致（`DeviceFiles.rev` ↔ `ota._rev`），`import_sim` 里专门对过。
+- **agent 工作目录可自定义**（`agent.json` 的 `workspace_dir`，`registry.resolveWorkspace`，LRN 2026-10-26）：绝对路径或 `~/…`，空 = `agents/<id>/workspace`。
+  人设、记忆、技能、扩展、exec 默认目录都跟着走，`agent.json` / `agent.sqlite` 始终在数据目录。一律用 `AgentInfo.workspace`，**别再自己拼 `agents/<id>/workspace`**。
+  改目录：新目录空的就整个复制过去、有东西（如 OpenClaw 工作区）就原样用只补缺的人设，旧目录不删；不能包住数据目录、不能和别的 agent 重叠；
+  改完要 `memories.forget`（索引按旧目录建的）。目录用不了（移动盘没插）就退回默认目录并带 `workspace_error`，别让整个 agent 加载失败。
+  导出包里一律按默认布局记，读写经 `backup.realPath` 换成本机真实目录；导入时 `workspace_dir` 是本机的事：本机有就保留、没有就删掉用默认。
 - **执行命令 / 联网（新服务端内置 agent，`server/src/agent/tools/exec.ts`、`web.ts`）**：`exec` 只在
   `RunScope.trusted` 的会话里出现。可信度的来源：IM 渠道默认不可信，只有渠道白名单里 owner 的私聊显式可信；
   其它渠道可信；嵌套调用（a2a）沿用上层，后台派出的经 `lineage.trusted` 带过去；**不可信会话里 cron_add / cron_update

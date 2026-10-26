@@ -128,7 +128,12 @@ export function registerAdmin(r: Router, ctx: Ctx, sys: AgentSystem) {
   patch("/api/admin/agents/<id>", (req) => {
     agentOr404(req.params.id);
     const { id: _ignore, ...p } = req.json() ?? {};
-    registry.update(req.params.id, p);
+    const before = agentOr404(req.params.id).workspace;
+    const a = registry.update(req.params.id, p);
+    if (a.workspace !== before) {
+      memories.forget(a.id);          // 记忆索引按旧目录建的
+      console.log(`[agent] 📁 ${a.id} 的工作目录 → ${a.workspace}`);
+    }
     changed();
     return json(view(req.params.id));
   });

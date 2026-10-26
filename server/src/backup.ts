@@ -11,6 +11,7 @@ import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { zip, unzip, type ZipEntry } from "./util/zip.ts";
+import { resolveWorkspace } from "./agent/registry.ts";
 
 export const FORMAT = 1;
 const MANIFEST = "kagura-backup.json";
@@ -53,22 +54,39 @@ function agentIds(dataDir: string): { id: string; name: string }[] {
   });
 }
 
+/** agent 实际的工作目录（agent.json 里可能改到了数据目录外面） */
+function agentWs(dataDir: string, aid: string): string {
+  const dir = path.join(dataDir, "agents", aid);
+  let custom = "";
+  try { custom = JSON.parse(fs.readFileSync(path.join(dir, "agent.json"), "utf8")).workspace_dir ?? ""; } catch { /* 还没有 */ }
+  try { return resolveWorkspace(dir, custom); } catch { return path.join(dir, "workspace"); }
+}
+/**
+ * 包里的路径 → 本机真实路径。包里一律按默认布局记 agents/<id>/workspace/…（换台电脑不一定有同样的盘符），
+ * 读写时再换成这台电脑上 agent 实际用的工作目录。
+ */
+function realPath(dataDir: string, rel: string): string {
+  const m = /^agents\/([^/]+)\/workspace(?:\/(.*))?$/.exec(rel);
+  return m ? path.join(agentWs(dataDir, m[1]), ...(m[2] ? m[2].split("/") : [])) : path.join(dataDir, rel);
+}
+
 /** 一项对应数据目录里哪些文件（相对数据目录）。sqlite 单独处理（拍快照） */
 function filesOf(dataDir: string, id: string): { files: string[]; sqlite: string[] } {
   const dir = (sub: string, skip?: (r: string) => boolean) => walk(path.join(dataDir, sub), skip).map((f) => `${sub}/${f}`);
-  const file = (f: string) => (exists(path.join(dataDir, f)) ? [f] : []);
+  const file = (f: string) => (exists(realPath(dataDir, f)) ? [f] : []);
   const m = /^agent:([^:]+):(\w+)$/.exec(id);
   if (m) {
     const [, aid, part] = m;
-    const base = `agents/${aid}`, ws = path.join(dataDir, base, "workspace");
+    const base = `agents/${aid}`, ws = agentWs(dataDir, aid);
+    const wsDir = (sub: string, skip?: (r: string) => boolean) => walk(path.join(ws, sub), skip).map((f) => `${base}/workspace/${sub ? sub + "/" : ""}${f}`);
     const topMd = isDir(ws) ? fs.readdirSync(ws).filter((f) => f.endsWith(".md") && f !== "MEMORY.md" && fs.statSync(path.join(ws, f)).isFile()) : [];
     switch (part as AgentPart) {
       case "profile": return { files: [...file(`${base}/agent.json`), ...topMd.map((f) => `${base}/workspace/${f}`)], sqlite: [] };
-      case "memory": return { files: [...file(`${base}/workspace/MEMORY.md`), ...dir(`${base}/workspace/memory`)], sqlite: [] };
-      case "skills": return { files: [...dir(`${base}/workspace/skills`), ...dir(`${base}/workspace/extensions`)], sqlite: [] };
+      case "memory": return { files: [...file(`${base}/workspace/MEMORY.md`), ...wsDir("memory")], sqlite: [] };
+      case "skills": return { files: [...wsDir("skills"), ...wsDir("extensions")], sqlite: [] };
       case "sessions": return { files: [], sqlite: file(`${base}/agent.sqlite`) };
       case "files": return {
-        files: dir(`${base}/workspace`, (r) => /^(memory|skills|extensions)(\/|$)/.test(r) || (!r.includes("/") && r.endsWith(".md"))),
+        files: wsDir("", (r) => /^(memory|skills|extensions)(\/|$)/.test(r) || (!r.includes("/") && r.endsWith(".md"))),
         sqlite: [],
       };
     }
@@ -94,7 +112,7 @@ function filesOf(dataDir: string, id: string): { files: string[]; sqlite: string
 
 /** 可导出的项（给管理界面勾选） */
 export function catalog(dataDir: string): CatalogItem[] {
-  const size = (id: string) => { const f = filesOf(dataDir, id); return sizeOf([...f.files, ...f.sqlite].map((x) => path.join(dataDir, x))); };
+  const size = (id: string) => { const f = filesOf(dataDir, id); return sizeOf([...f.files, ...f.sqlite].map((x) => realPath(dataDir, x))); };
   const items: CatalogItem[] = [
     { id: "settings", group: "系统", label: "设置（模型服务商、百度语音、端口、工具设置……）", bytes: size("settings"), secret: true, default: true },
   ];
@@ -164,7 +182,7 @@ export function exportBackup(dataDir: string, ids: string[], opts: { secrets: bo
     const { files, sqlite } = filesOf(dataDir, id);
     let bytes = 0;
     for (const f of files) {
-      let data: Buffer = fs.readFileSync(path.join(dataDir, f));
+      let data: Buffer = fs.readFileSync(realPath(dataDir, f));
       if (!opts.secrets && ["config.json", "channels.json", "mcp.json"].includes(f)) data = stripFile(f, data);
       entries.push({ name: `data/${f}`, data });
       bytes += data.length;
@@ -269,14 +287,20 @@ export function applyPending(dataDir: string, log: (s: string) => void = console
   const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
   const backupDir = path.join(dataDir, "backups", `before-import-${stamp}`);
   const moveAway = (rel: string) => {
-    const p = path.join(dataDir, rel);
+    const p = realPath(dataDir, rel);
     if (!exists(p)) return;
     const b = path.join(backupDir, rel);
     fs.mkdirSync(path.dirname(b), { recursive: true });
-    fs.renameSync(p, b);
+    try { fs.renameSync(p, b); }
+    catch (e: any) {
+      if (e.code !== "EXDEV") throw e;
+      // 工作目录在另一块盘上：rename 跨不了盘，复制过去再删
+      fs.cpSync(p, b, { recursive: true });
+      fs.rmSync(p, { recursive: true, force: true });
+    }
   };
   const put = (rel: string) => {
-    const from = path.join(src, rel), to = path.join(dataDir, rel);
+    const from = path.join(src, rel), to = realPath(dataDir, rel);
     fs.mkdirSync(path.dirname(to), { recursive: true });
     fs.copyFileSync(from, to);
   };
@@ -313,6 +337,18 @@ export function applyPending(dataDir: string, log: (s: string) => void = console
           }
         }
         moveAway(f);
+        fs.writeFileSync(path.join(dataDir, f), JSON.stringify(inc, null, 2));
+        continue;
+      }
+      // agent.json 里的自定义工作目录是这台电脑的事：本机有就保留本机的，没有就用默认位置（别人电脑上的盘符这里多半没有）
+      const am = /^agents\/([^/]+)\/agent\.json$/.exec(f);
+      if (am) {
+        let localWs = "";
+        try { localWs = JSON.parse(fs.readFileSync(path.join(dataDir, f), "utf8")).workspace_dir ?? ""; } catch { /* 本机没有这个 agent */ }
+        const inc = JSON.parse(fs.readFileSync(path.join(src, f), "utf8"));
+        if (localWs) inc.workspace_dir = localWs; else delete inc.workspace_dir;
+        moveAway(f);
+        fs.mkdirSync(path.dirname(path.join(dataDir, f)), { recursive: true });
         fs.writeFileSync(path.join(dataDir, f), JSON.stringify(inc, null, 2));
         continue;
       }
