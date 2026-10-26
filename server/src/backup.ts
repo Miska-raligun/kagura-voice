@@ -86,7 +86,7 @@ function filesOf(dataDir: string, id: string): { files: string[]; sqlite: string
     }
     case "channels": return { files: [...file("channels.json"), ...file("clients.json")], sqlite: [] };
     case "jobs": return { files: [...file("reminders.json"), ...file("photo_schedules.json")], sqlite: file("system.sqlite") };
-    case "device": return { files: dir("device_files"), sqlite: [] };
+    case "device": return { files: [...dir("device_files"), ...dir("app_images")], sqlite: [] };
     case "snapshots": return { files: dir("snapshots"), sqlite: [] };
   }
   return { files: [], sqlite: [] };
@@ -114,7 +114,7 @@ export function catalog(dataDir: string): CatalogItem[] {
     { id: "packages", group: "全局", label: "扩展包（npm / git 装的导入后重新下载）", bytes: size("packages"), default: true },
     { id: "channels", group: "全局", label: "IM 渠道（飞书 / QQ 账号、白名单、绑定）与配对过的手机", bytes: size("channels"), secret: true, default: true },
     { id: "jobs", group: "全局", label: "定时任务、提醒、定时拍照（含运行记录）", bytes: size("jobs"), default: true },
-    { id: "device", group: "设备", label: "传给设备的角色图片与代码", bytes: size("device"), default: true },
+    { id: "device", group: "设备", label: "角色图片（CoreS3 与手机）与设备代码", bytes: size("device"), default: true },
     { id: "snapshots", group: "设备", label: "设备拍的照片", bytes: size("snapshots"), default: false },
   );
   return items.filter((i) => i.bytes > 0 || i.id.endsWith(":profile") || i.id === "settings");
@@ -209,7 +209,7 @@ export function itemOf(rel: string): string | null {
   const map: Record<string, string> = {
     "config.json": "settings", "roles_state.json": "settings", "minimax_voices.json": "settings", skills: "skills", extensions: "extensions", "mcp.json": "extensions",
     "packages.json": "packages", packages: "packages", "channels.json": "channels", "clients.json": "channels", "system.sqlite": "jobs", "reminders.json": "jobs",
-    "photo_schedules.json": "jobs", device_files: "device", snapshots: "snapshots",
+    "photo_schedules.json": "jobs", device_files: "device", app_images: "device", snapshots: "snapshots",
   };
   return map[top] ?? null;
 }
@@ -286,7 +286,7 @@ export function applyPending(dataDir: string, log: (s: string) => void = console
     const m = /^agent:([^:]+):(\w+)$/.exec(id);
     // 整块替换的目录：先把本机的挪进备份，再放进来
     const dirs = m ? ({ memory: [`agents/${m[1]}/workspace/memory`], skills: [`agents/${m[1]}/workspace/skills`, `agents/${m[1]}/workspace/extensions`] } as Record<string, string[]>)[m[2]] ?? []
-      : ({ skills: ["skills"], extensions: ["extensions"], device: ["device_files"] } as Record<string, string[]>)[id] ?? [];
+      : ({ skills: ["skills"], extensions: ["extensions"], device: ["device_files", "app_images"] } as Record<string, string[]>)[id] ?? [];
     for (const d of dirs) moveAway(d);
     for (const f of mine) {
       if (f === "config.json") {

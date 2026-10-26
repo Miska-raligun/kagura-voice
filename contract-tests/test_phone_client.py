@@ -154,3 +154,69 @@ def test_admin_sets_cores3_volume(srv):
         assert row["vol"] == 85                                  # 下一次心跳之前先显示调成的值
     finally:
         d.close()
+
+
+JPG = b"\xff\xd8\xff\xe0" + b"\x00" * 200 + b"\xff\xd9"
+PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 300
+
+
+def test_phone_images_separate_from_cores3(token_server):
+    """手机显示用的图单独一套：不限 320×240 / JPEG；没传的图位沿用 CoreS3 那套；手机自己能改，开着的页面收到 images 通知"""
+    import base64
+    s = token_server
+    cid, token = _pair(s, "形象手机")
+    b64 = lambda b: base64.b64encode(b).decode()
+    put_dev = lambda p, data: s.request("PUT", "/api/admin/device-files", json={"p": p, "b64": b64(data)})
+    try:
+        assert put_dev("resource/img_bg.jpg", JPG).status_code == 200
+        # 手机没传：沿用 CoreS3 的；缺的状态退回待机图
+        r = _bare(s, "GET", "/app/img?name=img_playing")
+        assert r.status_code == 200 and r.headers["X-Img-Src"] == "device" and r.content == JPG
+        etag = r.headers["ETag"]
+        assert _bare(s, "GET", "/app/img?name=img_playing", headers={"If-None-Match": etag}).status_code == 304
+        assert _bare(s, "GET", "/app/img?name=nope").status_code == 400
+
+        # 要令牌
+        assert _bare(s, "PUT", "/client/images", json={"role": "", "name": "img_bg", "b64": b64(PNG)}).status_code == 401
+        # 只收 JPEG / PNG / WebP
+        assert _bare(s, "PUT", "/client/images", token, json={"role": "", "name": "img_bg", "b64": b64(b"GIF89a....")}).status_code == 400
+
+        got, ready = [], threading.Event()
+
+        def listen():
+            with requests.get(s.base + f"/client/events?ct={token}", stream=True, timeout=20) as r:
+                ready.set()
+                for line in r.iter_lines(decode_unicode=True):
+                    got.append(line)
+                    if '"images"' in line:
+                        return
+
+        t = threading.Thread(target=listen, daemon=True)
+        t.start()
+        assert ready.wait(5)
+        time.sleep(0.3)
+        r = _bare(s, "PUT", "/client/images", token, json={"role": "", "name": "img_bg", "b64": b64(PNG)})
+        assert r.status_code == 200 and r.json()["ext"] == "png", r.text
+        t.join(10)
+        assert any('"images"' in l for l in got), got
+
+        # 手机这套优先；手机缺的状态用手机自己的待机图，不跟 CoreS3 的混
+        r = _bare(s, "GET", "/app/img?name=img_bg")
+        assert r.headers["X-Img-Src"] == "app" and r.headers["Content-Type"] == "image/png" and r.content == PNG
+        assert _bare(s, "GET", "/app/img?name=img_recording").content == PNG
+        # CoreS3 那套不受影响
+        assert _bare(s, "GET", "/device/file?p=resource/img_bg.jpg").content == JPG
+
+        slots = {x["name"]: x for x in _bare(s, "GET", "/client/images?role=", token).json()["slots"]}
+        assert slots["img_bg"]["using"] == "phone" and slots["img_playing"]["using"] == "phone-bg"
+        assert any(f["name"] == "img_bg" for f in s.get("/api/admin/app-images").json()["files"])
+        assert _bare(s, "GET", "/client/images?role=nosuchrole", token).status_code == 404
+
+        # 恢复：删掉手机的，回到 CoreS3 那套
+        assert _bare(s, "DELETE", "/client/images?role=&name=img_bg", token).status_code == 200
+        assert _bare(s, "GET", "/app/img?name=img_bg").headers["X-Img-Src"] == "device"
+        assert _bare(s, "GET", "/client/images?role=", token).json()["slots"][0]["using"] == "cores3"
+    finally:
+        s.request("DELETE", "/api/admin/device-files?p=resource/img_bg.jpg")
+        s.request("DELETE", "/api/admin/app-images?role=&name=img_bg")
+        s.request("DELETE", f"/api/admin/clients/{cid}")

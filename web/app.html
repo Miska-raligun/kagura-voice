@@ -23,7 +23,7 @@
   --bg:#111113; --panel:#1b1b1e; --panel2:#242428; --fg:#f5f5f7; --muted:rgba(245,245,247,.7); --faint:rgba(245,245,247,.42);
   --line:rgba(255,255,255,.1); --line2:rgba(255,255,255,.18); --accent:#f2f2f4; --accent-fg:#16161a; --ok:#5fd4a0; --err:#ff7a6b;
   --glass:rgba(0,0,0,.28); --glass2:rgba(0,0,0,.34);
-  --stage-h:min(75vw, 44vh);       /* 角色图按 4:3 完整露出来的高度 */
+  --stage-h:min(75vw, 44vh);       /* 角色图完整露出来的高度：默认按 4:3，手机单独传了图就跟着那张图的比例（applyRatio） */
   --safe-b: env(safe-area-inset-bottom, 0px); --safe-t: env(safe-area-inset-top, 0px);
 }
 * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
@@ -43,7 +43,7 @@ svg { display:block; }
 /* 底色 = 同一张图放大糊开压暗（颜色跟着角色走）；清晰的那张按 4:3 放在上面，聊天从它下面开始，不压着她 */
 .backdrop { position:absolute; inset:0; overflow:hidden; background:var(--bg); }
 .backdrop .ambient { position:absolute; inset:-12%; width:124%; height:124%; object-fit:cover; filter:blur(36px) saturate(1.15) brightness(.42); transform:translateZ(0); }
-.backdrop #bg { position:absolute; left:0; right:0; top:0; width:100%; height:var(--stage-h); object-fit:cover;
+.backdrop #bg { position:absolute; left:0; right:0; top:0; width:100%; height:var(--stage-h); object-fit:cover; object-position:50% 20%;
   -webkit-mask-image:linear-gradient(180deg, #000 80%, transparent 100%); mask-image:linear-gradient(180deg, #000 80%, transparent 100%); }
 .backdrop .face { position:absolute; left:0; right:0; top:calc(var(--stage-h) * .45); text-align:center; font-size:42px; color:var(--accent); opacity:.85; letter-spacing:.04em; }
 .backdrop .veil { position:absolute; inset:0; background:linear-gradient(180deg, rgba(0,0,0,.38) 0, transparent calc(var(--safe-t) + 70px)); }
@@ -127,6 +127,31 @@ main { position:relative; z-index:1; flex:1; min-height:0; }
 .shots img { width:100%; aspect-ratio:4/3; object-fit:cover; border-radius:8px; background:var(--panel2); }
 .photo { margin-top:10px; } .photo img { width:100%; border-radius:12px; }
 
+/* ── 形象：手机显示用的角色图（和 CoreS3 那套分开） ── */
+#lookPage { background:rgba(17,17,19,.9); }
+.looks { display:grid; grid-template-columns:repeat(2, 1fr); gap:10px; }
+.look { border-radius:14px; overflow:hidden; background:rgba(255,255,255,.05); border:1px solid var(--line); display:flex; flex-direction:column; }
+.look .pic { position:relative; aspect-ratio:3/4; background:var(--panel2); display:flex; align-items:center; justify-content:center; color:var(--faint); font-size:13px; }
+.look .pic img { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; object-position:50% 20%; }
+.look .pic.borrowed img { opacity:.45; }
+.look .tag { position:absolute; left:6px; top:6px; padding:1px 8px; border-radius:10px; font-size:11.5px; background:var(--glass2); border:1px solid var(--line); backdrop-filter:blur(8px); -webkit-backdrop-filter:blur(8px); }
+.look .tag.own { background:var(--accent); color:var(--accent-fg); border-color:var(--accent); font-weight:600; }
+.look .meta { padding:8px 10px 2px; font-size:14px; font-weight:600; }
+.look .meta small { display:block; font-weight:400; font-size:12px; color:var(--faint); }
+.look .btns { margin:6px 8px 10px; gap:6px; }
+.look .btn { height:30px; padding:0 12px; font-size:13px; }
+.look.busy .pic::after { content:"上传中…"; position:absolute; inset:0; display:flex; align-items:center; justify-content:center; background:#0008; color:var(--fg); }
+
+/* ── 底部弹出的小菜单（拍照 / 从相册选） ── */
+.sheet-bg { position:fixed; inset:0; z-index:8; background:#0006; display:flex; align-items:flex-end; justify-content:center; padding:0 10px calc(var(--safe-b) + 10px); }
+.sheet { width:100%; max-width:420px; display:flex; flex-direction:column; gap:8px; }
+.sheet .grp { border-radius:16px; overflow:hidden; background:rgba(40,40,44,.82); border:1px solid var(--line2); backdrop-filter:blur(16px); -webkit-backdrop-filter:blur(16px); }
+.sheet .grp > * { display:flex; align-items:center; justify-content:center; gap:10px; width:100%; height:52px; font-size:16px; }
+.sheet .grp > * + * { border-top:1px solid var(--line); }
+.sheet .grp svg { width:20px; height:20px; opacity:.8; }
+.sheet .title { height:40px; font-size:12.5px; color:var(--faint); }
+.sheet .cancel { font-weight:600; }
+
 /* ── 配对 ── */
 .pair { flex:1; display:flex; flex-direction:column; justify-content:center; padding:28px; gap:14px; }
 .pair h1 { margin:0; font-size:26px; } .pair ol { margin:0; padding-left:20px; color:var(--muted); line-height:1.9; }
@@ -163,6 +188,7 @@ main { position:relative; z-index:1; flex:1; min-height:0; }
       </span>
       <select id="roleSel" aria-label="换角色"></select>
     </label>
+    <button class="hbtn" id="tabLook" aria-label="形象"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="4" y="4" width="16" height="16" rx="3"/><circle cx="9.5" cy="9.5" r="1.8"/><path d="M5 17.5l4.5-4.5 3.5 3.5 2.5-2.5 3.5 3.5"/></svg></button>
     <button class="hbtn" id="tabHome" aria-label="看家"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3.5 11L12 4l8.5 7"/><path d="M5.5 9.5V20h13V9.5"/><circle cx="12" cy="14.5" r="2.6"/></svg></button>
     <button class="hbtn hidden" id="tabChat" aria-label="回到对话"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M5 6h14v10H10l-5 4z"/></svg></button>
   </header>
@@ -181,7 +207,6 @@ main { position:relative; z-index:1; flex:1; min-height:0; }
           <button class="cbtn" id="camBtn" aria-label="拍照"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 8.5h3.2L9 6h6l1.8 2.5H20V18H4z"/><circle cx="12" cy="13" r="3.2"/></svg></button>
           <button class="cbtn send hidden" id="sendBtn" aria-label="发送"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M4.5 11.2L19 4.5c.6-.3 1.2.3 1 .9l-5 14c-.2.6-1.1.7-1.4.1L11 13l-6.3-.8c-.6-.1-.8-.8-.2-1z"/></svg></button>
         </div>
-        <input type="file" accept="image/*" capture="environment" id="camInput" class="hidden">
       </div>
     </section>
 
@@ -207,8 +232,21 @@ main { position:relative; z-index:1; flex:1; min-height:0; }
         </div>
       </div>
     </section>
+
+    <section class="page hidden" id="lookPage">
+      <div class="home">
+        <div class="card">
+          <h3>手机上的样子<select id="lookRole" aria-label="角色"></select></h3>
+          <div class="faint" style="font-size:13px;margin:-2px 0 12px">这套图只在手机 / 平板上显示，和 CoreS3 那套分开存，可以传高清、竖着的图。哪张没传，就沿用 CoreS3 那套。</div>
+          <div class="looks" id="looks"></div>
+        </div>
+      </div>
+    </section>
   </main>
 </div>
+
+<input type="file" accept="image/*" capture="environment" id="camInput" class="hidden">
+<input type="file" accept="image/*" id="albumInput" class="hidden">
 
 <script>
 "use strict";
@@ -468,36 +506,40 @@ function addMsg(kind, text, img) {
 }
 /**
  * 舞台图跟着状态换，规则同 CoreS3（device/src/ui.py 的 _IMG_MAP）：待机 img_bg、录音 img_recording、
- * 思考 img_streaming、说话 img_playing；先找 resource/<角色>/ 下的，没有用默认目录的，再没有退回 img_bg，都没有就显示颜文字。
+ * 思考 img_streaming、说话 img_playing。手机有自己的一套图（GET /app/img，服务端挑：先角色的再默认的，
+ * 同一层里手机单独传的优先、没有就用 CoreS3 那套，缺了这个状态退回待机图），都没有就显示颜文字。
  * 当前角色的几张图提前加载并解码好，切换时只换 src、复用同一个 <img>（没解码完就换上去会闪，见 CLAUDE.md「频闪」）。
  */
 const IMG_MAP = { idle: "img_bg", recording: "img_recording", processing: "img_streaming", playing: "img_playing", shake: "img_shake" };
 const imgCache = new Map();      // "角色|图名" → Promise<url | null>
-function loadImg(path) {
+const imgRatio = new Map();      // url → 高 / 宽
+let imgRev = Date.now();         // 图换了（SSE 的 images 命令）就换个数，绕过浏览器缓存
+const imgUrl = (role, name) => `/app/img?role=${encodeURIComponent(role || "")}&name=${name}&v=${imgRev}`;
+function loadImg(url) {
   return new Promise((ok) => {
     const img = new Image();
-    img.onload = async () => { try { await img.decode(); } catch {} ok(img.src); };
+    img.onload = async () => { try { await img.decode(); } catch {} if (img.naturalWidth) imgRatio.set(img.src, img.naturalHeight / img.naturalWidth); ok(img.src); };
     img.onerror = () => ok(null);
-    img.src = "/device/file?p=" + encodeURIComponent(path);
+    img.src = url;
   });
 }
 function resolveImg(role, name) {
   const key = role + "|" + name;
-  if (!imgCache.has(key)) imgCache.set(key, (async () => {
-    for (const p of [role ? `resource/${role}/${name}.jpg` : "", `resource/${name}.jpg`].filter(Boolean)) {
-      const url = await loadImg(p);
-      if (url) return url;
-    }
-    return null;
-  })());
+  if (!imgCache.has(key)) imgCache.set(key, loadImg(imgUrl(role, name)));
   return imgCache.get(key);
 }
+/** 舞台高度跟着待机图的比例：4:3 横图同以前；竖图给高一点（但至少留出半屏多给聊天） */
+function applyRatio(url) {
+  const k = imgRatio.get(url) || 0.75;
+  const cap = k > 0.8 ? "54vh" : "44vh";
+  document.documentElement.style.setProperty("--stage-h", `min(${(k * 100).toFixed(2)}vw, ${cap})`);
+}
+function imagesChanged() { imgCache.clear(); imgRev = Date.now(); renderRoles(); if (!$("lookPage").classList.contains("hidden")) renderLooks(); }
 function preloadImgs(role) { for (const n of new Set(Object.values(IMG_MAP))) resolveImg(role, n); }
 async function showVis(vis) {
   S.vis = vis;
   const role = S.role, name = IMG_MAP[vis] || "img_bg";
-  let url = await resolveImg(role, name);
-  if (!url && name !== "img_bg") url = await resolveImg(role, "img_bg");
+  const url = await resolveImg(role, name);
   if (S.vis !== vis || S.role !== role) return;          // 等图的时候状态又变了
   if (!url) { $("bg").classList.add("hidden"); $("face").classList.remove("hidden"); return; }
   if ($("bg").src !== url) $("bg").src = url;
@@ -521,6 +563,7 @@ function renderRoles() {
     $("avatar").classList.toggle("hidden", !url); $("avatarText").classList.toggle("hidden", !!url);
     $("bgAmb").classList.toggle("hidden", !url);
     if (url) { $("avatar").src = url; $("bgAmb").src = url; }      // 底色只用待机图糊开：换状态不跟着闪
+    applyRatio(url);
   });
 }
 $("roleSel").onchange = async (e) => {
@@ -661,19 +704,60 @@ function setMode(m) {
 $("modeBtn").onclick = () => setMode(S.mode === "voice" ? "text" : "voice");
 $("text").addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.isComposing) { e.preventDefault(); sendText(); } });
 
-// 拍照：缩到长边 1280 的 JPEG（手机原图好几 MB，服务端上限 5MB）
-$("camBtn").onclick = () => $("camInput").click();
-$("camInput").onchange = async (e) => {
-  if (AC && AC.state !== "running") AC.resume().catch(() => {});      // 刚从相机回来，声音多半被系统暂停了
-  const f = e.target.files && e.target.files[0];
-  e.target.value = "";
-  if (!f) return;
+// ── 选图：拍照 / 从相册选（底部小菜单） ──
+const ICO_CAM = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 8.5h3.2L9 6h6l1.8 2.5H20V18H4z"/><circle cx="12" cy="13" r="3.2"/></svg>';
+const ICO_ALBUM = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="4" y="4" width="16" height="16" rx="3"/><circle cx="9.5" cy="9.5" r="1.8"/><path d="M5 17.5l4.5-4.5 3.5 3.5 2.5-2.5 3.5 3.5"/></svg>';
+/** 弹一个底部菜单，items = [{ label, icon?, value, danger? }]；点外面或「取消」→ null */
+function sheet(title, items) {
+  return new Promise((done) => {
+    const bg = document.createElement("div"); bg.className = "sheet-bg";
+    const box = document.createElement("div"); box.className = "sheet";
+    const grp = document.createElement("div"); grp.className = "grp";
+    if (title) { const t = document.createElement("div"); t.className = "title"; t.textContent = title; grp.appendChild(t); }
+    const close = (v) => { bg.remove(); done(v); };
+    for (const it of items) {
+      const b = document.createElement("button");
+      b.innerHTML = it.icon || ""; b.appendChild(document.createTextNode(it.label));
+      if (it.danger) b.style.color = "var(--err)";
+      b.onclick = (e) => { e.stopPropagation(); close(it.value); };
+      grp.appendChild(b);
+    }
+    const cancel = document.createElement("div"); cancel.className = "grp";
+    const cb = document.createElement("button"); cb.className = "cancel"; cb.textContent = "取消"; cb.onclick = (e) => { e.stopPropagation(); close(null); };
+    cancel.appendChild(cb);
+    box.append(grp, cancel); bg.appendChild(box);
+    bg.onclick = (e) => { if (e.target === bg) close(null); };
+    document.body.appendChild(bg);
+  });
+}
+/** 拍照还是相册。没有摄像头的设备（电脑）直接开选文件 */
+async function chooseImage(title, extra = []) {
+  const touch = matchMedia("(pointer:coarse)").matches;
+  const v = touch || extra.length
+    ? await sheet(title, [...(touch ? [{ label: "拍照", icon: ICO_CAM, value: "cam" }] : []), { label: touch ? "从相册选" : "选一张图片", icon: ICO_ALBUM, value: "album" }, ...extra])
+    : "album";
+  if (!v) return null;
+  if (v !== "cam" && v !== "album") return v;
+  return await new Promise((ok) => {
+    const el = $(v === "cam" ? "camInput" : "albumInput");
+    el.value = "";
+    el.onchange = () => { if (AC && AC.state !== "running") AC.resume().catch(() => {}); ok((el.files && el.files[0]) || null); };   // 刚从相机回来，声音多半被系统暂停了
+    el.click();
+  });
+}
+
+// 聊天里发照片：缩到长边 1280 的 JPEG（手机原图好几 MB，服务端上限 5MB）
+$("camBtn").onclick = async () => {
+  const f = await chooseImage("发一张照片给她");
+  if (f instanceof File) attachPhoto(f);
+};
+async function attachPhoto(f) {
   try {
     S.photo = await shrink(f);
     $("attachImg").src = S.photo.url; $("attach").classList.remove("hidden"); syncSend();
     if (S.autoSendPhoto) { S.autoSendPhoto = false; const p = S.photo; clearPhoto(); converse({ text: S.photoQuestion || "", image: p }); }
   } catch (err) { toast("照片读不出来：" + err.message, true); }
-};
+}
 $("attachX").onclick = clearPhoto;
 function clearPhoto() { S.photo = null; $("attach").classList.add("hidden"); syncSend(); }
 async function shrink(file) {
@@ -692,7 +776,11 @@ async function shrink(file) {
 function askPhoto() {
   const m = addMsg("her", "想看看的话，拍张照片给我吧。");
   const a = document.createElement("div"); a.className = "act"; a.textContent = "📷 点这里拍照";
-  a.onclick = () => { S.autoSendPhoto = true; S.photoQuestion = ""; $("camInput").click(); };
+  a.onclick = () => {
+    const el = $("camInput"); el.value = "";
+    el.onchange = () => { if (AC && AC.state !== "running") AC.resume().catch(() => {}); const f = el.files && el.files[0]; if (f) { S.autoSendPhoto = true; S.photoQuestion = ""; attachPhoto(f); } };
+    el.click();          // 她说要看，多半是想看眼前的：直接开相机
+  };
   m.appendChild(a);
 }
 
@@ -707,6 +795,7 @@ function connectEvents() {
   es.addEventListener("cmd", (e) => {
     let d = {}; try { d = JSON.parse(e.data); } catch {}
     if (d.action === "role" && d.role) { S.role = d.role; renderRoles(); }
+    else if (d.action === "images") imagesChanged();
     else if (d.action === "capture") addMsg("sys", "她想拍照：点左下角相机拍一张发给她");
   });
 }
@@ -834,14 +923,100 @@ $("describeBtn").onclick = async () => {
   catch (e) { toast(e.message, true); }
 };
 
+// ── 形象：手机上显示的角色图（GET/PUT/DELETE /client/images，存在服务端 app_images/，和 CoreS3 那套分开） ──
+const SLOT_NAMES = { img_bg: ["待机", "平时 / 头像 / 底色都用它"], img_recording: ["在听", "按住说话的时候"], img_streaming: ["在想", "等她回复的时候"], img_playing: ["在说", "她说话的时候"], img_shake: ["摇一摇", "摇手机的彩蛋"] };
+const MAX_UP = 3.5 * 1024 * 1024, MAX_SIDE = 2560;
+let lookRole = null;
+function usingText(u) {
+  if (u === "phone") return "手机";
+  if (u === "none") return "未设置";
+  const parts = u.split("-");
+  let t = parts[0] === "phone" ? "沿用" : "沿用 CoreS3";
+  if (parts.includes("default")) t += parts[0] === "phone" ? "默认角色" : "（默认角色）";
+  if (parts.includes("bg")) t = (parts.includes("default") || parts[0] !== "phone" ? t + " · " : "") + "用待机图";
+  return t;
+}
+async function renderLooks() {
+  const sel = $("lookRole");
+  if (lookRole === null || !S.roles.some((r) => r.id === lookRole)) lookRole = S.role;
+  sel.innerHTML = "";
+  for (const r of S.roles) { const o = document.createElement("option"); o.value = r.id; o.textContent = r.name; sel.appendChild(o); }
+  sel.value = lookRole; sel.classList.toggle("hidden", S.roles.length < 2);
+  const box = $("looks");
+  let d;
+  try { d = await apiJson("/client/images?role=" + encodeURIComponent(lookRole)); }
+  catch (e) { box.innerHTML = ""; box.textContent = "读取失败：" + e.message; return; }
+  box.innerHTML = "";
+  for (const sl of d.slots) {
+    const [label, hint] = SLOT_NAMES[sl.name] || [sl.name, sl.desc];
+    const el = document.createElement("div"); el.className = "look";
+    const pic = document.createElement("div"); pic.className = "pic" + (sl.using === "phone" ? "" : " borrowed");
+    if (sl.using !== "none") { const i = document.createElement("img"); i.alt = label; i.src = imgUrl(lookRole, sl.name); pic.appendChild(i); }
+    else pic.textContent = "没有图";
+    const tag = document.createElement("span"); tag.className = "tag" + (sl.using === "phone" ? " own" : ""); tag.textContent = usingText(sl.using); pic.appendChild(tag);
+    const meta = document.createElement("div"); meta.className = "meta"; meta.textContent = label;
+    const sm = document.createElement("small"); sm.textContent = hint; meta.appendChild(sm);
+    const btns = document.createElement("div"); btns.className = "btns";
+    const up = document.createElement("button"); up.className = "btn" + (sl.phone ? "" : " primary"); up.textContent = sl.phone ? "换一张" : "传一张";
+    up.onclick = async () => {
+      const f = await chooseImage(`${label} · 手机上显示`);
+      if (!(f instanceof File)) return;
+      el.classList.add("busy");
+      try {
+        const b64 = await prepUpload(f);
+        await apiJson("/client/images", { method: "PUT", json: { role: lookRole, name: sl.name, b64 } });
+        toast("换好了");
+      } catch (e) { toast("没传上去：" + e.message, true); }
+      el.classList.remove("busy");
+      imagesChanged();
+    };
+    btns.appendChild(up);
+    if (sl.phone) {
+      const rm = document.createElement("button"); rm.className = "btn"; rm.textContent = "恢复";
+      rm.onclick = async () => {
+        if (!(await sheet(`删掉手机上的「${label}」图，沿用 CoreS3 那套？`, [{ label: "删掉，恢复", value: "y", danger: true }]))) return;
+        try { await apiJson(`/client/images?role=${encodeURIComponent(lookRole)}&name=${sl.name}`, { method: "DELETE" }); } catch (e) { toast(e.message, true); }
+        imagesChanged();
+      };
+      btns.appendChild(rm);
+    }
+    el.append(pic, meta, btns);
+    box.appendChild(el);
+  }
+}
+$("lookRole").onchange = (e) => { lookRole = e.target.value; renderLooks(); };
+/** 原图够小就原样传（不再压一遍）；太大或太宽就缩到长边 2560 的 JPEG */
+async function prepUpload(file) {
+  const okType = /^image\/(jpeg|png|webp)$/.test(file.type);
+  const url = URL.createObjectURL(file);
+  try {
+    const img = new Image(); img.src = url; await img.decode();
+    const w = img.naturalWidth, h = img.naturalHeight;
+    if (okType && file.size <= MAX_UP && Math.max(w, h) <= MAX_SIDE) return await blobB64(file);
+    const k = Math.min(1, MAX_SIDE / Math.max(w, h));
+    const c = document.createElement("canvas");
+    c.width = Math.round(w * k); c.height = Math.round(h * k);
+    c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+    for (const q of [0.9, 0.82, 0.72, 0.6]) {
+      const blob = await new Promise((ok) => c.toBlob(ok, "image/jpeg", q));
+      if (blob && (blob.size <= MAX_UP || q === 0.6)) return await blobB64(blob);
+    }
+    throw new Error("转换失败");
+  } finally { URL.revokeObjectURL(url); }
+}
+
 // ── 页签 ──
 function tab(name) {
-  $("tabChat").classList.toggle("hidden", name === "chat"); $("tabHome").classList.toggle("hidden", name === "home");
-  $("chatPage").classList.toggle("hidden", name !== "chat"); $("homePage").classList.toggle("hidden", name !== "home");
+  for (const [n, page, btn] of [["chat", "chatPage", "tabChat"], ["home", "homePage", "tabHome"], ["look", "lookPage", "tabLook"]]) {
+    $(page).classList.toggle("hidden", name !== n);
+    $(btn).classList.toggle("hidden", name === n);
+  }
   if (name === "home") { loadMe().then(refreshHome); } else stopLive();
+  if (name === "look") { lookRole = S.role; renderLooks(); }
 }
 $("tabChat").onclick = () => tab("chat");
 $("tabHome").onclick = () => tab("home");
+$("tabLook").onclick = () => tab("look");
 // 离开前台（切 App、锁屏）就主动断开推送连接：iOS 会把后台页面挂起，连接却可能还挂着一阵——服务端以为页面开着，
 // 推过来的话就丢了。断开后服务端立刻知道「没开」，主动说的话改去别的设备；回到前台再连上
 document.addEventListener("visibilitychange", () => {
@@ -874,7 +1049,7 @@ function onMotion(e) {
   if (shakeHits.length >= SHAKE.count) { shakeHits = []; onShake(now); }
 }
 async function onShake(now) {
-  if (now - shakeLast < SHAKE.cool || S.busy || document.hidden || !$("homePage").classList.contains("hidden")) return;
+  if (now - shakeLast < SHAKE.cool || S.busy || document.hidden || $("chatPage").classList.contains("hidden")) return;
   shakeLast = now;
   try { navigator.vibrate && navigator.vibrate(60); } catch {}
   showVis("shake");

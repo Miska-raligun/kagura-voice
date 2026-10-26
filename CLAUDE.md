@@ -402,6 +402,12 @@ CoreS3 (MicroPython) ──HTTP──▶ server/（TypeScript 单文件可执行
   管理界面里手机和 CoreS3 在同一张设备表（`/api/admin/devices` 带 `kind: "phone"`），配对入口是表上的「＋ 添加手机」。
   舞台图跟着状态换，规则抄设备端 `ui._IMG_MAP`（待机 img_bg / 录音 img_recording / 思考 img_streaming / 说话 img_playing，角色目录优先、缺了退 img_bg）——
   改设备端的映射要同步改 `app.html` 的 `IMG_MAP`；图预先解码好、复用同一个 `<img>` 换 src。
+  **手机有自己的一套图**（`server/src/appimages.ts`，`<数据目录>/app_images/[角色/]<图名>.<jpg|png|webp>`，LRN 2026-10-26）：CoreS3 那套受设备内存所限是 320×240 JPEG，
+  手机屏幕大、竖着拿，两套分开存，手机这套不裁、不限比例、单张 4MB。手机只请求 `GET /app/img?role=&name=`，**挑图在服务端 `resolve`**：
+  先角色的、再默认的（角色对不上比画质差更糟）；同一层手机的优先；手机这套缺了某个状态用手机这套的待机图（别和 320×240 的混着闪）；再退 CoreS3 那套。
+  改这个顺序要同步管理界面 `PhoneImages.fallback`。入口：手机右上角「形象」（`/client/images`，配对令牌）、管理界面「设备 → 图片与代码」切到「手机 / 平板」。
+  任一套图变了都经 SSE 发 `{"action":"images"}`，开着的页面清 `imgCache` 重取；舞台高度跟着待机图比例走（`applyRatio`，竖图最多 54vh）。
+  聊天里的相机键是「拍照 / 从相册选」底部菜单（`chooseImage`），她说「我看看」那条只开相机。导出项「device」含 app_images。
   布局：清晰的角色图按 4:3 放顶上（`--stage-h`），聊天从它下面开始（`.stagegap`）、不压着她；底色是同一张待机图放大糊开压暗（`#bgAmb`），颜色跟着角色走，别再写死成某个色调。
   **摇一摇**同 CoreS3 彩蛋：`devicemotion` 去重力后 700ms 内 3 下 → 换 `img_shake`、`GET /shake`，回复走推送（推给手机的通知带 `text`，页面显示成她的一条消息）。
   动作传感器只在 https 下有；iOS / 新版 Chrome 要在一次点击里 `DeviceMotionEvent.requestPermission()`——挂在 `unlockAudio` 上，**`pointerdown` 里申请不算数**。

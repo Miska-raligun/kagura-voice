@@ -223,3 +223,4 @@ details.summary { margin-bottom:8px; }
 .notebox { background:color-mix(in srgb, var(--warn) 9%, transparent); border:1px solid color-mix(in srgb, var(--warn) 40%, transparent); color:var(--warn); padding:9px 12px; border-radius:8px; margin:0 0 10px; font-size:13px; }
 .vol { display:inline-flex; align-items:center; gap:6px; white-space:nowrap; }
 .vol input[type=range] { width:96px; accent-color:var(--accent); }
+.slot img.tall, .slot .ph.tall { aspect-ratio:3/4; object-position:50% 20%; }

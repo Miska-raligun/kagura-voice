@@ -19,6 +19,7 @@ import { Clients } from "./clients.ts";
 import { registerAdmin } from "./routes/admin.ts";
 import { registerAdminUi } from "./routes/admin-ui.ts";
 import { registerDeviceFiles } from "./routes/devicefiles.ts";
+import { AppImages } from "./appimages.ts";
 import { DeviceFiles } from "./devicefiles.ts";
 // 构建时打进来的设备固件（device/src/*.py），见 scripts/build.mjs 的 deviceFw 插件
 import { files as deviceFw } from "virtual:device-fw";
@@ -141,7 +142,7 @@ async function main() {
   registerAdminSystem(r, ctx);
   registerAdminUi(r);
   const builtinFw = Object.fromEntries(Object.entries(deviceFw).map(([p, b64]) => [p, Buffer.from(b64, "base64")]));
-  registerDeviceFiles(r, ctx, new DeviceFiles(path.join(cfg.dataDir, "device_files"), builtinFw, VERSION));
+  registerDeviceFiles(r, ctx, new DeviceFiles(path.join(cfg.dataDir, "device_files"), builtinFw, VERSION), new AppImages(path.join(cfg.dataDir, "app_images")));
 
   await listenOrExplain("MQTT", cfg.mqttPort, () => mqtt.start(cfg.mqttPort));
   await listenOrExplain("直播", cfg.streamPort, () => stream.start(cfg.streamPort));
