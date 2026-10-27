@@ -51,7 +51,9 @@ export function cronTools(sched: Scheduler) {
       },
       {
         name: "cron_add", label: "新建定时任务",
-        description: "新建定时任务。kind=at（一次性，value 如 +20m、08:00、2026-10-24 08:00）/ every（间隔，value 如 30m、2h）/ cron（5 段表达式，如 0 8 * * *）。"
+        description: "新建定时任务：到点要说的话、提醒、播报，以及周期性的事（每天讲新闻、每周发周报）。"
+          + "改代码、整理资料、写长文档这类「干活」、不在乎具体几点的，用 task_add 记成待办（夜里排队做、早上汇报），别用一次性定时任务凑。"
+          + "kind=at（一次性，value 如 +20m、08:00、2026-10-24 08:00）/ every（间隔，value 如 30m、2h）/ cron（5 段表达式，如 0 8 * * *）。"
           + "message 是到点时交给你执行的指令（写清楚要做什么）。session=isolated（默认，每次全新上下文）或 main。"
           + "delivery 默认投递到当前设备（device:<id>），none 表示不投递。",
         parameters: Type.Object({

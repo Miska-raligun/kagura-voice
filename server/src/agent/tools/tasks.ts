@@ -32,6 +32,7 @@ export function taskTools(q: TaskQueue) {
         name: "task_add", label: "记待办",
         description: `把又大又不急的活记成待办，安排到夜间静默时段（${s.window}）再做，白天的额度留给聊天：改代码修 bug、整理资料、批量处理文件、写长文档这类。`
           + "主人说「现在就做」、或者几分钟就能做完的小事，直接做，别记待办。"
+          + "到点要说的话、提醒、周期性的事用 cron_add，不用待办。"
           + "detail 要写清楚目标、相关文件路径 / 链接、做到什么程度算完——到时候是另一个你在全新上下文里做，看不到现在的聊天。"
           + "when 省略 = 今晚静默时段；也可以 now（马上在后台做）、+2h、23:30、2026-10-28 09:00。做完的结果会在早上汇报给主人。",
         parameters: Type.Object({ title: Type.String(), detail: Type.String(), when: Type.Optional(Type.String()) }),
