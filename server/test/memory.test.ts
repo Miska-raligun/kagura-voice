@@ -81,10 +81,11 @@ describe("记忆工具", () => {
     expect(tr.content[0].text).toContain("3 月 14 日");
   });
 
-  it("memory_get 只能读记忆文件，越界与符号链接都拒绝", async () => {
+  it("memory_get 只能读记忆和人设文件，越界与符号链接都拒绝", async () => {
     const { a } = setup();
     expect(() => Memories.memoryPath(a, "../agent.json")).toThrow();
-    expect(() => Memories.memoryPath(a, "SOUL.md")).toThrow();
+    expect(Memories.memoryPath(a, "SOUL.md")).toContain("SOUL.md");             // 没加载的人设文件要能现读
+    expect(() => Memories.memoryPath(a, "files/x.md")).toThrow();
     expect(() => Memories.memoryPath(a, "memory/../../agent.json")).toThrow();
     expect(Memories.memoryPath(a, "memory/2026-10-01.md")).toContain("memory");
     fs.symlinkSync("/etc", path.join(a.workspace, "files", "etc"));

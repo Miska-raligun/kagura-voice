@@ -13,7 +13,7 @@ import type { AgentRegistry, AgentInfo } from "./registry.ts";
 import type { ModelRegistry } from "./models.ts";
 import { AgentStore } from "./store.ts";
 import { toSpoken } from "../util/text.ts";
-import { BUDGETS, buildSystemPrompt, turnContext, type SessionKind } from "./soul.ts";
+import { BUDGETS, buildSystemPrompt, sceneOf, turnContext, type SessionKind } from "./soul.ts";
 import { runScope, withScope, type RunScope } from "./scope.ts";
 
 /** IM 渠道：消息可能来自陌生人，默认不可信（主人私聊由渠道层显式标 trusted） */
@@ -351,7 +351,7 @@ export class Runtime {
     // 近况：这个会话看不到的、最近在别处跟主人说过的话。只给可信的会话（主人本人），陌生人 / 群聊不给
     const recent = scope.trusted && req.kind !== "sub" && req.purpose !== "flush" ? this.recentActivity(agent, req.sessionKey) : "";
     const systemPrompt = buildSystemPrompt({
-      agent, kind: req.kind, channel: req.channel, summary: session?.summary,
+      agent, scene: sceneOf(scope), channel: req.channel, summary: session?.summary,
       extra: [...(req.extraSystem ?? []), recent], skills: this.skillCatalog(agent), voiceDelivery: req.voiceDelivery,
       peers: tools.some((t) => t.name.startsWith("sessions_")) ? peers : [],
     });

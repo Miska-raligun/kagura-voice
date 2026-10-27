@@ -118,9 +118,9 @@ function Basic({ a, save }: { a: any; save: (p: any) => Promise<void> }) {
 }
 
 const SOUL_DESC: Record<string, string> = {
-  "SOUL.md": "性格、语气、价值观（所有会话）", "IDENTITY.md": "名字、自我介绍、外形", "USER.md": "主人的稳定偏好（子任务不注入）",
-  "AGENTS.md": "操作守则：何时用哪个工具、语音要短……", "TOOLS.md": "工具使用备注", "HEARTBEAT.md": "heartbeat 检查清单（只在 heartbeat 时注入）",
-  "MEMORY.md": "长期记忆（子任务不注入）",
+  "SOUL.md": "性格、语气、价值观", "IDENTITY.md": "名字、自我介绍、外形", "USER.md": "主人的稳定偏好",
+  "AGENTS.md": "操作守则：何时用哪个工具、语音要短……", "TOOLS.md": "工具使用备注", "HEARTBEAT.md": "heartbeat 检查清单",
+  "MEMORY.md": "长期记忆",
 };
 
 export function FileEditor({ id, path, budget, budgets, onBudget }: { id: string; path: string; budget?: number; budgets?: Record<string, number>; onBudget?: () => void }) {
@@ -153,10 +153,41 @@ function SoulFiles({ id }: { id: string }) {
   const [file, setFile] = useState("SOUL.md");
   const files: string[] = meta?.soul_files ?? Object.keys(SOUL_DESC);
   return (
+    <>
     <Card>
       <Tabs value={file} onChange={setFile} tabs={files.map((f) => [f, f.replace(".md", "")] as [string, string])} />
       <p class="muted">{SOUL_DESC[file]}</p>
       <FileEditor id={id} path={file} budget={meta?.budgets?.[file]} budgets={meta?.budgets} onBudget={reloadMeta} />
+    </Card>
+    {meta?.loadout && <Loadout id={id} lo={meta.loadout} reload={reloadMeta} />}
+    </>
+  );
+}
+
+/** 各场景加载哪些人设文件（所有 agent 共用）。没勾的需要时她用 memory_get 现读；群聊 / 陌生人那行的私人文件勾不上 */
+function Loadout({ id, lo, reload }: { id: string; lo: any; reload: () => void }) {
+  const [cur, setCur] = useState<Record<string, string[]>>(lo.current);
+  const [files] = useLoad(() => api<any>(`/agents/${enc(id)}/files`), [id]);
+  const size = (f: string) => f === "daily" ? null : (files?.files ?? files ?? []).find?.((x: any) => x.path === f)?.size;
+  const dirty = JSON.stringify(cur) !== JSON.stringify(lo.current);
+  const label = (f: string) => f === "daily" ? "每日笔记" : f.replace(".md", "");
+  return (
+    <Card title="加载场景" actions={dirty && <Btn small kind="primary" onClick={async () => {
+      try { await api("/config", { method: "PUT", body: { prompt_files: cur } }); toast("已保存，下一轮对话生效"); reload(); } catch (e) { toastErr(e); }
+    }}>保存</Btn>}>
+      <table class="matrix">
+        <thead><tr><th />{lo.files.map((f: string) => <th>{label(f)}{size(f) ? <small class="muted"><br />{Math.round(size(f) / 1024 * 10) / 10}KB</small> : null}</th>)}</tr></thead>
+        <tbody>{lo.scenes.map((sc: any) => (
+          <tr><td title={sc.desc}>{sc.label}</td>
+            {lo.files.map((f: string) => {
+              const locked = sc.id === "guest" && lo.private.includes(f);
+              return <td><input type="checkbox" disabled={locked} checked={!locked && cur[sc.id]?.includes(f)}
+                onChange={(e) => {
+                  const on = (e.target as HTMLInputElement).checked;
+                  setCur({ ...cur, [sc.id]: lo.files.filter((x: string) => (x === f ? on : cur[sc.id]?.includes(x))) });
+                }} /></td>;
+            })}</tr>))}</tbody>
+      </table>
     </Card>
   );
 }

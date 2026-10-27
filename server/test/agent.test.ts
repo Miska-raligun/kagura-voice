@@ -6,7 +6,8 @@ import { makeRuntime } from "./helpers.ts";
 import { deviceTools } from "../src/agent/tools/device.ts";
 import { Runtime } from "../src/agent/runtime.ts";
 import { AgentRegistry } from "../src/agent/registry.ts";
-import { buildSystemPrompt, clip, applyBudgets, BUDGETS } from "../src/agent/soul.ts";
+import { Memories } from "../src/agent/tools/memory.ts";
+import { buildSystemPrompt, clip, applyBudgets, BUDGETS, applyLoadout, LOADOUT, DEFAULT_LOADOUT, sceneOf } from "../src/agent/soul.ts";
 import { PiBrain } from "../src/brain/pi.ts";
 import { Type } from "@earendil-works/pi-ai";
 
@@ -282,24 +283,70 @@ describe("soul 组装", () => {
     const d = new Date();
     const pad = (n: number) => String(n).padStart(2, "0");
     fs.writeFileSync(path.join(a.workspace, "memory", `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}.md`), "今天去了公园");
-    const main = buildSystemPrompt({ agent: a, kind: "main", channel: "device" });
+    const main = buildSystemPrompt({ agent: a, scene: "owner", channel: "device" });
     expect(main).toContain("乌龙茶");
     expect(main).toContain("今天去了公园");
     expect(main).toContain("已截断");
     expect(main).toContain("不超过 80 字");
     // 5000 字在默认上限内不截断；配置调小之后才截
     fs.writeFileSync(path.join(a.workspace, "SOUL.md"), "灵".repeat(5000));
-    expect(buildSystemPrompt({ agent: a, kind: "main", channel: "device" })).not.toContain("已截断");
+    expect(buildSystemPrompt({ agent: a, scene: "owner", channel: "device" })).not.toContain("已截断");
     applyBudgets({ "SOUL.md": 1000, bogus: 5 });
     expect(BUDGETS["SOUL.md"]).toBe(1000);
     expect("bogus" in BUDGETS).toBe(false);
-    expect(buildSystemPrompt({ agent: a, kind: "main", channel: "device" })).toContain("已截断");
+    expect(buildSystemPrompt({ agent: a, scene: "owner", channel: "device" })).toContain("已截断");
     applyBudgets({});
     expect(BUDGETS["SOUL.md"]).toBe(20000);
-    const sub = buildSystemPrompt({ agent: a, kind: "sub", channel: "a2a" });
+    const sub = buildSystemPrompt({ agent: a, scene: "sub", channel: "a2a" });
     expect(sub).not.toContain("乌龙茶");
     expect(sub).not.toContain("<USER.md>");
     expect(sub).not.toContain("今天去了公园");
+  });
+
+  it("按场景加载人设文件：陌生人拿不到主人的私人信息，干活的场景不背整篇性格和记忆", () => {
+    const { reg } = makeRuntime();
+    const a = reg.get("main")!;
+    fs.writeFileSync(path.join(a.workspace, "SOUL.md"), "性格温柔");
+    fs.writeFileSync(path.join(a.workspace, "USER.md"), "主人叫小明");
+    fs.writeFileSync(path.join(a.workspace, "MEMORY.md"), "主人喜欢乌龙茶");
+    fs.writeFileSync(path.join(a.workspace, "HEARTBEAT.md"), "检查天气");
+    fs.writeFileSync(path.join(a.workspace, "memory", `${new Date().toISOString().slice(0, 10)}.md`), "今天去了公园");
+    const p = (scene: any) => buildSystemPrompt({ agent: a, scene, channel: "feishu" });
+    const owner = p("owner");
+    expect(owner).toContain("小明"); expect(owner).toContain("乌龙茶"); expect(owner).not.toContain("检查天气");
+    expect(owner).not.toContain("<not_loaded>");
+    const guest = p("guest");
+    for (const x of ["小明", "乌龙茶", "公园", "<not_loaded>", "<TOOLS.md>"]) expect(guest).not.toContain(x);
+    expect(guest).toContain("性格温柔");
+    expect(p("heartbeat")).toContain("检查天气");
+    const task = p("task");
+    expect(task).not.toContain("性格温柔"); expect(task).not.toContain("乌龙茶"); expect(task).toContain("小明");
+    expect(task).toMatch(/<not_loaded>[\s\S]*SOUL\.md[\s\S]*MEMORY\.md[\s\S]*每日笔记/);
+    // 配置能改，但群聊陌生人永远拿不到私人文件
+    applyLoadout({ guest: ["SOUL.md", "USER.md", "MEMORY.md", "daily"], task: ["MEMORY.md"], bogus: ["x"] });
+    expect(p("guest")).not.toContain("小明");
+    expect(p("task")).toContain("乌龙茶");
+    expect(LOADOUT.guest).toEqual(["SOUL.md"]);
+    applyLoadout({});
+    expect(LOADOUT.task).toEqual(DEFAULT_LOADOUT.task);
+    // 场景判定：不可信的一律 guest
+    const sc = (x: any) => sceneOf({ trusted: true, purpose: "chat", kind: "main", channel: "device", ...x });
+    expect([sc({}), sc({ trusted: false, purpose: "cron" }), sc({ purpose: "heartbeat" }), sc({ purpose: "task" }), sc({ purpose: "cron" }), sc({ kind: "sub" }), sc({ channel: "a2a" })])
+      .toEqual(["owner", "guest", "heartbeat", "task", "cron", "sub", "a2a"]);
+  });
+
+  it("记忆工具只给可信会话；memory_get 能读没加载的人设文件", async () => {
+    const { rt, reg } = makeRuntime();
+    const mem = new Memories(rt, null);
+    const a = reg.get("main")!;
+    fs.writeFileSync(path.join(a.workspace, "USER.md"), "主人叫小明");
+    const scope = (trusted: boolean): any => ({ agentId: "main", sessionKey: "main:main", kind: "chat", channel: "feishu", purpose: "chat", hop: 0, chain: [], meta: {}, trusted });
+    expect(mem.tools()(scope(false), a)).toHaveLength(0);
+    const get = mem.tools()(scope(true), a).find((t) => t.name === "memory_get")!;
+    const r: any = await get.execute("1", { path: "USER.md" }, undefined as any);
+    expect(r.content[0].text).toContain("小明");
+    const bad: any = await get.execute("2", { path: "../agent.json" }, undefined as any);
+    expect(JSON.stringify(bad)).toMatch(/只能读/);
   });
 
   it("clip 按字截断", () => {

@@ -25,17 +25,57 @@ export function applyBudgets(over: Record<string, unknown> | undefined) {
   }
 }
 
-/** 会话种类决定注入哪些文件：sub（子 agent）不给 USER/MEMORY，同 OpenClaw */
 export type SessionKind = "main" | "chat" | "isolated" | "sub";
 
-const ORDER: [string, (k: SessionKind) => boolean][] = [
-  ["SOUL.md", () => true],
-  ["IDENTITY.md", () => true],
-  ["USER.md", (k) => k !== "sub"],
-  ["AGENTS.md", () => true],
-  ["TOOLS.md", () => true],
-  ["MEMORY.md", (k) => k !== "sub"],
+/**
+ * 按场景加载人设文件（LRN 2026-10-27）：以前除了子任务一律全量注入，群聊陌生人也拿到主人的 USER / MEMORY / 笔记，
+ * 待办、定时任务这类干活的场景也背着整篇性格和记忆。现在每个场景只带它用得上的，其余需要时用 memory_get / memory_search 现读。
+ * config.json 的 prompt_files 可改（管理界面 Agents → 人设文件 → 加载场景）；guest 永远拿不到 PRIVATE_FILES。
+ */
+export type Scene = "owner" | "guest" | "heartbeat" | "cron" | "task" | "sub" | "a2a";
+/** 注入顺序。daily = 今天和昨天的每日笔记 */
+export const PROMPT_FILES = ["SOUL.md", "IDENTITY.md", "USER.md", "AGENTS.md", "TOOLS.md", "MEMORY.md", "HEARTBEAT.md", "daily"] as const;
+export const SCENES: { id: Scene; label: string; desc: string }[] = [
+  { id: "owner", label: "主人对话", desc: "设备、手机、网页、主人的 IM 私聊" },
+  { id: "guest", label: "群聊 / 陌生人", desc: "IM 群聊、配对来的人：不给主人的私人信息" },
+  { id: "heartbeat", label: "Heartbeat", desc: "例行检查、主动开口" },
+  { id: "cron", label: "定时任务", desc: "到点提醒、播报" },
+  { id: "task", label: "待办", desc: "夜间干活" },
+  { id: "sub", label: "子任务", desc: "派出去的分身" },
+  { id: "a2a", label: "agent 间对话", desc: "别的 agent 找她" },
 ];
+/** 主人的私人信息：群聊、陌生人的会话里无论怎么配都不加载 */
+export const PRIVATE_FILES = new Set(["USER.md", "MEMORY.md", "daily"]);
+export const DEFAULT_LOADOUT: Record<Scene, string[]> = {
+  owner: ["SOUL.md", "IDENTITY.md", "USER.md", "AGENTS.md", "TOOLS.md", "MEMORY.md", "daily"],
+  guest: ["SOUL.md", "IDENTITY.md", "AGENTS.md"],
+  heartbeat: ["SOUL.md", "IDENTITY.md", "USER.md", "AGENTS.md", "TOOLS.md", "MEMORY.md", "HEARTBEAT.md", "daily"],
+  cron: ["SOUL.md", "IDENTITY.md", "USER.md", "AGENTS.md", "TOOLS.md"],
+  task: ["IDENTITY.md", "USER.md", "AGENTS.md", "TOOLS.md"],
+  sub: ["IDENTITY.md", "AGENTS.md", "TOOLS.md"],
+  a2a: ["SOUL.md", "IDENTITY.md", "USER.md", "AGENTS.md", "TOOLS.md", "MEMORY.md"],
+};
+export const LOADOUT: Record<Scene, string[]> = structuredClone(DEFAULT_LOADOUT);
+
+/** 用配置覆盖各场景的文件（只认已知的场景和文件；guest 去掉私人文件） */
+export function applyLoadout(over: Record<string, unknown> | undefined) {
+  Object.assign(LOADOUT, structuredClone(DEFAULT_LOADOUT));
+  for (const [k, v] of Object.entries(over ?? {})) {
+    if (!(k in DEFAULT_LOADOUT) || !Array.isArray(v)) continue;
+    LOADOUT[k as Scene] = (PROMPT_FILES as readonly string[]).filter((f) => v.includes(f) && !(k === "guest" && PRIVATE_FILES.has(f)));
+  }
+}
+
+/** 这一轮算哪个场景。不可信的一律 guest（陌生人建的定时任务、从群聊派出的子任务也是） */
+export function sceneOf(r: { trusted: boolean; purpose: string; kind: string; channel: string }): Scene {
+  if (!r.trusted) return "guest";
+  if (r.purpose === "heartbeat") return "heartbeat";
+  if (r.purpose === "task") return "task";
+  if (r.purpose === "cron") return "cron";
+  if (r.kind === "sub") return "sub";
+  if (r.channel === "a2a") return "a2a";
+  return "owner";
+}
 
 export function clip(text: string, max: number): string {
   const chars = Array.from(text.trim());
@@ -63,7 +103,7 @@ export const CHANNEL_HINTS: Record<string, string> = {
 
 export interface SoulOpts {
   agent: AgentInfo;
-  kind: SessionKind;
+  scene: Scene;
   channel: string;
   summary?: string;
   /** 额外段落（heartbeat 清单、任务说明等） */
@@ -78,13 +118,16 @@ export interface SoulOpts {
 export function buildSystemPrompt(o: SoulOpts): string {
   const ws = o.agent.workspace;
   const parts: string[] = [];
-  for (const [f, want] of ORDER) {
-    if (!want(o.kind)) continue;
-    const t = readSafe(path.join(ws, f)).trim();
+  const want = new Set(LOADOUT[o.scene].filter((f) => !(o.scene === "guest" && PRIVATE_FILES.has(f))));
+  const skipped: string[] = [];
+  for (const f of PROMPT_FILES) {
+    if (f === "daily") continue;
+    const t = want.has(f) ? readSafe(path.join(ws, f)).trim() : "";
     if (t) parts.push(`<${f}>\n${clip(t, BUDGETS[f])}\n</${f}>`);
+    else if (!want.has(f) && f !== "HEARTBEAT.md" && fs.existsSync(path.join(ws, f))) skipped.push(f);
   }
   // 今天和昨天的笔记：新会话也能接上最近发生的事
-  if (o.kind !== "sub") {
+  if (want.has("daily")) {
     const today = new Date();
     const yest = new Date(today.getTime() - 86400_000);
     const notes = [yest, today].map((d) => {
@@ -100,6 +143,11 @@ export function buildSystemPrompt(o: SoulOpts): string {
   if (o.peers?.length) {
     parts.push("<agents>\n你可以联系的其他 agent（sessions_send / sessions_spawn）：\n"
       + o.peers.map((p) => `- ${p.id}（${p.name}）`).join("\n") + "\n</agents>");
+  }
+  // 没加载的告诉她一声，需要时自己去读（群聊陌生人那边不提：她在那里本来就不该去翻主人的东西）
+  if (o.scene !== "guest" && (skipped.length || !want.has("daily"))) {
+    const list = [...skipped, ...(want.has("daily") ? [] : ["每日笔记（memory/）"])];
+    parts.push(`<not_loaded>\n这次没加载：${list.join("、")}。用到时用 memory_get 读、memory_search 搜。\n</not_loaded>`);
   }
   if (o.summary) parts.push(`<earlier_conversation_summary>\n${o.summary}\n</earlier_conversation_summary>`);
   for (const e of o.extra ?? []) if (e) parts.push(e);

@@ -338,10 +338,10 @@ export class Scheduler {
       trusted: !j.untrusted,
     };
     if (j.kind === "heartbeat") {
-      const list = this.agents.readFile(agent.id, "HEARTBEAT.md").trim();
+      // HEARTBEAT.md 由系统提示按场景加载（soul.ts 的 heartbeat 场景）
       return this.rt.run({
         ...base, sessionKey: `${agent.id}:main`, kind: "main",
-        text: j.message || HEARTBEAT_PROMPT, extraSystem: list ? [`<HEARTBEAT.md>\n${list}\n</HEARTBEAT.md>`] : [],
+        text: j.message || HEARTBEAT_PROMPT,
         model: j.model || agent.cheap_model || this.rt.models.cheapRef(),
         keepIf: (text) => !SILENT_RE.test(text) && !!text,
       });

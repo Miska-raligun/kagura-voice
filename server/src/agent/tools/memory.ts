@@ -8,6 +8,7 @@ import type { Runtime } from "../runtime.ts";
 import { MemoryIndex, type Embedder } from "../memory.ts";
 import { resolveInside } from "../paths.ts";
 import { ok, fail } from "./device.ts";
+import { SOUL_FILES } from "../registry.ts";
 
 export const FLUSH_PROMPT = "[系统] 这段对话马上要被压缩成摘要，较早的细节会丢失。"
   + "把其中值得长期记住、而记忆里还没有的事用 memory_write 记下来（主人的偏好、约定、待办、重要的日子与事实）："
@@ -34,15 +35,16 @@ export class Memories {
 
   forget(agentId: string) { this.idx.delete(agentId); }
 
-  /** 只允许 MEMORY.md 和 memory/ 下的 .md：memory_get 不是通用读文件工具 */
+  /** 只允许人设文件（MEMORY.md、USER.md……）和 memory/ 下的 .md：memory_get 不是通用读文件工具 */
   static memoryPath(agent: AgentInfo, rel: string) {
     const norm = rel.replace(/\\/g, "/").replace(/^\.\//, "");
-    if (norm !== "MEMORY.md" && !/^memory\/[^/]+\.md$/.test(norm)) throw new Error("只能读 MEMORY.md 或 memory/ 下的笔记");
+    if (!(SOUL_FILES as readonly string[]).includes(norm) && !/^memory\/[^/]+\.md$/.test(norm)) throw new Error("只能读人设文件（MEMORY.md、USER.md 等）或 memory/ 下的笔记");
     return resolveInside(agent.workspace, norm);
   }
 
   tools() {
-    return (scope: RunScope, agent: AgentInfo): AgentTool<any>[] => [
+    // 记忆是主人的私事：群聊、陌生人的会话里既不能翻（套话），也不能写（往记忆里塞东西，以后每轮都带着）
+    return (scope: RunScope, agent: AgentInfo): AgentTool<any>[] => !scope.trusted ? [] : [
       {
         name: "memory_search", label: "搜索记忆",
         description: "在你的长期记忆（MEMORY.md）和每日笔记里搜索。回答涉及以前的事、主人的偏好、约定时先搜一下。",
@@ -55,7 +57,7 @@ export class Memories {
       },
       {
         name: "memory_get", label: "读取记忆",
-        description: "读取一个记忆文件（MEMORY.md 或 memory/YYYY-MM-DD.md），可指定起始行与行数。",
+        description: "读取记忆或人设文件（MEMORY.md、USER.md、SOUL.md 等，或 memory/YYYY-MM-DD.md），可指定起始行与行数。",
         parameters: Type.Object({ path: Type.String(), from: Type.Optional(Type.Number()), lines: Type.Optional(Type.Number()) }),
         execute: async (_id, p: any) => {
           try {

@@ -8,7 +8,7 @@ import { json, viaProxy, type Req, type Res, type Router } from "../http/router.
 import type { Ctx } from "../ctx.ts";
 import type { AgentSystem } from "../agent/system.ts";
 import { SOUL_FILES } from "../agent/registry.ts";
-import { BUDGETS, applyBudgets } from "../agent/soul.ts";
+import { BUDGETS, LOADOUT, SCENES, PROMPT_FILES, PRIVATE_FILES, applyBudgets, applyLoadout } from "../agent/soul.ts";
 import { Memories } from "../agent/tools/memory.ts";
 import { importOpenClaw, findOpenClawDirs, describeImport } from "../agent/import-openclaw.ts";
 import { scheduleFrom } from "../agent/tools/cron.ts";
@@ -109,6 +109,7 @@ export function registerAdmin(r: Router, ctx: Ctx, sys: AgentSystem) {
   });
   get("/api/admin/meta", () => json({
     budgets: BUDGETS, soul_files: SOUL_FILES,
+    loadout: { scenes: SCENES, files: PROMPT_FILES, private: [...PRIVATE_FILES], current: LOADOUT },
     tools: runtime.allToolNames(registry.default()),
     fake: ctx.cfg.fakeProviders,
   }));
@@ -440,6 +441,7 @@ export function registerAdmin(r: Router, ctx: Ctx, sys: AgentSystem) {
       hot.push("tools");
     }
     if ("prompt_budgets" in patch) { applyBudgets(next.prompt_budgets); hot.push("prompt_budgets"); }
+    if ("prompt_files" in patch) { applyLoadout(next.prompt_files); hot.push("prompt_files"); }
     // 运行时里只有并发数要重启；超时就地生效
     const restart = ["port", "mqtt_port", "stream_port", "disc_port", "baidu", "api_token", "stream_token", "brain", "openclaw"].filter((k) => k in patch);
     if (patch.runtime && Number(patch.runtime.max_concurrency) !== Number(old.runtime?.max_concurrency ?? 4)) restart.push("最大并发");

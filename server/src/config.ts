@@ -63,6 +63,8 @@ export interface Config {
   schedulerTick: number;
   /** 人设文件注入上限覆盖（见 agent/soul.ts 的 DEFAULT_BUDGETS） */
   promptBudgets: Record<string, number>;
+  /** 各场景加载哪些人设文件（见 agent/soul.ts 的 LOADOUT） */
+  promptFiles: Record<string, string[]>;
   /** 执行命令、联网工具的设置。管理界面改了就地更新这个对象（工具每次调用时读），不用重启 */
   tools: ToolsConfig;
 }
@@ -211,6 +213,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     a2a: { enabled: a2a.enabled ?? true, maxHops: Number(a2a.max_hops ?? 3), perPairPerMin: Number(a2a.per_pair_per_min ?? 10) },
     tools: parseToolsConfig(file.tools),
     promptBudgets: file.prompt_budgets && typeof file.prompt_budgets === "object" ? file.prompt_budgets : {},
+    promptFiles: file.prompt_files && typeof file.prompt_files === "object" ? file.prompt_files : {},
     schedulerTick: Number(env.KAGURA_SCHEDULER_TICK || file.scheduler_tick || 15),
   };
 }

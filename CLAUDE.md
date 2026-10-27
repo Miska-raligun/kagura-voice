@@ -319,6 +319,11 @@ CoreS3 (MicroPython) ──HTTP──▶ server/（TypeScript 单文件可执行
   agent 每轮走 `ModelRegistry.chatStream`（Agent 的 `streamFn`）按 `thinkingParams` 加字段：MiniMax / 智谱只有开关，DeepSeek 加 `reasoning_effort`，
   通义加 `thinking_budget`，认不出的服务商「关」就不发（别乱发不认识的字段）。**思考在这几家都算进 max_tokens，改不了**——所以 `max_tokens` 的含义是
   「回复本身的上限」，请求时另加 `THINK_RESERVE`（默认 +4k / 低 +2k / 中 +6k / 高 +16k / 关 0），思考就挤不掉回复。
+- **人设文件按场景加载（`soul.ts` 的 `LOADOUT` / `sceneOf`，LRN 2026-10-27，症状「群聊陌生人的上下文里有主人的 USER / MEMORY / 笔记」「干活也背着整篇人设」）**：
+  场景 = owner（主人对话）/ guest（不可信：群聊、陌生人，**不管 purpose 一律算它**）/ heartbeat / cron / task / sub / a2a，每个场景一组文件（含 HEARTBEAT.md、daily=今昨笔记），
+  `config.json` 的 `prompt_files` 可改（管理界面 Agents → 人设文件 →「加载场景」）。**guest 永远拿不到 `PRIVATE_FILES`（USER / MEMORY / daily）**，配置也加不上；
+  记忆工具（memory_search / get / write）也只给可信会话——陌生人既能套话、也能往记忆里塞东西。没加载的文件在 `<not_loaded>` 里点名（guest 不提），
+  `memory_get` 能读所有人设文件。HEARTBEAT.md 现在走场景表，别再在 scheduler 里用 extraSystem 另塞一遍。加载的文件仍是整篇注入（每个上限 `BUDGETS`）。
 - **近况（`Runtime.recentActivity`，LRN 2026-10-26，症状「heartbeat / 主动聊天老问已经说过的事；换个 agent 又问一遍」）**：
   每个会话只看得见自己的历史——飞书私聊（没开 owner_main 时）、网页聊天、独立定时任务、别的 agent 各说各的，跨会话以前只能靠 agent 自己写记忆文件。
   现在每轮（只给可信会话、不给子任务 / 记忆冲刷）从库里摘最近 `RECENT_HOURS`（48）小时、**别处**跟主人的往来：本 agent 的其它会话 + 其他 agent 的，

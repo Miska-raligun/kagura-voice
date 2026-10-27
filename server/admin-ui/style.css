@@ -224,3 +224,5 @@ details.summary { margin-bottom:8px; }
 .vol { display:inline-flex; align-items:center; gap:6px; white-space:nowrap; }
 .vol input[type=range] { width:96px; accent-color:var(--accent); }
 .slot img.tall, .slot .ph.tall { aspect-ratio:3/4; object-position:50% 20%; }
+table.matrix th, table.matrix td { text-align:center; }
+table.matrix td:first-child { text-align:left; white-space:nowrap; }
