@@ -41,6 +41,8 @@ export interface RunRequest {
   /** 在 agent 白名单之上再收窄一层 */
   toolAllow?: (name: string) => boolean;
   timeoutSecs?: number;
+  /** 这一轮的总时长上限（秒），覆盖全局 max_secs（待办可以跑得比对话久） */
+  maxSecs?: number;
   /** 外部取消（设备上点屏幕取消正在等的回复） */
   signal?: AbortSignal;
   /** 不在消息前附 [时间…]（a2a 转述等） */
@@ -84,7 +86,7 @@ export function estimateTokens(text: string): number {
 
 const SILENT = /^\s*(HEARTBEAT_OK|NO_REPLY)\s*[。.!！]?\s*$/i;
 /** 系统替主人发起的那些「用户消息」（heartbeat、定时任务、系统事件、别的 agent 传话）：不是主人说的，近况里不算 */
-const NOT_OWNER = /^\s*\[(heartbeat|定时任务|系统事件|来自 |子任务|这条消息是)/;
+const NOT_OWNER = /^\s*\[(heartbeat|定时任务|系统事件|来自 |子任务|这条消息是|待办)/;
 const CHANNEL_NAME: Record<string, string> = { device: "设备", webchat: "网页", feishu: "飞书", qq: "QQ", onebot: "QQ", system: "定时", a2a: "agent 间" };
 /** 近况看多久以内的 */
 export const RECENT_HOURS = 48;
@@ -373,7 +375,7 @@ export class Runtime {
     // 超时按「多久没有进展」算，不按一轮总时长：模型在出字、工具在执行都算在干活，长任务不会被半路掐掉。
     // 工具执行期间不计时（命令有自己的超时）；另有总时长上限兜底，防卡死、防死循环
     const idleMs = (req.timeoutSecs ?? this.opts.timeoutSecs) * 1000;
-    const maxMs = Math.max(idleMs, (this.opts.maxSecs ?? 1800) * 1000);
+    const maxMs = Math.max(idleMs, (req.maxSecs ?? this.opts.maxSecs ?? 1800) * 1000);
     let timedOut: "" | "idle" | "max" | "cancel" = "";
     let idleTimer: ReturnType<typeof setTimeout> | null = null;
     let toolsRunning = 0;

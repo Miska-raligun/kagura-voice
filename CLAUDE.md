@@ -335,6 +335,14 @@ CoreS3 (MicroPython) ──HTTP──▶ server/（TypeScript 单文件可执行
   才删标记——别提前到 `setup()` 结束，那时还不知道新代码能不能跟服务端说上话；
   ④ `ota_state.json` 只记自己装过的文件，删除只删这些（手动传的文件不碰）；换了图要清 `ui._role_hit`/`_img_missing`；
   ⑤ `rev` 算法两边必须一致（`DeviceFiles.rev` ↔ `ota._rev`），`import_sim` 里专门对过。
+- **待办 / 延迟执行（`agent/tasks.ts` `TaskQueue`、工具 `tools/tasks.ts`、管理界面「待办」，LRN 2026-10-27）**：白天遇到改代码这类大而不急的活，
+  agent 用 `task_add` 记下（只在可信会话里有；执行待办的那一轮、子任务里没有），夜间静默时段（默认 01:00-06:00）一件件做，订阅制额度白天留给对话。
+  存 system.sqlite 的 `tasks` / `task_settings`。别改坏的点：① **一次只做一件**（`running`），做完 `setImmediate` 接着看下一件——按真实时钟判断时段，测试里要自己逐个 `tick(t)`；
+  ② `run_at` 空 = 等静默时段，有值 = 到点就做（不看时段），管理界面「立即执行」= 把 `run_at` 设成现在；③ 执行用全新上下文 `<agent>:task:<id>`、
+  `purpose: "task"`、`maxSecs` = 单件上限（`RunRequest.maxSecs` 覆盖全局 max_secs），提示词里明说「主人不在旁边、不可撤回的事别做、最后写汇报」；
+  ④ **做完不马上说**：`canReport` = 不在静默时段且过了 `report_at`（默认 08:00），同一来源合成一条，送没送出去都标 `reported`（别每分钟重试）；
+  来源是网页 / 管理界面的按 agent 的 heartbeat 投递目标送；⑤ 重启时 `running` 的回到排队，被打断两次算失败。`[待办` 开头的用户消息不算主人说的话（`NOT_OWNER`）。
+  `/api/admin/runs` 是「正在运行」，定时任务的运行记录在 `/api/admin/job-runs`（rc.18 起两者同路径、后者一直被盖住，会话页「定时任务消息」是空的）。
 - **agent 工作目录可自定义**（`agent.json` 的 `workspace_dir`，`registry.resolveWorkspace`，LRN 2026-10-26）：绝对路径或 `~/…`，空 = `agents/<id>/workspace`。
   人设、记忆、技能、扩展、exec 默认目录都跟着走，`agent.json` / `agent.sqlite` 始终在数据目录。一律用 `AgentInfo.workspace`，**别再自己拼 `agents/<id>/workspace`**。
   改目录：新目录空的就整个复制过去、有东西（如 OpenClaw 工作区）就原样用只补缺的人设，旧目录不删；不能包住数据目录、不能和别的 agent 重叠；

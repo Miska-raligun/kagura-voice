@@ -150,6 +150,7 @@ async function main() {
   // 提醒不属于哪个 agent：有出口（内置 agent）就按 voice_push 策略走，否则照旧直接推
   ctx.reminders.start(async (text, dev) => (ctx.outbox ? (await ctx.outbox.say({ text, agentId: null, device: dev, source: "reminder" })).played : ctx.sendPush(text, dev)));
   sys.scheduler?.start(cfg.schedulerTick);
+  sys.tasks?.start(Math.min(30, cfg.schedulerTick));
   // 扩展加载完会顺带（重新）连接 MCP 服务器；都在后台，不拖慢启动
   sys.extensions.reloadAll().catch((e) => console.log(`[ext] ⚠️  ${e.message}`))
     .then(() => reinstallImportedPackages(cfg.dataDir, sys.packages));

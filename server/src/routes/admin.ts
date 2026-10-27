@@ -12,6 +12,9 @@ import { BUDGETS, applyBudgets } from "../agent/soul.ts";
 import { Memories } from "../agent/tools/memory.ts";
 import { importOpenClaw, findOpenClawDirs, describeImport } from "../agent/import-openclaw.ts";
 import { scheduleFrom } from "../agent/tools/cron.ts";
+import { parseWhen } from "../agent/tools/tasks.ts";
+import { nextWindowStart } from "../agent/tasks.ts";
+import { inActiveHours } from "../agent/cron.ts";
 import { Roles } from "../roles.ts";
 import { parseToolsConfig, parseVoicePush } from "../config.ts";
 import { SpeechHub, parseSpeechConfig, minimaxClone, minimaxActivate, minimaxListCloned } from "../voice/hub.ts";
@@ -258,7 +261,29 @@ export function registerAdmin(r: Router, ctx: Ctx, sys: AgentSystem) {
   del("/api/admin/jobs/<id>", (req) => (sched().remove(req.params.id) ? json({ status: "ok" }) : json({ error: "没有这个任务" }, 404)));
   post("/api/admin/jobs/<id>/run", async (req) => json(await sched().runNow(req.params.id)));
   get("/api/admin/jobs/<id>/runs", (req) => json(sched().runs(req.params.id, Number(req.query.get("limit") ?? 50))));
-  get("/api/admin/runs", (req) => json(sched().runs(undefined, Number(req.query.get("limit") ?? 50))));
+  // ── 待办（夜间静默时段执行） ──
+  const tq = () => { if (!sys.tasks) throw Object.assign(new Error("待办只在内置 agent 模式下可用"), { status: 400 }); return sys.tasks; };
+  const runAt = (v: unknown): number | null => (v === null || v === "" || v === undefined ? null : Number.isFinite(Number(v)) ? Number(v) : parseWhen(String(v)));
+  get("/api/admin/tasks", () => {
+    const q = tq(), st = q.settings();
+    return json({ settings: st, next_window: nextWindowStart(st.window), in_window: inActiveHours(st.window, Date.now()), busy: q.busy(), tasks: q.list().slice(0, 200) });
+  });
+  post("/api/admin/tasks", (req) => {
+    const d = req.json() ?? {};
+    return json(tq().add({ agent: String(d.agent ?? registry.default().id), title: d.title, detail: d.detail, run_at: runAt(d.run_at), origin: String(d.origin ?? ""), trusted: true, source: "admin" }), 201);
+  });
+  patch("/api/admin/tasks/<id>", (req) => {
+    const d = req.json() ?? {};
+    return json(tq().update(req.params.id, { title: d.title, detail: d.detail, ...("run_at" in d ? { run_at: runAt(d.run_at) } : {}) }));
+  });
+  post("/api/admin/tasks/<id>/run", (req) => json(tq().runNow(req.params.id)));
+  post("/api/admin/tasks/<id>/cancel", (req) => json(tq().cancel(req.params.id)));
+  post("/api/admin/tasks/<id>/requeue", (req) => json(tq().requeue(req.params.id)));
+  del("/api/admin/tasks/<id>", (req) => { tq().remove(req.params.id); return json({ status: "ok" }); });
+  put("/api/admin/tasks-settings", (req) => json(tq().setSettings(req.json() ?? {})));
+
+  // 运行记录（所有任务）。别用 /api/admin/runs：那是「正在运行」（先注册的生效，rc.18 起这里一直被它盖住）
+  get("/api/admin/job-runs", (req) => json(sched().runs(undefined, Number(req.query.get("limit") ?? 50))));
 
   // ── 从 OpenClaw 导入（人设、记忆、定时任务；任务默认暂停）──
   post("/api/admin/import/openclaw", (req) => {

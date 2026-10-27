@@ -754,3 +754,46 @@ def test_pi_packages_install_local_and_upload(a, tmp_path):
         assert a.request("DELETE", f"/api/admin/packages/{i}").status_code == 200
     assert a.get("/api/admin/packages").json()["packages"] == []
     assert local.exists(), "删除本地包不能删用户的目录"
+
+
+def test_deferred_tasks(a):
+    """待办：对话里记下（不马上做）→ 管理界面改开始时间 / 立即执行 → 后台做完、结果和执行过程可查；撤销、重新排队、设置"""
+    a.fake_llm(tool("task_add", _then="好，记下了，今晚做。", title="整理报告", detail="把 notes 目录整理成一份周报"))
+    r = a.post("/chat", data=wav(), headers={"X-Device-Id": "ag_task"})
+    assert b64text(r.headers["X-Reply-Text"]) == "好，记下了，今晚做。"
+    d = a.get("/api/admin/tasks").json()
+    t = next(x for x in d["tasks"] if x["title"] == "整理报告")
+    assert t["status"] == "queued" and t["run_at"] is None and t["origin"] == "device:ag_task" and t["trusted"] is True
+    assert d["settings"]["window"] == "01:00-06:00"
+
+    # 改开始时间、立即执行
+    assert a.request("PATCH", f"/api/admin/tasks/{t['id']}", json={"run_at": time.time() + 7200, "detail": "改过：整理成周报"}).json()["detail"] == "改过：整理成周报"
+    a.fake_llm("周报整理好了，放在 weekly.md。")
+    assert a.post(f"/api/admin/tasks/{t['id']}/run", json={}).status_code == 200
+    for _ in range(50):
+        cur = next(x for x in a.get("/api/admin/tasks").json()["tasks"] if x["id"] == t["id"])
+        if cur["status"] != "running" and cur["status"] != "queued":
+            break
+        time.sleep(0.2)
+    assert cur["status"] == "done" and cur["result"] == "周报整理好了，放在 weekly.md。", cur
+    sess = a.get(f"/api/admin/agents/main/sessions/{requests_quote('main:task:' + t['id'])}").json()
+    assert "改过：整理成周报" in json.dumps(sess, ensure_ascii=False)
+
+    # 管理界面新建、撤销、重新排队、删除
+    n = a.post("/api/admin/tasks", json={"agent": "main", "title": "备份照片", "detail": "把 snapshots 打包"}).json()
+    assert a.post(f"/api/admin/tasks/{n['id']}/cancel", json={}).json()["status"] == "cancelled"
+    assert a.post(f"/api/admin/tasks/{n['id']}/requeue", json={}).json()["status"] == "queued"
+    assert a.request("DELETE", f"/api/admin/tasks/{n['id']}").status_code == 200
+    assert a.post("/api/admin/tasks", json={"agent": "main", "title": "", "detail": "x"}).status_code == 400
+
+    # 设置
+    s = a.request("PUT", "/api/admin/tasks-settings", json={"window": "02:00-05:00", "report_at": "", "max_minutes": 30}).json()
+    assert s["window"] == "02:00-05:00" and s["report_at"] == "" and s["max_minutes"] == 30
+    assert a.request("PUT", "/api/admin/tasks-settings", json={"window": "两点到五点"}).status_code == 400
+    a.request("PUT", "/api/admin/tasks-settings", json={"window": "01:00-06:00", "report_at": "08:00", "max_minutes": 60})
+
+
+def test_job_runs_history_endpoint(a):
+    """定时任务的运行记录在 /api/admin/job-runs（/api/admin/runs 是「正在运行」）"""
+    assert isinstance(a.get("/api/admin/job-runs?limit=5").json(), list)
+    assert isinstance(a.get("/api/admin/runs").json(), list)

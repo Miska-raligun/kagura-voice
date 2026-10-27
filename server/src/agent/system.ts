@@ -26,6 +26,8 @@ import { proxiedFetch } from "../util/proxy.ts";
 import { ChannelStore } from "../channels/store.ts";
 import { ChannelManager } from "../channels/manager.ts";
 import path from "node:path";
+import { TaskQueue } from "./tasks.ts";
+import { taskTools } from "./tools/tasks.ts";
 
 export interface AgentSystem {
   registry: AgentRegistry;
@@ -33,6 +35,7 @@ export interface AgentSystem {
   runtime: Runtime;
   memories: Memories;
   scheduler: Scheduler | null;
+  tasks: TaskQueue | null;
   a2a: A2A;
   skills: Skills;
   channels: ChannelManager;
@@ -80,7 +83,7 @@ export function createAgentSystem(cfg: Config, dirs: Dirs, fake: FakeLlm | null)
   runtime.addTools(extensions.tools(), { plugin: true });
   runtime.addTools(mcp.tools(), { plugin: true });
   const channels = new ChannelManager(new ChannelStore(path.join(cfg.dataDir, "channels.json")), runtime, registry, undefined, path.join(cfg.dataDir, "channels_seen.json"));
-  return { registry, models, runtime, memories, scheduler: null, a2a, skills, channels, mcp, extensions, packages };
+  return { registry, models, runtime, memories, scheduler: null, tasks: null, a2a, skills, channels, mcp, extensions, packages };
 }
 
 /** 依赖 Ctx 的部分（设备工具要推送、拍照；调度器要投递）在 Ctx 建好之后接上 */
@@ -157,6 +160,25 @@ export function attachAgentSystem(sys: AgentSystem, ctx: Ctx) {
     },
   });
   sys.scheduler = scheduler;
+  // 待办：夜间静默时段一件件做，早上按来源汇报
+  const report = async (agentId: string, origin: string, text: string): Promise<string> => {
+    if (origin.startsWith("device:")) {
+      const said = await runtime.spoken(agentId, text).catch(() => text);
+      const r = await outbox.say({ text: said || text, agentId, device: origin.slice("device:".length), source: "task" });
+      return r.played ? origin : r.held ? `held:${r.device}` : r.reason ? `muted:${r.reason}` : "";
+    }
+    if (/^(feishu|qq|onebot):/.test(origin)) {
+      const ok = await sys.channels.deliver(origin, text);
+      if (ok) await mirror(agentId, text, "task");
+      return ok ? origin : "";
+    }
+    // 网页聊天 / 管理界面记的：送到 agent 的 heartbeat 投递目标（没设就只在管理界面看）
+    const d = registry.get(agentId)?.heartbeat.delivery ?? "";
+    return d && d !== "none" && d !== "webchat" && d !== origin ? report(agentId, d, text) : "";
+  };
+  const tasks = new TaskQueue(ctx.dirs.systemDb, registry, { run: (req) => runtime.run(req), report });
+  sys.tasks = tasks;
+  runtime.addTools(taskTools(tasks));
   // 后台子任务的结果回到发起方后，按消息来源转达：设备 → 推送语音；IM → 发回原聊天并顺带念
   sys.a2a.announce = async (scope, text) => {
     const o = scope.origin ?? "";

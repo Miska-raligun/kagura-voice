@@ -10,6 +10,7 @@ import { Memory } from "./pages/memory.tsx";
 import { Skills } from "./pages/skills.tsx";
 import { Plugins } from "./pages/plugins.tsx";
 import { Jobs } from "./pages/jobs.tsx";
+import { Tasks } from "./pages/tasks.tsx";
 import { A2A } from "./pages/a2a.tsx";
 import { Channels } from "./pages/channels.tsx";
 import { Devices } from "./pages/devices.tsx";
@@ -29,6 +30,7 @@ const GROUPS: [string, Page[]][] = [
     ["skills", "技能", "book", Skills],
     ["plugins", "扩展 / MCP", "puzzle", Plugins],
     ["jobs", "定时任务", "clock", Jobs],
+    ["tasks", "待办", "moon", Tasks],
     ["a2a", "Agent 通信", "link", A2A],
   ]],
   ["连接", [

@@ -34,7 +34,7 @@ export function Sessions({ arg }: { arg: string }) {
 
 /** 没选会话时：说明 + 投递到网页聊天的定时任务结果 */
 function Inbox({ agent, onNew }: { agent: string; onNew: () => void }) {
-  const [runs] = useLoad(() => api<any[]>("/runs?limit=100"));
+  const [runs] = useLoad(() => api<any[]>("/job-runs?limit=100"));
   const inbox = (runs ?? []).filter((r) => r.delivered === "webchat" && r.agent === agent).slice(0, 10);
   return (
     <>
