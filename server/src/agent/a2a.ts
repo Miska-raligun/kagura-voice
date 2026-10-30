@@ -25,6 +25,14 @@ export type Announce = (scope: RunScope, text: string) => Promise<void>;
 
 const SEND_TIMEOUT = 90;
 const SPAWN_TIMEOUT = 300;
+/**
+ * agent 间传话的会话（LRN 2026-10-30）：接收方不进自己的 main，而是每个发起方一个 `<接收方>:a2a:<发起方>`。
+ * 进 main 的三个毛病：主人和她的聊天里混进别的 agent 的话；每次都背着整段主对话（贵）；占着 main 的会话锁，
+ * 主人这时候找她要排队、还容易两边互等。和同一个 agent 的往来留在这个会话里（「刚才说的那个」接得上），
+ * 只留最近 A2A_KEEP 条（在一轮开头切）；主人那边说过什么靠近况带上。
+ */
+export const a2aKey = (to: string, from: string) => `${to}:a2a:${from}`;
+export const A2A_KEEP = 20;
 
 export class A2A {
   db: DatabaseSync;
@@ -130,22 +138,23 @@ export class A2A {
       tools.push(
         {
           name: "sessions_send", label: "给其他 agent 发消息",
-          description: "给另一个 agent 发消息（进它的 main 会话）。wait=true（默认）时等它回复并把回复交给你。",
+          description: "给另一个 agent 发消息（它在专门跟你往来的会话里收，不打扰它和主人的对话；你们之前的往来它记得）。wait=true（默认）时等它回复并把回复交给你。",
           parameters: Type.Object({ agent: Type.String(), message: Type.String(), wait: Type.Optional(Type.Boolean()) }),
           execute: async (_id, p: any) => {
             const err = this.check(scope, p.agent);
             if (err) { this.record({ kind: "send", from: scope, to: p.agent, toSession: "", message: p.message, status: "rejected", reply: err }); return fail(err); }
-            const toKey = `${p.agent}:main`;
-            if (scope.chain.includes(`${p.agent}|${toKey}`)) return fail(`${p.agent} 正在等你的回复（是它在问你），直接在回复里回答它即可`);
+            const toKey = a2aKey(p.agent, agent.id);
+            if (scope.chain.some((c) => c.startsWith(`${p.agent}|`))) return fail(`${p.agent} 正在等你的回复（是它在问你），直接在回复里回答它即可`);
             const logId = this.record({ kind: "send", from: scope, to: p.agent, toSession: toKey, message: p.message, status: "running" });
             const text = `[来自 ${agent.name}（agent ${agent.id}）的消息] ${p.message}`;
             const t0 = Date.now();
             const link = { trace: scope.trace, a2aCall: logId };
-            const go = () => this.rt.run({ agentId: p.agent, sessionKey: toKey, kind: "main", channel: "a2a", text, purpose: "a2a", timeoutSecs: SEND_TIMEOUT, ...link });
+            this.rt.store(p.agent).keepLast(toKey, A2A_KEEP);
+            const go = () => this.rt.run({ agentId: p.agent, sessionKey: toKey, kind: "isolated", channel: "a2a", text, purpose: "a2a", timeoutSecs: SEND_TIMEOUT, ...link });
             if (p.wait === false) {
               const lineage = { hop: scope.hop + 1, chain: scope.chain, trusted: scope.trusted };
               outsideScope(() => {
-                this.rt.run({ agentId: p.agent, sessionKey: toKey, kind: "main", channel: "a2a", text, purpose: "a2a", lineage, ...link })
+                this.rt.run({ agentId: p.agent, sessionKey: toKey, kind: "isolated", channel: "a2a", text, purpose: "a2a", lineage, ...link })
                   .then((r) => this.finish(logId, "ok", r.text, Date.now() - t0))
                   .catch((e) => this.finish(logId, "error", String(e.message), Date.now() - t0));
               });

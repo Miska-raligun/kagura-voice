@@ -23,7 +23,7 @@ const waitFor = async (cond: () => boolean, ms = 2000) => {
 };
 
 describe("sessions_send", () => {
-  it("等对方回复：消息进对方 main 会话，回复交回发起方；记进 a2a_log", async () => {
+  it("等对方回复：消息进对方专门跟发起方往来的会话（不进它的 main），回复交回发起方；记进 a2a_log", async () => {
     const { rt, fake, a2a } = setup();
     fake.queue.push(
       { tool_calls: [{ name: "sessions_send", args: { agent: "mio", message: "明天天气怎么样？" } }], then: "小澪说明天晴" },
@@ -31,9 +31,10 @@ describe("sessions_send", () => {
     );
     const r = await rt.run({ ...chat, agentId: "main", sessionKey: "main:main", text: "问问小澪明天天气" });
     expect(r.text).toBe("小澪说明天晴");
-    expect(fake.calls[1]).toMatchObject({ agent: "mio", session: "mio:main", purpose: "a2a" });
+    expect(fake.calls[1]).toMatchObject({ agent: "mio", session: "mio:a2a:main", purpose: "a2a" });
     expect(fake.calls[1].message).toContain("来自 神乐");
-    expect(rt.store("mio").history("mio:main").length).toBe(2);
+    expect(rt.store("mio").history("mio:a2a:main").length).toBe(2);
+    expect(rt.store("mio").history("mio:main").length).toBe(0);
     const tr = rt.store("main").history("main:main").map((h) => h.msg as any).find((m) => m.role === "toolResult");
     expect(tr.content[0].text).toContain("明天晴，25 度");
     const [log] = a2a.log() as any[];
@@ -49,32 +50,40 @@ describe("sessions_send", () => {
     expect((a2a.log() as any[])[0].status).toBe("rejected");
   });
 
-  it("死锁防护：两个各自在跑的会话互相 sessions_send 等对方 → 后来的那个立刻失败，两边都能结束", async () => {
+  it("两个各自在跑的主会话同时互相 sessions_send：各进对方的 a2a 会话，不再互等，两边都拿到回复", async () => {
     const { rt, fake } = setup();
-    // A：main:main（比如 heartbeat）问 mio；B：mio:main（比如它自己的 heartbeat）同时问 main。两条调用链互不知道对方
+    // 以前两边都进对方的 main：A 拿着 main:main 等 mio:main，B 拿着 mio:main 等 main:main，只能拒掉一边
     fake.queue.push(
       { tool_calls: [{ name: "sessions_send", args: { agent: "mio", message: "在吗" } }], then: "A 结束" },
       { tool_calls: [{ name: "sessions_send", args: { agent: "main", message: "你在吗" } }], then: "B 结束" },
-      "mio 回复：在",
+      "在", "在",
     );
     const a = rt.run({ ...chat, agentId: "main", sessionKey: "main:main", text: "heartbeat A", kind: "main", channel: "heartbeat" });
     const b = rt.run({ ...chat, agentId: "mio", sessionKey: "mio:main", text: "heartbeat B", kind: "main", channel: "heartbeat" });
-    const t0 = Date.now();
     const [ra, rb] = await Promise.all([a, b]);
-    expect(Date.now() - t0).toBeLessThan(3000);
-    expect(ra.text).toBe("A 结束");
-    expect(rb.text).toBe("B 结束");
-    // 哪一边被拒取决于谁后发起等待；必须恰好有一边被拒、另一边拿到了回复
+    expect([ra.text, rb.text]).toEqual(["A 结束", "B 结束"]);
     const results = ["main", "mio"].flatMap((id) => rt.store(id).history(`${id}:main`).map((h) => h.msg as any).filter((m) => m.role === "toolResult").map((m) => m.content[0].text));
-    expect(results.filter((t) => /互相等/.test(t)).length).toBe(1);
-    expect(rt.busy("main", "main:main") || rt.busy("mio", "mio:main")).toBe(false);
+    expect(results.length).toBe(2);
+    expect(results.some((t) => /互相等|正忙/.test(t))).toBe(false);
+  }, 15_000);
+
+  it("a2a 会话只留最近的往来，且在一轮开头切", async () => {
+    const { rt, fake } = setup({ enabled: true, maxHops: 3, perPairPerMin: 100 });
+    for (let i = 0; i < 15; i++) {
+      fake.queue.push({ tool_calls: [{ name: "sessions_send", args: { agent: "mio", message: `第${i}件事` } }], then: "好" }, `收到${i}`);
+      await rt.run({ ...chat, agentId: "main", sessionKey: "main:main", text: `x${i}` });
+    }
+    const h = rt.store("mio").history("mio:a2a:main").map((x) => x.msg as any);
+    expect(h.length).toBeLessThanOrEqual(22);
+    expect(h[0].role).toBe("user");
+    expect(JSON.stringify(h.at(-1))).toContain("收到14");
   }, 15_000);
 
   it("对方会话一直被占着：sessions_send 等锁有上限，不会把自己也卡住", async () => {
     const { rt, fake } = setup();
     rt.lockWaitMs.a2a = 300;
     let release: () => void = () => {};
-    const hold = (rt as any).serial("mio|mio:main", () => new Promise<void>((r) => (release = r)));   // 模拟 mio 在跑一个长任务
+    const hold = (rt as any).serial("mio|mio:a2a:main", () => new Promise<void>((r) => (release = r)));   // 模拟 mio 在跑一个长任务
     fake.queue.push({ tool_calls: [{ name: "sessions_send", args: { agent: "mio", message: "在吗" } }], then: "她在忙" });
     const r = await rt.run({ ...chat, agentId: "main", sessionKey: "main:main", text: "x" });
     expect(r.text).toBe("她在忙");
@@ -82,7 +91,7 @@ describe("sessions_send", () => {
     expect(tr.content[0].text).toMatch(/正忙/);
     release(); await hold;
     fake.queue.push("我在");
-    expect((await rt.run({ ...chat, agentId: "mio", sessionKey: "mio:main", text: "y" })).text).toBe("我在");   // 排过队的位置没有插队、也没卡住
+    expect((await rt.run({ ...chat, agentId: "mio", sessionKey: "mio:a2a:main", text: "y" })).text).toBe("我在");   // 排过队的位置没有插队、也没卡住
   }, 15_000);
 
   it("死锁防护：B 被 A 问的时候反过来等 A → 拒绝（提示直接回复）", async () => {
@@ -93,7 +102,7 @@ describe("sessions_send", () => {
     );
     const r = await rt.run({ ...chat, agentId: "main", sessionKey: "main:main", text: "x" });
     expect(r.text).toBe("她说在");
-    const tr = rt.store("mio").history("mio:main").map((h) => h.msg as any).find((m) => m.role === "toolResult");
+    const tr = rt.store("mio").history("mio:a2a:main").map((h) => h.msg as any).find((m) => m.role === "toolResult");
     expect(tr.isError).toBe(true);
     expect(tr.content[0].text).toContain("正在等你的回复");
   });

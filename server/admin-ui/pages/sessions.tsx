@@ -21,6 +21,7 @@ function sourceOf(agent: string, s: { key: string; channel: string }): { group: 
   if (rest.startsWith("cron:")) return { group: "bg", label: "定时任务" };
   if (rest.startsWith("task:")) return { group: "bg", label: "待办" };
   if (rest.startsWith("sub:")) return { group: "bg", label: "子任务" };
+  if (rest.startsWith("a2a:")) return { group: "bg", label: `agent 通信 · ${rest.slice(4)}` };
   if (s.channel === "a2a") return { group: "bg", label: "agent 通信" };
   if (["feishu", "qq", "onebot"].includes(s.channel)) return { group: "im", label: CHANNEL[s.channel] ?? s.channel };
   if (s.channel === "device") return { group: "device", label: "设备" };

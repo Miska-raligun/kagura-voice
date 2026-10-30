@@ -520,6 +520,8 @@ CoreS3 (MicroPython) ──HTTP──▶ server/（TypeScript 单文件可执行
 - **Agent 通信按会话看（`a2a_log.trace` / `parent`，管理界面 `#/a2a/<trace>`，LRN 2026-10-30）**：一轮对话引出的所有 a2a 调用共用一个 `RunScope.trace`
   （顶层一轮新生成，嵌套 / `lineage` 后台派出 / 子任务结果交回那一轮都经 `RunRequest.trace` 带下去），`a2aCall` = 引起这一轮的那次调用，它再发起的调用记成 `parent`。
   **新加任何「替别的会话跑一轮」的 a2a 入口都要传 `trace` 和 `a2aCall`**，否则那一步会被拆成单独一串。老记录没有 trace，各算一串（`'id' || id`）。
+  **接收方不进自己的 main**（`a2aKey` = `<接收方>:a2a:<发起方>`，LRN 2026-10-30）：进 main 会让主人的对话里混进别的 agent 的话、每次背整段主对话、还占着 main 的锁（主人找她要排队、两边容易互等）。
+  每对一个会话，和同一个 agent 的往来接得上；发之前 `keepLast(A2A_KEEP)`（在一轮开头切）；主人那边的事靠近况。`sessions_history` 默认仍看对方 main。
   头像（`common.Avatar` / `avatarUrl`）= agent 的 `device_role` 那套角色图的待机图，走 `/app/img?…&strict=1`（只认这个角色自己的目录，不退回默认角色，免得别的 agent 顶着默认角色的脸），没图显示首字。
   **会话页实时弹出**（`a2a.A2ADock`）：`LiveRun.trace` 带着这一轮的会话 id（`execute` 开头先算 `traceId`，start 事件里就有），实时过程里一出现 `sessions_send` / `sessions_spawn`
   就在输入框上方滑出这串调用的动画（**放在卡片里、别用 fixed 盖住输入框**）。对话框（`.card.chat`）整体固定高、消息区 `flex:1` 吃剩下的——**别再给消息区写 max-height**，那样内容少 / 弹面板时框会忽大忽小，每秒刷新；这一轮结束后留着，主人关了同一串就不再弹。历史轮次在 ⓘ 里有「看这一轮的 Agent 通信」（`kctx.a2a`）。
