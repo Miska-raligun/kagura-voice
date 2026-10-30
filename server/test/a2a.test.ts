@@ -114,7 +114,7 @@ describe("sessions_send", () => {
 
   it("同一对 agent 每分钟调用上限", async () => {
     const { rt, fake, a2a } = setup({ enabled: true, maxHops: 3, perPairPerMin: 2 });
-    const calls = [1, 2, 3].map(() => ({ name: "sessions_send", args: { agent: "mio", message: "hi", wait: false } }));
+    const calls = [1, 2, 3].map((i) => ({ name: "sessions_send", args: { agent: "mio", message: `hi${i}`, wait: false } }));
     fake.queue.push({ tool_calls: calls, then: "好" });
     await rt.run({ ...chat, agentId: "main", sessionKey: "main:main", text: "x" });
     await waitFor(() => (a2a.log() as any[]).filter((l) => l.status === "ok").length === 2);

@@ -118,6 +118,59 @@ export function messageText(m: any): string {
  * 图片本身存进 agent 工作目录 uploads/<日期>/img-<哈希>.<扩展名>（同一张只存一份），记录里留「[图片 路径]」——
  * 管理界面凭路径显示，agent 以后也能用 exec 处理它。存不下来就退回「[图片]」。
  */
+export const DEFAULT_MAX_TOOL_CALLS = 40;
+export const DEFAULT_MAX_TURN_TOKENS = 500_000;
+/** 叫停之后还容她几次模型调用（用来写汇报）；还在调工具就强制中止 */
+const GUARD_GRACE = 2;
+/** 同一工具同样参数在一轮里第几次就拒绝 */
+const REPEAT_LIMIT = 3;
+
+/**
+ * 单轮上限（LRN 2026-10-30）：模型兜圈子时（同一条命令反复跑、换着花样试却一直不回复），以前只有超时管它——
+ * 「无进展超时」被每次工具调用刷新，总时长上限又有半小时，这期间每次调模型都把整段上下文重发一遍，token 烧得飞快。
+ * 三道闸：工具调用次数、本轮 token（含缓存读写）、同参数重复调用。到了先「软停」：之后的工具调用一律返回
+ * 「别再调工具，直接告诉主人做到哪了」，让她自己收尾回复；再给 GUARD_GRACE 次还在调工具就强制中止。
+ */
+export class TurnGuard {
+  calls = 0;
+  tokens = 0;
+  reason = "";
+  private seen = new Map<string, number>();
+  private afterStop = 0;
+  constructor(private maxCalls: number, private maxTokens: number, private label: string) {}
+
+  private halt(why: string) {
+    if (this.reason) return;
+    this.reason = why;
+    console.log(`[agent] 🔁 ${this.label} ${why}，叫她停手汇报`);
+  }
+
+  wrap<T extends AgentTool<any>>(t: T): T {
+    return Object.assign(Object.create(Object.getPrototypeOf(t)), t, {
+      execute: async (id: string, params: any, ...rest: any[]) => {
+        this.calls++;
+        if (this.calls > this.maxCalls) this.halt(`本轮工具调用超过 ${this.maxCalls} 次`);
+        if (this.reason) return { content: [{ type: "text", text: `[系统] ${this.reason}，已叫停。不要再调用任何工具，直接用文字告诉主人：做到哪了、卡在哪、接下来打算怎么办。` }], details: { guard: true }, isError: true } as any;
+        const key = `${t.name}:${JSON.stringify(params ?? {})}`;
+        const n = (this.seen.get(key) ?? 0) + 1;
+        this.seen.set(key, n);
+        if (n >= REPEAT_LIMIT) {
+          return { content: [{ type: "text", text: `[系统] 这一轮你已经用完全相同的参数调过 ${t.name} ${n - 1} 次了，结果不会变。换个思路，或者直接回复主人现在的情况。` }], details: { guard: true }, isError: true } as any;
+        }
+        return (t.execute as any).call(t, id, params, ...rest);
+      },
+    });
+  }
+
+  /** 每次模型回复后调用；返回 true = 该强制中止了 */
+  afterModel(u: any, hasCalls: boolean): boolean {
+    if (u) this.tokens += (u.input ?? 0) + (u.output ?? 0) + (u.cacheRead ?? 0) + (u.cacheWrite ?? 0);
+    if (this.reason) return hasCalls && ++this.afterStop > GUARD_GRACE;
+    if (this.tokens > this.maxTokens) this.halt(`本轮已用 ${Math.round(this.tokens / 1000)}k token，超过上限 ${Math.round(this.maxTokens / 1000)}k`);
+    return false;
+  }
+}
+
 /** 自动回忆附在用户消息里的那一段（开头这几个字认它，落盘前去掉） */
 export const RECALL_TAG = "[相关记忆（系统按这句话自动检索的，不是主人说的，可能不全）]";
 export const RECALL_WAIT_MS = 2000;
@@ -278,14 +331,16 @@ export class Runtime {
   /** 当前在家状态（presence 路由更新） */
   presence: () => string = () => "";
 
-  constructor(public agents: AgentRegistry, public models: ModelRegistry, private opts: { maxConcurrency: number; timeoutSecs: number; maxSecs?: number }) {
+  constructor(public agents: AgentRegistry, public models: ModelRegistry, private opts: { maxConcurrency: number; timeoutSecs: number; maxSecs?: number; maxToolCalls?: number; maxTurnTokens?: number }) {
     this.sem = new Semaphore(Math.max(1, opts.maxConcurrency));
   }
 
   /** 管理界面改了超时：就地生效（下一轮起） */
-  setLimits(l: { timeoutSecs?: number; maxSecs?: number }) {
+  setLimits(l: { timeoutSecs?: number; maxSecs?: number; maxToolCalls?: number; maxTurnTokens?: number }) {
     if (l.timeoutSecs && l.timeoutSecs > 0) this.opts.timeoutSecs = l.timeoutSecs;
     if (l.maxSecs && l.maxSecs > 0) this.opts.maxSecs = l.maxSecs;
+    if (l.maxToolCalls && l.maxToolCalls > 0) this.opts.maxToolCalls = l.maxToolCalls;
+    if (l.maxTurnTokens && l.maxTurnTokens > 0) this.opts.maxTurnTokens = l.maxTurnTokens;
   }
 
   addTools(p: ToolProvider, opts: { plugin?: boolean } = {}) { (opts.plugin ? this.pluginProviders : this.providers).push(p); }
@@ -446,7 +501,13 @@ export class Runtime {
       trusted: req.trusted ?? parent?.trusted ?? req.lineage?.trusted ?? !IM_CHANNELS.has(req.channel),
     };
     const model = this.models.resolve(req.model || agent.model);
-    const tools = this.toolsFor(scope, agent, req);
+    // 单轮上限（LRN 2026-10-30，症状「等她回复，她一直在 exec 兜圈子，把 token 烧光了」）：见 TurnGuard
+    const guard = new TurnGuard(
+      (this.opts.maxToolCalls || DEFAULT_MAX_TOOL_CALLS) * (scope.purpose === "task" ? 3 : 1),
+      (this.opts.maxTurnTokens || DEFAULT_MAX_TURN_TOKENS) * (scope.purpose === "task" ? 3 : 1),
+      `${agent.id} ${req.sessionKey}`,
+    );
+    const tools = this.toolsFor(scope, agent, req).map((t) => guard.wrap(t));
     const peers = this.agents.list().filter((p) => this.agents.canContact(agent.id, p.id)).map((p) => ({ id: p.id, name: p.name }));
     if (persist && scope.trusted) store.markOwner(req.sessionKey);
     // 近况：这个会话看不到的、最近在别处跟主人说过的话。只给可信的会话（主人本人），陌生人 / 群聊不给
@@ -502,13 +563,13 @@ export class Runtime {
     // 工具执行期间不计时（命令有自己的超时）；另有总时长上限兜底，防卡死、防死循环
     const idleMs = (req.timeoutSecs ?? this.opts.timeoutSecs) * 1000;
     const maxMs = Math.max(idleMs, (req.maxSecs ?? this.opts.maxSecs ?? 1800) * 1000);
-    let timedOut: "" | "idle" | "max" | "cancel" = "";
+    let timedOut: "" | "idle" | "max" | "cancel" | "budget" = "";
     let idleTimer: ReturnType<typeof setTimeout> | null = null;
     let toolsRunning = 0;
     // 超时后先 abort；有的工具不理会中止信号（卡在网络、扩展写得不好），给 2 秒宽限就不再等它
     let giveUp: () => void = () => {};
     const gaveUp = new Promise<void>((r) => (giveUp = r));
-    const stop = (why: "idle" | "max" | "cancel") => {
+    const stop = (why: "idle" | "max" | "cancel" | "budget") => {
       if (timedOut) return;
       timedOut = why;
       pi.abort();
@@ -524,6 +585,10 @@ export class Runtime {
         : setTimeout(() => stop("idle"), idleMs);
     };
     pi.subscribe((e: any) => {
+      if (e.type === "message_end" && e.message?.role === "assistant") {
+        const hasCalls = (e.message.content ?? []).some((c: any) => c.type === "toolCall");
+        if (guard.afterModel(e.message.usage, hasCalls)) stop("budget");
+      }
       if (e.type === "tool_execution_start") { toolCalls.push(e.toolName); toolsRunning++; info.tool = e.toolName; info.stage = "执行工具"; }
       else if (e.type === "tool_execution_end") { toolsRunning = Math.max(0, toolsRunning - 1); if (!toolsRunning) { info.tool = ""; info.stage = "生成回复"; } }
       kick();
@@ -555,7 +620,8 @@ export class Runtime {
     const fresh = pi.state.messages.slice(start).filter((m: any) => ["user", "assistant", "toolResult"].includes(m.role)) as Message[];
     const assistants = fresh.filter((m) => m.role === "assistant") as AssistantMessage[];
     const last = assistants.at(-1);
-    const why = timedOut as "" | "idle" | "max" | "cancel";      // 在回调里赋值，TS 看不出来
+    const why = timedOut as "" | "idle" | "max" | "cancel" | "budget";      // 在回调里赋值，TS 看不出来
+    if (why === "budget") throw new Error(`agent 停下了：${guard.reason}，叫她停手汇报也没停（多半在兜圈子）`);
     if (why === "cancel") throw new Error(info.cancelled ? "已在管理界面终止" : "已取消");
     if (why === "idle") throw new Error(toolStuck ? `agent 超时（工具 ${toolStuck} 执行超过 ${Math.round(toolMs / 60000)} 分钟没有结束）` : `agent 超时（${idleMs / 1000} 秒没有任何进展）`);
     if (why === "max") throw new Error(`agent 超时（这一轮超过总时长上限 ${Math.round(maxMs / 60000)} 分钟）`);

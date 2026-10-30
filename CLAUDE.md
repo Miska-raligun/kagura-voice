@@ -300,6 +300,9 @@ CoreS3 (MicroPython) ──HTTP──▶ server/（TypeScript 单文件可执行
   放弃之后回来的结果**不再改历史**；② 工具执行期间不按 idle 计时，但最多 `TOOL_MAX_MS`（15 分钟）；③ 流式写音频的 `write` 要同时听 `drain` 和 `close`，
   对方断开时 drain 永远不来，异步回复会一直回「还在想」。排队超过 20 秒会打一行 `⏳ … 在排队：上一轮还没结束（用途/渠道/阶段/工具）`——
   再遇到「不理人」先搜这行。新加任何在会话锁里 await 的东西都要问一句：它卡住了怎么办？
+  **单轮上限（`TurnGuard`，LRN 2026-10-30，症状「等她回复，她一直 exec 兜圈子把 token 烧光」）**：无进展超时被每次工具调用刷新、总时长又有半小时，挡不住兜圈子。
+  现在每轮有工具调用次数（`max_tool_calls`，默认 40）和 token（`max_turn_tokens`，默认 50 万，含缓存读写）上限，待办 ×3；同一工具同样参数第 `REPEAT_LIMIT`（3）次直接拒绝。
+  到上限先软停：之后的工具调用都返回「别再调工具，告诉主人做到哪了」，再 `GUARD_GRACE` 次还在调就强制中止。日志 `🔁`。工具经 `guard.wrap` 包一层（保留原型）。
   ④ **跨会话互相等待**（2026-10-24 真机日志：worker 的 heartbeat 拿着 `worker:main` 去 `sessions_send` 等 main，同时 main 那边一轮拿着 `main:main` 等 worker；
   手机设备 `device_in_main` 也走 `worker:main`，于是手机消息永远排不上）：`scope.chain` 只看得见同一条调用链，两条各自起头的链互等它看不出来。
   `Runtime.run` 记 `waitsFor`（拿着锁的会话 → 它在等的会话），发起嵌套等待前顺着走一圈，成环就立刻失败（日志 `🔁 互相等待`）；
