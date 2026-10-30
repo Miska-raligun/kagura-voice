@@ -29,10 +29,10 @@ describe("上下文预算", () => {
     expect(tight.reduce((n, m) => n + msgTokens(m), 0)).toBeLessThanOrEqual(20_000);
   });
 
-  it("系统提示算进预算：记忆很长、窗口小，历史没到 agent 设置的阈值也会压缩", async () => {
+  it("系统提示算进预算：人设很长、窗口小，历史没到 agent 设置的阈值也会压缩", async () => {
     const { rt, reg, fake } = makeRuntime();
     smallWindow(rt, 20_000);
-    fs.writeFileSync(path.join(reg.get("main")!.workspace, "MEMORY.md"), "记".repeat(12_000));
+    fs.writeFileSync(path.join(reg.get("main")!.workspace, "USER.md"), "记".repeat(12_000));
     const key = "main:main";
     for (let i = 0; i < 4; i++) { fake.queue.push("好的".repeat(400)); await rt.run({ ...dev, agentId: "main", sessionKey: key, text: `第${i}句`.repeat(300) }); }
     fake.queue.push("摘要", "嗯");
@@ -73,18 +73,19 @@ describe("上下文预算", () => {
     const { rt, reg, fake } = makeRuntime();
     const a = reg.get("main")!;
     rt.remember = (ag, target, text) => {
-      const f = target === "long" ? path.join(ag.workspace, "MEMORY.md") : path.join(ag.workspace, "memory", "today.md");
+      const f = target === "long" ? path.join(ag.workspace, "MEMORY.md") : target === "user" ? path.join(ag.workspace, "USER.md") : path.join(ag.workspace, "memory", "today.md");
       fs.appendFileSync(f, `- ${text}\n`);
     };
     reg.update("main", { compaction: { max_tokens: 30, keep_messages: 2 } });
     const key = "main:main";
     for (let i = 0; i < 3; i++) { fake.queue.push(`回复${i}，`.repeat(5)); await rt.run({ ...dev, agentId: "main", sessionKey: key, text: `第${i}句话`.repeat(3) }); }
     const calls = fake.calls.length;
-    fake.queue.push("主人在问问题。\n【记住】\n- 长期：主人喜欢乌龙茶\n- 今天：下午去了公园\n", "好");
+    fake.queue.push("主人在问问题。\n【记住】\n- 主人：女儿叫朵朵\n- 长期：主人喜欢乌龙茶\n- 今天：下午去了公园\n", "好");
     await rt.run({ ...dev, agentId: "main", sessionKey: key, text: "嗯" });
     expect(rt.store("main").getSession(key)?.summary).toBe("主人在问问题。");
     expect(fs.readFileSync(path.join(a.workspace, "MEMORY.md"), "utf8")).toContain("主人喜欢乌龙茶");
     expect(fs.readFileSync(path.join(a.workspace, "memory", "today.md"), "utf8")).toContain("下午去了公园");
+    expect(fs.readFileSync(path.join(a.workspace, "USER.md"), "utf8")).toContain("女儿叫朵朵");
     expect(fake.calls.length - calls).toBe(2);                   // 摘要 + 回复，没有额外的冲刷调用
   });
 

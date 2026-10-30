@@ -284,7 +284,8 @@ describe("soul 组装", () => {
     const pad = (n: number) => String(n).padStart(2, "0");
     fs.writeFileSync(path.join(a.workspace, "memory", `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}.md`), "今天去了公园");
     const main = buildSystemPrompt({ agent: a, scene: "owner", channel: "device" });
-    expect(main).toContain("乌龙茶");
+    expect(main).not.toContain("乌龙茶");                        // 长期记忆改成每轮自动检索，不整篇放
+    expect(main).toContain("<memory>");
     expect(main).toContain("今天去了公园");
     expect(main).toContain("已截断");
     expect(main).toContain("不超过 80 字");
@@ -310,18 +311,25 @@ describe("soul 组装", () => {
     fs.writeFileSync(path.join(a.workspace, "USER.md"), "主人叫小明");
     fs.writeFileSync(path.join(a.workspace, "MEMORY.md"), "主人喜欢乌龙茶");
     fs.writeFileSync(path.join(a.workspace, "HEARTBEAT.md"), "检查天气");
+    fs.writeFileSync(path.join(a.workspace, "TOOLS.md"), "# 工具备忘\n\n## 家里的设备\nNAS 地址 10.0.0.5\n\n## 账号\n快递用手机号\n");
     fs.writeFileSync(path.join(a.workspace, "memory", `${new Date().toISOString().slice(0, 10)}.md`), "今天去了公园");
     const p = (scene: any) => buildSystemPrompt({ agent: a, scene, channel: "feishu" });
     const owner = p("owner");
-    expect(owner).toContain("小明"); expect(owner).toContain("乌龙茶"); expect(owner).not.toContain("检查天气");
+    expect(owner).toContain("小明"); expect(owner).not.toContain("乌龙茶"); expect(owner).not.toContain("检查天气");
     expect(owner).not.toContain("<not_loaded>");
+    // TOOLS.md 只放目录：标题和行号在，正文不在
+    expect(owner).toContain('<TOOLS.md only="目录">');
+    expect(owner).toContain("家里的设备（第 3 行）");
+    expect(owner).not.toContain("10.0.0.5");
+    expect(p("heartbeat")).toContain("乌龙茶");
     const guest = p("guest");
     for (const x of ["小明", "乌龙茶", "公园", "<not_loaded>", "<TOOLS.md>"]) expect(guest).not.toContain(x);
     expect(guest).toContain("性格温柔");
     expect(p("heartbeat")).toContain("检查天气");
     const task = p("task");
     expect(task).not.toContain("性格温柔"); expect(task).not.toContain("乌龙茶"); expect(task).toContain("小明");
-    expect(task).toMatch(/<not_loaded>[\s\S]*SOUL\.md[\s\S]*MEMORY\.md[\s\S]*每日笔记/);
+    expect(task).toMatch(/<not_loaded>[\s\S]*SOUL\.md[\s\S]*每日笔记/);
+    expect(task).toContain("10.0.0.5");
     // 配置能改，但群聊陌生人永远拿不到私人文件
     applyLoadout({ guest: ["SOUL.md", "USER.md", "MEMORY.md", "daily"], task: ["MEMORY.md"], bogus: ["x"] });
     expect(p("guest")).not.toContain("小明");
@@ -329,6 +337,11 @@ describe("soul 组装", () => {
     expect(LOADOUT.guest).toEqual(["SOUL.md"]);
     applyLoadout({});
     expect(LOADOUT.task).toEqual(DEFAULT_LOADOUT.task);
+    // 目录模式能配；旧版整表保存过的默认（含 MEMORY 全文）当成没改过，跟新默认走
+    applyLoadout({ owner: ["SOUL.md", "IDENTITY.md", "USER.md", "AGENTS.md", "TOOLS.md", "MEMORY.md", "daily"], task: ["AGENTS.md:toc", "TOOLS.md", "daily:toc", "SOUL.md"] });
+    expect(LOADOUT.owner).toEqual(DEFAULT_LOADOUT.owner);
+    expect(LOADOUT.task).toEqual(["SOUL.md", "AGENTS.md:toc", "TOOLS.md"]);
+    applyLoadout({});
     // 场景判定：不可信的一律 guest
     const sc = (x: any) => sceneOf({ trusted: true, purpose: "chat", kind: "main", channel: "device", ...x });
     expect([sc({}), sc({ trusted: false, purpose: "cron" }), sc({ purpose: "heartbeat" }), sc({ purpose: "task" }), sc({ purpose: "cron" }), sc({ kind: "sub" }), sc({ channel: "a2a" })])

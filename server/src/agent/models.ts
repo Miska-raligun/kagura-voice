@@ -144,6 +144,7 @@ export class ModelRegistry {
     if (!afterTool) {
       this.fake!.logCall({
         message: text, session: scope?.sessionKey ?? "", agent: scope?.agentId ?? "", image,
+        full: typeof content === "string" ? content : (content ?? []).filter((c: any) => c.type === "text").map((c: any) => c.text).join("\n"),
         local_time: scope?.localTime ?? "", purpose: scope?.purpose ?? "chat",
         system: msgs.filter((x) => x.role === "system").map((x) => (typeof x.content === "string" ? x.content : "")).join("\n"),
       });

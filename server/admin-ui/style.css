@@ -226,3 +226,4 @@ details.summary { margin-bottom:8px; }
 .slot img.tall, .slot .ph.tall { aspect-ratio:3/4; object-position:50% 20%; }
 table.matrix th, table.matrix td { text-align:center; }
 table.matrix td:first-child { text-align:left; white-space:nowrap; }
+table.matrix button.cell { background:none; border:0; padding:2px 8px; font-size:16px; line-height:1; color:var(--fg); cursor:pointer; } table.matrix button.cell:disabled { opacity:.3; cursor:not-allowed; }

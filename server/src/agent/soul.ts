@@ -46,24 +46,63 @@ export const SCENES: { id: Scene; label: string; desc: string }[] = [
 ];
 /** 主人的私人信息：群聊、陌生人的会话里无论怎么配都不加载 */
 export const PRIVATE_FILES = new Set(["USER.md", "MEMORY.md", "daily"]);
+/**
+ * 每个场景的文件。"X.md" = 全文注入；"X.md:toc" = 只注入目录（各节标题 + 行号），用到时 memory_get 读那一节。
+ * 长期记忆 MEMORY.md 在对话里不注入（LRN 2026-10-30）：它是越用越长的流水账，改成每轮按主人这句话自动检索相关几条
+ * （Runtime.recall，附在这一轮消息上、不进历史），关于主人本人的稳定信息放常驻的 USER.md。heartbeat 要主动找话题，照旧带全文。
+ */
 export const DEFAULT_LOADOUT: Record<Scene, string[]> = {
-  owner: ["SOUL.md", "IDENTITY.md", "USER.md", "AGENTS.md", "TOOLS.md", "MEMORY.md", "daily"],
+  owner: ["SOUL.md", "IDENTITY.md", "USER.md", "AGENTS.md", "TOOLS.md:toc", "daily"],
   guest: ["SOUL.md", "IDENTITY.md", "AGENTS.md"],
   heartbeat: ["SOUL.md", "IDENTITY.md", "USER.md", "AGENTS.md", "TOOLS.md", "MEMORY.md", "HEARTBEAT.md", "daily"],
-  cron: ["SOUL.md", "IDENTITY.md", "USER.md", "AGENTS.md", "TOOLS.md"],
+  cron: ["SOUL.md", "IDENTITY.md", "USER.md", "AGENTS.md", "TOOLS.md:toc"],
   task: ["IDENTITY.md", "USER.md", "AGENTS.md", "TOOLS.md"],
   sub: ["IDENTITY.md", "AGENTS.md", "TOOLS.md"],
+  a2a: ["SOUL.md", "IDENTITY.md", "USER.md", "AGENTS.md", "TOOLS.md:toc"],
+};
+/** 上一版的默认（rc.28 前）：管理界面整表保存过、但内容和旧默认一样的，当成没改过、跟新默认走 */
+const OLD_DEFAULT: Partial<Record<Scene, string[]>> = {
+  owner: ["SOUL.md", "IDENTITY.md", "USER.md", "AGENTS.md", "TOOLS.md", "MEMORY.md", "daily"],
+  cron: ["SOUL.md", "IDENTITY.md", "USER.md", "AGENTS.md", "TOOLS.md"],
   a2a: ["SOUL.md", "IDENTITY.md", "USER.md", "AGENTS.md", "TOOLS.md", "MEMORY.md"],
 };
 export const LOADOUT: Record<Scene, string[]> = structuredClone(DEFAULT_LOADOUT);
+/** 能只放目录的文件（每日笔记、HEARTBEAT 不行） */
+export const TOC_FILES = new Set(["SOUL.md", "IDENTITY.md", "USER.md", "AGENTS.md", "TOOLS.md", "MEMORY.md"]);
 
 /** 用配置覆盖各场景的文件（只认已知的场景和文件；guest 去掉私人文件） */
 export function applyLoadout(over: Record<string, unknown> | undefined) {
   Object.assign(LOADOUT, structuredClone(DEFAULT_LOADOUT));
   for (const [k, v] of Object.entries(over ?? {})) {
     if (!(k in DEFAULT_LOADOUT) || !Array.isArray(v)) continue;
-    LOADOUT[k as Scene] = (PROMPT_FILES as readonly string[]).filter((f) => v.includes(f) && !(k === "guest" && PRIVATE_FILES.has(f)));
+    const want = v.map(String);
+    const old = OLD_DEFAULT[k as Scene];
+    if (old && want.length === old.length && old.every((f) => want.includes(f))) continue;
+    LOADOUT[k as Scene] = (PROMPT_FILES as readonly string[]).flatMap((f) => {
+      if (k === "guest" && PRIVATE_FILES.has(f)) return [];
+      if (want.includes(f)) return [f];
+      return TOC_FILES.has(f) && want.includes(`${f}:toc`) ? [`${f}:toc`] : [];
+    });
   }
+}
+
+/** 某个场景怎么带这个文件：全文 / 目录 / 不带 */
+export function loadMode(scene: Scene, f: string): "full" | "toc" | "" {
+  if (scene === "guest" && PRIVATE_FILES.has(f)) return "";
+  const l = LOADOUT[scene];
+  return l.includes(f) ? "full" : l.includes(`${f}:toc`) ? "toc" : "";
+}
+
+/** 只放目录：各级标题和所在行号。没有标题的文件给一句「全文多少字」 */
+export function tocOf(f: string, text: string): string {
+  const heads: string[] = [];
+  text.split(/\r?\n/).forEach((ln, i) => {
+    const m = /^(#{1,4})\s+(.+?)\s*#*\s*$/.exec(ln);
+    if (m) heads.push(`${"  ".repeat(m[1].length - 1)}- ${m[2]}（第 ${i + 1} 行）`);
+  });
+  const n = Array.from(text).length;
+  return `这里只列目录（全文 ${n} 字），用到哪节时 memory_get("${f}", from=行号) 读那一节。\n`
+    + (heads.length ? heads.slice(0, 60).join("\n") : "（没有分节标题）");
 }
 
 /** 这一轮算哪个场景。不可信的一律 guest（陌生人建的定时任务、从群聊派出的子任务也是） */
@@ -118,13 +157,15 @@ export interface SoulOpts {
 export function buildSystemPrompt(o: SoulOpts): string {
   const ws = o.agent.workspace;
   const parts: string[] = [];
-  const want = new Set(LOADOUT[o.scene].filter((f) => !(o.scene === "guest" && PRIVATE_FILES.has(f))));
+  const want = new Set(PROMPT_FILES.filter((f) => loadMode(o.scene, f) === "full"));
   const skipped: string[] = [];
   for (const f of PROMPT_FILES) {
     if (f === "daily") continue;
-    const t = want.has(f) ? readSafe(path.join(ws, f)).trim() : "";
-    if (t) parts.push(`<${f}>\n${clip(t, BUDGETS[f])}\n</${f}>`);
-    else if (!want.has(f) && f !== "HEARTBEAT.md" && fs.existsSync(path.join(ws, f))) skipped.push(f);
+    const mode = loadMode(o.scene, f);
+    const t = mode ? readSafe(path.join(ws, f)).trim() : "";
+    if (t && mode === "full") parts.push(`<${f}>\n${clip(t, BUDGETS[f])}\n</${f}>`);
+    else if (t) parts.push(`<${f} only="目录">\n${tocOf(f, t)}\n</${f}>`);
+    else if (!mode && f !== "HEARTBEAT.md" && f !== "MEMORY.md" && fs.existsSync(path.join(ws, f))) skipped.push(f);
   }
   // 今天和昨天的笔记：新会话也能接上最近发生的事
   if (want.has("daily")) {
@@ -148,6 +189,11 @@ export function buildSystemPrompt(o: SoulOpts): string {
   if (o.scene !== "guest" && (skipped.length || !want.has("daily"))) {
     const list = [...skipped, ...(want.has("daily") ? [] : ["每日笔记（memory/）"])];
     parts.push(`<not_loaded>\n这次没加载：${list.join("、")}。用到时用 memory_get 读、memory_search 搜。\n</not_loaded>`);
+  }
+  // 长期记忆不在提示里：告诉她系统会按每句话自动附上相关的几条，不够再自己搜
+  if (o.scene !== "guest" && !want.has("MEMORY.md") && fs.existsSync(path.join(ws, "MEMORY.md"))) {
+    parts.push("<memory>\n长期记忆（MEMORY.md）不全文放在这里：系统会按主人每句话自动检索，相关的几条附在那条消息前的 [相关记忆] 里。"
+      + "没附上不代表没有——涉及以前的事、约定、主人的偏好时，拿不准就 memory_search 搜一下再答。\n</memory>");
   }
   if (o.summary) parts.push(`<earlier_conversation_summary>\n${o.summary}\n</earlier_conversation_summary>`);
   for (const e of o.extra ?? []) if (e) parts.push(e);

@@ -13,7 +13,7 @@ import type { AgentRegistry, AgentInfo } from "./registry.ts";
 import { stripThinkText, type ModelRegistry } from "./models.ts";
 import { AgentStore } from "./store.ts";
 import { toSpoken } from "../util/text.ts";
-import { BUDGETS, buildSystemPrompt, sceneOf, turnContext, type SessionKind } from "./soul.ts";
+import { BUDGETS, buildSystemPrompt, dailyNotePath, loadMode, sceneOf, turnContext, type SessionKind } from "./soul.ts";
 import { toolAllowed, guestLocked } from "./toolpolicy.ts";
 import { runScope, withScope, type RunScope } from "./scope.ts";
 
@@ -118,6 +118,15 @@ export function messageText(m: any): string {
  * 图片本身存进 agent 工作目录 uploads/<日期>/img-<哈希>.<扩展名>（同一张只存一份），记录里留「[图片 路径]」——
  * 管理界面凭路径显示，agent 以后也能用 exec 处理它。存不下来就退回「[图片]」。
  */
+/** 自动回忆附在用户消息里的那一段（开头这几个字认它，落盘前去掉） */
+export const RECALL_TAG = "[相关记忆（系统按这句话自动检索的，不是主人说的，可能不全）]";
+export const RECALL_WAIT_MS = 2000;
+function stripRecall(m: Message): Message {
+  if (m.role !== "user" || !Array.isArray(m.content)) return m;
+  const content = m.content.filter((c: any) => !(c.type === "text" && String(c.text).startsWith(RECALL_TAG)));
+  return content.length === m.content.length ? m : { ...m, content } as Message;
+}
+
 export const IMAGE_REF_RE = /^\[图片 (uploads\/[^\]]+)\]$/;
 function stripImages(m: Message, workspace?: string): Message {
   if ((m.role === "user" || m.role === "toolResult") && Array.isArray(m.content)) {
@@ -257,7 +266,9 @@ export class Runtime {
   /** 压缩前的记忆冲刷（memory 模块注入） */
   beforeCompact: ((agent: AgentInfo, sessionKey: string) => Promise<void>) | null = null;
   /** 压缩时顺手挑出来的要记住的事（长期 → MEMORY.md，今天 → 当天笔记）。以前压缩前要用整段上下文另跑一轮「记忆冲刷」，很费 */
-  remember: ((agent: AgentInfo, target: "long" | "daily", text: string) => void) | null = null;
+  remember: ((agent: AgentInfo, target: "long" | "daily" | "user", text: string) => void) | null = null;
+  /** 自动回忆（memory 模块注入）：按这句话检索长期记忆，返回要附上的几条（「路径：内容」）。skip = 已整篇在提示里的文件 */
+  recall: ((agent: AgentInfo, text: string, skip: string[]) => Promise<string[]>) | null = null;
   /** 每个会话上一轮算出来的压缩阈值（回复后在后台压缩时用） */
   private compactLimit = new Map<string, number>();
   /** 回复后在后台预先压缩（测试里关掉，免得和假模型的回复队列抢） */
@@ -473,6 +484,8 @@ export class Runtime {
       if (model.input.includes("image")) content.push(...req.images);
       else content.push({ type: "text", text: "[用户发来了图片，但当前模型不支持看图，请如实告诉用户]" });
     }
+    const recalled = await this.recallFor(agent, scope, req);
+    if (recalled) content.push({ type: "text", text: recalled });
     content.push({ type: "text", text: req.text });
 
     const pi = new Agent({
@@ -560,9 +573,33 @@ export class Runtime {
     }
     const textOf = (a: AssistantMessage) => a.content.filter((c: any) => c.type === "text").map((c: any) => c.text).join("").trim();
     const text = textOf(last) || assistants.map(textOf).filter(Boolean).join("\n");
-    if (persist && (!req.keepIf || req.keepIf(text))) store.append(req.sessionKey, fresh.map((m) => stripImages(m, agent.workspace)));
+    if (persist && (!req.keepIf || req.keepIf(text))) store.append(req.sessionKey, fresh.map((m) => stripImages(stripRecall(m), agent.workspace)));
     return { text, meta: scope.meta, toolCalls, usage, stopReason: String(last.stopReason ?? "") };
     } finally { if (!nestedRun) this.running.delete(lockKey); req.signal?.removeEventListener("abort", onOuter); }
+  }
+
+  /**
+   * 自动回忆（LRN 2026-10-30）：长期记忆不再整篇放进系统提示，改成每轮拿主人这句话检索，相关的几条附在这一轮消息上。
+   * 附在消息里而不是系统提示里：系统提示不变，服务商的前缀缓存才命中；落盘前去掉（stripRecall），历史里不留、也不重复占地方。
+   * 只给可信、场景里没整篇加载 MEMORY.md 的轮次；检索本地几毫秒，配了嵌入接口时多一次嵌入请求，最多等 RECALL_WAIT_MS。
+   */
+  private async recallFor(agent: AgentInfo, scope: RunScope, req: RunRequest): Promise<string> {
+    if (!this.recall || !scope.trusted || req.noTurnContext || !req.text?.trim()) return "";
+    const scene = sceneOf(scope);
+    if (scene === "guest" || loadMode(scene, "MEMORY.md") === "full") return "";
+    const skip = loadMode(scene, "daily") === "full"
+      ? [new Date(), new Date(Date.now() - 86400_000)].map((d) => path.relative(agent.workspace, dailyNotePath(agent.workspace, d)).split(path.sep).join("/"))
+      : [];
+    try {
+      const hits = await Promise.race([
+        this.recall(agent, req.text, skip),
+        new Promise<string[]>((r) => setTimeout(() => r([]), RECALL_WAIT_MS).unref?.()),
+      ]);
+      return hits.length ? `${RECALL_TAG}\n${hits.map((h) => `- ${h}`).join("\n")}` : "";
+    } catch (e: any) {
+      console.log(`[agent] ⚠️  ${agent.id} 自动回忆失败（这轮不附）: ${e.message}`);
+      return "";
+    }
   }
 
   /**
@@ -739,7 +776,8 @@ export class Runtime {
     let summary = store.getSession(key)?.summary ?? "";
     let failed = 0;
     // 顺手挑出要记住的事：给摘要模型看一眼已有的长期记忆（结尾一段），免得重复记
-    const memTail = this.remember ? Array.from(this.agents.readFile(agent.id, "MEMORY.md").trim()).slice(-2000).join("") : "";
+    const tail = (f: string, n: number) => Array.from(this.agents.readFile(agent.id, f).trim()).slice(-n).join("");
+    const memTail = this.remember ? [tail("USER.md", 1500), tail("MEMORY.md", 1500)].filter(Boolean).join("\n…\n") : "";
     const remembered: string[] = [];
     for (const [i, chunk] of chunks.entries()) {
       if (signal?.aborted) throw new Error("已取消");
@@ -750,9 +788,10 @@ export class Runtime {
           () => this.models.quick(model, {
             systemPrompt: "你负责把一段对话压缩成摘要，供之后继续对话时参考。保留：人物、约定、待办、偏好、未解决的问题、重要事实与数字。"
               + "省略寒暄与重复。用第三人称、中文、条目式，不超过 800 字。直接输出，不要思考过程。"
-              + (this.remember ? "\n摘要之后另起一行写「【记住】」，下面每行一条这段对话里新出现、以后还用得着的事（主人的偏好、约定、重要日子、事实）："
-                + "长期稳定的以「长期：」开头，只跟今天有关的以「今天：」开头；已有长期记忆里有的别重复，没有就写「无」。" : ""),
-            messages: [{ role: "user", content: (memTail && i === 0 ? `已有的长期记忆（节选，别重复）：\n${memTail}\n\n` : "") + (summary ? `此前的摘要：\n${summary}\n\n` : "") + `需要并进摘要的对话${chunks.length > 1 ? `（第 ${i + 1}/${chunks.length} 段）` : ""}：\n${chunk.join("\n")}`, timestamp: Date.now() }],
+              + (this.remember ? "\n摘要之后另起一行写「【记住】」，下面每行一条这段对话里新出现、以后还用得着的事："
+                + "关于主人本人、以后每次聊天都该知道的（称呼、家人、作息、口味与习惯）以「主人：」开头；"
+                + "其它长期有用的（约定、经历过的事、计划与进展、重要日子）以「长期：」开头；只跟今天有关的以「今天：」开头。已有记忆里有的别重复，没有就写「无」。" : ""),
+            messages: [{ role: "user", content: (memTail && i === 0 ? `已有的记忆（节选，别重复）：\n${memTail}\n\n` : "") + (summary ? `此前的摘要：\n${summary}\n\n` : "") + `需要并进摘要的对话${chunks.length > 1 ? `（第 ${i + 1}/${chunks.length} 段）` : ""}：\n${chunk.join("\n")}`, timestamp: Date.now() }],
           }, { signal: sig, maxTokens: Math.max(model.maxTokens || 0, COMPACT_MAX_OUTPUT) }));
         if (signal?.aborted) throw new Error("已取消");          // 放弃等待之后才回来：别再改历史（下一轮可能已经在用了）
         const u = res.usage;
@@ -762,7 +801,7 @@ export class Runtime {
         const mark = text.indexOf("【记住】");
         if (mark >= 0) {
           for (const ln of text.slice(mark + 4).split("\n")) {
-            const m = /^\s*[-*·\d.、]*\s*(长期|今天)\s*[:：]\s*(.+)$/.exec(ln);
+            const m = /^\s*[-*·\d.、]*\s*(主人|长期|今天)\s*[:：]\s*(.+)$/.exec(ln);
             if (m && !/^无[。.]?$/.test(m[2].trim())) remembered.push(`${m[1]}\n${m[2].trim()}`);
           }
           text = text.slice(0, mark).trim();
@@ -783,7 +822,7 @@ export class Runtime {
     store.compact(key, old.at(-1)!.id, summary);
     for (const r of remembered.slice(0, 20)) {
       const [t, text] = r.split("\n");
-      try { this.remember?.(agent, t === "长期" ? "long" : "daily", text); } catch (e: any) { console.log(`[agent] ⚠️  ${agent.id} 记忆写入失败: ${e.message}`); }
+      try { this.remember?.(agent, t === "主人" ? "user" : t === "长期" ? "long" : "daily", text); } catch (e: any) { console.log(`[agent] ⚠️  ${agent.id} 记忆写入失败: ${e.message}`); }
     }
     console.log(`[agent] 🗜️  ${agent.id} ${key} 压缩 ${old.length} 条（${chunks.length} 段${failed ? `，${failed} 段没总结成` : ""}）→ 摘要 ${Array.from(summary).length} 字${remembered.length ? `，记下 ${remembered.length} 条` : ""}`);
     return true;

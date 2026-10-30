@@ -121,3 +121,49 @@ describe("压缩前冲刷", () => {
     expect(rt.store("main").getSession(key)!.summary).toBe("摘要：主人要搬家");
   });
 });
+
+describe("自动回忆（长期记忆不整篇注入）", () => {
+  it("只挑真正相关的：常见词单独命中不算；今天 / 昨天的笔记已在提示里就不重复", async () => {
+    const { mem, a } = setup();
+    fs.writeFileSync(path.join(a.workspace, "MEMORY.md"), "- 主人爱喝无糖乌龙茶\n\n- 今天的事情很多\n\n- 家里的猫叫团子\n");
+    const today = new Date();
+    const pad = (n: number) => String(n).padStart(2, "0");
+    const todayRel = `memory/${today.getFullYear()}-${pad(today.getMonth() + 1)}-${pad(today.getDate())}.md`;
+    fs.writeFileSync(path.join(a.workspace, todayRel), "- 下午给乌龙茶续了一壶\n");
+    const idx = mem.of("main");
+    const hits = await idx.recall("帮我泡杯乌龙茶吧", { skip: [todayRel] });
+    expect(hits.map((h) => h.text)).toEqual(["- 主人爱喝无糖乌龙茶"]);
+    expect(await idx.recall("今天好累")).toEqual([]);          // 只撞上「今天」一个词
+    expect(await idx.recall("嗯嗯")).toEqual([]);             // 太短不搜
+  });
+
+  it("每轮自动附上相关记忆：模型看得到，落盘的历史里没有", async () => {
+    const { rt, mem, fake, a } = setup();
+    rt.recall = async (ag, text, skip) => (await mem.of(ag.id).recall(text, { skip })).map((h) => `${h.path}：${h.text}`);
+    fs.writeFileSync(path.join(a.workspace, "MEMORY.md"), "- 主人爱喝无糖乌龙茶\n");
+    fake.queue.push("好的", "嗯");
+    await rt.run({ kind: "main", channel: "device", agentId: "main", sessionKey: "main:main", text: "帮我泡杯乌龙茶吧", trusted: true });
+    expect(fake.calls.at(-1).full).toContain("[相关记忆");
+    expect(fake.calls.at(-1).full).toContain("无糖乌龙茶");
+    expect(fake.calls.at(-1).system).not.toContain("无糖乌龙茶");
+    expect(JSON.stringify(rt.store("main").history("main:main").map((h) => h.msg))).not.toContain("相关记忆");
+    // 陌生人那边不附
+    await rt.run({ kind: "chat", channel: "feishu", agentId: "main", sessionKey: "main:feishu:g", text: "帮我泡杯乌龙茶吧", trusted: false });
+    expect(fake.calls.at(-1).full).not.toContain("相关记忆");
+  });
+
+  it("target=user 写进 USER.md 末尾的自动记录一节：不碰手写部分、不重复、满了改记 MEMORY.md", () => {
+    const { mem, a } = setup();
+    const f = path.join(a.workspace, "USER.md");
+    fs.writeFileSync(f, "# 主人\n叫小明\n");
+    const idx = mem.of("main");
+    expect(idx.write("user", "女儿叫朵朵")).toBe("USER.md");
+    idx.write("user", "女儿叫朵朵");
+    idx.write("user", "晚上十一点睡");
+    const t = fs.readFileSync(f, "utf8");
+    expect(t.startsWith("# 主人\n叫小明\n\n## 自动记录")).toBe(true);
+    expect(t.match(/朵朵/g)!.length).toBe(1);
+    expect(t.trimEnd().endsWith("- 晚上十一点睡")).toBe(true);
+    expect(idx.write("user", "很长".repeat(800))).toBe("MEMORY.md");
+  });
+});

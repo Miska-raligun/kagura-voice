@@ -164,28 +164,37 @@ function SoulFiles({ id }: { id: string }) {
   );
 }
 
-/** 各场景加载哪些人设文件（所有 agent 共用）。没勾的需要时她用 memory_get 现读；群聊 / 陌生人那行的私人文件勾不上 */
+/**
+ * 各场景加载哪些人设文件（所有 agent 共用）。每格点一下轮换：全文 → 目录（只放各节标题，用到时她自己读那一节）→ 不加载。
+ * 群聊 / 陌生人那行的私人文件点不动。长期记忆在对话里默认不加载：每轮按主人的话自动检索相关的几条
+ */
 function Loadout({ id, lo, reload }: { id: string; lo: any; reload: () => void }) {
   const [cur, setCur] = useState<Record<string, string[]>>(lo.current);
   const [files] = useLoad(() => api<any>(`/agents/${enc(id)}/files`), [id]);
   const size = (f: string) => f === "daily" ? null : (files?.files ?? files ?? []).find?.((x: any) => x.path === f)?.size;
   const dirty = JSON.stringify(cur) !== JSON.stringify(lo.current);
   const label = (f: string) => f === "daily" ? "每日笔记" : f.replace(".md", "");
+  const mode = (sc: string, f: string) => cur[sc]?.includes(f) ? "full" : cur[sc]?.includes(`${f}:toc`) ? "toc" : "";
+  const next = (sc: string, f: string) => {
+    const m = mode(sc, f);
+    const n = m === "full" ? (lo.toc?.includes(f) ? "toc" : "") : m === "toc" ? "" : "full";
+    const rest = (cur[sc] ?? []).filter((x) => x !== f && x !== `${f}:toc`);
+    setCur({ ...cur, [sc]: n ? [...rest, n === "toc" ? `${f}:toc` : f] : rest });
+  };
+  const MARK: Record<string, [string, string]> = { full: ["●", "全文"], toc: ["◐", "目录"], "": ["○", "不加载"] };
   return (
     <Card title="加载场景" actions={dirty && <Btn small kind="primary" onClick={async () => {
       try { await api("/config", { method: "PUT", body: { prompt_files: cur } }); toast("已保存，下一轮对话生效"); reload(); } catch (e) { toastErr(e); }
     }}>保存</Btn>}>
+      <p class="muted">● 全文 ◐ 目录 ○ 不加载</p>
       <table class="matrix">
         <thead><tr><th />{lo.files.map((f: string) => <th>{label(f)}{size(f) ? <small class="muted"><br />{Math.round(size(f) / 1024 * 10) / 10}KB</small> : null}</th>)}</tr></thead>
         <tbody>{lo.scenes.map((sc: any) => (
           <tr><td title={sc.desc}>{sc.label}</td>
             {lo.files.map((f: string) => {
               const locked = sc.id === "guest" && lo.private.includes(f);
-              return <td><input type="checkbox" disabled={locked} checked={!locked && cur[sc.id]?.includes(f)}
-                onChange={(e) => {
-                  const on = (e.target as HTMLInputElement).checked;
-                  setCur({ ...cur, [sc.id]: lo.files.filter((x: string) => (x === f ? on : cur[sc.id]?.includes(x))) });
-                }} /></td>;
+              const m = locked ? "" : mode(sc.id, f);
+              return <td><button class="cell" disabled={locked} title={MARK[m][1]} onClick={() => next(sc.id, f)}>{MARK[m][0]}</button></td>;
             })}</tr>))}</tbody>
       </table>
     </Card>

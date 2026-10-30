@@ -81,6 +81,10 @@ const cosine = (a: Float32Array, b: Float32Array) => {
   return na && nb ? dot / Math.sqrt(na * nb) : 0;
 };
 
+/** USER.md 里系统自动追加的那一节（标题之后都算） */
+export const USER_AUTO_HEAD = "## 自动记录（她从对话里记下的，可以挪到上面、改、删）";
+export const USER_AUTO_MAX = 1500;
+
 export interface MemoryHit { path: string; start: number; end: number; text: string; score: number; via: string }
 
 export class MemoryIndex {
@@ -187,11 +191,53 @@ export class MemoryIndex {
       });
   }
 
-  /** 追加一条记忆。target = daily（今天的笔记）| long（MEMORY.md） */
+  /**
+   * 自动回忆：拿主人这句话检索，挑真正相关的几条（附在这一轮消息上）。关键词分数是相对最高分归一化的，
+   * 最好的那条永远是 1，所以另按「命中了几个不同的词」卡一道：两字词至少中 2 个（「今天」这种常见词单独命中不算），
+   * 向量相似度够高的直接算。skip = 已经整篇在提示里的文件（今天 / 昨天的笔记）。
+   */
+  async recall(query: string, o: { k?: number; maxChars?: number; skip?: string[] } = {}): Promise<MemoryHit[]> {
+    const q = query.replace(/^\[[^\]]*\]\s*/, "").trim();
+    if (Array.from(q.replace(/[\s\p{P}]/gu, "")).length < 4) return [];
+    const terms = ftsQuery(q).split(" OR ").map((t) => t.replace(/"/g, "").replace(/ /g, "")).filter(Boolean);
+    const out: MemoryHit[] = [];
+    let size = 0;
+    for (const h of await this.search(q, 12)) {
+      if (o.skip?.includes(h.path)) continue;
+      const body = h.text.toLowerCase();
+      const hitTerms = terms.filter((t) => body.includes(t)).length;
+      const strongVec = h.via !== "keyword" && h.score >= 0.5;
+      if (!strongVec && hitTerms < 2) continue;
+      const n = Array.from(h.text).length;
+      if (out.length && size + n > (o.maxChars ?? 1200)) break;
+      out.push(h); size += n;
+      if (out.length >= (o.k ?? 5)) break;
+    }
+    return out;
+  }
+
+  /**
+   * 追加一条记忆。target = daily（今天的笔记）| long（MEMORY.md）| user（USER.md 末尾的「自动记录」一节：关于主人本人的稳定信息，
+   * 每轮常驻）。自动记录有上限 USER_AUTO_MAX，满了改记进 MEMORY.md 并提示去整理——不碰主人手写的部分。
+   */
   write(target: string, text: string, now = new Date()): string {
     const ws = this.agent.workspace;
     const t = text.trim().replace(/\n+/g, " ");
     if (!t) throw new Error("内容为空");
+    if (target === "user") {
+      const p = path.join(ws, "USER.md");
+      const cur = fs.existsSync(p) ? fs.readFileSync(p, "utf8") : "";
+      const at = cur.indexOf(USER_AUTO_HEAD);
+      const auto = at >= 0 ? cur.slice(at + USER_AUTO_HEAD.length) : "";
+      if (auto.includes(t)) return "USER.md";
+      if (Array.from(auto).length + Array.from(t).length > USER_AUTO_MAX) {
+        console.log(`[memory] ⚠️  ${this.agent.id} USER.md 的「自动记录」满了（${USER_AUTO_MAX} 字），这条改记进 MEMORY.md——到管理界面整理一下 USER.md`);
+        return this.write("long", t, now);
+      }
+      const base = at >= 0 ? cur.replace(/\n*$/, "\n") : cur.replace(/\n*$/, cur.trim() ? "\n\n" : "") + USER_AUTO_HEAD + "\n";
+      fs.writeFileSync(p, base + `- ${t}\n`);
+      return "USER.md";
+    }
     if (target === "long") {
       const p = path.join(ws, "MEMORY.md");
       const cur = fs.existsSync(p) ? fs.readFileSync(p, "utf8") : "# 长期记忆\n";

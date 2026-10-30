@@ -9,7 +9,7 @@ import type { Ctx } from "../ctx.ts";
 import type { AgentSystem } from "../agent/system.ts";
 import { SOUL_FILES } from "../agent/registry.ts";
 import { POLICY, applyToolPolicy } from "../agent/toolpolicy.ts";
-import { BUDGETS, LOADOUT, SCENES, PROMPT_FILES, PRIVATE_FILES, applyBudgets, applyLoadout } from "../agent/soul.ts";
+import { BUDGETS, LOADOUT, SCENES, PROMPT_FILES, PRIVATE_FILES, TOC_FILES, applyBudgets, applyLoadout } from "../agent/soul.ts";
 import { Memories } from "../agent/tools/memory.ts";
 import { importOpenClaw, findOpenClawDirs, describeImport } from "../agent/import-openclaw.ts";
 import { scheduleFrom } from "../agent/tools/cron.ts";
@@ -110,7 +110,7 @@ export function registerAdmin(r: Router, ctx: Ctx, sys: AgentSystem) {
   });
   get("/api/admin/meta", () => json({
     budgets: BUDGETS, soul_files: SOUL_FILES,
-    loadout: { scenes: SCENES, files: PROMPT_FILES, private: [...PRIVATE_FILES], current: LOADOUT },
+    loadout: { scenes: SCENES, files: PROMPT_FILES, private: [...PRIVATE_FILES], toc: [...TOC_FILES], current: LOADOUT },
     tool_policy: POLICY,
     tools: runtime.allToolNames(registry.default()),
     fake: ctx.cfg.fakeProviders,

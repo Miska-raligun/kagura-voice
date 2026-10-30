@@ -47,7 +47,7 @@ export class Memories {
     return (scope: RunScope, agent: AgentInfo): AgentTool<any>[] => !scope.trusted ? [] : [
       {
         name: "memory_search", label: "搜索记忆",
-        description: "在你的长期记忆（MEMORY.md）和每日笔记里搜索。回答涉及以前的事、主人的偏好、约定时先搜一下。",
+        description: "在你的长期记忆（MEMORY.md）和每日笔记里搜索。系统每轮会自动附上几条相关的，没附上的、拿不准的（以前的事、约定、主人的偏好）自己搜一下。",
         parameters: Type.Object({ query: Type.String(), k: Type.Optional(Type.Number({ minimum: 1, maximum: 20 })) }),
         execute: async (_id, p: any) => {
           const hits = await this.of(agent.id).search(String(p.query), p.k ?? 6);
@@ -72,8 +72,9 @@ export class Memories {
       },
       {
         name: "memory_write", label: "写入记忆",
-        description: "记下一件事。target=long 写进长期记忆 MEMORY.md（稳定的偏好与事实），target=daily 写进今天的笔记（当天发生的事）。一次一条，简洁。",
-        parameters: Type.Object({ target: Type.Union([Type.Literal("daily"), Type.Literal("long")]), text: Type.String() }),
+        description: "记下一件事。target=user 写进 USER.md（关于主人本人、以后每次聊天都该知道的：称呼、家人、作息、口味与习惯），"
+          + "target=long 写进长期记忆 MEMORY.md（约定、经历过的事、项目进展等，之后按需检索），target=daily 写进今天的笔记（当天发生的事）。一次一条，简洁。",
+        parameters: Type.Object({ target: Type.Union([Type.Literal("user"), Type.Literal("long"), Type.Literal("daily")]), text: Type.String() }),
         execute: async (_id, p: any) => {
           if (scope.kind === "sub") return fail("子任务不能写记忆，把要记的事写进结果里交给发起方");
           try { return ok(`已记到 ${this.of(agent.id).write(p.target, String(p.text))}`); }

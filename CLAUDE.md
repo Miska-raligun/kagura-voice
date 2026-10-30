@@ -345,6 +345,11 @@ CoreS3 (MicroPython) ──HTTP──▶ server/（TypeScript 单文件可执行
   `config.json` 的 `prompt_files` 可改（管理界面 Agents → 人设文件 →「加载场景」）。**guest 永远拿不到 `PRIVATE_FILES`（USER / MEMORY / daily）**，配置也加不上；
   记忆工具（memory_search / get / write）也只给可信会话——陌生人既能套话、也能往记忆里塞东西。没加载的文件在 `<not_loaded>` 里点名（guest 不提），
   `memory_get` 能读所有人设文件。HEARTBEAT.md 现在走场景表，别再在 scheduler 里用 extraSystem 另塞一遍。加载的文件仍是整篇注入（每个上限 `BUDGETS`）。
+  **三种加载方式 + 长期记忆改检索**（LRN 2026-10-30，症状「AGENTS / TOOLS / MEMORY 全量注入，上下文大头」）：每格是全文 `X.md` / 目录 `X.md:toc`（`tocOf`：只放各节标题和行号，用到时 memory_get 读那节；`TOC_FILES` 才能选）/ 不加载。
+  默认 TOOLS 在主人对话 / 定时任务 / agent 间只放目录（待办、子任务要干活，给全文）。**MEMORY.md 只有 heartbeat 带全文**，其它场景由 `Runtime.recallFor` 每轮拿主人这句话检索（`MemoryIndex.recall`：
+  两字词至少中 2 个或向量 ≥0.5，最多 5 条 / 1200 字，已整篇在提示里的今昨笔记跳过，最多等 `RECALL_WAIT_MS`），以 `RECALL_TAG` 开头附在**这一轮用户消息**里——不进系统提示（前缀缓存），
+  落盘前 `stripRecall` 去掉。关于主人本人的稳定信息走常驻的 USER.md：压缩摘要的「【记住】主人：」和 `memory_write target=user` 追加到 USER.md 末尾 `USER_AUTO_HEAD` 那节，
+  去重、上限 `USER_AUTO_MAX`，满了改记 MEMORY.md 并打日志，不碰手写部分。旧版整表保存过的默认（`OLD_DEFAULT`）当没改过、跟新默认走。
 - **近况（`Runtime.recentActivity`，LRN 2026-10-26，症状「heartbeat / 主动聊天老问已经说过的事；换个 agent 又问一遍」）**：
   每个会话只看得见自己的历史——飞书私聊（没开 owner_main 时）、网页聊天、独立定时任务、别的 agent 各说各的，跨会话以前只能靠 agent 自己写记忆文件。
   现在每轮（只给可信会话、不给子任务 / 记忆冲刷）从库里摘最近 `RECENT_HOURS`（48）小时、**别处**跟主人的往来：本 agent 的其它会话 + 其他 agent 的，
