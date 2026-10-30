@@ -271,7 +271,7 @@ export function registerAdmin(r: Router, ctx: Ctx, sys: AgentSystem) {
   const runAt = (v: unknown): number | null => (v === null || v === "" || v === undefined ? null : Number.isFinite(Number(v)) ? Number(v) : parseWhen(String(v)));
   get("/api/admin/tasks", () => {
     const q = tq(), st = q.settings();
-    return json({ settings: st, next_window: nextWindowStart(st.window), in_window: inActiveHours(st.window, Date.now()), busy: q.busy(), tasks: q.list().slice(0, 200) });
+    return json({ settings: st, next_window: nextWindowStart(st.window), in_window: inActiveHours(st.window, Date.now()), busy: q.busy(), tasks: q.list().slice(0, 1000) });
   });
   post("/api/admin/tasks", (req) => {
     const d = req.json() ?? {};
@@ -305,7 +305,7 @@ export function registerAdmin(r: Router, ctx: Ctx, sys: AgentSystem) {
   get("/api/admin/a2a", (req) => json({
     settings: a2a.cfg,
     matrix: registry.list().map((a) => ({ from: a.id, allow: a.a2a.allow })),
-    log: a2a.log(Number(req.query.get("limit") ?? 100)),
+    log: a2a.log(Math.min(2000, Number(req.query.get("limit") ?? 100) || 100)),
   }));
   /** 开关矩阵里的一格：from 能不能找 to */
   put("/api/admin/a2a/allow", (req) => {

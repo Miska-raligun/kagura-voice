@@ -1,10 +1,13 @@
 // Agent 通信：开关与上限、谁可以找谁的矩阵、调用记录
 import { useState } from "preact/hooks";
 import { api, fmtTime } from "../api.ts";
-import { Badge, Btn, Card, Empty, Err, Field, Input, Toggle, toast, useInterval, useLoad } from "../ui.tsx";
+import { Badge, Btn, Card, Empty, Err, Field, Input, Toggle, toast, useInterval, useLoad, usePage } from "../ui.tsx";
 
 export function A2A() {
-  const [d, reload, err] = useLoad(() => api("/a2a"));
+  const [d, reload, err] = useLoad(() => api("/a2a?limit=1000"));
+  const [who, setWho] = useState("");
+  const log: any[] = (d?.log ?? []).filter((l: any) => !who || l.from_agent === who || l.to_agent === who);
+  const [rows, pager] = usePage(log, 20);
   const [agents] = useLoad(() => api<any[]>("/agents"));
   useInterval(reload, 10_000);
   if (!d || !agents) return <Err msg={err} />;
@@ -21,11 +24,12 @@ export function A2A() {
                 disabled={(allow.get(f.id) ?? []).includes("*")} onChange={(e) => toggle(f.id, t.id, (e.target as HTMLInputElement).checked)} />}</td>))}</tr>))}</tbody></table>
         <p class="muted">行 → 列：允许发送消息或派发子任务。</p>
       </Card>
-      <Card title="调用记录">
-        {d.log.length ? <table><thead><tr><th>时间</th><th>类型</th><th>谁 → 谁</th><th>内容</th><th>回复</th><th>结果</th><th>耗时</th></tr></thead>
-          <tbody>{d.log.map((l: any) => (
+      <Card title={`调用记录${log.length ? ` · ${log.length}` : ""}`} actions={<select value={who} onChange={(e) => setWho((e.target as HTMLSelectElement).value)}>
+        <option value="">全部 agent</option>{agents.map((a) => <option value={a.id}>{a.name}</option>)}</select>}>
+        {log.length ? <><table><thead><tr><th>时间</th><th>类型</th><th>谁 → 谁</th><th>内容</th><th>回复</th><th>结果</th><th>耗时</th></tr></thead>
+          <tbody>{rows.map((l: any) => (
             <tr><td>{fmtTime(l.ts)}</td><td>{l.kind === "send" ? "发消息" : "子任务"}</td><td>{l.from_agent} → {l.to_agent} <small class="muted">{l.hop} 跳</small></td>
-              <td class="clip">{l.message}</td><td class="clip">{l.reply}</td><td><Badge s={l.status} /></td><td>{l.ms ? `${(l.ms / 1000).toFixed(1)}s` : "—"}</td></tr>))}</tbody></table>
+              <td class="clip">{l.message}</td><td class="clip">{l.reply}</td><td><Badge s={l.status} /></td><td>{l.ms ? `${(l.ms / 1000).toFixed(1)}s` : "—"}</td></tr>))}</tbody></table>{pager}</>
           : <Empty>暂无记录</Empty>}
       </Card>
     </>

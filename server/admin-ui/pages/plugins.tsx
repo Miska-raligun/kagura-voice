@@ -3,7 +3,7 @@
 // 路由参数：#/plugins/ext|<owner>|<name>  ·  #/plugins/pkg  ·  #/plugins/mcp
 import { useEffect, useState } from "preact/hooks";
 import { api, enc, go } from "../api.ts";
-import { Badge, Btn, Card, Empty, Err, Field, Input, Select, Split, Tabs, TextArea, Toggle, confirmDo, toast, toastErr, useLoad } from "../ui.tsx";
+import { Badge, Btn, Card, Empty, Err, Field, Input, Select, SideList, Split, Tabs, TextArea, Toggle, confirmDo, toast, toastErr, useLoad } from "../ui.tsx";
 
 const GLOBAL = "~global";
 
@@ -40,17 +40,14 @@ function Exts({ owner, name }: { owner: string; name: string }) {
         <Btn small kind="primary" onClick={() => { setCreating(true); go("plugins", "ext"); }}>＋ 新建扩展</Btn>
         <Btn small onClick={async () => { await api("/extensions/reload", { body: {} }); toast("已重新加载"); reload(); }}>重新加载</Btn>
       </div>
-      {d.owners.map((o: any) => {
-        const list = d.extensions.filter((e: any) => e.owner === o.id && !e.pkg);
-        return list.length ? <>
-          <h4 class="muted">{ownerName(o.id)}</h4>
-          <ul class="list">{list.map((e: any) => (
-            <li class={e.owner === owner && e.name === name ? "on" : ""} onClick={() => { setCreating(false); go("plugins", `ext|${e.owner}|${e.name}`); }}>
-              <b>{e.name} {e.error ? <Badge s="error" /> : null}</b>
-              <small>{e.error ? e.error.split("\n")[0] : e.tools.map((t: any) => t.name).join("、") || "（没有工具）"}</small>
-            </li>))}</ul></> : null;
-      })}
-      {!d.extensions.filter((e: any) => !e.pkg).length && <Empty>暂无扩展</Empty>}
+      <SideList groups={d.owners.map((o: any) => ({ id: o.id, title: ownerName(o.id), items: d.extensions.filter((e: any) => e.owner === o.id && !e.pkg) }))}
+        placeholder="搜索扩展名或工具名" empty={<Empty>暂无扩展</Empty>}
+        match={(e: any, q) => `${e.name} ${e.tools.map((t: any) => t.name).join(" ")}`.toLowerCase().includes(q)}
+        render={(e: any) => (
+          <li class={e.owner === owner && e.name === name ? "on" : ""} onClick={() => { setCreating(false); go("plugins", `ext|${e.owner}|${e.name}`); }}>
+            <b>{e.name} {e.error ? <Badge s="error" /> : null}</b>
+            <small class="clip2">{e.error ? e.error.split("\n")[0] : e.tools.map((t: any) => t.name).join("、") || "（没有工具）"}</small>
+          </li>)} />
     </>}>
       {creating ? <NewExt owners={d.owners} template={d.template} done={(o, n) => { setCreating(false); reload(); go("plugins", `ext|${o}|${n}`); }} />
         : name ? <ExtDetail key={owner + name} owner={owner} name={name} info={d.extensions.find((e: any) => e.owner === owner && e.name === name)}

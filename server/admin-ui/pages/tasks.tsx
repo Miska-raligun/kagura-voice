@@ -1,7 +1,7 @@
 // 待办：白天记下、夜间静默时段执行的活。改开始时间 / 内容、立即执行、撤销、重新排队；静默时段与汇报时间设置
 import { useState } from "preact/hooks";
 import { api, enc, fmtTime, go, money } from "../api.ts";
-import { Badge, Btn, Card, Empty, Err, Field, Input, Select, TextArea, Toggle, confirmDo, toast, toastErr, useInterval, useLoad } from "../ui.tsx";
+import { Badge, Btn, Card, Empty, Err, Field, Input, Select, TextArea, Toggle, confirmDo, toast, toastErr, useInterval, useLoad, usePage } from "../ui.tsx";
 
 const STATUS: Record<string, [string, string]> = {
   queued: ["muted", "排队中"], running: ["running", "进行中"], done: ["ok", "完成"], partial: ["deferred", "没做完"], failed: ["error", "失败"], cancelled: ["skipped", "已撤销"],
@@ -25,7 +25,7 @@ export function Tasks({ arg }: { arg: string }) {
     return t ? <TaskDetail t={t} d={d} reload={reload} /> : <Err msg="没有这件待办" />;
   }
   const open = d.tasks.filter((t: any) => t.status === "queued" || t.status === "running");
-  const past = d.tasks.filter((t: any) => t.status !== "queued" && t.status !== "running").slice(0, 50);
+  const past = d.tasks.filter((t: any) => t.status !== "queued" && t.status !== "running");
   return (
     <>
       <div class="row"><Btn kind="primary" onClick={() => go("tasks", "new")}>＋ 新建待办</Btn></div>
@@ -34,7 +34,7 @@ export function Tasks({ arg }: { arg: string }) {
       <Card title={`排队中 ${open.length ? `· ${open.length}` : ""}`}>
         {open.length ? <TaskTable list={open} d={d} reload={reload} /> : <Empty>没有排队的待办</Empty>}
       </Card>
-      {past.length > 0 && <Card title="已结束"><TaskTable list={past} d={d} reload={reload} /></Card>}
+      {past.length > 0 && <Past list={past} d={d} reload={reload} />}
     </>
   );
 }
@@ -52,6 +52,20 @@ function SettingsCard({ d, reload }: { d: any; reload: () => void }) {
         <Field label="单件最长（分钟）"><Input type="number" value={f.max_minutes} onInput={(v) => set({ ...f, max_minutes: v })} /></Field>
         <Field label="自动执行"><Toggle checked={f.auto} onChange={(v) => set({ ...f, auto: v })} label="静默时段自动做" /></Field>
       </div>
+    </Card>
+  );
+}
+
+/** 已结束的：按状态筛选、分页 */
+function Past({ list, d, reload }: { list: any[]; d: any; reload: () => void }) {
+  const [st, setSt] = useState("");
+  const shown = list.filter((t) => !st || t.status === st);
+  const [rows, pager] = usePage(shown, 20);
+  return (
+    <Card title={`已结束 · ${list.length}`} actions={<select value={st} onChange={(e) => setSt((e.target as HTMLSelectElement).value)}>
+      <option value="">全部</option>{["done", "partial", "failed", "cancelled"].map((x) => <option value={x}>{STATUS[x][1]}</option>)}</select>}>
+      {rows.length ? <TaskTable list={rows} d={d} reload={reload} /> : <Empty>没有</Empty>}
+      {pager}
     </Card>
   );
 }

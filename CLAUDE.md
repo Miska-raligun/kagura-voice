@@ -309,9 +309,9 @@ CoreS3 (MicroPython) ──HTTP──▶ server/（TypeScript 单文件可执行
   **每轮 token 明细**：每条助手消息本来就带服务商报的 `usage`（输入未缓存 / 缓存读写 / 输出 / 思考 / 费用）；`execute` 落盘时在这一轮最后一条助手消息上加 `kctx`
   （系统提示 / 工具定义 / 历史的估算 token、窗口、调用次数），会话页 `TurnUsage` 汇总显示。**读历史给模型前要去掉 `kctx`**（`execute` 里 `history` 那行）。
   **系统处理详情**：`kctx` 里还有 `trace`（`buildSystemPrompt` 的 `PromptTrace`：场景、加载了哪些文件 / 全文还是目录 / 字数 / 是否截断、没加载的、今昨笔记、技能、摘要）、
-  近况条数、自动回忆命中（`recallFor` 返回 hits / 用时 / 没附的原因）、截短的旧工具结果条数、单轮上限叫停原因，会话页 `TurnContext`（⚙️）显示。
+  近况条数、自动回忆命中（`recallFor` 返回 hits / 用时 / 没附的原因）、截短的旧工具结果条数、单轮上限叫停原因。
   压缩不属于某一轮，记成会话事件（`AgentStore.addEvent`，`events` 表，每会话留 200 条）：`compact`（`trigger` = before / background / overflow / manual，压了多少、剩多少、记进了哪些记忆）、
-  `compact_failed`；会话接口带 `events`，页面按时间穿插（`SysEvent` 🗜️）。新加系统层对上下文的处理时也照这个记，别只打日志。
+  `compact_failed`；会话接口带 `events`。会话页每轮回复下面只放小图标（`TurnMeta`）：ⓘ 上下文 + token，🗜 这一轮之后发生的压缩（`placeEvents` 按时间挂到轮次上），悬停预览（不挡鼠标）、点击固定（`ui.Pop`）——**别再把详情平铺进对话流**。新加系统层对上下文的处理时也照这个记，别只打日志。
   **会话来源**：所有入口（设备、飞书 / QQ、网页、heartbeat、定时任务、待办、子任务）的会话都在 agent 库里，会话页一律能看、能实时跟。
   落盘时第一条用户消息带 `ksrc`（渠道 / 用途 / 设备），`Runtime.note` 记进来的带 `purpose: "note"`；和 `kctx` 一样**发给模型前去掉**。
   列表按 key 认来源（`sourceOf`：`:main` 主会话、`:heartbeat` / `:cron:` / `:task:` / `:sub:` 后台），每 5 秒刷新。
@@ -507,6 +507,8 @@ CoreS3 (MicroPython) ──HTTP──▶ server/（TypeScript 单文件可执行
   **IM 消息去重**（`channels/seen.ts`，症状「升级完她把之前那几条又回了一遍」）：飞书事件「至少投递一次」，投给死连接 / 没确认的会重投，QQ 重连也补发。
   `ChannelManager` 收到就按「账号 + message_id」查 `channels_seen.json`（留 3 天、最多 3000 条，重启后也记得），见过就跳过（日志 `↩️ 重复投递`）。
   晚到超过 5 分钟的（`InboundMessage.sentAt`，飞书 `create_time`）在消息前注明「这条消息是 N 分钟前发的」，别让 agent 当成刚说的。
+- **管理界面的长列表**：侧边列表一律用 `ui.SideList`（搜索框、分组折叠、先显示一部分再「再显示」），表格用 `ui.usePage` 分页（每页 20）。
+  新加会越积越多的列表 / 记录时直接用这两个，别平铺。
 - **新版本提醒（`util/update.ts`）**：启动 30 秒后、之后每 12 小时查一次 GitHub Releases，只提示不安装；
   预览版连预览版一起比，正式版只看正式版。`update_check: false` 关掉。
 - **`global` 声明必须有主**（LRN 2026-08-25）：`netsvc.mqtt_check` 里写过

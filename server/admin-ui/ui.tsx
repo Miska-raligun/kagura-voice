@@ -1,6 +1,6 @@
 // 通用小组件：卡片、按钮、表单行、表格、标签页、状态徽章、提示条、异步加载钩子
 import type { ComponentChildren } from "preact";
-import { useCallback, useEffect, useState } from "preact/hooks";
+import { useCallback, useEffect, useRef, useState } from "preact/hooks";
 
 // ── 全局提示 ──
 type Toast = { id: number; text: string; kind: "ok" | "err" };
@@ -97,6 +97,79 @@ export function Err(p: { msg: string }) { return p.msg ? <div class="errbox">{p.
 /** 左边列表、右边详情的布局 */
 export function Split(p: { left: ComponentChildren; children: ComponentChildren }) {
   return <div class="split"><aside>{p.left}</aside><div class="detail">{p.children}</div></div>;
+}
+
+/**
+ * 侧边长列表：顶上搜索框；分组可折叠（标题带数量）；每组先显示 initial 个，底下「再显示」。
+ * 记忆、技能、扩展、会话这些多了以后就是一长串，靠它找得到东西。render 返回一个 <li>
+ */
+export function SideList<T>(p: {
+  groups: { id: string; title?: string; items: T[]; collapsed?: boolean }[];
+  match: (it: T, q: string) => boolean;
+  render: (it: T) => ComponentChildren;
+  placeholder?: string;
+  initial?: number;
+  empty?: ComponentChildren;
+}) {
+  const [q, setQ] = useState("");
+  const [more, setMore] = useState<Record<string, number>>({});
+  const [shut, setShut] = useState<Record<string, boolean>>({});
+  const init = p.initial ?? 30;
+  const needle = q.trim().toLowerCase();
+  const total = p.groups.reduce((n, g) => n + g.items.length, 0);
+  const groups = p.groups.map((g) => ({ ...g, items: needle ? g.items.filter((it) => p.match(it, needle)) : g.items })).filter((g) => g.items.length);
+  return (
+    <>
+      {total > 8 && <input class="sidesearch" type="search" value={q} placeholder={p.placeholder ?? "搜索…"} onInput={(e) => setQ((e.target as HTMLInputElement).value)} />}
+      {groups.map((g) => {
+        const closed = !needle && (shut[g.id] ?? !!g.collapsed);
+        const n = needle ? 100 : (more[g.id] ?? init);
+        const body = !closed && <ul class="list">
+          {g.items.slice(0, n).map(p.render)}
+          {g.items.length > n && <li class="more" onClick={() => setMore({ ...more, [g.id]: n + init * 2 })}>再显示 {Math.min(g.items.length - n, init * 2)} 个（共 {g.items.length}）</li>}
+        </ul>;
+        return g.title ? <div class="sidegroup">
+          <h4 class="muted" onClick={() => setShut({ ...shut, [g.id]: !closed })}>{closed ? "▸" : "▾"} {g.title} <small>{g.items.length}</small></h4>
+          {body}
+        </div> : body;
+      })}
+      {!groups.length && (needle ? <div class="muted small" style="padding:8px">没有匹配的</div> : p.empty)}
+    </>
+  );
+}
+
+/** 表格分页：返回这一页的数据和翻页条（只有一页时不显示） */
+export function usePage<T>(list: T[], size = 20): [T[], ComponentChildren] {
+  const [page, setPage] = useState(0);
+  const pages = Math.max(1, Math.ceil(list.length / size));
+  const cur = Math.min(page, pages - 1);
+  const bar = pages > 1 && <div class="pager">
+    <Btn small kind="ghost" disabled={cur === 0} onClick={() => setPage(cur - 1)}>‹ 上一页</Btn>
+    <span class="muted">{cur + 1} / {pages}（共 {list.length} 条）</span>
+    <Btn small kind="ghost" disabled={cur >= pages - 1} onClick={() => setPage(cur + 1)}>下一页 ›</Btn>
+  </div>;
+  return [list.slice(cur * size, (cur + 1) * size), bar];
+}
+
+/** 小图标：鼠标放上去看详情，点一下固定住（再点 / 点别处收起）。tip 是一行摘要（原生提示） */
+export function Pop(p: { icon: ComponentChildren; tip?: string; class?: string; children: ComponentChildren }) {
+  const [open, setOpen] = useState(false);
+  const [up, setUp] = useState(false);
+  const ref = useRef<HTMLSpanElement>(null);
+  // 在屏幕下半部分就往上弹，免得被滚动区域底边截掉
+  const place = () => { const r = ref.current?.getBoundingClientRect(); if (r) setUp(r.top > window.innerHeight * 0.55); };
+  useEffect(() => {
+    if (!open) return;
+    const h = (e: MouseEvent) => { if (!ref.current?.contains(e.target as Node)) setOpen(false); };
+    document.addEventListener("mousedown", h);
+    return () => document.removeEventListener("mousedown", h);
+  }, [open]);
+  return (
+    <span class={`pop ${open ? "open" : ""} ${up ? "up" : ""} ${p.class ?? ""}`} ref={ref} onMouseEnter={place}>
+      <button type="button" class="popbtn" aria-label={p.tip} onClick={() => { place(); setOpen(!open); }}>{p.icon}</button>
+      <div class="poppanel">{p.tip && <div class="poptip">{p.tip}</div>}{p.children}</div>
+    </span>
+  );
 }
 
 export function confirmDo(msg: string, fn: () => any) { return () => (window.confirm(msg) ? fn() : undefined); }

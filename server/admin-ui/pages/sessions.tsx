@@ -3,7 +3,7 @@
 // 路由：#/sessions/<agent>|<会话 key>
 import { useEffect, useRef, useState } from "preact/hooks";
 import { api, download, enc, fmtTime, go, money } from "../api.ts";
-import { Btn, Card, Empty, Err, Split, TextArea, confirmDo, toast, toastErr, useInterval, useLoad } from "../ui.tsx";
+import { Btn, Card, Empty, Err, Pop, SideList, Split, TextArea, confirmDo, toast, toastErr, useInterval, useLoad } from "../ui.tsx";
 import { AgentPicker, Message, useAgentId } from "./common.tsx";
 import { renderMarkdown } from "../md.ts";
 
@@ -47,11 +47,14 @@ export function Sessions({ arg }: { arg: string }) {
           const n = g ? (list ?? []).filter((s) => sourceOf(agent, s).group === g).length : (list ?? []).length;
           return n || !g ? <a class={g === group ? "on" : ""} onClick={() => setGroup(g)}>{l}{g ? ` ${n}` : ""}</a> : null;
         })}</div>
-        {shown.length ? <ul class="list">{shown.map((s) => (
-          <li class={s.key === key ? "on" : ""} onClick={() => go("sessions", `${agent}|${s.key}`)}>
-            <b>{s.title || s.key.slice(agent.length + 1)}</b>
-            <small>{sourceOf(agent, s).label} · {s.messages} 条 · {fmtTime(s.updated)}{s.busy ? " · 回复中" : ""}</small>
-          </li>))}</ul> : <Empty>暂无会话</Empty>}
+        <SideList groups={[{ id: "all", items: shown }]} placeholder="搜索会话标题"
+          match={(x: any, q) => `${x.title} ${x.key} ${sourceOf(agent, x).label}`.toLowerCase().includes(q)}
+          empty={<Empty>暂无会话</Empty>}
+          render={(x: any) => (
+            <li class={x.key === key ? "on" : ""} onClick={() => go("sessions", `${agent}|${x.key}`)}>
+              <b>{x.title || x.key.slice(agent.length + 1)}</b>
+              <small>{sourceOf(agent, x).label} · {x.messages} 条 · {fmtTime(x.updated)}{x.busy ? " · 回复中" : ""}</small>
+            </li>)} />
       </>}>
         {key ? <Conversation key={key} agent={agent} skey={key} onChange={reload} /> : <Inbox agent={agent} onNew={newChat} />}
       </Split>
@@ -178,6 +181,7 @@ function Conversation({ agent, skey, onChange }: { agent: string; skey: string; 
   const old = (s.messages ?? []).length - msgs.length;
   // 系统事件（压缩等）按时间穿插：已压缩的消息隐藏时，早于第一条可见消息的事件也不显示
   const events: any[] = (s.events ?? []).filter((e: any) => showOld || !msgs.length || e.ts >= msgs[0].ts || !old);
+  const evs = placeEvents(events, msgs);
   return (
     <Card class="chat" title={s.fresh ? "新对话" : `${sourceOf(agent, { key: skey, channel: s.channel ?? "" }).label} · ${s.title || skey.slice(agent.length + 1)}`} actions={!s.fresh && <>
       <Btn small onClick={async () => { const r = await api(`${base}/compact`, { body: {} }); toast(r.compacted ? "已压缩" : "太短了，不用压缩"); reload(); }}>压缩</Btn>
@@ -190,12 +194,12 @@ function Conversation({ agent, skey, onChange }: { agent: string; skey: string; 
       <div class="msgs" ref={box}>
         {old > 0 && <a class="muted small" onClick={() => setShowOld(true)}>还有 {old} 条已清空 / 已压缩的记录</a>}
         {!msgs.length && !run && !pending && <Empty>支持粘贴或拖入图片与文件</Empty>}
+        {evs.lead.length > 0 && <div class="turnmeta"><CompactPop events={evs.lead} /></div>}
         {msgs.map((m: any, i: number) => <>
-          {eventsBefore(events, msgs, i).map((e) => <SysEvent e={e} />)}
           <Message m={m} agent={agent} />
-          {m.msg?.role === "assistant" && turnEnds(msgs, i) && <><TurnContext m={m} /><TurnUsage msgs={msgs} end={i} /></>}
+          {m.msg?.role === "assistant" && turnEnds(msgs, i) && <TurnMeta msgs={msgs} end={i} events={evs.at.get(i) ?? []} />}
         </>)}
-        {events.filter((e: any) => !msgs.length || e.ts > msgs[msgs.length - 1].ts).map((e: any) => <SysEvent e={e} />)}
+        {evs.tail.length > 0 && <div class="turnmeta"><CompactPop events={evs.tail} /></div>}
         {pending && !run?.messages.length && <>
           <Message m={{ msg: pending }} agent={agent} />
           <div class="msg a"><div class="who">助手 <small class="muted">{run ? "整理上下文…" : "排队中…"}</small></div></div>
@@ -216,61 +220,30 @@ function Conversation({ agent, skey, onChange }: { agent: string; skey: string; 
   );
 }
 
-/** 排在第 i 条消息前面的系统事件：时间在上一条和这一条之间 */
-function eventsBefore(events: any[], msgs: any[], i: number) {
-  const lo = i > 0 ? msgs[i - 1].ts : -Infinity, hi = msgs[i].ts;
-  return events.filter((e) => e.ts > lo && e.ts <= hi && !(i > 0 && msgs[i - 1].ts === hi));
+/**
+ * 压缩等系统事件挂到哪一轮：发生在某一轮结束之后（下一轮开始之前）就挂在那一轮的图标上；
+ * 比第一轮还早的放最上面，最后一轮没结束（出错 / 没回复）之后的放最下面
+ */
+function placeEvents(events: any[], msgs: any[]) {
+  const ends = msgs.map((m, i) => (m.msg?.role === "assistant" && turnEnds(msgs, i) ? i : -1)).filter((i) => i >= 0);
+  const at = new Map<number, any[]>();
+  const lead: any[] = [], tail: any[] = [];
+  for (const e of events) {
+    let owner = -1;
+    for (const i of ends) if (msgs[i].ts <= e.ts) owner = i;
+    if (owner < 0) { lead.push(e); continue; }
+    const nextUser = msgs.findIndex((m, j) => j > owner && m.msg?.role === "user");
+    const lastEnd = ends.at(-1)!;
+    if (owner === lastEnd && nextUser >= 0 && msgs[nextUser].ts <= e.ts) { tail.push(e); continue; }
+    at.set(owner, [...(at.get(owner) ?? []), e]);
+  }
+  return { at, lead, tail };
 }
 
 const SCENE: Record<string, string> = { owner: "主人对话", guest: "群聊 / 陌生人", heartbeat: "heartbeat", cron: "定时任务", task: "待办", sub: "子任务", a2a: "agent 间对话" };
 const TRIGGER: Record<string, string> = { before: "回复前（历史超过阈值）", background: "回复后在后台预先压缩", overflow: "服务商报上下文超长", manual: "手动" };
 const TARGET: Record<string, string> = { user: "USER.md", long: "MEMORY.md", daily: "今天的笔记" };
 const fileLabel = (f: string) => (f === "daily" ? "每日笔记" : f.replace(".md", ""));
-
-/** 一轮开始时系统层做了什么：系统提示里放了哪些文件、近况、摘要，自动回忆附了什么，截短了几条旧工具结果，有没有被单轮上限叫停 */
-function TurnContext({ m }: { m: any }) {
-  const c = m.msg?.kctx;
-  if (!c?.trace) return null;
-  const t = c.trace;
-  const bits = [`${t.files.length} 个人设文件`];
-  if (c.recall?.hits?.length) bits.push(`回忆 ${c.recall.hits.length} 条`);
-  if (c.recent?.items) bits.push(`近况 ${c.recent.items} 条`);
-  if (t.summary) bits.push(`较早对话摘要 ${t.summary} 字`);
-  if (c.pruned) bits.push(`截短旧工具结果 ${c.pruned} 条`);
-  return (
-    <details class="usage">
-      <summary>⚙️ {SCENE[t.scene] ?? t.scene} · {bits.join(" · ")}{c.guard ? ` · ⚠️ ${c.guard}，已叫停` : ""}</summary>
-      <div>人设：{t.files.map((f: any) => `${fileLabel(f.name)}（${f.mode === "toc" ? "目录" : `${f.chars} 字${f.clipped ? "，超上限已截断" : ""}`}）`).join("、") || "无"}</div>
-      {t.notLoaded?.length > 0 && <div>没加载：{t.notLoaded.map(fileLabel).join("、")}（需要时她自己读）</div>}
-      {t.daily > 0 && <div>今昨笔记：{t.daily} 字</div>}
-      <div>近况：{c.recent?.items ? `${c.recent.items} 条，${c.recent.chars} 字` : "无"}</div>
-      <div>较早对话摘要：{t.summary ? `${t.summary} 字` : "无"}</div>
-      <div>自动回忆：{c.recall?.hits?.length ? `${c.recall.hits.length} 条（${c.recall.ms}ms）` : c.recall?.why || "没检索"}</div>
-      {c.recall?.hits?.map((h: string) => <div class="hit">· {h}</div>)}
-      <div>工具 {c.toolCount ?? "?"} 个 · 技能 {t.skills} 个 · 可联系的 agent {t.peers} 个</div>
-      {c.pruned > 0 && <div>之前几轮的工具结果有 {c.pruned} 条截短后放进上下文（库里存全文）</div>}
-      {c.limit && <div>压缩阈值：历史超过 {k(c.limit)} token 时压缩</div>}
-      {c.guard && <div class="over">单轮上限：{c.guard}</div>}
-    </details>
-  );
-}
-
-/** 会话里的系统事件：压缩（为什么、压了多少、剩多少、顺手记了什么）、压缩失败 */
-function SysEvent({ e }: { e: any }) {
-  const d = e.data ?? {};
-  const time = new Date(e.ts * 1000).toLocaleString("zh-CN", { hour12: false });
-  if (e.kind === "compact_failed") return <div class="sysev over">🗜️ 压缩失败（{TRIGGER[d.trigger] ?? d.trigger}）：{d.error} <small>{time}</small></div>;
-  if (e.kind !== "compact") return null;
-  return (
-    <details class="sysev">
-      <summary>🗜️ 压缩：{d.messages} 条（约 {k(d.oldTokens ?? 0)} token）→ 摘要 {d.summary} 字，留下最近 {d.kept} 条{d.remembered?.length ? `，记下 ${d.remembered.length} 条记忆` : ""} <small>{time}</small></summary>
-      <div>原因：{TRIGGER[d.trigger] ?? d.trigger}{d.size ? `（历史约 ${k(d.size)} token，阈值 ${k(d.limit ?? 0)}）` : ""}</div>
-      <div>摘要模型 {d.model}，分 {d.chunks} 段{d.failed ? `，${d.failed} 段没总结成（只留了用户说过的话）` : ""}，用时 {(d.ms / 1000).toFixed(1)} 秒</div>
-      <div>压缩后留下的历史约 {k(d.keptTokens ?? 0)} token</div>
-      {d.remembered?.map((r: any) => <div class="hit">· 记进 {TARGET[r.target] ?? r.target}：{r.text}</div>)}
-    </details>
-  );
-}
 
 /** 这条助手消息之后到下一条用户消息之间没有别的助手消息 = 这一轮的最后一条 */
 function turnEnds(msgs: any[], i: number) {
@@ -284,37 +257,90 @@ function turnEnds(msgs: any[], i: number) {
 
 const k = (n: number) => (n >= 10_000 ? `${(n / 1000).toFixed(n >= 100_000 ? 0 : 1)}k` : String(n));
 
+/** 每轮回复下面的小图标：ⓘ 这一轮的上下文和 token，🗜 这一轮之后发生的压缩。鼠标放上去看，点一下固定 */
+function TurnMeta({ msgs, end, events }: { msgs: any[]; end: number; events: any[] }) {
+  const info = turnInfo(msgs, end);
+  if (!info && !events.length) return null;
+  return (
+    <div class="turnmeta">
+      {info && <Pop icon={info.guard ? "⚠" : "ⓘ"} class={info.guard ? "bad" : ""} tip={info.tip}>{info.body}</Pop>}
+      {events.length > 0 && <CompactPop events={events} />}
+    </div>
+  );
+}
+
 /**
- * 一轮的 token 明细：这一轮每次调模型的用量加总（服务商报的：输入未缓存 / 缓存读 / 缓存写 / 输出，含思考），
- * 以及这一轮开始时上下文的构成（系统提示 / 工具定义 / 历史，按字数估算）。点开看每次调用。
+ * 一轮的详情：系统层放进上下文的东西（场景、人设文件、近况、摘要、自动回忆、截短的旧工具结果、单轮上限）
+ * 和 token（服务商报的输入 / 缓存读写 / 输出 / 思考 / 费用，以及按字数估算的上下文构成）
  */
-function TurnUsage({ msgs, end }: { msgs: any[]; end: number }) {
+function turnInfo(msgs: any[], end: number) {
   let start = end;
   while (start > 0 && msgs[start - 1].msg?.role !== "user") start--;
   const calls = msgs.slice(start, end + 1).filter((m) => m.msg?.role === "assistant" && m.msg.usage);
-  if (!calls.length) return null;
   const sum = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0, cost: 0 };
   for (const c of calls) {
     const u = c.msg.usage;
     sum.input += u.input ?? 0; sum.output += u.output ?? 0; sum.cacheRead += u.cacheRead ?? 0; sum.cacheWrite += u.cacheWrite ?? 0;
     sum.reasoning += u.reasoning ?? 0; sum.cost += u.cost?.total ?? 0;
   }
-  const ctx = msgs[end].msg.kctx;
   const total = sum.input + sum.output + sum.cacheRead + sum.cacheWrite;
-  if (!total) return null;                // 主动开口记进来的那种，没调模型
-  return (
-    <details class="usage">
-      <summary>
-        🔢 {k(total)} token · 输入 {k(sum.input)} · 缓存读 {k(sum.cacheRead)}{sum.cacheWrite ? ` · 缓存写 ${k(sum.cacheWrite)}` : ""} · 输出 {k(sum.output)}
-        {sum.reasoning ? `（思考 ${k(sum.reasoning)}）` : ""}{calls.length > 1 ? ` · ${calls.length} 次调用` : ""}{sum.cost ? ` · ${money(sum.cost)}` : ""}
-      </summary>
-      {ctx && <div>上下文 ≈ 系统提示 {k(ctx.sys)} + 工具定义 {k(ctx.tools)} + 历史 {k(ctx.hist)} = {k(ctx.sys + ctx.tools + ctx.hist)}（窗口 {k(ctx.win)}）</div>}
-      {calls.length > 1 && <table class="small">
+  const c = msgs[end].msg?.kctx;
+  const t = c?.trace;
+  if (!total && !t) return null;              // 主动开口记进来的那种：没调模型、也没组装上下文
+  const tip = [total ? `${k(total)} token` : "", sum.cost ? money(sum.cost) : "", calls.length > 1 ? `${calls.length} 次调用` : "",
+    t ? `${t.files.length} 个人设文件` : "", c?.recall?.hits?.length ? `回忆 ${c.recall.hits.length} 条` : "",
+    t?.summary ? "带较早对话摘要" : "", c?.guard ? `⚠️ ${c.guard}，已叫停` : ""].filter(Boolean).join(" · ");
+  const body = <>
+    {t && <>
+      <h5>上下文（{SCENE[t.scene] ?? t.scene}）</h5>
+      <div>人设：{t.files.map((f: any) => `${fileLabel(f.name)}（${f.mode === "toc" ? "目录" : `${f.chars} 字${f.clipped ? "，超上限已截断" : ""}`}）`).join("、") || "无"}</div>
+      {t.notLoaded?.length > 0 && <div>没加载：{t.notLoaded.map(fileLabel).join("、")}（需要时她自己读）</div>}
+      {t.daily > 0 && <div>今昨笔记：{t.daily} 字</div>}
+      <div>近况：{c.recent?.items ? `${c.recent.items} 条，${c.recent.chars} 字` : "无"}</div>
+      <div>较早对话摘要：{t.summary ? `${t.summary} 字` : "无"}</div>
+      <div>自动回忆：{c.recall?.hits?.length ? `${c.recall.hits.length} 条（${c.recall.ms}ms）` : c.recall?.why || "没检索"}</div>
+      {c.recall?.hits?.map((h: string) => <div class="hit">· {h}</div>)}
+      <div>工具 {c.toolCount ?? "?"} 个 · 技能 {t.skills} 个 · 可联系的 agent {t.peers} 个</div>
+      {c.pruned > 0 && <div>之前几轮的工具结果有 {c.pruned} 条截短后放进上下文（库里存全文）</div>}
+      {c.limit && <div>压缩阈值：历史超过 {k(c.limit)} token 时压缩</div>}
+      {c.guard && <div class="over">单轮上限：{c.guard}</div>}
+    </>}
+    {total > 0 && <>
+      <h5>Token</h5>
+      <div>输入 {k(sum.input)} · 缓存读 {k(sum.cacheRead)} · 缓存写 {k(sum.cacheWrite)} · 输出 {k(sum.output)}{sum.reasoning ? `（思考 ${k(sum.reasoning)}）` : ""}{sum.cost ? ` · ${money(sum.cost)}` : ""}</div>
+      {c && <div>上下文 ≈ 系统提示 {k(c.sys)} + 工具定义 {k(c.tools)} + 历史 {k(c.hist)} = {k(c.sys + c.tools + c.hist)}（窗口 {k(c.win)}）</div>}
+      {calls.length > 1 && <table>
         <thead><tr><th>#</th><th>输入</th><th>缓存读</th><th>缓存写</th><th>输出</th><th>费用</th></tr></thead>
-        <tbody>{calls.map((c, i) => { const u = c.msg.usage; return (
+        <tbody>{calls.map((x, i) => { const u = x.msg.usage; return (
           <tr><td>{i + 1}</td><td>{k(u.input ?? 0)}</td><td>{k(u.cacheRead ?? 0)}</td><td>{k(u.cacheWrite ?? 0)}</td><td>{k(u.output ?? 0)}{u.reasoning ? `（思考 ${k(u.reasoning)}）` : ""}</td><td>{money(u.cost?.total)}</td></tr>); })}</tbody>
       </table>}
-    </details>
+    </>}
+  </>;
+  return { tip, body, guard: !!c?.guard };
+}
+
+/** 压缩事件的图标：为什么压、压了多少、剩多少、顺手记了什么；失败的标红 */
+function CompactPop({ events }: { events: any[] }) {
+  const failed = events.filter((e) => e.kind === "compact_failed");
+  const ok = events.filter((e) => e.kind === "compact");
+  const last = ok.at(-1)?.data;
+  const tip = [ok.length ? `压缩 ${ok.reduce((n, e) => n + (e.data?.messages ?? 0), 0)} 条 → 摘要 ${last?.summary ?? 0} 字${ok.some((e) => e.data?.remembered?.length) ? "，记下了记忆" : ""}` : "",
+    failed.length ? `压缩失败 ${failed.length} 次` : ""].filter(Boolean).join(" · ");
+  return (
+    <Pop icon="🗜" class={failed.length && !ok.length ? "bad" : ""} tip={tip}>
+      {events.map((e) => {
+        const d = e.data ?? {};
+        const time = new Date(e.ts * 1000).toLocaleString("zh-CN", { hour12: false });
+        if (e.kind === "compact_failed") return <><h5 class="over">压缩失败 · {time}</h5><div>{TRIGGER[d.trigger] ?? d.trigger}：{d.error}</div></>;
+        return <>
+          <h5>压缩 · {time}</h5>
+          <div>原因：{TRIGGER[d.trigger] ?? d.trigger}{d.size ? `（历史约 ${k(d.size)} token，阈值 ${k(d.limit ?? 0)}）` : ""}</div>
+          <div>压掉 {d.messages} 条（约 {k(d.oldTokens ?? 0)} token）→ 摘要 {d.summary} 字；留下最近 {d.kept} 条（约 {k(d.keptTokens ?? 0)} token）</div>
+          <div>摘要模型 {d.model}，分 {d.chunks} 段{d.failed ? `，${d.failed} 段没总结成（只留了用户说过的话）` : ""}，用时 {(d.ms / 1000).toFixed(1)} 秒</div>
+          {d.remembered?.map((r: any) => <div class="hit">· 记进 {TARGET[r.target] ?? r.target}：{r.text}</div>)}
+        </>;
+      })}
+    </Pop>
   );
 }
 

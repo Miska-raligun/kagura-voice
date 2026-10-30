@@ -2,7 +2,7 @@
 // 路由参数：#/skills/<owner>|<技能文件夹>|<文件>；owner = ~global（全局）或 agent id（只给它）
 import { useEffect, useState } from "preact/hooks";
 import { api, enc, go } from "../api.ts";
-import { Btn, Card, Empty, Err, Field, Input, Select, Split, TextArea, Toggle, confirmDo, toast, toastErr, useLoad } from "../ui.tsx";
+import { Btn, Card, Empty, Err, Field, Input, Select, SideList, Split, TextArea, Toggle, confirmDo, toast, toastErr, useLoad } from "../ui.tsx";
 
 const GLOBAL = "~global";
 
@@ -31,13 +31,13 @@ export function Skills({ arg }: { arg: string }) {
   return (
     <Split left={<>
       <div class="row"><Btn small kind="primary" onClick={() => setMode("new")}>＋ 新建技能</Btn><Btn small onClick={() => setMode("zip")}>上传技能包</Btn></div>
-      {groups.map(([id, list]) => list.length ? <>
-        <h4 class="muted">{ownerName(id)}</h4>
-        <ul class="list">{list.map((s: any) => (
-          <li class={s.owner === owner && s.folder === folder ? "on" : ""} onClick={() => { setMode(""); go("skills", `${s.owner}|${s.folder}`); }}>
-            <b>{s.name}</b><small>{s.description || "（没写描述）"}</small>
-          </li>))}</ul></> : null)}
-      {!d.skills.length && <Empty>暂无技能</Empty>}
+      <SideList groups={groups.map(([id, list]) => ({ id, title: ownerName(id), items: list, collapsed: !!owner && id !== owner && list.length > 10 }))}
+        placeholder="搜索技能名或描述" empty={<Empty>暂无技能</Empty>}
+        match={(x: any, q) => `${x.name} ${x.description}`.toLowerCase().includes(q)}
+        render={(x: any) => (
+          <li class={x.owner === owner && x.folder === folder ? "on" : ""} onClick={() => { setMode(""); go("skills", `${x.owner}|${x.folder}`); }}>
+            <b>{x.name}</b><small class="clip2">{x.description || "（没写描述）"}</small>
+          </li>)} />
     </>}>
       {mode === "new" && <NewSkill owners={d.owners} done={(o, n) => { setMode(""); reload(); go("skills", `${o}|${n}|SKILL.md`); }} />}
       {mode === "zip" && <UploadZip owners={d.owners} done={(o, n) => { setMode(""); reload(); go("skills", `${o}|${n}|SKILL.md`); }} />}
