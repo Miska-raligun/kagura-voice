@@ -365,7 +365,7 @@ CoreS3 (MicroPython) ──HTTP──▶ server/（TypeScript 单文件可执行
   `memory_get` 能读所有人设文件。HEARTBEAT.md 现在走场景表，别再在 scheduler 里用 extraSystem 另塞一遍。加载的文件仍是整篇注入（每个上限 `BUDGETS`）。
   **三种加载方式 + 长期记忆改检索**（LRN 2026-10-30，症状「AGENTS / TOOLS / MEMORY 全量注入，上下文大头」）：每格是全文 `X.md` / 目录 `X.md:toc`（`tocOf`：只放各节标题和行号，用到时 memory_get 读那节；`TOC_FILES` 才能选）/ 不加载。
   默认 TOOLS 在主人对话 / 定时任务 / agent 间只放目录（待办、子任务要干活，给全文）。**MEMORY.md 只有 heartbeat 带全文**，其它场景由 `Runtime.recallFor` 每轮拿主人这句话检索（`MemoryIndex.recall`：
-  两字词至少中 2 个或向量 ≥0.5，最多 5 条 / 1200 字，已整篇在提示里的今昨笔记跳过，最多等 `RECALL_WAIT_MS`），以 `RECALL_TAG` 开头附在**这一轮用户消息**里——不进系统提示（前缀缓存），
+  先从这句话里抠掉常用词（`STOP_TERMS`）再切两字词、再去掉在记忆里到处都是的（出现在超过 15% 的块里）；中 2 个，或中 1 个很少见的（≤2 块），或向量 ≥0.5；最多 5 条 / 1200 字；**清单每一项单独成块**（`chunkMarkdown`，改切块要加 `CHUNKER_VERSION`，旧索引自动重建），已整篇在提示里的今昨笔记跳过，最多等 `RECALL_WAIT_MS`），以 `RECALL_TAG` 开头附在**这一轮用户消息**里——不进系统提示（前缀缓存），
   落盘前 `stripRecall` 去掉。关于主人本人的稳定信息走常驻的 USER.md：压缩摘要的「【记住】主人：」和 `memory_write target=user` 追加到 USER.md 末尾 `USER_AUTO_HEAD` 那节，
   去重、上限 `USER_AUTO_MAX`，满了改记 MEMORY.md 并打日志，不碰手写部分。旧版整表保存过的默认（`OLD_DEFAULT`）当没改过、跟新默认走。
 - **近况（`Runtime.recentActivity`，LRN 2026-10-26，症状「heartbeat / 主动聊天老问已经说过的事；换个 agent 又问一遍」）**：

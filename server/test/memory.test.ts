@@ -139,7 +139,7 @@ describe("自动回忆（长期记忆不整篇注入）", () => {
 
   it("每轮自动附上相关记忆：模型看得到，落盘的历史里没有", async () => {
     const { rt, mem, fake, a } = setup();
-    rt.recall = async (ag, text, skip) => (await mem.of(ag.id).recall(text, { skip })).map((h) => `${h.path}：${h.text}`);
+    rt.recall = async (ag, text, skip) => (await mem.of(ag.id).recall(text, { skip })).map((h) => ({ line: `${h.path}：${h.text}`, why: "" }));
     fs.writeFileSync(path.join(a.workspace, "MEMORY.md"), "- 主人爱喝无糖乌龙茶\n");
     fake.queue.push("好的", "嗯");
     await rt.run({ kind: "main", channel: "device", agentId: "main", sessionKey: "main:main", text: "帮我泡杯乌龙茶吧", trusted: true });
@@ -165,5 +165,21 @@ describe("自动回忆（长期记忆不整篇注入）", () => {
     expect(t.match(/朵朵/g)!.length).toBe(1);
     expect(t.trimEnd().endsWith("- 晚上十一点睡")).toBe(true);
     expect(idx.write("user", "很长".repeat(800))).toBe("MEMORY.md");
+  });
+});
+
+
+describe("自动回忆不再随机", () => {
+  it("清单每一项单独成块；只命中常用词（主人 / 今天…）的不附；很少见的词中一个就够", async () => {
+    expect(chunkMarkdown("# 长期记忆\n- 主人爱喝乌龙茶\n- 家里的猫叫团子\n  它很胖\n1. 下周去杭州").map((c) => [c.start, c.end, c.text]))
+      .toEqual([[1, 1, "# 长期记忆"], [2, 2, "- 主人爱喝乌龙茶"], [3, 4, "- 家里的猫叫团子\n  它很胖"], [5, 5, "1. 下周去杭州"]]);
+    const { mem, a } = setup();
+    fs.writeFileSync(path.join(a.workspace, "MEMORY.md"), "# 长期记忆\n- 主人爱喝无糖乌龙茶\n- 家里的猫叫团子\n- 主人下周去杭州出差\n- 主人今天说想学吉他\n- 主人今天心情不错\n");
+    const idx = mem.of("main");
+    const r1 = await idx.recall("帮我泡杯乌龙茶吧");
+    expect(r1.map((h) => h.text)).toEqual(["- 主人爱喝无糖乌龙茶"]);          // 以前整串五条一起附上
+    expect(r1[0].terms).toEqual(expect.arrayContaining(["乌龙", "龙茶"]));
+    expect(await idx.recall("主人今天有点累")).toEqual([]);                    // 只撞上常用词
+    expect((await idx.recall("团子在干嘛呢")).map((h) => h.text)).toEqual(["- 家里的猫叫团子"]);
   });
 });

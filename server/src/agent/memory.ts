@@ -54,6 +54,18 @@ export function ftsQuery(q: string): string {
 }
 
 /** 按段落切块（空行或标题分隔），过长的段再按字数切。记行号，memory_get 能精确取回 */
+const LIST_ITEM = /^\s*(?:[-*+•]|\d{1,3}[.、)])\s+/;
+/** 切块算法版本：改了要加一，已建的索引会自动重建 */
+const CHUNKER_VERSION = "2";
+
+/**
+ * 自动回忆里不算数的两字词：几乎每条记忆、每句话里都有，命中它们说明不了相关（「主人今天…」随便一句都能凑够两个）。
+ * 另外按出现频率再筛一道（见 recall），这里只放最常见的
+ */
+const STOP_TERMS = new Set(("主人 我们 你们 他们 她们 今天 明天 昨天 现在 时候 一下 一个 一些 这个 那个 这样 那样 什么 怎么 为什么 "
+  + "可以 就是 还是 没有 不是 知道 觉得 有点 一点 如果 因为 所以 但是 然后 已经 还有 自己 大家 东西 事情 的话 帮我 给我 告诉 "
+  + "一起 看看 好的 好吧 嗯嗯 哈哈 谢谢 记得 记住 说过 一直 喜欢 想要 需要 应该 不要 不会 可能").split(" "));
+
 export function chunkMarkdown(text: string, max = 400): { start: number; end: number; text: string }[] {
   const lines = text.split(/\r?\n/);
   const out: { start: number; end: number; text: string }[] = [];
@@ -66,9 +78,10 @@ export function chunkMarkdown(text: string, max = 400): { start: number; end: nu
     }
     buf = [];
   };
+  // 清单的每一项单独成块（LRN 2026-10-30）：以前连着写的「- …」整串算一块，一条沾边整串都被自动回忆附上，看起来像随手抓了一把
   lines.forEach((ln, i) => {
     const n = i + 1;
-    if (/^#{1,6}\s/.test(ln) || !ln.trim()) { flush(n - 1); start = n; }
+    if (/^#{1,6}\s/.test(ln) || !ln.trim() || LIST_ITEM.test(ln)) { flush(n - 1); start = n; }
     if (ln.trim()) { if (!buf.length) start = n; buf.push(ln); }
   });
   flush(lines.length);
@@ -85,7 +98,7 @@ const cosine = (a: Float32Array, b: Float32Array) => {
 export const USER_AUTO_HEAD = "## 自动记录（她从对话里记下的，可以挪到上面、改、删）";
 export const USER_AUTO_MAX = 1500;
 
-export interface MemoryHit { path: string; start: number; end: number; text: string; score: number; via: string }
+export interface MemoryHit { path: string; start: number; end: number; text: string; score: number; via: string; terms?: string[] }
 
 export class MemoryIndex {
   constructor(private agent: AgentInfo, private db: DatabaseSync, private embedder: Embedder | null) {
@@ -94,7 +107,14 @@ export class MemoryIndex {
       CREATE TABLE IF NOT EXISTS mem_chunks (id INTEGER PRIMARY KEY AUTOINCREMENT, path TEXT, start_line INTEGER, end_line INTEGER, text TEXT, embedding BLOB);
       CREATE INDEX IF NOT EXISTS mem_chunks_path ON mem_chunks(path);
       CREATE VIRTUAL TABLE IF NOT EXISTS mem_fts USING fts5(body, chunk_id UNINDEXED, tokenize='unicode61');
+      CREATE TABLE IF NOT EXISTS mem_meta (key TEXT PRIMARY KEY, value TEXT);
     `);
+    // 切块算法变了：旧索引整个清掉，下次检索按新算法重建
+    const v = (db.prepare("SELECT value FROM mem_meta WHERE key = 'chunker'").get() as any)?.value;
+    if (v !== CHUNKER_VERSION) {
+      db.exec("DELETE FROM mem_fts; DELETE FROM mem_chunks; DELETE FROM mem_files;");
+      db.prepare("INSERT OR REPLACE INTO mem_meta(key, value) VALUES ('chunker', ?)").run(CHUNKER_VERSION);
+    }
   }
 
   /** workspace 里参与检索的文件（相对路径） */
@@ -199,15 +219,28 @@ export class MemoryIndex {
   async recall(query: string, o: { k?: number; maxChars?: number; skip?: string[] } = {}): Promise<MemoryHit[]> {
     const q = query.replace(/^\[[^\]]*\]\s*/, "").trim();
     if (Array.from(q.replace(/[\s\p{P}]/gu, "")).length < 4) return [];
-    const terms = ftsQuery(q).split(" OR ").map((t) => t.replace(/"/g, "").replace(/ /g, "")).filter(Boolean);
+    // 先把常用词从这句话里抠掉再切词：不然「主人今天」会拼出「人今」这种跨词的两字，正好撞上「主人今天…」的记忆
+    let qq = q.toLowerCase();
+    for (const w of STOP_TERMS) qq = qq.split(w).join(" ");
+    if (!ftsQuery(qq)) return [];
+    const hits0 = await this.search(qq, 12);
+    // 有信息量的词：去掉常用词，再去掉在记忆里到处都是的（出现在超过 15% 的块里）
+    const total = Math.max(1, (this.db.prepare("SELECT COUNT(*) AS n FROM mem_chunks").get() as any).n);
+    const dfStmt = this.db.prepare("SELECT COUNT(*) AS n FROM mem_chunks WHERE instr(lower(text), ?) > 0");
+    const df = new Map<string, number>();
+    const terms = ftsQuery(qq).split(" OR ").map((t) => t.replace(/"/g, "").replace(/ /g, "")).filter((t) => t && !STOP_TERMS.has(t))
+      .filter((t) => { const n = (dfStmt.get(t) as any).n; df.set(t, n); return n <= Math.max(3, total * 0.15); });
     const out: MemoryHit[] = [];
     let size = 0;
-    for (const h of await this.search(q, 12)) {
+    for (const h of hits0) {
       if (o.skip?.includes(h.path)) continue;
       const body = h.text.toLowerCase();
-      const hitTerms = terms.filter((t) => body.includes(t)).length;
+      const hit = terms.filter((t) => body.includes(t));
       const strongVec = h.via !== "keyword" && h.score >= 0.5;
-      if (!strongVec && hitTerms < 2) continue;
+      // 中两个有信息量的词；或者中了一个很少见的词（「团子在干嘛」里的「团子」）
+      const ok = hit.length >= 2 || (hit.length === 1 && (df.get(hit[0]) ?? 99) <= 2);
+      if (!strongVec && !ok) continue;
+      h.terms = hit;
       const n = Array.from(h.text).length;
       if (out.length && size + n > (o.maxChars ?? 1200)) break;
       out.push(h); size += n;

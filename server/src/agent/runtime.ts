@@ -363,7 +363,7 @@ export class Runtime {
   /** 压缩时顺手挑出来的要记住的事（长期 → MEMORY.md，今天 → 当天笔记）。以前压缩前要用整段上下文另跑一轮「记忆冲刷」，很费 */
   remember: ((agent: AgentInfo, target: "long" | "daily" | "user", text: string) => void) | null = null;
   /** 自动回忆（memory 模块注入）：按这句话检索长期记忆，返回要附上的几条（「路径：内容」）。skip = 已整篇在提示里的文件 */
-  recall: ((agent: AgentInfo, text: string, skip: string[]) => Promise<string[]>) | null = null;
+  recall: ((agent: AgentInfo, text: string, skip: string[]) => Promise<{ line: string; why: string }[]>) | null = null;
   /** 每个会话上一轮算出来的压缩阈值（回复后在后台压缩时用） */
   private compactLimit = new Map<string, number>();
   /** 回复后在后台预先压缩（测试里关掉，免得和假模型的回复队列抢） */
@@ -777,10 +777,11 @@ export class Runtime {
     try {
       const hits = await Promise.race([
         this.recall(agent, req.text, skip),
-        new Promise<string[]>((r) => setTimeout(() => { late = true; r([]); }, RECALL_WAIT_MS).unref?.()),
+        new Promise<{ line: string; why: string }[]>((r) => setTimeout(() => { late = true; r([]); }, RECALL_WAIT_MS).unref?.()),
       ]);
       const ms = Date.now() - t0;
-      return { text: hits.length ? `${RECALL_TAG}\n${hits.map((h) => `- ${h}`).join("\n")}` : "", hits, ms, why: late ? `超过 ${RECALL_WAIT_MS / 1000} 秒没检索完，这轮不附` : hits.length ? "" : "没有相关的" };
+      // 发给模型的只有记忆本身；会话页 ⓘ 里多显示一句是哪些词让它被挑中的
+      return { text: hits.length ? `${RECALL_TAG}\n${hits.map((h) => `- ${h.line}`).join("\n")}` : "", hits: hits.map((h) => h.why ? `${h.line}（命中：${h.why}）` : h.line), ms, why: late ? `超过 ${RECALL_WAIT_MS / 1000} 秒没检索完，这轮不附` : hits.length ? "" : "没有相关的" };
     } catch (e: any) {
       console.log(`[agent] ⚠️  ${agent.id} 自动回忆失败（这轮不附）: ${e.message}`);
       return { ...none(`检索失败：${e.message}`), ms: Date.now() - t0 };

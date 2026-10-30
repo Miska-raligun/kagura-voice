@@ -65,14 +65,14 @@ describe("系统处理详情", () => {
     const a = reg.get("main")!;
     fs.writeFileSync(path.join(a.workspace, "USER.md"), "主人叫小明");
     fs.writeFileSync(path.join(a.workspace, "TOOLS.md"), "# 工具\n## NAS\n地址");
-    rt.recall = async () => ["MEMORY.md#L1：主人爱喝乌龙茶"];
+    rt.recall = async () => [{ line: "MEMORY.md#L1：主人爱喝乌龙茶", why: "乌龙、龙茶" }];
     rt.remember = () => {};
     fake.queue.push("好");
     await rt.run({ agentId: "main", sessionKey: "main:main", kind: "main", channel: "webchat", text: "泡杯乌龙茶" });
     const c = (rt.store("main").history("main:main").at(-1)!.msg as any).kctx;
     expect(c.trace.scene).toBe("owner");
     expect(c.trace.files).toEqual(expect.arrayContaining([{ name: "USER.md", mode: "full", chars: 5, clipped: false }, expect.objectContaining({ name: "TOOLS.md", mode: "toc" })]));
-    expect(c.recall.hits).toEqual(["MEMORY.md#L1：主人爱喝乌龙茶"]);
+    expect(c.recall.hits).toEqual(["MEMORY.md#L1：主人爱喝乌龙茶（命中：乌龙、龙茶）"]);
     // 压缩：手动压一次，事件里有原因、条数、记下的记忆
     for (let i = 0; i < 2; i++) { fake.queue.push(`回复${i}`); await rt.run({ agentId: "main", sessionKey: "main:main", kind: "main", channel: "webchat", text: `问题${i}` }); }
     reg.update("main", { compaction: { ...a.compaction, keep_messages: 2 } });
