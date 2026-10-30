@@ -72,9 +72,12 @@ export class Memories {
       },
       {
         name: "memory_write", label: "写入记忆",
-        description: "记下一件事。target=user 写进 USER.md（关于主人本人、以后每次聊天都该知道的：称呼、家人、作息、口味与习惯），"
-          + "target=long 写进长期记忆 MEMORY.md（约定、经历过的事、项目进展等，之后按需检索），target=daily 写进今天的笔记（当天发生的事）。一次一条，简洁。",
-        parameters: Type.Object({ target: Type.Union([Type.Literal("user"), Type.Literal("long"), Type.Literal("daily")]), text: Type.String() }),
+        description: "记下一件事，一次一条、简洁。target 怎么选："
+          + "long（默认，拿不准就用它）→ MEMORY.md：约定、经历过的事、计划与进展、项目、重要日子、你对事情的判断——以后聊到相关话题系统会自动想起，不会丢；"
+          + "daily → 今天的笔记：只跟今天有关的事；"
+          + "user → USER.md：**只放主人本人的稳定个人信息**（称呼、家人、生日、长期作息、口味与忌口、习惯和喜好），每次聊天都常驻，所以要少而精。"
+          + "主人做过 / 要做的事、项目进展、约定、某次聊天的内容都不是 user。",
+        parameters: Type.Object({ target: Type.Union([Type.Literal("long"), Type.Literal("daily"), Type.Literal("user")]), text: Type.String() }),
         execute: async (_id, p: any) => {
           if (scope.kind === "sub") return fail("子任务不能写记忆，把要记的事写进结果里交给发起方");
           try { return ok(`已记到 ${this.of(agent.id).write(p.target, String(p.text))}`); }

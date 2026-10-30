@@ -96,6 +96,8 @@ const cosine = (a: Float32Array, b: Float32Array) => {
 
 /** USER.md 里系统自动追加的那一节（标题之后都算） */
 export const USER_AUTO_HEAD = "## 自动记录（她从对话里记下的，可以挪到上面、改、删）";
+/** USER.md 自动记录里单条的上限：超过就不像「关于主人的一条稳定信息」了，改记 MEMORY.md */
+export const USER_ITEM_MAX = 80;
 export const USER_AUTO_MAX = 1500;
 
 export interface MemoryHit { path: string; start: number; end: number; text: string; score: number; via: string; terms?: string[] }
@@ -263,6 +265,8 @@ export class MemoryIndex {
     const t = text.trim().replace(/\n+/g, " ");
     if (!t) throw new Error("内容为空");
     if (target === "user") {
+      // 关于主人的一条稳定信息是一句短话；长的多半是事情经过 / 进展，改记长期记忆（USER.md 每轮常驻，要少而精）
+      if (Array.from(t).length > USER_ITEM_MAX) return this.write("long", t, now);
       const p = path.join(ws, "USER.md");
       const cur = fs.existsSync(p) ? fs.readFileSync(p, "utf8") : "";
       const at = cur.indexOf(USER_AUTO_HEAD);

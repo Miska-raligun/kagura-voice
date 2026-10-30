@@ -169,6 +169,8 @@ describe("自动回忆（长期记忆不整篇注入）", () => {
     expect(t.match(/朵朵/g)!.length).toBe(1);
     expect(t.trimEnd().endsWith("- 晚上十一点睡")).toBe(true);
     expect(idx.write("user", "很长".repeat(800))).toBe("MEMORY.md");
+    // 一条很长的（多半是事情经过 / 进展）不进 USER.md
+    expect(idx.write("user", "主人今天下午把客厅的灯换成了智能灯，接进了家里的系统，说以后想让我晚上十点自动调暗，还提到下周要再买两个放卧室和书房，预算大概三百块左右，等双十一打折的时候再下单，到时候提醒一下")).toBe("MEMORY.md");
   });
 });
 
