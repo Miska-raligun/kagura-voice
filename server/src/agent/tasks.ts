@@ -4,6 +4,10 @@
 //   排队   agent 用 task_add 记（只在可信会话里有），管理界面也能新建；run_at 空 = 等下一个静默时段，有值 = 到点就做
 //   执行   一次只做一件（不跟白天的对话抢额度），全新上下文（执行时看不到当时的聊天，所以 detail 要写清楚），
 //          单件最长 max_minutes；管理界面可以立即执行、撤销、改开始时间、改内容
+//   验收   最后必须单独写一行「状态：完成 / 没做完：… / 需要主人：…」（LRN 2026-10-30，症状「报了已完成实际没做完」：
+//          模型说一句「接下来我改 X」就结束了本轮、输出被截断、工具报错了却说搞定了，以前一律记成完成）。
+//          没写状态行或被截断就在同一个会话里催她接着做（最多 MAX_ROUNDS 轮，总时长不超过 max_minutes）；
+//          只有「完成」才算 done，其余记 partial（没做完），可以「继续做」（接着原会话）或「重新开始」
 //   汇报   做完不马上说（半夜别出声）：不在静默时段且过了 report_at（默认早上 8 点）才按来源汇报，同一来源的合成一条
 //
 // 存 system.sqlite 的 tasks 表（导出时跟着「定时任务」那一项走），设置存同库的 task_settings。
@@ -13,7 +17,7 @@ import { inActiveHours } from "./cron.ts";
 import type { RunRequest, RunResult } from "./runtime.ts";
 import type { AgentRegistry } from "./registry.ts";
 
-export type TaskStatus = "queued" | "running" | "done" | "failed" | "cancelled";
+export type TaskStatus = "queued" | "running" | "done" | "partial" | "failed" | "cancelled";
 
 export interface Task {
   id: string; agent: string; title: string; detail: string;
@@ -30,7 +34,32 @@ export interface Task {
   attempts: number;
   /** 结果汇报过了没有；汇报到哪 */
   reported: boolean; delivered: string;
+  /** 下次执行接着原会话做（没做完时「继续做」），不从头开始 */
+  resume?: boolean;
 }
+
+/** 每次执行最多催几轮「接着做」（不算第一轮） */
+export const MAX_ROUNDS = 4;
+const STATUS_LINE = /(?:^|\n)\s*[*_`#>\-\s]*状态\s*[:：]\s*(完成|没做完|需要主人)\s*[:：，,]?\s*([^\n]*)\s*$/;
+export type Verdict = { v: "done" | "partial" | "blocked" | "none"; why: string; body: string };
+
+/** 从最后的汇报里取状态行（必须在末尾）。body = 去掉状态行的汇报 */
+export function verdictOf(text: string): Verdict {
+  const t = text.trim();
+  const m = STATUS_LINE.exec(t);
+  if (!m) return { v: "none", why: "", body: t };
+  const body = t.slice(0, m.index).trim();
+  const why = m[2].replace(/[*_`]+$/g, "").trim();
+  return { v: m[1] === "完成" ? "done" : m[1] === "没做完" ? "partial" : "blocked", why, body: body || t };
+}
+
+const FINISH_RULE = "最后单独一行写状态（必须写，系统靠它判断做没做完）：\n"
+  + "- 「状态：完成」——确实做完并检查过（改了代码就跑过测试 / 看过结果，写了文件就确认文件在）；\n"
+  + "- 「状态：没做完：原因」——卡住了、出错了或时间不够；\n"
+  + "- 「状态：需要主人：要主人决定什么」。\n"
+  + "别把计划当成完成：说了「接下来我会…」就接着去做，做完再写状态。";
+const CONTINUE_PROMPT = "[继续待办] 你还没写最后的「状态：…」那一行，说明这件事还没做完。接着做下去；"
+  + "已经做完的话先检查一遍结果，再汇报并写状态行。\n" + FINISH_RULE;
 
 export interface TaskSettings {
   /** 静默时段：没定时间的待办在这段时间里自动做 */
@@ -49,11 +78,14 @@ const WINDOW = /^(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})$/;
 
 export interface TaskHost {
   run(req: RunRequest): Promise<RunResult>;
+  /** 清空某个会话的历史（「重新开始」时用） */
+  reset?(agentId: string, sessionKey: string): void;
   /** 把汇报送到来源；返回实际送到哪（空 = 没送出去，只在管理界面看得到） */
   report(agentId: string, origin: string, text: string): Promise<string>;
 }
 
 const nowS = () => Date.now() / 1000;
+export const sessionKeyOf = (t: { agent: string; id: string }) => `${t.agent}:task:${t.id}`;
 const minutesOf = (ms: number) => { const d = new Date(ms); return d.getHours() * 60 + d.getMinutes(); };
 
 /** 下一个静默时段开始的时刻（秒）；现在就在时段里 = 现在 */
@@ -115,7 +147,7 @@ export class TaskQueue {
 
   list(agent?: string): Task[] {
     const all = (this.db.prepare("SELECT data FROM tasks").all() as any[]).map((r) => JSON.parse(r.data) as Task);
-    const rank: Record<TaskStatus, number> = { running: 0, queued: 1, failed: 2, done: 3, cancelled: 4 };
+    const rank: Record<TaskStatus, number> = { running: 0, queued: 1, partial: 2, failed: 2, done: 3, cancelled: 4 };
     return all.filter((t) => !agent || t.agent === agent).sort((a, b) =>
       rank[a.status] - rank[b.status]
       || (a.status === "queued" ? (a.run_at ?? Infinity) - (b.run_at ?? Infinity) || a.created - b.created : (b.finished ?? b.updated) - (a.finished ?? a.updated)));
@@ -164,11 +196,15 @@ export class TaskQueue {
     throw new Error("这件已经结束了");
   }
 
-  /** 失败 / 撤销的重新排队（等下一个静默时段） */
-  requeue(id: string): Task {
+  /**
+   * 重新排队（等下一个静默时段）。resume = 接着原会话继续做（没做完的默认这样）；否则清空会话从头开始
+   */
+  requeue(id: string, opts: { resume?: boolean } = {}): Task {
     const t = this.need(id);
     if (t.status === "queued" || t.status === "running") throw new Error("还在排队或正在做");
-    const n: Task = { ...t, status: "queued", run_at: null, started: null, finished: null, result: "", error: "", attempts: 0, reported: false, delivered: "", updated: nowS() };
+    const resume = opts.resume ?? t.status === "partial";
+    if (!resume) this.host.reset?.(t.agent, sessionKeyOf(t));
+    const n: Task = { ...t, status: "queued", run_at: null, started: null, finished: null, result: resume ? t.result : "", error: "", attempts: 0, reported: false, delivered: "", resume, updated: nowS() };
     this.save(n);
     return n;
   }
@@ -242,21 +278,41 @@ export class TaskQueue {
     this.save(t);
     const ac = new AbortController();
     this.ctl.set(id, ac);
-    console.log(`[tasks] 🌙 开始做「${t.title}」（${t.agent}）`);
+    console.log(`[tasks] 🌙 ${t.resume ? "接着做" : "开始做"}「${t.title}」（${t.agent}）`);
+    const deadline = Date.now() + s.max_minutes * 60_000;
+    const usage = { input: 0, output: 0, cost: 0 };
     try {
-      const r = await this.host.run({
-        agentId: t.agent, sessionKey: `${t.agent}:task:${t.id}`, kind: "isolated", channel: "system", purpose: "task",
-        trusted: t.trusted, origin: t.origin || undefined, signal: ac.signal, maxSecs: s.max_minutes * 60,
-        toolAllow: (n) => !n.startsWith("task_"),
-        text: `[待办「${t.title}」] ${t.detail}\n\n`
+      const first = t.resume
+        ? `[继续待办「${t.title}」] 上次没做完，接着往下做（之前的过程都在上面）。${t.detail ? `\n原来的要求：${t.detail}` : ""}\n\n${FINISH_RULE}`
+        : `[待办「${t.title}」] ${t.detail}\n\n`
           + "（这是主人之前交代、安排在现在执行的待办。主人多半不在旁边：能自己判断的就直接做完，别停下来等确认；"
-          + "删除、付钱、对外发消息这类不可撤回的事不要做，需要主人拍板的地方写进结果里。"
-          + "最后用几句话汇报做了什么、结果在哪、还有什么要主人处理——这段汇报会原样转给主人。）",
-      });
-      if (this.get(id)?.status === "cancelled") return;
-      this.save({ ...this.get(id)!, status: "done", result: r.text.trim() || "（没有输出）", finished: nowS(), updated: nowS(),
-        tokens_in: r.usage.input, tokens_out: r.usage.output, cost: r.usage.cost });
-      console.log(`[tasks] ✅ 「${t.title}」做完了`);
+          + "删除、付钱、对外发消息这类不可撤回的事不要做，需要主人拍板的写进汇报。"
+          + "最后用几句话汇报做了什么、结果在哪、还有什么要主人处理——这段汇报会原样转给主人。）\n" + FINISH_RULE;
+      let r: RunResult | null = null, verdict: Verdict = { v: "none", why: "", body: "" }, rounds = 0;
+      for (; rounds <= MAX_ROUNDS; rounds++) {
+        const left = Math.floor((deadline - Date.now()) / 1000);
+        if (rounds > 0 && left < 30) break;              // 时间不够再催一轮了
+        r = await this.host.run({
+          agentId: t.agent, sessionKey: sessionKeyOf(t), kind: "isolated", channel: "system", purpose: "task",
+          trusted: t.trusted, origin: t.origin || undefined, signal: ac.signal, maxSecs: Math.max(30, left),
+          toolAllow: (n) => !n.startsWith("task_"),
+          text: rounds === 0 ? first : CONTINUE_PROMPT,
+        });
+        usage.input += r.usage.input; usage.output += r.usage.output; usage.cost += r.usage.cost;
+        if (this.get(id)?.status === "cancelled") return;
+        verdict = verdictOf(r.text);
+        // 写了状态行、又不是被截断的，就是她的结论；否则催她接着做
+        if (verdict.v !== "none" && r.stopReason !== "length") break;
+        console.log(`[tasks] ↻ 「${t.title}」第 ${rounds + 1} 轮没给结论${r.stopReason === "length" ? "（输出被截断）" : ""}，催她接着做`);
+      }
+      const body = verdict.body || r?.text.trim() || "（没有输出）";
+      const done = verdict.v === "done";
+      const why = verdict.v === "partial" ? `没做完：${verdict.why || "没说原因"}`
+        : verdict.v === "blocked" ? `需要你决定：${verdict.why || "见汇报"}`
+        : verdict.v === "none" ? `催了 ${rounds} 轮也没给出「完成」的结论，可能没做完` : "";
+      this.save({ ...this.get(id)!, status: done ? "done" : "partial", result: body, error: why, resume: false, finished: nowS(), updated: nowS(),
+        tokens_in: usage.input, tokens_out: usage.output, cost: usage.cost });
+      console.log(done ? `[tasks] ✅ 「${t.title}」做完了` : `[tasks] ⏸️  「${t.title}」${why}`);
     } catch (e: any) {
       if (this.get(id)?.status === "cancelled") return;
       const msg = String(e?.message || e);
@@ -280,7 +336,7 @@ export class TaskQueue {
   private reporting = false;
   async report(t = nowS()): Promise<number> {
     if (this.reporting || !this.canReport(t)) return 0;
-    const pending = this.list().filter((x) => (x.status === "done" || x.status === "failed") && !x.reported)
+    const pending = this.list().filter((x) => (x.status === "done" || x.status === "partial" || x.status === "failed") && !x.reported)
       .sort((a, b) => (a.finished ?? 0) - (b.finished ?? 0) || a.created - b.created);     // 按做完的先后讲
     if (!pending.length) return 0;
     this.reporting = true;
@@ -292,7 +348,8 @@ export class TaskQueue {
       }
       for (const [k, list] of groups) {
         const [agentId, origin] = k.split("\n");
-        const line = (x: Task) => x.status === "done" ? `「${x.title}」做完了：${x.result}` : `「${x.title}」没做成：${x.error}`;
+        const line = (x: Task) => x.status === "done" ? `「${x.title}」做完了：${x.result}`
+          : x.status === "partial" ? `「${x.title}」${x.error}。目前的进展：${x.result}` : `「${x.title}」没做成：${x.error}`;
         const text = list.length === 1 ? line(list[0]) : `之前记下的 ${list.length} 件待办：\n${list.map((x, i) => `${i + 1}. ${line(x)}`).join("\n")}`;
         let delivered = "";
         try { delivered = await this.host.report(agentId, origin, text); }

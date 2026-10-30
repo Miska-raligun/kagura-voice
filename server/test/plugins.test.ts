@@ -119,7 +119,7 @@ describe("扩展（pi 格式）", () => {
     const gdir = tmpdir("gext");
     const exts = new Extensions(gdir, reg);
     rt.addTools(extensionTools(exts));
-    rt.addTools(exts.tools());
+    rt.addTools(exts.tools(), { plugin: true });     // 同 system.ts：扩展按插件注册
     // agent 自己写一个工具
     fake.queue.push({ tool_calls: [{ name: "extension_write", args: { name: "hello", code: EXT.replace('import { greet } from "./lib/greet";', "const greet = (w) => `你好，${w}`;") } }], then: "写好了" });
     const r1 = await rt.run({ agentId: "main", sessionKey: "main:main", kind: "main", channel: "device", text: "给自己写个打招呼工具", trusted: true });

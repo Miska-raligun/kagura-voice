@@ -4,7 +4,7 @@ import { api, enc, fmtTime, go, money } from "../api.ts";
 import { Badge, Btn, Card, Empty, Err, Field, Input, Select, TextArea, Toggle, confirmDo, toast, toastErr, useInterval, useLoad } from "../ui.tsx";
 
 const STATUS: Record<string, [string, string]> = {
-  queued: ["muted", "排队中"], running: ["running", "进行中"], done: ["ok", "完成"], failed: ["error", "失败"], cancelled: ["skipped", "已撤销"],
+  queued: ["muted", "排队中"], running: ["running", "进行中"], done: ["ok", "完成"], partial: ["deferred", "没做完"], failed: ["error", "失败"], cancelled: ["skipped", "已撤销"],
 };
 const St = ({ s }: { s: string }) => <Badge s={STATUS[s]?.[0] ?? s} text={STATUS[s]?.[1] ?? s} />;
 
@@ -57,8 +57,8 @@ function SettingsCard({ d, reload }: { d: any; reload: () => void }) {
 }
 
 function TaskTable({ list, d, reload }: { list: any[]; d: any; reload: () => void }) {
-  const act = (path: string, msg: string) => async () => {
-    try { await api(path, { body: {} }); toast(msg); reload(); } catch (err) { toastErr(err); }
+  const act = (path: string, msg: string, body: any = {}) => async () => {
+    try { await api(path, { body }); toast(msg); reload(); } catch (err) { toastErr(err); }
   };
   return (
     <table class="hover">
@@ -68,10 +68,11 @@ function TaskTable({ list, d, reload }: { list: any[]; d: any; reload: () => voi
           <td>{t.title}{t.source === "admin" && <small class="tag">手动</small>}</td>
           <td>{t.agent}</td>
           <td>{whenText(t, d)}</td>
-          <td><St s={t.status} />{t.status === "done" && !t.reported && <small class="muted"> 待汇报</small>}</td>
+          <td><St s={t.status} />{(t.status === "done" || t.status === "partial") && !t.reported && <small class="muted"> 待汇报</small>}</td>
           <td class="actions" onClick={(e) => e.stopPropagation()}>
             {t.status === "queued" && <Btn small onClick={act(`/tasks/${enc(t.id)}/run`, d.busy ? "排在正在做的那件后面" : "开始执行")}>立即执行</Btn>}
             {(t.status === "queued" || t.status === "running") && <Btn small kind="ghost" onClick={act(`/tasks/${enc(t.id)}/cancel`, "已撤销")}>撤销</Btn>}
+            {t.status === "partial" && <Btn small onClick={act(`/tasks/${enc(t.id)}/requeue`, "接着上次的进度，排到静默时段", { resume: true })}>继续做</Btn>}
             {(t.status === "failed" || t.status === "cancelled") && <Btn small kind="ghost" onClick={act(`/tasks/${enc(t.id)}/requeue`, "已重新排队")}>重新排队</Btn>}
           </td>
         </tr>))}</tbody>
@@ -111,7 +112,7 @@ function TaskForm({ t, done }: { t?: any; done: () => void }) {
 function TaskDetail({ t, d, reload }: { t: any; d: any; reload: () => void }) {
   const [edit, setEdit] = useState(false);
   if (edit) return <TaskForm t={t} done={() => { setEdit(false); reload(); }} />;
-  const act = (path: string, msg: string) => async () => { try { await api(path, { body: {} }); toast(msg); reload(); } catch (e) { toastErr(e); } };
+  const act = (path: string, msg: string, body: any = {}) => async () => { try { await api(path, { body }); toast(msg); reload(); } catch (e) { toastErr(e); } };
   return (
     <>
       <div class="titlebar"><h3>{t.title} <small class="muted">{t.id}</small></h3>
@@ -120,7 +121,8 @@ function TaskDetail({ t, d, reload }: { t: any; d: any; reload: () => void }) {
           {t.status === "queued" && <Btn onClick={() => setEdit(true)}>编辑</Btn>}
           {t.status === "queued" && <Btn kind="primary" onClick={act(`/tasks/${enc(t.id)}/run`, "开始执行")}>立即执行</Btn>}
           {(t.status === "queued" || t.status === "running") && <Btn kind="danger" onClick={act(`/tasks/${enc(t.id)}/cancel`, "已撤销")}>撤销</Btn>}
-          {(t.status === "failed" || t.status === "cancelled") && <Btn onClick={act(`/tasks/${enc(t.id)}/requeue`, "已重新排队")}>重新排队</Btn>}
+          {t.status === "partial" && <Btn kind="primary" onClick={act(`/tasks/${enc(t.id)}/requeue`, "接着上次的进度，排到静默时段", { resume: true })}>继续做</Btn>}
+          {(t.status === "partial" || t.status === "failed" || t.status === "cancelled") && <Btn onClick={act(`/tasks/${enc(t.id)}/requeue`, "已重新排队，从头开始", { resume: false })}>{t.status === "partial" ? "重新开始" : "重新排队"}</Btn>}
           {t.started && <Btn kind="ghost" onClick={() => go("sessions", `${t.agent}|${t.agent}:task:${t.id}`)}>执行过程</Btn>}
           {t.status !== "running" && <Btn kind="ghost" onClick={confirmDo("删除这件待办？", async () => { await api(`/tasks/${enc(t.id)}`, { method: "DELETE" }); reload(); go("tasks"); })}>删除</Btn>}
         </div></div>
@@ -133,7 +135,7 @@ function TaskDetail({ t, d, reload }: { t: any; d: any; reload: () => void }) {
           {t.tokens_in > 0 && <><dt>用量</dt><dd>{t.tokens_in}/{t.tokens_out} token · {money(t.cost)}</dd></>}
           <dt>要做什么</dt><dd class="pre">{t.detail}</dd>
           {t.result && <><dt>结果</dt><dd class="pre">{t.result}</dd></>}
-          {t.error && <><dt>{t.status === "failed" ? "失败原因" : "备注"}</dt><dd class="pre over">{t.error}</dd></>}
+          {t.error && <><dt>{t.status === "failed" ? "失败原因" : t.status === "partial" ? "为什么没做完" : "备注"}</dt><dd class="pre over">{t.error}</dd></>}
         </dl>
       </Card>
     </>

@@ -2,7 +2,7 @@
 import { describe, it, expect } from "vitest";
 import path from "node:path";
 import { makeRuntime } from "./helpers.ts";
-import { TaskQueue, nextWindowStart, type TaskHost } from "../src/agent/tasks.ts";
+import { TaskQueue, nextWindowStart, verdictOf, MAX_ROUNDS, type TaskHost } from "../src/agent/tasks.ts";
 import { taskTools, parseWhen } from "../src/agent/tools/tasks.ts";
 import type { RunScope } from "../src/agent/scope.ts";
 
@@ -14,7 +14,7 @@ function setup(hostPatch: Partial<TaskHost> = {}) {
   const runs: any[] = [], reports: any[] = [];
   let release: (() => void) | null = null;
   const host: TaskHost = {
-    run: async (req) => { runs.push(req); if (hostPatch.run) return hostPatch.run(req); return { text: `做完了：${req.sessionKey}`, meta: {}, toolCalls: [], usage: { input: 10, output: 5, cost: 0.01 } }; },
+    run: async (req) => { runs.push(req); if (hostPatch.run) return hostPatch.run(req); return { text: `做完了：${req.sessionKey}\n状态：完成`, meta: {}, toolCalls: [], usage: { input: 10, output: 5, cost: 0.01 } }; },
     report: async (agentId, origin, text) => { reports.push({ agentId, origin, text }); return origin || ""; },
   };
   const q = new TaskQueue(path.join(root, "system.sqlite"), reg, host);
@@ -59,6 +59,7 @@ describe("待办", () => {
     expect(reports).toHaveLength(2);
     const dev = reports.find((r) => r.origin === "device:cores3");
     expect(dev.text).toMatch(/2 件待办[\s\S]*「A」做完了[\s\S]*「B」做完了/);
+    expect(dev.text).not.toContain("状态：");               // 状态行是给系统看的，不念给主人
     expect(q.get(a.id)!.reported).toBe(true);
     expect(await q.report(at(9))).toBe(0);                    // 不重复汇报
 
@@ -75,7 +76,7 @@ describe("待办", () => {
     let gate: () => void = () => {};
     const { q, root, reg } = setup({ run: (req) => new Promise((ok, bad) => {
       req.signal?.addEventListener("abort", () => bad(new Error("aborted")));
-      gate = () => ok({ text: "ok", meta: {}, toolCalls: [], usage: { input: 0, output: 0, cost: 0 } });
+      gate = () => ok({ text: "ok\n状态：完成", meta: {}, toolCalls: [], usage: { input: 0, output: 0, cost: 0 } });
     }) });
     const a = q.add({ agent: "main", title: "A", detail: "a" });
     const b = q.add({ agent: "main", title: "B", detail: "b" });
@@ -122,5 +123,53 @@ describe("待办", () => {
     expect(Math.abs(parseWhen("now")! - Date.now() / 1000)).toBeLessThan(2);
     expect(nextWindowStart("01:00-06:00", at(3))).toBe(at(3));
     expect(nextWindowStart("01:00-06:00", at(14))).toBe(at(1) + 86400);
+  });
+
+  it("验收：没写状态行 / 被截断就催她接着做；只有「完成」才算完成，其余记没做完、能接着做", async () => {
+    const replies: any[] = [];
+    const { q, runs } = setup({ run: async () => replies.shift() });
+    const R = (text: string, stopReason = "stop") => ({ text, meta: {}, toolCalls: [], usage: { input: 1, output: 1, cost: 0 }, stopReason });
+    // 第一轮只说了计划，第二轮被截断，第三轮才真做完
+    replies.push(R("我先看看代码，接下来改 login.ts。"), R("改好了一半…\n状态：完成", "length"), R("改好了，测试通过。\n**状态：完成**"));
+    const a = q.add({ agent: "main", title: "修 bug", detail: "修登录页" });
+    await q.tick(at(3)); await q.idle();
+    expect(runs.length).toBe(3);
+    expect(runs[1].text).toContain("[继续待办]");
+    expect(runs.every((r) => r.sessionKey === `main:task:${a.id}`)).toBe(true);
+    expect(q.get(a.id)).toMatchObject({ status: "done", result: "改好了，测试通过。", tokens_in: 3 });
+
+    // 一直不给结论：催满 MAX_ROUNDS 轮记为没做完
+    for (let i = 0; i <= MAX_ROUNDS; i++) replies.push(R("我会去做的。"));
+    const b = q.add({ agent: "main", title: "整理", detail: "整理资料" });
+    await q.tick(at(3, 10)); await q.idle();
+    expect(q.get(b.id)!.status).toBe("partial");
+    expect(q.get(b.id)!.error).toMatch(/没给出「完成」/);
+    expect(runs.length).toBe(3 + 1 + MAX_ROUNDS);
+
+    // 自己说没做完 / 要主人决定
+    replies.push(R("改了两个文件，第三个依赖装不上。\n状态：没做完：npm 装不上 sharp"));
+    const c = q.add({ agent: "main", title: "升级依赖", detail: "升级依赖" });
+    await q.tick(at(3, 20)); await q.idle();
+    expect(q.get(c.id)).toMatchObject({ status: "partial", error: "没做完：npm 装不上 sharp", result: "改了两个文件，第三个依赖装不上。" });
+    replies.push(R("方案写好了。\n状态：需要主人：选 A 还是 B"));
+    const d = q.add({ agent: "main", title: "选型", detail: "对比方案" });
+    await q.tick(at(3, 30)); await q.idle();
+    expect(q.get(d.id)!.error).toBe("需要你决定：选 A 还是 B");
+    expect(verdictOf("嗯\n> 状态：完成").v).toBe("done");
+    expect(verdictOf("状态：完成，然后我还要…").v).toBe("done");
+    expect(verdictOf("我之前说过状态：完成，但还有事").v).toBe("none");      // 状态行得单独成行
+
+    // 继续做：接着原会话、提示词是「继续待办」；重新开始：清空会话
+    const resets: string[] = [];
+    (q as any).host.reset = (_a: string, k: string) => resets.push(k);
+    q.requeue(c.id);
+    expect(q.get(c.id)).toMatchObject({ status: "queued", resume: true });
+    replies.push(R("装好了，全部升级完。\n状态：完成"));
+    await q.tick(at(3, 40)); await q.idle();
+    expect(runs.at(-1).text).toMatch(/^\[继续待办「升级依赖」\]/);
+    expect(q.get(c.id)).toMatchObject({ status: "done", resume: false });
+    expect(resets).toEqual([]);
+    q.requeue(d.id, { resume: false });
+    expect(resets).toEqual([`main:task:${d.id}`]);
   });
 });

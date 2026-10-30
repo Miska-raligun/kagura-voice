@@ -1,6 +1,7 @@
 // 内置 agent 系统的装配：注册表 + 模型 + 运行时 + 各工具模块。main.ts 只调这里。
 import { HB_SILENT_SECS } from "../heartbeat.ts";
 import { applyBudgets, applyLoadout } from "./soul.ts";
+import { applyToolPolicy } from "./toolpolicy.ts";
 import { VERSION } from "../cli.ts";
 import { restartSelf } from "../util/restart.ts";
 import type { Config, Dirs } from "../config.ts";
@@ -50,6 +51,7 @@ export interface AgentSystem {
 export function createAgentSystem(cfg: Config, dirs: Dirs, fake: FakeLlm | null): AgentSystem {
   applyBudgets(cfg.promptBudgets);
   applyLoadout(cfg.promptFiles);
+  applyToolPolicy(cfg.toolPolicy);
   const registry = new AgentRegistry(dirs.agents);
   registry.load(cfg.roles);
   // 假服务商模式：所有 agent 都用按脚本回复的假模型
@@ -177,7 +179,7 @@ export function attachAgentSystem(sys: AgentSystem, ctx: Ctx) {
     const d = registry.get(agentId)?.heartbeat.delivery ?? "";
     return d && d !== "none" && d !== "webchat" && d !== origin ? report(agentId, d, text) : "";
   };
-  const tasks = new TaskQueue(ctx.dirs.systemDb, registry, { run: (req) => runtime.run(req), report });
+  const tasks = new TaskQueue(ctx.dirs.systemDb, registry, { run: (req) => runtime.run(req), report, reset: (a, k) => runtime.store(a).reset(k) });
   sys.tasks = tasks;
   runtime.addTools(taskTools(tasks));
   // 后台子任务的结果回到发起方后，按消息来源转达：设备 → 推送语音；IM → 发回原聊天并顺带念

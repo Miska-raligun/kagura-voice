@@ -218,7 +218,46 @@ function ToolsTab({ a, save }: { a: any; save: (p: any) => Promise<void> }) {
         {skills?.length ? <AllowList all={skills} value={sk} onChange={setSk} /> : <Empty>暂无技能</Empty>}
       </Card>
       <Btn kind="primary" onClick={() => save({ tools, skills: sk })}>保存</Btn>
+      {meta?.tool_policy && <ToolScenes meta={meta} />}
     </>
+  );
+}
+
+/**
+ * 按场景的工具权限（所有 agent 共用，存 config.json 的 tool_policy）。群聊 / 陌生人：只有勾上的才给，
+ * 碰家里设备、主人隐私、执行代码的勾不上；扩展 / MCP 里标了「陌生人也能用」的默认勾着。其它场景默认全给。
+ */
+function ToolScenes({ meta }: { meta: any }) {
+  const [pol, setPol] = useState<{ guest: string[]; deny: Record<string, string[]> }>(meta.tool_policy);
+  const [saved, setSaved] = useState(JSON.stringify(meta.tool_policy));
+  const scenes: any[] = meta.loadout.scenes;
+  const tools: any[] = meta.tools ?? [];
+  const denied = (sc: string, n: string) => (pol.deny[sc] ?? []).includes(n);
+  const on = (sc: string, t: any) => sc === "guest"
+    ? !t.guest_locked && !denied(sc, t.name) && (t.plugin ? t.guest_source : pol.guest.includes(t.name))
+    : !denied(sc, t.name);
+  const toggle = (sc: string, t: any, v: boolean) => {
+    const deny = { ...pol.deny, [sc]: (pol.deny[sc] ?? []).filter((x) => x !== t.name) };
+    let guest = pol.guest;
+    if (sc === "guest" && !t.plugin) { guest = guest.filter((x) => x !== t.name); if (v) guest = [...guest, t.name]; }
+    else if (!v) deny[sc] = [...deny[sc], t.name];
+    setPol({ guest, deny });
+  };
+  const dirty = JSON.stringify(pol) !== saved;
+  return (
+    <Card title="按场景（所有 agent 共用）" actions={dirty && <Btn small kind="primary" onClick={async () => {
+      try { await api("/config", { method: "PUT", body: { tool_policy: pol } }); setSaved(JSON.stringify(pol)); toast("已保存，下一轮对话生效"); } catch (e) { toastErr(e); }
+    }}>保存</Btn>}>
+      <table class="matrix">
+        <thead><tr><th />{scenes.map((sc) => <th title={sc.desc}>{sc.label}</th>)}</tr></thead>
+        <tbody>{tools.map((t) => (
+          <tr><td title={t.description}><code>{t.name}</code> <small class="muted">{t.label}</small></td>
+            {scenes.map((sc) => {
+              const locked = sc.id === "guest" && (t.guest_locked || (t.plugin && !t.guest_source));
+              return <td><input type="checkbox" disabled={locked} checked={!locked && on(sc.id, t)} onChange={(e) => toggle(sc.id, t, (e.target as HTMLInputElement).checked)} /></td>;
+            })}</tr>))}</tbody>
+      </table>
+    </Card>
   );
 }
 

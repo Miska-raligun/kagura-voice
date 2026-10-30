@@ -9,6 +9,8 @@ import type { AgentInfo } from "../registry.ts";
 import type { ToolsConfig } from "../../config.ts";
 import { ok, fail } from "./device.ts";
 import { proxiedFetch } from "../../util/proxy.ts";
+import dns from "node:dns/promises";
+import net from "node:net";
 
 export interface SearchHit { title: string; url: string; snippet: string }
 export type Fetcher = typeof fetch;
@@ -88,20 +90,65 @@ export function decodeBody(buf: Buffer, contentType: string): string {
   try { return new TextDecoder((cs || "utf-8").toLowerCase()).decode(buf); } catch { return buf.toString("utf8"); }
 }
 
-export async function fetchPage(url: string, f: Fetcher = proxiedFetch): Promise<{ url: string; title: string; text: string; type: string }> {
+/**
+ * 本机 / 局域网 / 链路本地 / 运营商内网（含 Tailscale 的 100.64/10）地址。web_fetch 一律不去：
+ * 不然一句「帮我打开 http://127.0.0.1:5000/api/admin/…」就能借服务端读管理接口（从本机发的请求算本机），
+ * 或者去翻路由器、NAS 的页面（LRN 2026-10-27 安全检查）。
+ */
+export function isPrivateIp(ip: string): boolean {
+  const v = net.isIP(ip);
+  if (v === 4) {
+    const [a, b] = ip.split(".").map(Number);
+    return a === 0 || a === 10 || a === 127 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31)
+      || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127) || a >= 224;
+  }
+  if (v === 6) {
+    const x = ip.toLowerCase();
+    const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(x);
+    if (mapped) return isPrivateIp(mapped[1]);
+    return x === "::" || x === "::1" || /^f[cd]/.test(x) || /^fe[89ab]/.test(x) || /^ff/.test(x);
+  }
+  return false;
+}
+
+type Lookup = (host: string) => Promise<string[]>;
+const sysLookup: Lookup = async (h) => (await dns.lookup(h, { all: true })).map((a) => a.address);
+
+/** 目标是不是公网地址：IP 直接判，域名先解析（解析出任何一个内网地址都不去） */
+export async function assertPublic(u: URL, lookup: Lookup = sysLookup) {
+  const host = u.hostname.replace(/^\[|\]$/g, "");
+  if (/^(localhost|.*\.localhost|.*\.local|.*\.internal|.*\.lan|.*\.home|.*\.arpa)$/i.test(host)) throw new Error(`不能访问本机或局域网地址：${host}`);
+  if (net.isIP(host)) { if (isPrivateIp(host)) throw new Error(`不能访问本机或局域网地址：${host}`); return; }
+  let addrs: string[] = [];
+  try { addrs = await lookup(host); } catch { return; }       // 解析不了：交给 fetch 报错（经代理时由代理解析）
+  const bad = addrs.find(isPrivateIp);
+  if (bad) throw new Error(`不能访问本机或局域网地址：${host}（解析到 ${bad}）`);
+}
+
+export async function fetchPage(url: string, f: Fetcher = proxiedFetch, opts: { lookup?: Lookup } = {}): Promise<{ url: string; title: string; text: string; type: string }> {
   let u: URL;
   try { u = new URL(url); } catch { throw new Error(`不是有效的网址：${url}`); }
-  if (u.protocol !== "http:" && u.protocol !== "https:") throw new Error("只支持 http / https 网址");
-  const r = await f(u, { headers: { "User-Agent": UA, "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.6" }, redirect: "follow", signal: AbortSignal.timeout(FETCH_TIMEOUT) });
+  let r: Response | null = null;
+  // 自己一跳一跳跟重定向：每一跳都要过一遍地址检查（公网页面 302 到 127.0.0.1 也算）
+  for (let hop = 0; ; hop++) {
+    if (u.protocol !== "http:" && u.protocol !== "https:") throw new Error("只支持 http / https 网址");
+    await assertPublic(u, opts.lookup);
+    r = await f(u, { headers: { "User-Agent": UA, "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.6" }, redirect: "manual", signal: AbortSignal.timeout(FETCH_TIMEOUT) });
+    const loc = r.status >= 300 && r.status < 400 ? r.headers.get("location") : null;
+    if (!loc) break;
+    if (hop >= 5) throw new Error("重定向太多次");
+    try { await r.body?.cancel(); } catch { /* 不要的响应体 */ }
+    u = new URL(loc, u);
+  }
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   const type = r.headers.get("content-type") ?? "";
   const buf = await readCapped(r);
   const raw = decodeBody(buf, type);
   if (/html|xml/i.test(type) || /^\s*</.test(raw)) {
     const { title, text } = htmlToText(raw);
-    return { url: r.url || u.href, title, text, type };
+    return { url: u.href, title, text, type };
   }
-  if (/json|text|javascript|csv/i.test(type) || !type) return { url: r.url || u.href, title: "", text: raw, type };
+  if (/json|text|javascript|csv/i.test(type) || !type) return { url: u.href, title: "", text: raw, type };
   throw new Error(`不是网页或文本（${type}）`);
 }
 

@@ -8,6 +8,7 @@ import { json, viaProxy, type Req, type Res, type Router } from "../http/router.
 import type { Ctx } from "../ctx.ts";
 import type { AgentSystem } from "../agent/system.ts";
 import { SOUL_FILES } from "../agent/registry.ts";
+import { POLICY, applyToolPolicy } from "../agent/toolpolicy.ts";
 import { BUDGETS, LOADOUT, SCENES, PROMPT_FILES, PRIVATE_FILES, applyBudgets, applyLoadout } from "../agent/soul.ts";
 import { Memories } from "../agent/tools/memory.ts";
 import { importOpenClaw, findOpenClawDirs, describeImport } from "../agent/import-openclaw.ts";
@@ -110,6 +111,7 @@ export function registerAdmin(r: Router, ctx: Ctx, sys: AgentSystem) {
   get("/api/admin/meta", () => json({
     budgets: BUDGETS, soul_files: SOUL_FILES,
     loadout: { scenes: SCENES, files: PROMPT_FILES, private: [...PRIVATE_FILES], current: LOADOUT },
+    tool_policy: POLICY,
     tools: runtime.allToolNames(registry.default()),
     fake: ctx.cfg.fakeProviders,
   }));
@@ -279,7 +281,7 @@ export function registerAdmin(r: Router, ctx: Ctx, sys: AgentSystem) {
   });
   post("/api/admin/tasks/<id>/run", (req) => json(tq().runNow(req.params.id)));
   post("/api/admin/tasks/<id>/cancel", (req) => json(tq().cancel(req.params.id)));
-  post("/api/admin/tasks/<id>/requeue", (req) => json(tq().requeue(req.params.id)));
+  post("/api/admin/tasks/<id>/requeue", (req) => { const d = req.json() ?? {}; return json(tq().requeue(req.params.id, { resume: typeof d.resume === "boolean" ? d.resume : undefined })); });
   del("/api/admin/tasks/<id>", (req) => { tq().remove(req.params.id); return json({ status: "ok" }); });
   put("/api/admin/tasks-settings", (req) => json(tq().setSettings(req.json() ?? {})));
 
@@ -442,6 +444,7 @@ export function registerAdmin(r: Router, ctx: Ctx, sys: AgentSystem) {
     }
     if ("prompt_budgets" in patch) { applyBudgets(next.prompt_budgets); hot.push("prompt_budgets"); }
     if ("prompt_files" in patch) { applyLoadout(next.prompt_files); hot.push("prompt_files"); }
+    if ("tool_policy" in patch) { applyToolPolicy(next.tool_policy); hot.push("tool_policy"); }
     // 运行时里只有并发数要重启；超时就地生效
     const restart = ["port", "mqtt_port", "stream_port", "disc_port", "baidu", "api_token", "stream_token", "brain", "openclaw"].filter((k) => k in patch);
     if (patch.runtime && Number(patch.runtime.max_concurrency) !== Number(old.runtime?.max_concurrency ?? 4)) restart.push("最大并发");

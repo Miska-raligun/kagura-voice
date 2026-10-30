@@ -562,12 +562,11 @@ def test_exec_tool_runs_command_in_workspace(a):
     assert "exit=0" in _transcript_text(a)
 
 
-def test_web_fetch_tool_reads_page(a):
-    """web_fetch 能取回网页 / 文本内容（这里读服务端自己的 /health，CI 里不依赖外网）"""
-    a.fake_llm(tool("web_fetch", _then="看完了", url=a.base + "/health"))
+def test_web_fetch_refuses_local_addresses(a):
+    """web_fetch 不去本机 / 局域网：不然一句话就能借服务端读本机的管理接口（CI 里不依赖外网，只验拒绝）"""
+    a.fake_llm(tool("web_fetch", _then="打不开", url=a.base + "/api/admin/config"))
     a.post("/chat", data=wav(), headers={"X-Device-Id": "ag_web"})
-    t = _transcript_text(a)
-    assert '\\"app\\":\\"kagura\\"' in t or '"app":"kagura"' in t or "kagura" in t
+    assert "本机或局域网" in _transcript_text(a)
 
 
 def test_tools_settings_hot_apply_and_test_exec(a):
@@ -768,7 +767,7 @@ def test_deferred_tasks(a):
 
     # 改开始时间、立即执行
     assert a.request("PATCH", f"/api/admin/tasks/{t['id']}", json={"run_at": time.time() + 7200, "detail": "改过：整理成周报"}).json()["detail"] == "改过：整理成周报"
-    a.fake_llm("周报整理好了，放在 weekly.md。")
+    a.fake_llm("周报整理好了，放在 weekly.md。\n状态：完成")
     assert a.post(f"/api/admin/tasks/{t['id']}/run", json={}).status_code == 200
     for _ in range(50):
         cur = next(x for x in a.get("/api/admin/tasks").json()["tasks"] if x["id"] == t["id"])

@@ -65,6 +65,8 @@ export interface Config {
   promptBudgets: Record<string, number>;
   /** 各场景加载哪些人设文件（见 agent/soul.ts 的 LOADOUT） */
   promptFiles: Record<string, string[]>;
+  /** 按场景的工具权限（见 agent/toolpolicy.ts） */
+  toolPolicy: unknown;
   /** 执行命令、联网工具的设置。管理界面改了就地更新这个对象（工具每次调用时读），不用重启 */
   tools: ToolsConfig;
 }
@@ -214,6 +216,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     tools: parseToolsConfig(file.tools),
     promptBudgets: file.prompt_budgets && typeof file.prompt_budgets === "object" ? file.prompt_budgets : {},
     promptFiles: file.prompt_files && typeof file.prompt_files === "object" ? file.prompt_files : {},
+    toolPolicy: file.tool_policy ?? null,
     schedulerTick: Number(env.KAGURA_SCHEDULER_TICK || file.scheduler_tick || 15),
   };
 }

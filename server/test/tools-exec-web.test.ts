@@ -4,7 +4,7 @@ import path from "node:path";
 import { makeRuntime, tmpdir } from "./helpers.ts";
 import { parseToolsConfig } from "../src/config.ts";
 import { execTools, shellFor, runShell, clipOutput } from "../src/agent/tools/exec.ts";
-import { htmlToText, parseBing, parseDuckDuckGo, search, fetchPage, decodeBody, webTools } from "../src/agent/tools/web.ts";
+import { htmlToText, parseBing, parseDuckDuckGo, search, fetchPage, decodeBody, webTools, isPrivateIp } from "../src/agent/tools/web.ts";
 import { Scheduler } from "../src/agent/scheduler.ts";
 import { cronTools } from "../src/agent/tools/cron.ts";
 
@@ -146,6 +146,25 @@ describe("联网", () => {
     const page = await fetchPage("https://x.com", f);
     expect(page.title).toBe("T");
     expect(page.text).toBe("正文");
+  });
+
+  it("读网页不去本机 / 局域网：IP、域名解析结果、重定向的每一跳都查", async () => {
+    for (const ip of ["127.0.0.1", "10.1.2.3", "172.20.0.1", "192.168.1.1", "169.254.169.254", "100.100.1.1", "0.0.0.0", "::1", "fd00::1", "fe80::1", "::ffff:127.0.0.1"]) expect(isPrivateIp(ip)).toBe(true);
+    for (const ip of ["8.8.8.8", "172.32.0.1", "100.128.0.1", "2001:4860::8888"]) expect(isPrivateIp(ip)).toBe(false);
+    const f: any = async (u: URL) => new Response(`<html><body><p>${u.href}</p></body></html>`, { headers: { "content-type": "text/html" } });
+    const pub = { lookup: async () => ["93.184.216.34"] };
+    await expect(fetchPage("http://127.0.0.1:5000/api/admin/config", f, pub)).rejects.toThrow(/本机或局域网/);
+    await expect(fetchPage("http://localhost:5000/", f, pub)).rejects.toThrow(/本机或局域网/);
+    await expect(fetchPage("http://[::1]/", f, pub)).rejects.toThrow(/本机或局域网/);
+    await expect(fetchPage("http://nas.example.com/", f, { lookup: async () => ["192.168.1.10"] })).rejects.toThrow(/192\.168\.1\.10/);
+    // 公网页面 302 到本机：跟到那一跳时拦下
+    const redir: any = async (u: URL) => u.hostname === "evil.example.com"
+      ? new Response("", { status: 302, headers: { location: "http://127.0.0.1:5000/api/admin/agents" } })
+      : f(u);
+    await expect(fetchPage("https://evil.example.com/", redir, pub)).rejects.toThrow(/本机或局域网/);
+    // 正常重定向照跟
+    const ok: any = async (u: URL) => u.pathname === "/a" ? new Response("", { status: 301, headers: { location: "/b" } }) : f(u);
+    expect((await fetchPage("https://x.example.com/a", ok, pub)).text).toContain("/b");
   });
 
   it("工具开关", () => {

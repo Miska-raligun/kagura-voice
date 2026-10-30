@@ -319,6 +319,14 @@ CoreS3 (MicroPython) ──HTTP──▶ server/（TypeScript 单文件可执行
   agent 每轮走 `ModelRegistry.chatStream`（Agent 的 `streamFn`）按 `thinkingParams` 加字段：MiniMax / 智谱只有开关，DeepSeek 加 `reasoning_effort`，
   通义加 `thinking_budget`，认不出的服务商「关」就不发（别乱发不认识的字段）。**思考在这几家都算进 max_tokens，改不了**——所以 `max_tokens` 的含义是
   「回复本身的上限」，请求时另加 `THINK_RESERVE`（默认 +4k / 低 +2k / 中 +6k / 高 +16k / 关 0），思考就挤不掉回复。
+- **工具权限按场景（`agent/toolpolicy.ts`，`Runtime.toolsFor` 里 `toolAllowed(sceneOf(scope), …)`，LRN 2026-10-30 安全检查）**：
+  以前是「默认都给、危险的各自 `if (!scope.trusted)` 拦」，漏拦一个就是一个洞——查出群聊陌生人能 `take_photo`（照片发回群里）、`get_presence`、
+  `sessions_history` 读主人聊天、`photo_schedule_add` / `cron_add`、`web_fetch` 读本机管理接口。现在 **guest 默认什么都不给，只放 `POLICY.guest` 白名单**
+  （默认 web_search / web_fetch / skill_read / set_volume），`guestLocked` 里的（家里设备、隐私、执行代码、替主人花额度）配置也加不上；
+  扩展 / MCP 的工具提供者在不可信时本来就只给 `allowUntrusted` 的，这里照放、可单独关。其它场景默认全给，`deny` 按场景关。
+  `config.json` 的 `tool_policy`，管理界面 Agents → 工具与技能 →「按场景」。各工具里原来的可信判断保留（双保险）。**新加内置工具不用做什么就不会给陌生人**；
+  要给就进白名单，碰隐私的加进 `guestLocked`。扩展必须用 `addTools(p, { plugin: true })` 注册，否则会被当内置工具、陌生人那边被白名单挡掉。
+  **`web_fetch` 不去本机 / 局域网**（`isPrivateIp` / `assertPublic`）：域名先解析、重定向自己一跳跳跟且每跳都查——从本机发的请求算 `isLocal`，不拦就能借它读管理接口。
 - **人设文件按场景加载（`soul.ts` 的 `LOADOUT` / `sceneOf`，LRN 2026-10-27，症状「群聊陌生人的上下文里有主人的 USER / MEMORY / 笔记」「干活也背着整篇人设」）**：
   场景 = owner（主人对话）/ guest（不可信：群聊、陌生人，**不管 purpose 一律算它**）/ heartbeat / cron / task / sub / a2a，每个场景一组文件（含 HEARTBEAT.md、daily=今昨笔记），
   `config.json` 的 `prompt_files` 可改（管理界面 Agents → 人设文件 →「加载场景」）。**guest 永远拿不到 `PRIVATE_FILES`（USER / MEMORY / daily）**，配置也加不上；
@@ -340,6 +348,10 @@ CoreS3 (MicroPython) ──HTTP──▶ server/（TypeScript 单文件可执行
   才删标记——别提前到 `setup()` 结束，那时还不知道新代码能不能跟服务端说上话；
   ④ `ota_state.json` 只记自己装过的文件，删除只删这些（手动传的文件不碰）；换了图要清 `ui._role_hit`/`_img_missing`；
   ⑤ `rev` 算法两边必须一致（`DeviceFiles.rev` ↔ `ota._rev`），`import_sim` 里专门对过。
+- **待办必须写状态行才算完成**（`tasks.ts` 的 `verdictOf` / `MAX_ROUNDS`，LRN 2026-10-30，症状「报了已完成实际没做完」）：模型说一句「接下来我改 X」就结束本轮、
+  输出到上限被截断（`RunResult.stopReason === "length"`）、工具报错了却说搞定了，以前一律记 done。现在最后必须单独一行「状态：完成 / 没做完：… / 需要主人：…」，
+  没写或被截断就在同一会话里用 `CONTINUE_PROMPT` 催，最多 `MAX_ROUNDS` 轮、总时长不超过单件上限；只有「完成」是 done，其余 `partial`（汇报照实说「没做完：…」），
+  `requeue` 对 partial 默认 `resume`（接着原会话，提示词「[继续待办…]」），否则 `host.reset` 清会话从头来。状态行不进汇报正文。
 - **待办 / 延迟执行（`agent/tasks.ts` `TaskQueue`、工具 `tools/tasks.ts`、管理界面「待办」，LRN 2026-10-27）**：白天遇到改代码这类大而不急的活，
   agent 用 `task_add` 记下（只在可信会话里有；执行待办的那一轮、子任务里没有），夜间静默时段（默认 01:00-06:00）一件件做，订阅制额度白天留给对话。
   存 system.sqlite 的 `tasks` / `task_settings`。别改坏的点：① **一次只做一件**（`running`），做完 `setImmediate` 接着看下一件——按真实时钟判断时段，测试里要自己逐个 `tick(t)`；

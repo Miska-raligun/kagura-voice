@@ -14,6 +14,7 @@ import type { ModelRegistry } from "./models.ts";
 import { AgentStore } from "./store.ts";
 import { toSpoken } from "../util/text.ts";
 import { BUDGETS, buildSystemPrompt, sceneOf, turnContext, type SessionKind } from "./soul.ts";
+import { toolAllowed, guestLocked } from "./toolpolicy.ts";
 import { runScope, withScope, type RunScope } from "./scope.ts";
 
 /** IM 渠道：消息可能来自陌生人，默认不可信（主人私聊由渠道层显式标 trusted） */
@@ -73,6 +74,8 @@ export interface RunResult {
   meta: RunScope["meta"];
   toolCalls: string[];
   usage: { input: number; output: number; cost: number };
+  /** 最后一条回复为什么停：stop / toolUse / length（输出到了上限被截断）… */
+  stopReason?: string;
 }
 
 export type ToolProvider = (scope: RunScope, agent: AgentInfo) => AgentTool<any>[];
@@ -448,7 +451,7 @@ export class Runtime {
     const textOf = (a: AssistantMessage) => a.content.filter((c: any) => c.type === "text").map((c: any) => c.text).join("").trim();
     const text = textOf(last) || assistants.map(textOf).filter(Boolean).join("\n");
     if (persist && (!req.keepIf || req.keepIf(text))) store.append(req.sessionKey, fresh.map((m) => stripImages(m, agent.workspace)));
-    return { text, meta: scope.meta, toolCalls, usage };
+    return { text, meta: scope.meta, toolCalls, usage, stopReason: String(last.stopReason ?? "") };
     } finally { if (!nestedRun) this.running.delete(lockKey); req.signal?.removeEventListener("abort", onOuter); }
   }
 
@@ -496,23 +499,31 @@ export class Runtime {
   }
 
   /** 某个 agent 在普通会话里能看到的全部内置工具（管理界面白名单用，不过滤白名单本身） */
-  allToolNames(agent: AgentInfo): { name: string; label: string; description: string }[] {
+  allToolNames(agent: AgentInfo): { name: string; label: string; description: string; plugin: boolean; guest_source: boolean; guest_locked: boolean }[] {
     const scope: RunScope = { agentId: agent.id, sessionKey: `${agent.id}:main`, kind: "main", channel: "webchat", purpose: "list", hop: 0, chain: [], meta: {}, trusted: true };
     const seen = new Set<string>();
+    const plugin = new Set(this.pluginProviders.flatMap((p) => p(scope, agent)).map((t) => t.name));
+    // 扩展 / MCP 里哪些是标了「陌生人也能用」的：拿不可信的上下文问一遍提供者
+    const guestSource = new Set(this.pluginProviders.flatMap((p) => p({ ...scope, trusted: false }, agent)).map((t) => t.name));
     return this.allProviders().flatMap((p) => p(scope, agent)).filter((t) => (seen.has(t.name) ? false : (seen.add(t.name), true)))
-      .map((t) => ({ name: t.name, label: t.label, description: t.description }));
+      .map((t) => ({ name: t.name, label: t.label, description: t.description, plugin: plugin.has(t.name), guest_source: guestSource.has(t.name), guest_locked: !plugin.has(t.name) && guestLocked(t.name) }));
   }
 
   private toolsFor(scope: RunScope, agent: AgentInfo, req: RunRequest): AgentTool<any>[] {
     // 同名工具只留第一个：内置的先注册，扩展 / MCP 起了重名也盖不掉内置工具
     const seen = new Set<string>();
-    const all = this.allProviders().flatMap((p) => p(scope, agent)).filter((t) => (seen.has(t.name) ? false : (seen.add(t.name), true)));
+    const tag = (plugin: boolean) => (p: ToolProvider) => p(scope, agent).map((t) => ({ t, plugin }));
+    const all = [...this.providers.flatMap(tag(false)), ...this.pluginProviders.flatMap(tag(true))]
+      .filter(({ t }) => (seen.has(t.name) ? false : (seen.add(t.name), true)));
     const allow = agent.tools.includes("*") ? null : new Set(agent.tools);
+    // 按场景的工具权限（toolpolicy.ts）：群聊 / 陌生人只给白名单
+    const scene = sceneOf(scope);
     // 这条消息已经带着照片（设备取景拍照 / 「看看这是什么」拍完发来的 / 手机发的图）：这一轮不给 take_photo。
     // 不然模型看到「这是什么」就又去调拍照，设备对话里拍照工具只会说「下一条再拍」然后结束这一轮，
     // 可设备刚拍完、不会再拍——对话就断在「我看看」上（2026-10-25 真机）
     const hasImage = !!req.images?.length;
-    return all.filter((t) => (!allow || allow.has(t.name)) && (!req.toolAllow || req.toolAllow(t.name)) && !(hasImage && t.name === "take_photo"));
+    return all.filter(({ t, plugin }) => toolAllowed(scene, t.name, plugin)).map(({ t }) => t)
+      .filter((t) => (!allow || allow.has(t.name)) && (!req.toolAllow || req.toolAllow(t.name)) && !(hasImage && t.name === "take_photo"));
   }
 
   // ── 压缩 ──
