@@ -573,7 +573,8 @@ export class Runtime {
       if (signal.aborted) throw new Error(info.cancelled ? "已在管理界面终止" : "已取消");
     }
     info.stage = "生成回复";
-    const history = store.history(req.sessionKey).map((h) => h.msg);
+    // kctx 是存在助手消息上的「这一轮上下文构成」统计，只给管理界面看，别发给模型
+    const history = store.history(req.sessionKey).map((h) => { const { kctx: _k, ...m } = h.msg as any; return m as Message; });
     const session = store.getSession(req.sessionKey);
     const systemPrompt = promptOf(session?.summary);
     const histSize = estimateTokens(session?.summary ?? "") + pruneToolResults(history).reduce((n, m) => n + msgTokens(m), 0);
@@ -702,7 +703,13 @@ export class Runtime {
     }
     const textOf = (a: AssistantMessage) => a.content.filter((c: any) => c.type === "text").map((c: any) => c.text).join("").trim();
     const text = textOf(last) || assistants.map(textOf).filter(Boolean).join("\n");
-    if (persist && (!req.keepIf || req.keepIf(text))) store.append(req.sessionKey, fresh.map((m) => stripImages(stripRecall(m), agent.workspace)));
+    if (persist && (!req.keepIf || req.keepIf(text))) {
+      const out = fresh.map((m) => stripImages(stripRecall(m), agent.workspace));
+      // 这一轮的上下文构成（估算）记在最后一条助手消息上：会话页每轮下面显示 token 明细用
+      const li = out.map((m) => m.role).lastIndexOf("assistant");
+      if (li >= 0) out[li] = { ...out[li], kctx: { sys: fixedSys, tools: fixedTools, hist: histSize, win: ctxWin, calls: assistants.length } } as any;
+      store.append(req.sessionKey, out);
+    }
     return { text, meta: scope.meta, toolCalls, usage, stopReason: String(last.stopReason ?? "") };
     } catch (e: any) { liveError = OVERFLOW_RE.test(String(e?.message ?? "")) ? "" : String(e?.message ?? e); throw e; }
     finally {

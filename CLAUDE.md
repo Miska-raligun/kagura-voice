@@ -306,6 +306,8 @@ CoreS3 (MicroPython) ──HTTP──▶ server/（TypeScript 单文件可执行
   **会话页实时过程（`Runtime.watchLive`，`GET /api/admin/agents/<id>/sessions/<key>/live`，LRN 2026-10-30，症状「网页上只有发消息那个窗口看得到过程，切走再回来、飞书 / 设备触发的只剩『回复中』」）**：
   每轮（非嵌套）在 `execute` 里留一份 `LiveRun`（已完成的消息 + 正在生成的思考 / 正文 + 正在执行的工具），会话页长连接订阅：先快照（start / idle），再 delta / message / tool，结束 end（带错误原因，超长重试那次不报）。
   推给页面的消息过 `liveMessage`（去自动回忆、图片只留占位、工具结果截 8000 字）。页面过程一律从订阅来，发消息的 POST 只等结果；end 后先重新拉历史再收起实时块。
+  **每轮 token 明细**：每条助手消息本来就带服务商报的 `usage`（输入未缓存 / 缓存读写 / 输出 / 思考 / 费用）；`execute` 落盘时在这一轮最后一条助手消息上加 `kctx`
+  （系统提示 / 工具定义 / 历史的估算 token、窗口、调用次数），会话页 `TurnUsage` 汇总显示。**读历史给模型前要去掉 `kctx`**（`execute` 里 `history` 那行）。
   ④ **跨会话互相等待**（2026-10-24 真机日志：worker 的 heartbeat 拿着 `worker:main` 去 `sessions_send` 等 main，同时 main 那边一轮拿着 `main:main` 等 worker；
   手机设备 `device_in_main` 也走 `worker:main`，于是手机消息永远排不上）：`scope.chain` 只看得见同一条调用链，两条各自起头的链互等它看不出来。
   `Runtime.run` 记 `waitsFor`（拿着锁的会话 → 它在等的会话），发起嵌套等待前顺着走一圈，成环就立刻失败（日志 `🔁 互相等待`）；

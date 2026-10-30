@@ -421,16 +421,6 @@ function Misc({ cfg, dataDir, save }: { cfg: any; dataDir: string; save: (p: any
     max_tool_calls: cfg.runtime?.max_tool_calls ?? 40, max_turn_tokens: cfg.runtime?.max_turn_tokens ?? 2000000 });
   return (
     <>
-      <Card title="数据目录"><code>{dataDir}</code></Card>
-      <Card title="端口">
-        <p class="muted">重启后生效。WSL 下需同步修改 Windows 端口转发与防火墙。</p>
-        <div class="form">
-          {(["port", "mqtt_port", "disc_port", "stream_port"] as const).map((k) => (
-            <Field label={{ port: "HTTP", mqtt_port: "MQTT", disc_port: "UDP 发现", stream_port: "直播 TCP" }[k]}>
-              <Input type="number" value={p[k]} onInput={(v) => setP({ ...p, [k]: Number(v) })} /></Field>))}
-        </div>
-        <Btn kind="primary" onClick={() => save(p)}>保存</Btn>
-      </Card>
       <Card title="运行时">
         <div class="form">
           <Field label="最大并发" hint="重启后生效"><Input type="number" value={rt.max_concurrency} onInput={(v) => setRt({ ...rt, max_concurrency: Number(v) })} /></Field>
@@ -440,6 +430,16 @@ function Misc({ cfg, dataDir, save }: { cfg: any; dataDir: string; save: (p: any
           <Field label="单轮 token 上限" hint="默认 200 万，0 = 不限"><Input type="number" value={rt.max_turn_tokens} onInput={(v) => setRt({ ...rt, max_turn_tokens: Number(v) })} /></Field>
         </div>
         <Btn kind="primary" onClick={() => save({ runtime: rt })}>保存</Btn>
+      </Card>
+      <Card title="数据目录"><code>{dataDir}</code></Card>
+      <Card title="端口">
+        <p class="muted">重启后生效。WSL 下需同步修改 Windows 端口转发与防火墙。</p>
+        <div class="form">
+          {(["port", "mqtt_port", "disc_port", "stream_port"] as const).map((k) => (
+            <Field label={{ port: "HTTP", mqtt_port: "MQTT", disc_port: "UDP 发现", stream_port: "直播 TCP" }[k]}>
+              <Input type="number" value={p[k]} onInput={(v) => setP({ ...p, [k]: Number(v) })} /></Field>))}
+        </div>
+        <Btn kind="primary" onClick={() => save(p)}>保存</Btn>
       </Card>
       <Card title="重启">
         <p class="muted">IM 中主人也可发送 <code>/restart</code>。</p>

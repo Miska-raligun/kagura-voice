@@ -2,7 +2,7 @@
 // 回复边生成边显示（Markdown 渲染）；可以发图片（选择 / 粘贴 / 拖进来）和文件；压缩、导出、清空上下文、删除。
 // 路由：#/sessions/<agent>|<会话 key>
 import { useEffect, useRef, useState } from "preact/hooks";
-import { api, download, enc, fmtTime, go } from "../api.ts";
+import { api, download, enc, fmtTime, go, money } from "../api.ts";
 import { Btn, Card, Empty, Err, Split, TextArea, confirmDo, toast, toastErr, useLoad } from "../ui.tsx";
 import { AgentPicker, Message, useAgentId } from "./common.tsx";
 import { renderMarkdown } from "../md.ts";
@@ -161,7 +161,10 @@ function Conversation({ agent, skey, onChange }: { agent: string; skey: string; 
       <div class="msgs" ref={box}>
         {old > 0 && <a class="muted small" onClick={() => setShowOld(true)}>还有 {old} 条已清空 / 已压缩的记录</a>}
         {!msgs.length && !run && !pending && <Empty>支持粘贴或拖入图片与文件</Empty>}
-        {msgs.map((m: any) => <Message m={m} agent={agent} />)}
+        {msgs.map((m: any, i: number) => <>
+          <Message m={m} agent={agent} />
+          {m.msg?.role === "assistant" && turnEnds(msgs, i) && <TurnUsage msgs={msgs} end={i} />}
+        </>)}
         {pending && !run?.messages.length && <>
           <Message m={{ msg: pending }} agent={agent} />
           <div class="msg a"><div class="who">助手 <small class="muted">{run ? "整理上下文…" : "排队中…"}</small></div></div>
@@ -179,6 +182,51 @@ function Conversation({ agent, skey, onChange }: { agent: string; skey: string; 
       </div>
       <Composer busy={sending || !!run} onSend={send} />
     </Card>
+  );
+}
+
+/** 这条助手消息之后到下一条用户消息之间没有别的助手消息 = 这一轮的最后一条 */
+function turnEnds(msgs: any[], i: number) {
+  for (let j = i + 1; j < msgs.length; j++) {
+    const r = msgs[j].msg?.role;
+    if (r === "user") return true;
+    if (r === "assistant") return false;
+  }
+  return true;
+}
+
+const k = (n: number) => (n >= 10_000 ? `${(n / 1000).toFixed(n >= 100_000 ? 0 : 1)}k` : String(n));
+
+/**
+ * 一轮的 token 明细：这一轮每次调模型的用量加总（服务商报的：输入未缓存 / 缓存读 / 缓存写 / 输出，含思考），
+ * 以及这一轮开始时上下文的构成（系统提示 / 工具定义 / 历史，按字数估算）。点开看每次调用。
+ */
+function TurnUsage({ msgs, end }: { msgs: any[]; end: number }) {
+  let start = end;
+  while (start > 0 && msgs[start - 1].msg?.role !== "user") start--;
+  const calls = msgs.slice(start, end + 1).filter((m) => m.msg?.role === "assistant" && m.msg.usage);
+  if (!calls.length) return null;
+  const sum = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0, cost: 0 };
+  for (const c of calls) {
+    const u = c.msg.usage;
+    sum.input += u.input ?? 0; sum.output += u.output ?? 0; sum.cacheRead += u.cacheRead ?? 0; sum.cacheWrite += u.cacheWrite ?? 0;
+    sum.reasoning += u.reasoning ?? 0; sum.cost += u.cost?.total ?? 0;
+  }
+  const ctx = msgs[end].msg.kctx;
+  const total = sum.input + sum.output + sum.cacheRead + sum.cacheWrite;
+  return (
+    <details class="usage">
+      <summary>
+        🔢 {k(total)} token · 输入 {k(sum.input)} · 缓存读 {k(sum.cacheRead)}{sum.cacheWrite ? ` · 缓存写 ${k(sum.cacheWrite)}` : ""} · 输出 {k(sum.output)}
+        {sum.reasoning ? `（思考 ${k(sum.reasoning)}）` : ""}{calls.length > 1 ? ` · ${calls.length} 次调用` : ""}{sum.cost ? ` · ${money(sum.cost)}` : ""}
+      </summary>
+      {ctx && <div>上下文 ≈ 系统提示 {k(ctx.sys)} + 工具定义 {k(ctx.tools)} + 历史 {k(ctx.hist)} = {k(ctx.sys + ctx.tools + ctx.hist)}（窗口 {k(ctx.win)}）</div>}
+      {calls.length > 1 && <table class="small">
+        <thead><tr><th>#</th><th>输入</th><th>缓存读</th><th>缓存写</th><th>输出</th><th>费用</th></tr></thead>
+        <tbody>{calls.map((c, i) => { const u = c.msg.usage; return (
+          <tr><td>{i + 1}</td><td>{k(u.input ?? 0)}</td><td>{k(u.cacheRead ?? 0)}</td><td>{k(u.cacheWrite ?? 0)}</td><td>{k(u.output ?? 0)}{u.reasoning ? `（思考 ${k(u.reasoning)}）` : ""}</td><td>{money(u.cost?.total)}</td></tr>); })}</tbody>
+      </table>}
+    </details>
   );
 }
 

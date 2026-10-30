@@ -41,3 +41,18 @@ describe("实时过程", () => {
     expect(seen.at(-1)).toMatchObject({ type: "end", error: expect.stringContaining("api key") });
   });
 });
+
+describe("每轮 token 明细", () => {
+  it("最后一条助手消息记上这一轮的上下文构成；再发给模型时去掉", async () => {
+    const { rt, fake } = makeRuntime();
+    fake.queue.push("好", "嗯");
+    await rt.run({ agentId: "main", sessionKey: "main:main", kind: "main", channel: "webchat", text: "你好" });
+    const last = rt.store("main").history("main:main").map((h) => h.msg as any).filter((m) => m.role === "assistant").at(-1);
+    expect(last.kctx).toMatchObject({ calls: 1 });
+    expect(last.kctx.sys).toBeGreaterThan(0);
+    expect(last.kctx.win).toBeGreaterThan(0);
+    expect(last.usage).toBeTruthy();
+    await rt.run({ agentId: "main", sessionKey: "main:main", kind: "main", channel: "webchat", text: "再来" });
+    expect(rt.store("main").history("main:main").length).toBe(4);
+  });
+});
