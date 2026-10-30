@@ -26,13 +26,11 @@ export type Announce = (scope: RunScope, text: string) => Promise<void>;
 const SEND_TIMEOUT = 90;
 const SPAWN_TIMEOUT = 300;
 /**
- * agent 间传话的会话（LRN 2026-10-30）：接收方不进自己的 main，而是每个发起方一个 `<接收方>:a2a:<发起方>`。
- * 进 main 的三个毛病：主人和她的聊天里混进别的 agent 的话；每次都背着整段主对话（贵）；占着 main 的会话锁，
- * 主人这时候找她要排队、还容易两边互等。和同一个 agent 的往来留在这个会话里（「刚才说的那个」接得上），
- * 只留最近 A2A_KEEP 条（在一轮开头切）；主人那边说过什么靠近况带上。
+ * agent 间传话的会话（LRN 2026-10-30）：每次传话接收方都起一个全新会话 `<接收方>:a2a:<发起方>:<随机>`，不进自己的 main。
+ * 进 main 的毛病：主人和她的聊天里混进别的 agent 的话；每次都背着整段主对话（贵）；占着 main 的会话锁，主人这时候找她要排队、两边容易互等。
+ * 主人那边说过什么靠近况带上；要接着上次的话题，发起方在消息里把前情说清楚。
  */
-export const a2aKey = (to: string, from: string) => `${to}:a2a:${from}`;
-export const A2A_KEEP = 20;
+export const a2aKey = (to: string, from: string) => `${to}:a2a:${from}:${crypto.randomUUID().slice(0, 8)}`;
 
 export class A2A {
   db: DatabaseSync;
@@ -138,7 +136,7 @@ export class A2A {
       tools.push(
         {
           name: "sessions_send", label: "给其他 agent 发消息",
-          description: "给另一个 agent 发消息（它在专门跟你往来的会话里收，不打扰它和主人的对话；你们之前的往来它记得）。wait=true（默认）时等它回复并把回复交给你。",
+          description: "给另一个 agent 发消息（它每次都在一个新对话里收，不打扰它和主人的对话，也不记得你们之前的传话——需要前情就写进 message）。wait=true（默认）时等它回复并把回复交给你。",
           parameters: Type.Object({ agent: Type.String(), message: Type.String(), wait: Type.Optional(Type.Boolean()) }),
           execute: async (_id, p: any) => {
             const err = this.check(scope, p.agent);
@@ -149,7 +147,6 @@ export class A2A {
             const text = `[来自 ${agent.name}（agent ${agent.id}）的消息] ${p.message}`;
             const t0 = Date.now();
             const link = { trace: scope.trace, a2aCall: logId };
-            this.rt.store(p.agent).keepLast(toKey, A2A_KEEP);
             const go = () => this.rt.run({ agentId: p.agent, sessionKey: toKey, kind: "isolated", channel: "a2a", text, purpose: "a2a", timeoutSecs: SEND_TIMEOUT, ...link });
             if (p.wait === false) {
               const lineage = { hop: scope.hop + 1, chain: scope.chain, trusted: scope.trusted };
