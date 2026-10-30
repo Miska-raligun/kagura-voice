@@ -170,9 +170,17 @@ function Conversation({ agent, skey, onChange }: { agent: string; skey: string; 
     if (run?.trace && usesA2A(run) && dockClosed !== run.trace) setDock({ trace: run.trace, live: true });
     else if (!run) setDock((d) => (d && d.live ? { ...d, live: false } : d));
   }, [run]);
-  useEffect(() => { box.current?.scrollTo(0, box.current.scrollHeight); }, [s, run, pending]);
+  // 只在本来就停在最底下时跟着滚：往上翻看之前的消息 / 详情图标时，生成中每来一个字都把人拽回底部，图标从鼠标下溜走、详情一直闪
+  const stick = useRef(true);
+  useEffect(() => { stick.current = true; }, [skey]);
+  useEffect(() => {
+    const el = box.current;
+    // 鼠标正停在某个详情图标上 / 详情固定着：先别滚
+    if (el && stick.current && !el.querySelector(".pop:hover, .pop.open")) el.scrollTo(0, el.scrollHeight);
+  }, [s, run, pending]);
 
   const send = async (text: string, images: Img[], files: Att[]) => {
+    stick.current = true;
     setPending({ role: "user", content: [...images.map((i) => ({ type: "image", data: i.data, mimeType: i.mimeType })), ...(text ? [{ type: "text", text }] : []),
       ...files.map((f) => ({ type: "text", text: `[附件 ${f.name}（${(f.size / 1024).toFixed(1)}KB）]` }))] });
     setSending(true);
@@ -204,7 +212,7 @@ function Conversation({ agent, skey, onChange }: { agent: string; skey: string; 
         try { await api(base, { method: "DELETE" }); toast("已删除"); onChange(); go("sessions", agent); } catch (e) { toastErr(e); }
       })}>删除</Btn></>}>
       {s.summary && <details class="summary"><summary><b>较早对话的摘要</b></summary><div>{s.summary}</div></details>}
-      <div class="msgs" ref={box}>
+      <div class="msgs" ref={box} onScroll={(e) => { const el = e.currentTarget as HTMLDivElement; stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 60; }}>
         {old > 0 && <a class="muted small" onClick={() => setShowOld(true)}>还有 {old} 条已清空 / 已压缩的记录</a>}
         {!msgs.length && !run && !pending && <Empty>支持粘贴或拖入图片与文件</Empty>}
         {evs.lead.length > 0 && <div class="turnmeta"><CompactPop events={evs.lead} /></div>}
