@@ -341,3 +341,6 @@ span.who { display:inline-flex; align-items:center; }
 .a2adock .docksteps { height:100%; overflow:auto; }
 .chat details.summary > div { max-height:24vh; overflow:auto; }
 .card.chat > header { min-height:30px; }
+.msgs .queued { opacity:.6; }
+.msgs .queued .qbar { text-align:right; margin:-6px 4px 4px; }
+.msgs .queued { display:flex; flex-direction:column; align-items:flex-end; }

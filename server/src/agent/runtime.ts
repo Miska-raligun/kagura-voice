@@ -637,7 +637,11 @@ export class Runtime {
         : toolsRunning > 0 ? setTimeout(() => { toolStuck = info.tool; stop("idle"); }, toolMs)
         : setTimeout(() => stop("idle"), idleMs);
     };
+    // 这一轮已经说出口的字（被打断时记进历史用；中止时那条没说完的消息内容会被清空，只能自己攒）
+    let spoken = "";
     pi.subscribe((e: any) => {
+      if (e.type === "message_update" && e.assistantMessageEvent?.type === "text_delta") spoken += e.assistantMessageEvent.delta;
+      else if (e.type === "message_end" && e.message?.role === "assistant" && spoken && !spoken.endsWith("\n")) spoken += "\n";
       if (liveRun) {
         try {
           if (e.type === "message_update") {
@@ -696,7 +700,24 @@ export class Runtime {
     const last = assistants.at(-1);
     const why = timedOut as "" | "idle" | "max" | "cancel" | "budget";      // 在回调里赋值，TS 看不出来
     if (why === "budget") throw new Error(`agent 停下了：${guard.reason}，叫她停手汇报也没停（多半在兜圈子）`);
-    if (why === "cancel") throw new Error(info.cancelled ? "已在管理界面终止" : "已取消");
+    if (why === "cancel") {
+      // 主人手动终止（管理界面「停止」/「停止并发送」）：问题和已经说出口的那部分照样记进历史，注明被打断——
+      // 不然紧接着发的新消息她不知道刚才在聊什么。工具调用和结果不留（没配对的 toolCall 下一轮服务商会拒）
+      if (info.cancelled && persist) {
+        try {
+          const user = fresh.find((m) => m.role === "user");
+          const said = spoken.trim();
+          if (user) {
+            const zero = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
+            store.append(req.sessionKey, [
+              stripImages(stripRecall(user), agent.workspace),
+              { role: "assistant", content: [{ type: "text", text: `${said ? said + "\n" : ""}（这一轮被主人打断了，没说完）` }], api: "openai-completions", provider: "kagura", model: "interrupted", usage: zero, stopReason: "stop", timestamp: Date.now() } as any,
+            ]);
+          }
+        } catch (e: any) { console.log(`[agent] ⚠️  记下被打断的那一轮失败: ${e.message}`); }
+      }
+      throw new Error(info.cancelled ? "已在管理界面终止" : "已取消");
+    }
     if (why === "idle") throw new Error(toolStuck ? `agent 超时（工具 ${toolStuck} 执行超过 ${Math.round(toolMs / 60000)} 分钟没有结束）` : `agent 超时（${idleMs / 1000} 秒没有任何进展）`);
     if (why === "max") throw new Error(`agent 超时（这一轮超过总时长上限 ${Math.round(maxMs / 60000)} 分钟）`);
     if (!last) throw new Error(pi.state.errorMessage || "模型没有返回内容");

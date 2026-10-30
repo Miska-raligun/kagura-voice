@@ -99,3 +99,23 @@ describe("会话来源", () => {
     ]);
   });
 });
+
+describe("打断", () => {
+  it("手动终止的一轮：问题和已经说出口的部分记进历史、注明被打断；下一轮照常", async () => {
+    const { rt, fake } = makeRuntime();
+    fake.queue.push({ text: "我想想啊，这个问题要从很久以前说起，那时候" + "很长很长的故事，".repeat(40), tps: 5 }, "好的，换个话题");
+    const p = rt.run({ agentId: "main", sessionKey: "main:main", kind: "main", channel: "webchat", text: "讲讲历史" });
+    // 等她真的说出几个字再打断
+    let said = "";
+    rt.watchLive("main", "main:main", (e: any) => { if (e.type === "delta" && e.kind === "text") said += e.delta; });
+    for (let i = 0; i < 300 && said.length < 4; i++) await new Promise((r) => setTimeout(r, 20));
+    expect(rt.cancelRun("main|main:main")).toBe(true);
+    await expect(p).rejects.toThrow(/终止/);
+    const h = rt.store("main").history("main:main").map((x) => x.msg as any);
+    expect(h.map((m) => m.role)).toEqual(["user", "assistant"]);
+    expect(h[1].content[0].text).toMatch(/^我想想啊.*\n（这一轮被主人打断了，没说完）$/s);
+    const r = await rt.run({ agentId: "main", sessionKey: "main:main", kind: "main", channel: "webchat", text: "算了，换个话题" });
+    expect(r.text).toBe("好的，换个话题");
+    expect(rt.store("main").history("main:main").length).toBe(4);
+  });
+});

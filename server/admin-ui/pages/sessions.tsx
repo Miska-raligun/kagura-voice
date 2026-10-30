@@ -122,7 +122,7 @@ function useLive(base: string, onEnd: () => Promise<void>): LiveRun | null {
       const was = cur;
       cur = null;
       if (raf) { cancelAnimationFrame(raf); raf = 0; }
-      if (err) toast(err, "err");
+      if (err && !/终止/.test(err)) toast(err, "err");      // 主人自己点的「停止」不用报错
       endRef.current().finally(() => { if (!cur || cur === was) flush(); });
     };
     const handle = (e: any) => {
@@ -197,6 +197,28 @@ function Conversation({ agent, skey, onChange }: { agent: string; skey: string; 
     reload(); onChange();
   };
 
+  // 排队：她还在回复（网页发的、飞书 / 设备来的都算）时发的消息先排在页面上，这一轮结束后按顺序发出；排着的能撤回。
+  // 排在页面上而不是直接丢给服务端排队，是为了能撤回、能看见
+  const [queue, setQueue] = useState<{ id: number; text: string; images: Img[]; files: Att[] }[]>([]);
+  const busyNow = sending || !!run;
+  useEffect(() => { setQueue([]); }, [skey]);
+  useEffect(() => {
+    if (busyNow || !queue.length) return;
+    const [next, ...rest] = queue;
+    setQueue(rest);
+    send(next.text, next.images, next.files);
+  }, [busyNow, queue]);
+  const enqueue = (text: string, images: Img[], files: Att[], front = false) => {
+    const item = { id: Date.now() + Math.random(), text, images, files };
+    if (!busyNow && !queue.length) send(text, images, files);
+    else setQueue((q) => (front ? [item, ...q] : [...q, item]));
+  };
+  /** 终止正在跑的这一轮（问题和已经说出口的部分服务端会照样记下、注明被打断） */
+  const stop = async () => {
+    try { await api("/runs/cancel", { body: { key: `${agent}|${skey}` } }); }
+    catch (e: any) { if (!/已经结束/.test(String(e?.message))) toastErr(e); }
+  };
+
   if (!s) return <div class="muted">加载中…</div>;
   const msgs = (s.messages ?? []).filter((m: any) => !m.compacted || showOld);
   const old = (s.messages ?? []).length - msgs.length;
@@ -235,9 +257,16 @@ function Conversation({ agent, skey, onChange }: { agent: string; skey: string; 
             {run.partial.text && <div class="md" dangerouslySetInnerHTML={{ __html: renderMarkdown(run.partial.text) }} />}
           </div>
         </>}
+        {queue.map((q) => (
+          <div class="queued">
+            <Message m={{ msg: { role: "user", content: [...q.images.map((i) => ({ type: "image", data: i.data, mimeType: i.mimeType })), ...(q.text ? [{ type: "text", text: q.text }] : []),
+              ...q.files.map((f) => ({ type: "text", text: `[附件 ${f.name}]` }))] } }} agent={agent} />
+            <div class="qbar muted small">排队中，这一轮说完就发 · <a onClick={() => setQueue((x) => x.filter((y) => y.id !== q.id))}>撤回</a></div>
+          </div>))}
       </div>
       {dock && <A2ADock key={dock.trace} trace={dock.trace} live={dock.live} onClose={() => { setDockClosed(dock.trace); setDock(null); setDockSmall(false); }} onSmall={setDockSmall} />}
-      <Composer busy={sending || !!run} onSend={send} />
+      <Composer busy={busyNow} onSend={(t, im, f) => enqueue(t, im, f)}
+        onInterrupt={(t, im, f) => { enqueue(t, im, f, true); void stop(); }} onStop={stop} />
     </Card>
   );
 }
@@ -391,7 +420,9 @@ async function toImg(file: File): Promise<Img> {
   return { data: b64(await blob.arrayBuffer()), mimeType: "image/jpeg", name: file.name };
 }
 
-function Composer({ busy, onSend }: { busy: boolean; onSend: (text: string, images: Img[], files: Att[]) => void }) {
+type SendFn = (text: string, images: Img[], files: Att[]) => void;
+/** 输入框。她在回复时：Enter / 「排队发送」先排着；「停止并发送」打断这一轮立刻发；没打字时「停止」只打断 */
+function Composer({ busy, onSend, onInterrupt, onStop }: { busy: boolean; onSend: SendFn; onInterrupt: SendFn; onStop: () => void }) {
   const [text, setText] = useState("");
   const [images, setImages] = useState<Img[]>([]);
   const [files, setFiles] = useState<Att[]>([]);
@@ -405,9 +436,10 @@ function Composer({ busy, onSend }: { busy: boolean; onSend: (text: string, imag
       } catch (e) { toastErr(e); }
     }
   };
-  const submit = () => {
-    if (busy || (!text.trim() && !images.length && !files.length)) return;
-    onSend(text.trim(), images, files);
+  const empty = !text.trim() && !images.length && !files.length;
+  const submit = (interrupt = false) => {
+    if (empty) return;
+    (interrupt ? onInterrupt : onSend)(text.trim(), images, files);
     setText(""); setImages([]); setFiles([]);
   };
   return (
@@ -429,11 +461,14 @@ function Composer({ busy, onSend }: { busy: boolean; onSend: (text: string, imag
           const fs = [...(e.clipboardData?.files ?? [])];
           if (fs.length) { e.preventDefault(); add(fs); }
         }} onKeyDown={(e: KeyboardEvent) => {
-          if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); submit(); }
+          if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); submit((e.ctrlKey || e.metaKey) && busy); }
         }}>
-          <TextArea value={text} onInput={setText} rows={2} placeholder="Enter 发送 · Shift+Enter 换行 · /reset 清空上下文" />
+          <TextArea value={text} onInput={setText} rows={2} placeholder={busy ? "她还在回复：Enter 排队发送 · Ctrl+Enter 停止并发送" : "Enter 发送 · Shift+Enter 换行 · /reset 清空上下文"} />
         </div>
-        <Btn kind="primary" onClick={submit} disabled={busy || (!text.trim() && !images.length && !files.length)}>{busy ? "回复中…" : "发送"}</Btn>
+        {busy && (empty
+          ? <Btn kind="danger" title="终止这一轮（已经说出口的部分会留下）" onClick={onStop}>■ 停止</Btn>
+          : <Btn kind="ghost" title="终止这一轮，马上发这条" onClick={() => submit(true)}>停止并发送</Btn>)}
+        <Btn kind="primary" onClick={() => submit()} disabled={empty}>{busy ? "排队发送" : "发送"}</Btn>
       </div>
     </div>
   );
