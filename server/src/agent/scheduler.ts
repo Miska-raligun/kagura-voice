@@ -45,7 +45,7 @@ export interface RunRecord {
 
 export interface SchedulerHost {
   /** 投递回复。返回实际投递到哪（空串 = 没投递） */
-  deliver(agentId: string, delivery: string, text: string, meta?: { announced?: boolean }): Promise<string>;
+  deliver(agentId: string, delivery: string, text: string, meta?: { announced?: boolean; source?: string }): Promise<string>;
   /** 设备或会话正忙（idleOnly 用） */
   busy(agentId: string, delivery: string): boolean;
 }
@@ -56,7 +56,7 @@ export const SILENT_RE = /^\s*(HEARTBEAT_OK|NO_REPLY)\s*[。.!！]?\s*$/i;
 export const MISS_WINDOW = 15 * 60;
 const BUSY_DELAY = 60;
 /** heartbeat 会话留最近几条（它自己最近说过的话） */
-export const HEARTBEAT_KEEP = 6;
+export const HEARTBEAT_KEEP = 10;
 
 export const HEARTBEAT_PROMPT = "[heartbeat] 现在是例行检查时间。按 HEARTBEAT.md 的清单看看有没有需要主动告诉主人的事。"
   + "开口前先看对话历史和 <recent_activity>（最近在别处跟主人说过的话）：主人已经回答过的别再问，你或别人刚说过的话题别再提，"
@@ -290,7 +290,7 @@ export class Scheduler {
       const r = await this.runAgent(j);
       const silent = SILENT_RE.test(r.text) || !r.text;
       let delivered = "";
-      if (!silent && j.delivery !== "none") delivered = await this.host.deliver(j.agent, j.delivery, r.text, r.meta);
+      if (!silent && j.delivery !== "none") delivered = await this.host.deliver(j.agent, j.delivery, r.text, { ...r.meta, source: j.kind === "heartbeat" ? "heartbeat" : `定时任务「${j.name}」` });
       if (trigger === "schedule") this.reschedule(j, t, silent ? "silent" : "ok");
       else this.mark(j.id, { last_run: t, last_status: silent ? "silent" : "ok" });
       return finish(silent ? "silent" : "ok", { output: r.text, tokens_in: r.usage.input, tokens_out: r.usage.output, cost: r.usage.cost, delivered });

@@ -9,6 +9,7 @@ import { OneBotAdapter, parseOneBotMessage } from "../src/channels/onebot.ts";
 import { FeishuAdapter, parseFeishuContent } from "../src/channels/feishu.ts";
 import { ChannelStore } from "../src/channels/store.ts";
 import { ChannelManager } from "../src/channels/manager.ts";
+import { messageText } from "../src/agent/runtime.ts";
 import type { ChannelAdapter, InboundMessage } from "../src/channels/types.ts";
 
 const waitFor = async (cond: () => any, ms = 3000) => {
@@ -291,6 +292,30 @@ describe("渠道路由", () => {
     expect(fake.calls[1].session).toBe("main:main");
     await mgr.handle(msg({ sender: "ou_owner", chatId: "oc_owner", text: "/reset" }));
     expect(rt.store("main").history("main:main")).toEqual([]);
+  });
+
+  it("主动消息（heartbeat 等）投到 IM：记进那个聊天用的会话，主人接话时上一句就在历史里；近况里同一句只列一次", async () => {
+    const { mgr, store, fake, rt, reg } = setupMgr({ dm_policy: "open", owner_main: true });
+    await mgr.startAll();
+    store.allow("fs", "ou_owner", "主人", true);
+    fake.queue.push("在的");
+    await mgr.handle(msg({ sender: "ou_owner", chatId: "oc_owner" }));
+    expect(mgr.sessionFor("feishu:fs:oc_owner", "main")).toBe("main:main");          // 主人私聊并进了 main
+    expect(mgr.sessionFor("feishu:fs:oc_other", "main")).toBe("main:feishu:oc_other");
+    expect(mgr.sessionFor("feishu:fs:oc_owner", "mio")).toBe("mio:feishu:oc_owner");
+    await rt.note("main", "main:main", "heartbeat", "该喝水啦");
+    const h = rt.store("main").history("main:main").map((x) => messageText(x.msg));
+    expect(h.at(-1)).toBe("该喝水啦");
+    expect(h.at(-2)).toMatch(/^\[heartbeat\]/);
+    fake.queue.push("好的我去倒水");
+    await mgr.handle(msg({ sender: "ou_owner", chatId: "oc_owner", text: "好呀", messageId: "om2" }));
+    expect(rt.store("main").history("main:main").map((x) => messageText(x.msg)).slice(-4, -2)).toEqual([h.at(-2), "该喝水啦"]);
+    // heartbeat 自己的会话里也有这句：近况里只列一次；「[heartbeat]」那条不算主人说的
+    await rt.note("main", "main:heartbeat", "heartbeat", "该喝水啦");
+    rt.store("main").markOwner("main:heartbeat");
+    const ra = rt.recentActivity(reg.get("main")!, "main:webchat:x");
+    expect(ra.split("该喝水啦").length - 1).toBe(1);
+    expect(ra).not.toContain("主人：[heartbeat]");
   });
 
   it("每日上限：超了只提醒一次；HEARTBEAT_OK/NO_REPLY 不回；出错回一句", async () => {

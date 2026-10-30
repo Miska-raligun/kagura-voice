@@ -3,6 +3,7 @@
 // 会话 key：<agent>:<渠道>:<聊天 id>，同一个 agent 的 MEMORY.md 跨渠道共享（设备上说过的事飞书上也记得）。
 // 主人私聊可以并入 main 会话（账号开 owner_main + 白名单里标记 owner）。
 import fs from "node:fs";
+import path from "node:path";
 import type { Runtime } from "../agent/runtime.ts";
 import type { AgentRegistry } from "../agent/registry.ts";
 import { SILENT_RE } from "../agent/scheduler.ts";
@@ -56,6 +57,31 @@ export class ChannelManager {
 
   constructor(public store: ChannelStore, private rt: Runtime, private agents: AgentRegistry, private factory: AdapterFactory = defaultFactory, seenFile: string | null = null) {
     this.seen = new SeenMessages(seenFile);
+    this.chatFile = seenFile ? path.join(path.dirname(seenFile), "channels_sessions.json") : null;
+    try { if (this.chatFile) for (const [k, v] of Object.entries(JSON.parse(fs.readFileSync(this.chatFile, "utf8")))) this.chatSessions.set(k, String(v)); } catch { /* 还没有 */ }
+  }
+
+  /** 「账号:聊天」→ 这个聊天用的会话（主人私聊开了 owner_main 时是 <agent>:main）。投递主动消息时据此把话也记进那个会话 */
+  private chatSessions = new Map<string, string>();
+  private chatFile: string | null;
+  private rememberChat(account: string, chatId: string, sessionKey: string) {
+    const k = `${account}:${chatId}`;
+    if (this.chatSessions.get(k) === sessionKey) return;
+    this.chatSessions.set(k, sessionKey);
+    if (this.chatFile) { try { fs.writeFileSync(this.chatFile, JSON.stringify(Object.fromEntries(this.chatSessions), null, 1)); } catch { /* 存不下就只在内存里 */ } }
+  }
+
+  /** 投递目标（feishu:<账号>:<聊天>）对应 agent 的哪个会话：聊过就用聊天时的那个，没聊过按默认规则 */
+  sessionFor(target: string, agentId: string): string | null {
+    const i = target.indexOf(":");
+    if (i < 0) return null;
+    const kind = target.slice(0, i);
+    let rest = target.slice(i + 1);
+    const acc = this.store.accounts().find((a) => a.kind === kind && rest.startsWith(`${a.id}:`)) ?? this.store.accounts().find((a) => a.kind === kind && a.enabled);
+    if (!acc) return null;
+    if (rest.startsWith(`${acc.id}:`)) rest = rest.slice(acc.id.length + 1);
+    const known = this.chatSessions.get(`${acc.id}:${rest}`);
+    return known && known.startsWith(`${agentId}:`) ? known : `${agentId}:${kind}:${rest}`;
   }
 
   async startAll() {
@@ -141,6 +167,7 @@ export class ChannelManager {
     const agentId = [this.store.binding(a.id, m.chatId)?.agent, a.agent].find((x) => x && this.agents.get(x)) ?? this.agents.default().id;
     const ownerMain = a.owner_main && m.chatType === "dm" && !!allowed?.owner;
     const sessionKey = ownerMain ? `${agentId}:main` : `${agentId}:${m.kind}:${m.chatId}`;
+    this.rememberChat(a.id, m.chatId, sessionKey);
     if (m.text.trim().startsWith("/")) {
       const owner = !!allowed?.owner;
       const deps: CommandDeps = { rt: this.rt, agents: this.agents, store: this.store, version: "", scheduler: () => null, devices: () => [], channelStatus: () => this.status(), restart: () => {}, ...(this.commands ?? {}) };

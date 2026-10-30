@@ -149,13 +149,21 @@ export function attachAgentSystem(sys: AgentSystem, ctx: Ctx) {
   sys.mirror = mirror;
   const scheduler = new Scheduler(ctx.dirs.systemDb, runtime, registry, {
     async deliver(agentId, delivery, text, meta) {
+      const tag = meta?.source || "定时任务";
       if (delivery.startsWith("device:")) {
         // 只投设备：按策略不播记为「静音」、角色不对记为「留言」，都不算失败
         const r = await outbox.say({ text, agentId, device: delivery.slice("device:".length), source: "job" });
+        // 播出去（或留了言）的话记进那台设备的会话：主人对着设备接话时上一句就在历史里
+        if (r.played || r.held) void runtime.note(agentId, runtime.sessionKey(agentId, "device", r.device || delivery.slice("device:".length)), tag, text);
         return r.played ? `device:${r.device}` : r.held ? `held:${r.device}` : r.reason === "away" || r.reason === "policy" ? `muted:${r.reason}` : "";
       }
       const ok = delivery === "webchat" || (await sys.channels.deliver(delivery, text));   // webchat：运行记录里就是投递内容
-      if (ok) await mirror(agentId, text, "job", meta);
+      if (ok) {
+        // 发到 IM 的记进那个聊天的会话：主人在飞书里直接回这个话题也接得上
+        const key = delivery === "webchat" ? null : sys.channels.sessionFor(delivery, agentId);
+        if (key) void runtime.note(agentId, key, tag, text);
+        await mirror(agentId, text, "job", meta);
+      }
       return ok ? delivery : "";
     },
     busy(agentId, delivery) {
@@ -169,11 +177,16 @@ export function attachAgentSystem(sys: AgentSystem, ctx: Ctx) {
     if (origin.startsWith("device:")) {
       const said = await runtime.spoken(agentId, text).catch(() => text);
       const r = await outbox.say({ text: said || text, agentId, device: origin.slice("device:".length), source: "task" });
+      if (r.played || r.held) void runtime.note(agentId, runtime.sessionKey(agentId, "device", r.device || origin.slice("device:".length)), "待办汇报", text);
       return r.played ? origin : r.held ? `held:${r.device}` : r.reason ? `muted:${r.reason}` : "";
     }
     if (/^(feishu|qq|onebot):/.test(origin)) {
       const ok = await sys.channels.deliver(origin, text);
-      if (ok) await mirror(agentId, text, "task");
+      if (ok) {
+        const key = sys.channels.sessionFor(origin, agentId);
+        if (key) void runtime.note(agentId, key, "待办汇报", text);
+        await mirror(agentId, text, "task");
+      }
       return ok ? origin : "";
     }
     // 网页聊天 / 管理界面记的：送到 agent 的 heartbeat 投递目标（没设就只在管理界面看）

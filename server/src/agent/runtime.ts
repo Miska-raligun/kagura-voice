@@ -342,6 +342,26 @@ export class Runtime {
     return run;
   }
 
+  /**
+   * 把一句主动说的话（heartbeat、定时任务、待办汇报）记进接收方那个会话：主人在飞书 / 设备上接话时，上一句就在历史里，
+   * 不用靠近况去猜（LRN 2026-10-30：heartbeat 搬出主会话以后，主人回它的话题对不上）。
+   * 记成一对「[来源] 用户消息 + 助手消息」（有的服务商不接受连着两条助手消息）；排在这个会话的队里，不打断正在跑的那轮
+   */
+  note(agentId: string, sessionKey: string, tag: string, text: string): Promise<void> {
+    const agent = this.agents.get(agentId);
+    if (!agent || !text.trim()) return Promise.resolve();
+    const store = this.store(agentId);
+    const t = Date.now();
+    const zero = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
+    return this.serial(`${agentId}|${sessionKey}`, async () => {
+      store.touchSession(sessionKey, sessionKey.endsWith(":main") ? "main" : "chat", sessionKey.split(":")[1] ?? "system");
+      store.append(sessionKey, [
+        { role: "user", content: [{ type: "text", text: `[${tag}]（你主动开口，下面是你发出去的话）` }], timestamp: t } as any,
+        { role: "assistant", content: [{ type: "text", text: text.trim() }], api: "openai-completions", provider: "kagura", model: "note", usage: zero, stopReason: "stop", timestamp: t } as any,
+      ]);
+    }).catch((e) => console.log(`[agent] ⚠️  记进会话 ${sessionKey} 失败: ${e.message}`));
+  }
+
   /** 会话是否正有一轮在跑（调度器的 idleOnly 用） */
   busy(agentId: string, sessionKey: string) { return this.locks.has(`${agentId}|${sessionKey}`); }
 
@@ -556,6 +576,8 @@ export class Runtime {
     if (budget <= 0) return "";
     const since = Date.now() / 1000 - RECENT_HOURS * 3600;
     const items: { ts: number; line: string }[] = [];
+    // 同一句话可能同时在 heartbeat 会话和接收方会话里（主动消息会记进接收方会话），只列一次
+    const seenText = new Set<string>();
     for (const a of this.agents.list()) {
       let rows: ReturnType<AgentStore["recentOwnerMessages"]>;
       try { rows = this.store(a.id).recentOwnerMessages(since, a.id === agent.id ? currentKey : "", 200); } catch { continue; }
@@ -568,6 +590,9 @@ export class Runtime {
         if (r.role === "user" && NOT_OWNER.test(text)) continue;
         const where = CHANNEL_NAME[r.channel] ?? r.channel;
         const who = r.role === "user" ? "主人" : mine ? "你" : a.name;
+        const dedup = `${a.id}|${r.role}|${text.slice(0, 160)}`;
+        if (seenText.has(dedup)) continue;
+        seenText.add(dedup);
         const tag = mine ? where : `${a.name}·${where}`;
         const d = new Date(r.ts * 1000);
         const when = `${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;

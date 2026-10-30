@@ -159,6 +159,14 @@ def test_heartbeat_silent_then_delivered(a):
         a.post("/api/admin/jobs/hb-mio/run")
         assert d.wait("push")["type"] == "push"
         assert a.fake_log()["tts"][-1]["per"] == 4       # 用 mio 自己的音色
+        # heartbeat 在自己的小会话里跑；播出去的那句同时记进设备的会话，主人对着设备接话时上一句就在历史里
+        for _ in range(20):
+            main = json.dumps(a.get("/api/admin/agents/mio/sessions/mio:main").json(), ensure_ascii=False)
+            if "该休息一下啦" in main:
+                break
+            time.sleep(0.1)
+        assert "该休息一下啦" in main and "[heartbeat]" in main
+        assert "该休息一下啦" in json.dumps(a.get("/api/admin/agents/mio/sessions/mio:heartbeat").json(), ensure_ascii=False)
     finally:
         a.request("PATCH", "/api/admin/agents/mio", json={"heartbeat": {"enabled": False}})
         a.request("PUT", "/api/admin/devices/ag9", json={"role": "", "greet": False})

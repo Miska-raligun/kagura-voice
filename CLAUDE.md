@@ -320,7 +320,10 @@ CoreS3 (MicroPython) ──HTTP──▶ server/（TypeScript 单文件可执行
   上下文过半会打一行 `📏 … 系统提示 X + 工具 Y + 历史 Z`。**记忆冲刷不再单独跑**：以前压缩前用整段上下文另跑一轮（一次几万 token），
   现在摘要模型顺手输出「【记住】长期：/今天：」，经 `runtime.remember` 写进 MEMORY.md / 当天笔记（`beforeCompact` 留着但默认不接）。
   **heartbeat 不再跑在 main 会话里**：每半小时把整段主对话重发一遍太费，现在是 `<agent>:heartbeat` 小会话、只留最近 `HEARTBEAT_KEEP` 条，
-  主对话最近说了什么靠近况带上。
+  主对话最近说了什么靠近况带上。**主动说出去的话要记进接收方会话**（`Runtime.note`）：heartbeat / 定时任务 / 待办汇报投递成功后，
+  把那句话以「[heartbeat]（你主动开口…）+ 助手消息」一对记进接收方的会话——设备走 `runtime.sessionKey(agent, "device", dev)`，
+  IM 走 `ChannelManager.sessionFor(target)`（`channels_sessions.json` 记着每个聊天实际用的会话，主人私聊开了 owner_main 就是 main）。
+  不记的话主人在飞书回 heartbeat 的话题，她只能从近况里猜。近况按「agent + 角色 + 文字」去重，同一句不会列两次。
   ⑥ **内部小任务关思考**（`ModelRegistry.quick`，症状「压缩经常超时 / 思考把输出额度占满」）：压缩摘要、长回复压成口语都走 `quick`，
   按服务商地址自动加关思考的字段（MiniMax / DeepSeek / 智谱 → `thinking: {type: "disabled"}`，通义 → `enable_thinking: false`），经 pi-ai 的
   `samplingParams` 原样并进请求体；服务商报错里提到这个字段就去掉重试、本次运行不再发；正文里的 `<think>…</think>` 剥掉。
