@@ -28,6 +28,9 @@ export class AgentStore {
         model TEXT NOT NULL, input INTEGER, output INTEGER, cache_read INTEGER, cache_write INTEGER, cost REAL);
       CREATE INDEX IF NOT EXISTS usage_ts ON usage(ts);
       CREATE INDEX IF NOT EXISTS messages_ts ON messages(ts);
+      CREATE TABLE IF NOT EXISTS events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, session TEXT NOT NULL, ts REAL NOT NULL, kind TEXT NOT NULL, data TEXT NOT NULL);
+      CREATE INDEX IF NOT EXISTS events_session ON events(session, id);
     `);
     // owner：主人本人参与的会话（可信的那几种：设备、网页、主人私聊）。「近况」只从这些会话里摘，陌生人 / 群聊不混进来
     try { this.db.exec("ALTER TABLE sessions ADD COLUMN owner INTEGER NOT NULL DEFAULT 0"); } catch { /* 已有 */ }
@@ -99,6 +102,7 @@ export class AgentStore {
   /** 彻底删除一个会话（消息和摘要都删；用量记录保留，统计不受影响） */
   remove(key: string): boolean {
     this.db.prepare("DELETE FROM messages WHERE session = ?").run(key);
+    this.db.prepare("DELETE FROM events WHERE session = ?").run(key);
     return this.db.prepare("DELETE FROM sessions WHERE key = ?").run(key).changes > 0;
   }
 
@@ -123,6 +127,17 @@ export class AgentStore {
   reset(key: string) {
     this.db.prepare("UPDATE messages SET compacted = 1 WHERE session = ?").run(key);
     this.db.prepare("UPDATE sessions SET summary = '' WHERE key = ?").run(key);
+  }
+
+  /** 会话里的系统事件（压缩等，管理界面会话页按时间穿插显示）。只留每个会话最近 200 条 */
+  addEvent(session: string, kind: string, data: unknown) {
+    this.db.prepare("INSERT INTO events(session, ts, kind, data) VALUES (?, ?, ?, ?)").run(session, Date.now() / 1000, kind, JSON.stringify(data));
+    this.db.prepare("DELETE FROM events WHERE session = ? AND id <= (SELECT id FROM events WHERE session = ? ORDER BY id DESC LIMIT 1 OFFSET 200)").run(session, session);
+  }
+
+  events(session: string, since = 0): { id: number; ts: number; kind: string; data: any }[] {
+    return (this.db.prepare("SELECT * FROM events WHERE session = ? AND ts >= ? ORDER BY id").all(session, since) as any[])
+      .map((r) => ({ id: r.id, ts: r.ts, kind: r.kind, data: JSON.parse(r.data) }));
   }
 
   recordUsage(session: string, purpose: string, u: UsageRow) {

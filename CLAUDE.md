@@ -308,6 +308,10 @@ CoreS3 (MicroPython) ──HTTP──▶ server/（TypeScript 单文件可执行
   推给页面的消息过 `liveMessage`（去自动回忆、图片只留占位、工具结果截 8000 字）。页面过程一律从订阅来，发消息的 POST 只等结果；end 后先重新拉历史再收起实时块。
   **每轮 token 明细**：每条助手消息本来就带服务商报的 `usage`（输入未缓存 / 缓存读写 / 输出 / 思考 / 费用）；`execute` 落盘时在这一轮最后一条助手消息上加 `kctx`
   （系统提示 / 工具定义 / 历史的估算 token、窗口、调用次数），会话页 `TurnUsage` 汇总显示。**读历史给模型前要去掉 `kctx`**（`execute` 里 `history` 那行）。
+  **系统处理详情**：`kctx` 里还有 `trace`（`buildSystemPrompt` 的 `PromptTrace`：场景、加载了哪些文件 / 全文还是目录 / 字数 / 是否截断、没加载的、今昨笔记、技能、摘要）、
+  近况条数、自动回忆命中（`recallFor` 返回 hits / 用时 / 没附的原因）、截短的旧工具结果条数、单轮上限叫停原因，会话页 `TurnContext`（⚙️）显示。
+  压缩不属于某一轮，记成会话事件（`AgentStore.addEvent`，`events` 表，每会话留 200 条）：`compact`（`trigger` = before / background / overflow / manual，压了多少、剩多少、记进了哪些记忆）、
+  `compact_failed`；会话接口带 `events`，页面按时间穿插（`SysEvent` 🗜️）。新加系统层对上下文的处理时也照这个记，别只打日志。
   ④ **跨会话互相等待**（2026-10-24 真机日志：worker 的 heartbeat 拿着 `worker:main` 去 `sessions_send` 等 main，同时 main 那边一轮拿着 `main:main` 等 worker；
   手机设备 `device_in_main` 也走 `worker:main`，于是手机消息永远排不上）：`scope.chain` 只看得见同一条调用链，两条各自起头的链互等它看不出来。
   `Runtime.run` 记 `waitsFor`（拿着锁的会话 → 它在等的会话），发起嵌套等待前顺着走一圈，成环就立刻失败（日志 `🔁 互相等待`）；

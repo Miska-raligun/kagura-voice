@@ -140,7 +140,20 @@ export const CHANNEL_HINTS: Record<string, string> = {
   onebot: "你正在 QQ 上和人聊天：QQ 不渲染 markdown，用纯文本，别太长。群聊消息前的 [名字] 是发言人。",
 };
 
+/** 系统提示是怎么拼出来的（会话页「系统处理」显示用） */
+export interface PromptTrace {
+  scene: Scene;
+  files: { name: string; mode: "full" | "toc"; chars: number; clipped: boolean }[];
+  notLoaded: string[];
+  daily: number;
+  skills: number;
+  peers: number;
+  summary: number;
+}
+
 export interface SoulOpts {
+  /** 传了就把拼装过程记进去 */
+  trace?: PromptTrace;
   agent: AgentInfo;
   scene: Scene;
   channel: string;
@@ -165,6 +178,10 @@ export function buildSystemPrompt(o: SoulOpts): string {
     const t = mode ? readSafe(path.join(ws, f)).trim() : "";
     if (t && mode === "full") parts.push(`<${f}>\n${clip(t, BUDGETS[f])}\n</${f}>`);
     else if (t) parts.push(`<${f} only="目录">\n${tocOf(f, t)}\n</${f}>`);
+    if (t && (mode === "full" || mode === "toc")) {
+      const n = Array.from(t).length;
+      o.trace?.files.push({ name: f, mode, chars: n, clipped: mode === "full" && n > BUDGETS[f] });
+    }
     else if (!mode && f !== "HEARTBEAT.md" && f !== "MEMORY.md" && fs.existsSync(path.join(ws, f))) skipped.push(f);
   }
   // 今天和昨天的笔记：新会话也能接上最近发生的事
@@ -176,6 +193,7 @@ export function buildSystemPrompt(o: SoulOpts): string {
       return t ? `## ${strftime("%Y-%m-%d", d)}\n${t}` : "";
     }).filter(Boolean).join("\n\n");
     if (notes) parts.push(`<recent_notes>\n${clip(notes, BUDGETS.daily)}\n</recent_notes>`);
+    if (o.trace) o.trace.daily = Math.min(Array.from(notes).length, BUDGETS.daily);
   }
   if (o.skills?.length) {
     parts.push("<skills>\n可用技能（需要时用 skill_read 读全文再照做；要跑的脚本用 exec 执行）：\n"
@@ -194,6 +212,12 @@ export function buildSystemPrompt(o: SoulOpts): string {
   if (o.scene !== "guest" && !want.has("MEMORY.md") && fs.existsSync(path.join(ws, "MEMORY.md"))) {
     parts.push("<memory>\n长期记忆（MEMORY.md）不全文放在这里：系统会按主人每句话自动检索，相关的几条附在那条消息前的 [相关记忆] 里。"
       + "没附上不代表没有——涉及以前的事、约定、主人的偏好时，拿不准就 memory_search 搜一下再答。\n</memory>");
+  }
+  if (o.trace) {
+    o.trace.notLoaded = o.scene === "guest" ? [] : [...skipped, ...(want.has("daily") ? [] : ["daily"])];
+    o.trace.skills = o.skills?.length ?? 0;
+    o.trace.peers = o.peers?.length ?? 0;
+    o.trace.summary = Array.from(o.summary ?? "").length;
   }
   if (o.summary) parts.push(`<earlier_conversation_summary>\n${o.summary}\n</earlier_conversation_summary>`);
   for (const e of o.extra ?? []) if (e) parts.push(e);

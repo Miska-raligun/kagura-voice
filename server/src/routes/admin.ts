@@ -188,7 +188,9 @@ export function registerAdmin(r: Router, ctx: Ctx, sys: AgentSystem) {
     const st = runtime.store(req.params.id);
     const s = st.getSession(req.params.key);
     if (!s) return json({ error: "没有这个会话" }, 404);
-    return json({ ...s, title: st.title(req.params.key), messages: st.transcript(req.params.key, Number(req.query.get("limit") ?? 200)) });
+    const messages = st.transcript(req.params.key, Number(req.query.get("limit") ?? 200));
+    // 系统事件（压缩等）：只取这批消息时间范围内的
+    return json({ ...s, title: st.title(req.params.key), messages, events: st.events(req.params.key, messages[0]?.ts ?? 0) });
   });
   post("/api/admin/agents/<id>/sessions/<key>/reset", (req) => { agentOr404(req.params.id); runtime.store(req.params.id).reset(req.params.key); return json({ status: "ok" }); });
   post("/api/admin/agents/<id>/sessions/<key>/compact", async (req) => {

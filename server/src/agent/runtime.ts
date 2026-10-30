@@ -13,7 +13,7 @@ import type { AgentRegistry, AgentInfo } from "./registry.ts";
 import { stripThinkText, type ModelRegistry } from "./models.ts";
 import { AgentStore } from "./store.ts";
 import { toSpoken } from "../util/text.ts";
-import { BUDGETS, buildSystemPrompt, dailyNotePath, loadMode, sceneOf, turnContext, type SessionKind } from "./soul.ts";
+import { BUDGETS, buildSystemPrompt, dailyNotePath, loadMode, sceneOf, turnContext, type PromptTrace, type SessionKind } from "./soul.ts";
 import { toolAllowed, guestLocked } from "./toolpolicy.ts";
 import { runScope, withScope, type RunScope } from "./scope.ts";
 
@@ -500,7 +500,7 @@ export class Runtime {
             const agent = this.agents.get(req.agentId);
             if (!agent) throw e;
             console.log(`[agent] 📏 ${key} 上下文超长（${String(e.message).slice(0, 120)}），压缩后重试`);
-            await this.maybeCompact(agent, this.store(agent.id), req.sessionKey, req.signal, { limit: 0, keepTokens: 0 });
+            await this.maybeCompact(agent, this.store(agent.id), req.sessionKey, req.signal, { limit: 0, keepTokens: 0, trigger: "overflow" });
             return await this.execute(req);
           }
         }
@@ -554,8 +554,8 @@ export class Runtime {
     if (persist && scope.trusted) store.markOwner(req.sessionKey);
     // 近况：这个会话看不到的、最近在别处跟主人说过的话。只给可信的会话（主人本人），陌生人 / 群聊不给
     const recent = scope.trusted && req.kind !== "sub" && req.purpose !== "flush" ? this.recentActivity(agent, req.sessionKey) : "";
-    const promptOf = (summary?: string) => buildSystemPrompt({
-      agent, scene: sceneOf(scope), channel: req.channel, summary,
+    const promptOf = (summary?: string, trace?: PromptTrace) => buildSystemPrompt({
+      agent, scene: sceneOf(scope), channel: req.channel, summary, trace,
       extra: [...(req.extraSystem ?? []), recent], skills: this.skillCatalog(agent), voiceDelivery: req.voiceDelivery,
       peers: tools.some((t) => t.name.startsWith("sessions_")) ? peers : [],
     });
@@ -576,8 +576,11 @@ export class Runtime {
     // kctx 是存在助手消息上的「这一轮上下文构成」统计，只给管理界面看，别发给模型
     const history = store.history(req.sessionKey).map((h) => { const { kctx: _k, ...m } = h.msg as any; return m as Message; });
     const session = store.getSession(req.sessionKey);
-    const systemPrompt = promptOf(session?.summary);
-    const histSize = estimateTokens(session?.summary ?? "") + pruneToolResults(history).reduce((n, m) => n + msgTokens(m), 0);
+    const trace: PromptTrace = { scene: sceneOf(scope), files: [], notLoaded: [], daily: 0, skills: 0, peers: 0, summary: 0 };
+    const systemPrompt = promptOf(session?.summary, trace);
+    const prunedHist = pruneToolResults(history);
+    const histSize = estimateTokens(session?.summary ?? "") + prunedHist.reduce((n, m) => n + msgTokens(m), 0);
+    const pruned = prunedHist.filter((m, i) => m !== history[i]).length;
     if (fixedSys + fixedTools + histSize > ctxWin * 0.5) {
       console.log(`[agent] 📏 ${agent.id} ${req.sessionKey} 上下文≈ 系统提示 ${fixedSys} + 工具 ${fixedTools} + 历史 ${histSize} token（窗口 ${ctxWin}，压缩阈值 ${limit}）`);
     }
@@ -589,7 +592,7 @@ export class Runtime {
       else content.push({ type: "text", text: "[用户发来了图片，但当前模型不支持看图，请如实告诉用户]" });
     }
     const recalled = await this.recallFor(agent, scope, req);
-    if (recalled) content.push({ type: "text", text: recalled });
+    if (recalled.text) content.push({ type: "text", text: recalled.text });
     content.push({ type: "text", text: req.text });
 
     const pi = new Agent({
@@ -707,7 +710,12 @@ export class Runtime {
       const out = fresh.map((m) => stripImages(stripRecall(m), agent.workspace));
       // 这一轮的上下文构成（估算）记在最后一条助手消息上：会话页每轮下面显示 token 明细用
       const li = out.map((m) => m.role).lastIndexOf("assistant");
-      if (li >= 0) out[li] = { ...out[li], kctx: { sys: fixedSys, tools: fixedTools, hist: histSize, win: ctxWin, calls: assistants.length } } as any;
+      if (li >= 0) out[li] = { ...out[li], kctx: {
+        sys: fixedSys, tools: fixedTools, hist: histSize, win: ctxWin, calls: assistants.length, limit, toolCount: tools.length,
+        // 系统层对上下文做了什么：加载了哪些文件、近况、摘要、自动回忆、截短了几条旧工具结果、单轮上限有没有叫停
+        trace, recent: { chars: Array.from(recent).length, items: recent.split("\n").filter((l) => /^\s*-\s/.test(l)).length },
+        recall: { hits: recalled.hits, ms: recalled.ms, why: recalled.why }, pruned, guard: guard.reason || undefined,
+      } } as any;
       store.append(req.sessionKey, out);
     }
     return { text, meta: scope.meta, toolCalls, usage, stopReason: String(last.stopReason ?? "") };
@@ -724,22 +732,27 @@ export class Runtime {
    * 附在消息里而不是系统提示里：系统提示不变，服务商的前缀缓存才命中；落盘前去掉（stripRecall），历史里不留、也不重复占地方。
    * 只给可信、场景里没整篇加载 MEMORY.md 的轮次；检索本地几毫秒，配了嵌入接口时多一次嵌入请求，最多等 RECALL_WAIT_MS。
    */
-  private async recallFor(agent: AgentInfo, scope: RunScope, req: RunRequest): Promise<string> {
-    if (!this.recall || !scope.trusted || req.noTurnContext || !req.text?.trim()) return "";
+  private async recallFor(agent: AgentInfo, scope: RunScope, req: RunRequest): Promise<{ text: string; hits: string[]; ms: number; why: string }> {
+    const none = (why: string) => ({ text: "", hits: [], ms: 0, why });
+    if (!this.recall || !scope.trusted || req.noTurnContext || !req.text?.trim()) return none(!scope.trusted ? "群聊 / 陌生人不检索" : "");
     const scene = sceneOf(scope);
-    if (scene === "guest" || loadMode(scene, "MEMORY.md") === "full") return "";
+    if (scene === "guest") return none("群聊 / 陌生人不检索");
+    if (loadMode(scene, "MEMORY.md") === "full") return none("这个场景整篇加载了 MEMORY.md");
     const skip = loadMode(scene, "daily") === "full"
       ? [new Date(), new Date(Date.now() - 86400_000)].map((d) => path.relative(agent.workspace, dailyNotePath(agent.workspace, d)).split(path.sep).join("/"))
       : [];
+    const t0 = Date.now();
+    let late = false;
     try {
       const hits = await Promise.race([
         this.recall(agent, req.text, skip),
-        new Promise<string[]>((r) => setTimeout(() => r([]), RECALL_WAIT_MS).unref?.()),
+        new Promise<string[]>((r) => setTimeout(() => { late = true; r([]); }, RECALL_WAIT_MS).unref?.()),
       ]);
-      return hits.length ? `${RECALL_TAG}\n${hits.map((h) => `- ${h}`).join("\n")}` : "";
+      const ms = Date.now() - t0;
+      return { text: hits.length ? `${RECALL_TAG}\n${hits.map((h) => `- ${h}`).join("\n")}` : "", hits, ms, why: late ? `超过 ${RECALL_WAIT_MS / 1000} 秒没检索完，这轮不附` : hits.length ? "" : "没有相关的" };
     } catch (e: any) {
       console.log(`[agent] ⚠️  ${agent.id} 自动回忆失败（这轮不附）: ${e.message}`);
-      return "";
+      return { ...none(`检索失败：${e.message}`), ms: Date.now() - t0 };
     }
   }
 
@@ -826,7 +839,7 @@ export class Runtime {
    * 接口一卡住，这个 agent 的这个会话就永远排不上队（症状「某个 agent 不理人了，换个 agent 正常」）。
    * 超时 / 失败就跳过，这轮照常回复，下轮再试。
    */
-  private async maybeCompact(agent: AgentInfo, store: AgentStore, key: string, signal?: AbortSignal, o: { limit: number; keepTokens?: number } = { limit: agent.compaction.max_tokens }) {
+  private async maybeCompact(agent: AgentInfo, store: AgentStore, key: string, signal?: AbortSignal, o: { limit: number; keepTokens?: number; trigger?: string } = { limit: agent.compaction.max_tokens }) {
     const hist = store.history(key);
     const summary = store.getSession(key)?.summary ?? "";
     // 按「进上下文时的样子」算：旧工具结果反正会被截短，别拿原文的大小去触发压缩
@@ -841,10 +854,13 @@ export class Runtime {
     signal?.addEventListener("abort", onAbort, { once: true });
     const timer = setTimeout(() => { why ||= `超过 ${ms / 1000} 秒`; ac.abort(); }, ms);
     const aborted = new Promise<never>((_, rej) => ac.signal.addEventListener("abort", () => rej(new Error(why)), { once: true }));
-    const work = this.compactNow(agent, store, key, ac.signal, o.keepTokens ?? Math.floor(o.limit * KEEP_RATIO));
+    const work = this.compactNow(agent, store, key, ac.signal, o.keepTokens ?? Math.floor(o.limit * KEEP_RATIO), o.trigger ?? "before", { size, limit: o.limit });
     work.catch(() => {});                                     // 放弃等待之后它再报错也别变成未处理的 rejection
     try { await Promise.race([work, aborted]); }
-    catch (e: any) { console.log(`[agent] ⚠️  ${agent.id} 压缩${why === "已取消" ? "被取消" : "失败"}（下轮再试）: ${e.message}`); }
+    catch (e: any) {
+      console.log(`[agent] ⚠️  ${agent.id} 压缩${why === "已取消" ? "被取消" : "失败"}（下轮再试）: ${e.message}`);
+      try { store.addEvent(key, "compact_failed", { trigger: o.trigger ?? "before", error: e.message, size, limit: o.limit }); } catch { /* 记不下就算了 */ }
+    }
     finally { clearTimeout(timer); signal?.removeEventListener("abort", onAbort); }
   }
 
@@ -861,7 +877,7 @@ export class Runtime {
     const store = this.store(agent.id);
     const size = estimateTokens(store.getSession(req.sessionKey)?.summary ?? "") + pruneToolResults(store.history(req.sessionKey).map((h) => h.msg)).reduce((n, m) => n + msgTokens(m), 0);
     if (size <= limit * 0.7) return;
-    void this.serial(key, () => this.maybeCompact(agent, store, req.sessionKey, undefined, { limit: Math.floor(limit * 0.7), keepTokens: Math.floor(limit * KEEP_RATIO) }))
+    void this.serial(key, () => this.maybeCompact(agent, store, req.sessionKey, undefined, { limit: Math.floor(limit * 0.7), keepTokens: Math.floor(limit * KEEP_RATIO), trigger: "background" }))
       .catch((e) => console.log(`[agent] ⚠️  ${agent.id} 后台压缩失败: ${e.message}`));
   }
 
@@ -870,14 +886,16 @@ export class Runtime {
     const agent = this.agents.get(agentId);
     if (!agent) throw new Error(`没有 agent ${agentId}`);
     const limit = this.compactLimit.get(`${agentId}|${key}`) ?? agent.compaction.max_tokens;
-    return this.serial(`${agentId}|${key}`, () => this.compactNow(agent, this.store(agentId), key, undefined, Math.floor(limit * KEEP_RATIO)));
+    return this.serial(`${agentId}|${key}`, () => this.compactNow(agent, this.store(agentId), key, undefined, Math.floor(limit * KEEP_RATIO), "manual"));
   }
 
   /**
    * 压缩：留下最近的消息（按 token，最多 keepTokens、最多 keep_messages 条，至少留最近一轮），其余总结成摘要。
    * 从一条用户消息处切开，不把工具调用和它的结果拆开
    */
-  private async compactNow(agent: AgentInfo, store: AgentStore, key: string, signal?: AbortSignal, keepTokens = Math.floor(agent.compaction.max_tokens * KEEP_RATIO)): Promise<boolean> {
+  private async compactNow(agent: AgentInfo, store: AgentStore, key: string, signal?: AbortSignal, keepTokens = Math.floor(agent.compaction.max_tokens * KEEP_RATIO),
+    trigger = "manual", why?: { size: number; limit: number }): Promise<boolean> {
+    const t0 = Date.now();
     const hist = store.history(key);
     const eff = pruneToolResults(hist.map((h) => h.msg));
     const userIdx = hist.map((h, i) => (h.msg.role === "user" ? i : -1)).filter((i) => i >= 0);
@@ -961,11 +979,23 @@ export class Runtime {
     }
     if (failed === chunks.length && !summary.trim()) throw new Error("摘要为空");
     store.compact(key, old.at(-1)!.id, summary);
+    const wrote: { target: string; text: string }[] = [];
     for (const r of remembered.slice(0, 20)) {
       const [t, text] = r.split("\n");
-      try { this.remember?.(agent, t === "主人" ? "user" : t === "长期" ? "long" : "daily", text); } catch (e: any) { console.log(`[agent] ⚠️  ${agent.id} 记忆写入失败: ${e.message}`); }
+      const target = t === "主人" ? "user" : t === "长期" ? "long" : "daily";
+      wrote.push({ target, text });
+      try { this.remember?.(agent, target, text); } catch (e: any) { console.log(`[agent] ⚠️  ${agent.id} 记忆写入失败: ${e.message}`); }
     }
     console.log(`[agent] 🗜️  ${agent.id} ${key} 压缩 ${old.length} 条（${chunks.length} 段${failed ? `，${failed} 段没总结成` : ""}）→ 摘要 ${Array.from(summary).length} 字${remembered.length ? `，记下 ${remembered.length} 条` : ""}`);
+    // 会话页「系统事件」：什么时候、为什么压的，压了多少、剩多少，顺手记进了哪些记忆
+    try {
+      const sum = (a: Message[]) => a.reduce((n, m) => n + msgTokens(m), 0);
+      store.addEvent(key, "compact", {
+        trigger, size: why?.size, limit: why?.limit, ms: Date.now() - t0, model: `${model.provider}/${model.id}`,
+        messages: old.length, oldTokens: sum(eff.slice(0, cut)), kept: hist.length - cut, keptTokens: sum(eff.slice(cut)),
+        chunks: chunks.length, failed, summary: Array.from(summary).length, remembered: wrote,
+      });
+    } catch { /* 记不下就算了 */ }
     return true;
   }
 

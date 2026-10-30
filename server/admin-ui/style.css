@@ -234,3 +234,7 @@ table.matrix button.cell { background:none; border:0; padding:2px 8px; font-size
 .msgs details.usage > div { margin:4px 0 4px 18px; }
 .msgs details.usage table { margin:4px 0 4px 18px; width:auto; }
 .msgs details.usage td, .msgs details.usage th { padding:2px 10px 2px 0; text-align:right; }
+.msgs details.usage .hit, .msgs .sysev .hit { margin-left:30px; color:var(--fg); opacity:.75; }
+.msgs .sysev { font-size:12px; color:var(--muted); margin:6px 0 10px; padding:6px 10px; border:1px dashed var(--line, rgba(127,127,127,.3)); border-radius:8px; }
+.msgs .sysev summary { cursor:pointer; }
+.msgs .sysev > div { margin:3px 0 0 18px; }

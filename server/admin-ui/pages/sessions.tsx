@@ -149,6 +149,8 @@ function Conversation({ agent, skey, onChange }: { agent: string; skey: string; 
   if (!s) return <div class="muted">加载中…</div>;
   const msgs = (s.messages ?? []).filter((m: any) => !m.compacted || showOld);
   const old = (s.messages ?? []).length - msgs.length;
+  // 系统事件（压缩等）按时间穿插：已压缩的消息隐藏时，早于第一条可见消息的事件也不显示
+  const events: any[] = (s.events ?? []).filter((e: any) => showOld || !msgs.length || e.ts >= msgs[0].ts || !old);
   return (
     <Card class="chat" title={s.fresh ? "新对话" : `${CHANNEL[s.channel] ?? s.channel ?? ""} · ${s.title || skey.slice(agent.length + 1)}`} actions={!s.fresh && <>
       <Btn small onClick={async () => { const r = await api(`${base}/compact`, { body: {} }); toast(r.compacted ? "已压缩" : "太短了，不用压缩"); reload(); }}>压缩</Btn>
@@ -162,9 +164,11 @@ function Conversation({ agent, skey, onChange }: { agent: string; skey: string; 
         {old > 0 && <a class="muted small" onClick={() => setShowOld(true)}>还有 {old} 条已清空 / 已压缩的记录</a>}
         {!msgs.length && !run && !pending && <Empty>支持粘贴或拖入图片与文件</Empty>}
         {msgs.map((m: any, i: number) => <>
+          {eventsBefore(events, msgs, i).map((e) => <SysEvent e={e} />)}
           <Message m={m} agent={agent} />
-          {m.msg?.role === "assistant" && turnEnds(msgs, i) && <TurnUsage msgs={msgs} end={i} />}
+          {m.msg?.role === "assistant" && turnEnds(msgs, i) && <><TurnContext m={m} /><TurnUsage msgs={msgs} end={i} /></>}
         </>)}
+        {events.filter((e: any) => !msgs.length || e.ts > msgs[msgs.length - 1].ts).map((e: any) => <SysEvent e={e} />)}
         {pending && !run?.messages.length && <>
           <Message m={{ msg: pending }} agent={agent} />
           <div class="msg a"><div class="who">助手 <small class="muted">{run ? "整理上下文…" : "排队中…"}</small></div></div>
@@ -182,6 +186,62 @@ function Conversation({ agent, skey, onChange }: { agent: string; skey: string; 
       </div>
       <Composer busy={sending || !!run} onSend={send} />
     </Card>
+  );
+}
+
+/** 排在第 i 条消息前面的系统事件：时间在上一条和这一条之间 */
+function eventsBefore(events: any[], msgs: any[], i: number) {
+  const lo = i > 0 ? msgs[i - 1].ts : -Infinity, hi = msgs[i].ts;
+  return events.filter((e) => e.ts > lo && e.ts <= hi && !(i > 0 && msgs[i - 1].ts === hi));
+}
+
+const SCENE: Record<string, string> = { owner: "主人对话", guest: "群聊 / 陌生人", heartbeat: "heartbeat", cron: "定时任务", task: "待办", sub: "子任务", a2a: "agent 间对话" };
+const TRIGGER: Record<string, string> = { before: "回复前（历史超过阈值）", background: "回复后在后台预先压缩", overflow: "服务商报上下文超长", manual: "手动" };
+const TARGET: Record<string, string> = { user: "USER.md", long: "MEMORY.md", daily: "今天的笔记" };
+const fileLabel = (f: string) => (f === "daily" ? "每日笔记" : f.replace(".md", ""));
+
+/** 一轮开始时系统层做了什么：系统提示里放了哪些文件、近况、摘要，自动回忆附了什么，截短了几条旧工具结果，有没有被单轮上限叫停 */
+function TurnContext({ m }: { m: any }) {
+  const c = m.msg?.kctx;
+  if (!c?.trace) return null;
+  const t = c.trace;
+  const bits = [`${t.files.length} 个人设文件`];
+  if (c.recall?.hits?.length) bits.push(`回忆 ${c.recall.hits.length} 条`);
+  if (c.recent?.items) bits.push(`近况 ${c.recent.items} 条`);
+  if (t.summary) bits.push(`较早对话摘要 ${t.summary} 字`);
+  if (c.pruned) bits.push(`截短旧工具结果 ${c.pruned} 条`);
+  return (
+    <details class="usage">
+      <summary>⚙️ {SCENE[t.scene] ?? t.scene} · {bits.join(" · ")}{c.guard ? ` · ⚠️ ${c.guard}，已叫停` : ""}</summary>
+      <div>人设：{t.files.map((f: any) => `${fileLabel(f.name)}（${f.mode === "toc" ? "目录" : `${f.chars} 字${f.clipped ? "，超上限已截断" : ""}`}）`).join("、") || "无"}</div>
+      {t.notLoaded?.length > 0 && <div>没加载：{t.notLoaded.map(fileLabel).join("、")}（需要时她自己读）</div>}
+      {t.daily > 0 && <div>今昨笔记：{t.daily} 字</div>}
+      <div>近况：{c.recent?.items ? `${c.recent.items} 条，${c.recent.chars} 字` : "无"}</div>
+      <div>较早对话摘要：{t.summary ? `${t.summary} 字` : "无"}</div>
+      <div>自动回忆：{c.recall?.hits?.length ? `${c.recall.hits.length} 条（${c.recall.ms}ms）` : c.recall?.why || "没检索"}</div>
+      {c.recall?.hits?.map((h: string) => <div class="hit">· {h}</div>)}
+      <div>工具 {c.toolCount ?? "?"} 个 · 技能 {t.skills} 个 · 可联系的 agent {t.peers} 个</div>
+      {c.pruned > 0 && <div>之前几轮的工具结果有 {c.pruned} 条截短后放进上下文（库里存全文）</div>}
+      {c.limit && <div>压缩阈值：历史超过 {k(c.limit)} token 时压缩</div>}
+      {c.guard && <div class="over">单轮上限：{c.guard}</div>}
+    </details>
+  );
+}
+
+/** 会话里的系统事件：压缩（为什么、压了多少、剩多少、顺手记了什么）、压缩失败 */
+function SysEvent({ e }: { e: any }) {
+  const d = e.data ?? {};
+  const time = new Date(e.ts * 1000).toLocaleString("zh-CN", { hour12: false });
+  if (e.kind === "compact_failed") return <div class="sysev over">🗜️ 压缩失败（{TRIGGER[d.trigger] ?? d.trigger}）：{d.error} <small>{time}</small></div>;
+  if (e.kind !== "compact") return null;
+  return (
+    <details class="sysev">
+      <summary>🗜️ 压缩：{d.messages} 条（约 {k(d.oldTokens ?? 0)} token）→ 摘要 {d.summary} 字，留下最近 {d.kept} 条{d.remembered?.length ? `，记下 ${d.remembered.length} 条记忆` : ""} <small>{time}</small></summary>
+      <div>原因：{TRIGGER[d.trigger] ?? d.trigger}{d.size ? `（历史约 ${k(d.size)} token，阈值 ${k(d.limit ?? 0)}）` : ""}</div>
+      <div>摘要模型 {d.model}，分 {d.chunks} 段{d.failed ? `，${d.failed} 段没总结成（只留了用户说过的话）` : ""}，用时 {(d.ms / 1000).toFixed(1)} 秒</div>
+      <div>压缩后留下的历史约 {k(d.keptTokens ?? 0)} token</div>
+      {d.remembered?.map((r: any) => <div class="hit">· 记进 {TARGET[r.target] ?? r.target}：{r.text}</div>)}
+    </details>
   );
 }
 

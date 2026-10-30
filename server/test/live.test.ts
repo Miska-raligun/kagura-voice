@@ -56,3 +56,30 @@ describe("每轮 token 明细", () => {
     expect(rt.store("main").history("main:main").length).toBe(4);
   });
 });
+
+describe("系统处理详情", () => {
+  it("每轮记下系统提示的构成和自动回忆；压缩记成会话事件", async () => {
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    const { rt, reg, fake } = makeRuntime();
+    const a = reg.get("main")!;
+    fs.writeFileSync(path.join(a.workspace, "USER.md"), "主人叫小明");
+    fs.writeFileSync(path.join(a.workspace, "TOOLS.md"), "# 工具\n## NAS\n地址");
+    rt.recall = async () => ["MEMORY.md#L1：主人爱喝乌龙茶"];
+    rt.remember = () => {};
+    fake.queue.push("好");
+    await rt.run({ agentId: "main", sessionKey: "main:main", kind: "main", channel: "webchat", text: "泡杯乌龙茶" });
+    const c = (rt.store("main").history("main:main").at(-1)!.msg as any).kctx;
+    expect(c.trace.scene).toBe("owner");
+    expect(c.trace.files).toEqual(expect.arrayContaining([{ name: "USER.md", mode: "full", chars: 5, clipped: false }, expect.objectContaining({ name: "TOOLS.md", mode: "toc" })]));
+    expect(c.recall.hits).toEqual(["MEMORY.md#L1：主人爱喝乌龙茶"]);
+    // 压缩：手动压一次，事件里有原因、条数、记下的记忆
+    for (let i = 0; i < 2; i++) { fake.queue.push(`回复${i}`); await rt.run({ agentId: "main", sessionKey: "main:main", kind: "main", channel: "webchat", text: `问题${i}` }); }
+    reg.update("main", { compaction: { ...a.compaction, keep_messages: 2 } });
+    fake.queue.push("主人在聊天。\n【记住】\n- 主人：女儿叫朵朵\n");
+    expect(await rt.compact("main", "main:main")).toBe(true);
+    const ev = rt.store("main").events("main:main");
+    expect(ev.at(-1)).toMatchObject({ kind: "compact", data: { trigger: "manual", remembered: [{ target: "user", text: "女儿叫朵朵" }] } });
+    expect(ev.at(-1)!.data.messages).toBeGreaterThan(0);
+  });
+});
