@@ -201,3 +201,25 @@ describe("skills", () => {
     expect(parseFrontMatter("no fm").meta).toEqual({});
   });
 });
+
+describe("a2a 会话", () => {
+  it("一轮对话引出的调用归成一串：嵌套调用记下是由哪次调用引出的；另一轮是另一串", async () => {
+    const { rt, fake, a2a } = setup();
+    fake.queue.push(
+      { tool_calls: [{ name: "sessions_send", args: { agent: "mio", message: "帮我查查天气" } }], then: "查好了" },
+      { tool_calls: [{ name: "sessions_spawn", args: { task: "查天气", wait: true } }], then: "明天晴" },
+      "晴，25 度",
+    );
+    await rt.run({ ...chat, agentId: "main", sessionKey: "main:main", text: "问问小澪天气" });
+    fake.queue.push({ tool_calls: [{ name: "sessions_send", args: { agent: "mio", message: "谢谢" } }], then: "好" }, "不客气");
+    await rt.run({ ...chat, agentId: "main", sessionKey: "main:main", text: "谢谢她" });
+    const convs = a2a.conversations();
+    expect(convs.length).toBe(2);
+    expect(convs[1]).toMatchObject({ calls: 2, failed: 0, running: 0 });
+    expect(convs[1].agents).toEqual(expect.arrayContaining(["main", "mio"]));
+    const calls = a2a.conversation(convs[1].trace) as any[];
+    expect(calls.map((c) => [c.kind, c.from_agent, c.to_agent])).toEqual([["send", "main", "mio"], ["spawn", "mio", "mio"]]);
+    expect(calls[1].parent).toBe(calls[0].id);
+    expect(calls[0].parent).toBeNull();
+  });
+});

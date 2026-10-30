@@ -302,6 +302,8 @@ export function registerAdmin(r: Router, ctx: Ctx, sys: AgentSystem) {
   });
 
   // ── Agent 通信 ──
+  get("/api/admin/a2a/conversations", (req) => json(a2a.conversations(Math.min(1000, Number(req.query.get("limit") ?? 200) || 200))));
+  get("/api/admin/a2a/conversations/<trace>", (req) => json({ calls: a2a.conversation(req.params.trace), agents: registry.list().map((a) => ({ id: a.id, name: a.name })) }));
   get("/api/admin/a2a", (req) => json({
     settings: a2a.cfg,
     matrix: registry.list().map((a) => ({ from: a.id, allow: a.a2a.allow })),

@@ -507,6 +507,10 @@ CoreS3 (MicroPython) ──HTTP──▶ server/（TypeScript 单文件可执行
   **IM 消息去重**（`channels/seen.ts`，症状「升级完她把之前那几条又回了一遍」）：飞书事件「至少投递一次」，投给死连接 / 没确认的会重投，QQ 重连也补发。
   `ChannelManager` 收到就按「账号 + message_id」查 `channels_seen.json`（留 3 天、最多 3000 条，重启后也记得），见过就跳过（日志 `↩️ 重复投递`）。
   晚到超过 5 分钟的（`InboundMessage.sentAt`，飞书 `create_time`）在消息前注明「这条消息是 N 分钟前发的」，别让 agent 当成刚说的。
+- **Agent 通信按会话看（`a2a_log.trace` / `parent`，管理界面 `#/a2a/<trace>`，LRN 2026-10-30）**：一轮对话引出的所有 a2a 调用共用一个 `RunScope.trace`
+  （顶层一轮新生成，嵌套 / `lineage` 后台派出 / 子任务结果交回那一轮都经 `RunRequest.trace` 带下去），`a2aCall` = 引起这一轮的那次调用，它再发起的调用记成 `parent`。
+  **新加任何「替别的会话跑一轮」的 a2a 入口都要传 `trace` 和 `a2aCall`**，否则那一步会被拆成单独一串。老记录没有 trace，各算一串（`'id' || id`）。
+  详情页是回放：每次调用拆成「发出 / 回来」两步，按时间排，SVG 节点（每个 agent 一个，子任务会话单独一个）+ 沿弧线走的光点，下方步骤列表同步高亮，进行中的 3 秒刷新一次接着播。
 - **管理界面的长列表**：侧边列表一律用 `ui.SideList`（搜索框、分组折叠、先显示一部分再「再显示」），表格用 `ui.usePage` 分页（每页 20）。
   新加会越积越多的列表 / 记录时直接用这两个，别平铺。
 - **新版本提醒（`util/update.ts`）**：启动 30 秒后、之后每 12 小时查一次 GitHub Releases，只提示不安装；

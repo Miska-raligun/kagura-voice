@@ -270,3 +270,47 @@ table.matrix button.cell { background:none; border:0; padding:2px 8px; font-size
 .pop.open .poppanel { z-index:31; }
 .pop.up .poppanel { top:auto; bottom:calc(100% + 4px); }
 .list li.inline { flex-direction:row; align-items:baseline; justify-content:space-between; padding:5px 10px; }
+
+/* Agent 通信：调用图 */
+.chip { display:inline-block; font-size:11.5px; padding:1px 7px; margin:0 4px 2px 0; border-radius:999px; border:1px solid var(--line2); }
+.a2agraph svg.graph { width:100%; height:auto; display:block; color:var(--faint); }
+.graph .edge path { fill:none; stroke:var(--line2); stroke-width:1.6; color:var(--line2); }
+.graph .edge.back path { stroke-dasharray:5 4; }
+.graph .edge.bad path { stroke:var(--err); color:var(--err); }
+.graph .edge.current path { stroke:var(--accent); color:var(--accent); stroke-width:2.2; }
+.graph .edge.current.back path { stroke:var(--ok); color:var(--ok); }
+.graph .edge.current.bad path { stroke:var(--err); color:var(--err); }
+.graph .edge.active path { stroke-dasharray:6 6; animation:flow .6s linear infinite; }
+@keyframes flow { to { stroke-dashoffset:-12; } }
+.graph .pulse { fill:var(--accent); filter:drop-shadow(0 0 6px var(--accent)); }
+.graph .edge.back .pulse { fill:var(--ok); filter:drop-shadow(0 0 6px var(--ok)); }
+.graph .edge.bad .pulse { fill:var(--err); }
+.graph .elabel { font-size:12px; fill:var(--fg); paint-order:stroke; stroke:var(--panel); stroke-width:4px; }
+.graph .node { cursor:pointer; }
+.graph .node .dot { fill:var(--panel2); stroke:var(--line2); stroke-width:1.5; transition:stroke .2s; }
+.graph .node.root .dot { stroke:var(--accent); }
+.graph .node.sub .dot { stroke-dasharray:4 3; }
+.graph .node.busy .dot { stroke:var(--accent); stroke-width:2.5; }
+.graph .node:hover .dot { fill:var(--hover); }
+.graph .node .ring { fill:none; stroke:var(--accent); opacity:.6; animation:ring 1.4s ease-out infinite; transform-box:fill-box; transform-origin:center; }
+@keyframes ring { from { transform:scale(1); opacity:.6; } to { transform:scale(1.6); opacity:0; } }
+.graph .node .ini { font-size:20px; font-weight:600; fill:var(--fg); }
+.graph .node .name { font-size:12.5px; fill:var(--fg); }
+.graph .node .state { font-size:11px; fill:var(--accent); }
+.player { display:flex; align-items:center; gap:10px; margin-top:8px; }
+.player input[type=range] { flex:1; accent-color:var(--accent); }
+ol.steps { list-style:none; counter-reset:st; margin:0; padding:0; }
+ol.steps li { counter-increment:st; position:relative; padding:8px 10px 8px 34px; border-radius:8px; cursor:pointer; }
+ol.steps li::before { content:counter(st); position:absolute; left:8px; top:9px; width:18px; height:18px; border-radius:50%; font-size:11px; line-height:18px; text-align:center; background:var(--sel); color:var(--muted); }
+ol.steps li:hover { background:var(--hover); }
+ol.steps li.on { background:var(--sel); } ol.steps li.on::before { background:var(--accent); color:var(--primary-fg); }
+ol.steps li.later { opacity:.45; }
+ol.steps li.bad .what { color:var(--err); }
+ol.steps .head { display:flex; flex-wrap:wrap; gap:6px; align-items:baseline; }
+ol.steps .what { color:var(--accent); font-size:12.5px; }
+ol.steps details summary { cursor:pointer; color:var(--muted); font-size:12.5px; margin-top:2px; }
+ol.steps .pre { white-space:pre-wrap; font-size:12.5px; margin-top:4px; }
+@media (prefers-reduced-motion: reduce) { .graph .edge.active path, .graph .node .ring { animation:none; } }
+.player input[type=range] { flex:1; min-width:120px; width:auto; height:auto; padding:0; border:0; background:none; box-shadow:none; }
+.player select { width:auto; flex:none; }
+.player .muted { white-space:nowrap; font-size:12.5px; }

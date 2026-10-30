@@ -26,6 +26,13 @@ export interface RunScope {
    * IM 里陌生人（配对用户、群聊）的消息不算。经 a2a 转手、或由它建的定时任务，都沿用发起方的可信度。
    */
   trusted: boolean;
+  /**
+   * a2a 会话 id：一轮对话（以及它经 a2a 引出的所有调用、后台子任务、子任务结果交回那一轮）共用一个，
+   * 管理界面「Agent 通信」按它把调用归成一串画调用图
+   */
+  trace?: string;
+  /** 这一轮是哪次 a2a 调用引起的（a2a_log 的 id）：它再发起的调用记成那次的下一步 */
+  a2aCall?: number;
   /** 假模型：工具结果回来后的续写脚本 */
   fakeAfterTool?: any;
 }

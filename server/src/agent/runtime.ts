@@ -52,6 +52,9 @@ export interface RunRequest {
   model?: string;
   /** 脱离调用方运行（后台子任务）时显式带上跳数与调用链，防循环 */
   lineage?: { hop: number; chain: string[]; trusted?: boolean };
+  /** a2a 会话 id 与引起这一轮的那次调用（见 RunScope.trace / a2aCall） */
+  trace?: string;
+  a2aCall?: number;
   /** 可信度（见 RunScope.trusted）。不传：嵌套调用沿用上层；IM 渠道默认不可信，其它渠道可信 */
   trusted?: boolean;
   /** 直接用调用方给的对象当本轮 meta（边生成边播要在运行中途读到 needPhoto/volume） */
@@ -541,6 +544,8 @@ export class Runtime {
       chain: [...(parent?.chain ?? req.lineage?.chain ?? []), `${agent.id}|${req.sessionKey}`],
       meta: req.meta ?? {},
       trusted: req.trusted ?? parent?.trusted ?? req.lineage?.trusted ?? !IM_CHANNELS.has(req.channel),
+      trace: req.trace ?? parent?.trace ?? `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`,
+      a2aCall: req.a2aCall,
     };
     const model = this.models.resolve(req.model || agent.model);
     // 单轮上限（LRN 2026-10-30，症状「等她回复，她一直在 exec 兜圈子，把 token 烧光了」）：见 TurnGuard

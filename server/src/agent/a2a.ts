@@ -40,14 +40,36 @@ export class A2A {
         from_agent TEXT NOT NULL, from_session TEXT NOT NULL, to_agent TEXT NOT NULL, to_session TEXT NOT NULL,
         message TEXT NOT NULL, reply TEXT NOT NULL DEFAULT '', status TEXT NOT NULL, hop INTEGER NOT NULL, ms INTEGER NOT NULL DEFAULT 0);
     `);
+    // trace：同一串调用（一轮对话引出的）；parent：引起发起方这一轮的那次调用。老记录没有，各自算一串
+    for (const col of ["trace TEXT", "parent INTEGER"]) { try { this.db.exec(`ALTER TABLE a2a_log ADD COLUMN ${col}`); } catch { /* 已有 */ } }
+    this.db.exec("CREATE INDEX IF NOT EXISTS a2a_log_trace ON a2a_log(trace)");
   }
 
   log(limit = 100) { return this.db.prepare("SELECT * FROM a2a_log ORDER BY id DESC LIMIT ?").all(limit); }
 
+  /** 按会话（一串调用）汇总，新的在前 */
+  conversations(limit = 200) {
+    return (this.db.prepare(`SELECT COALESCE(trace, 'id' || id) AS trace, MIN(ts) AS ts, MAX(ts + ms / 1000.0) AS last, COUNT(*) AS calls,
+        SUM(status = 'running') AS running, SUM(status IN ('error', 'rejected')) AS failed, MAX(hop) AS hops,
+        GROUP_CONCAT(DISTINCT from_agent) AS froms, GROUP_CONCAT(DISTINCT to_agent) AS tos, MIN(id) AS first
+      FROM a2a_log GROUP BY COALESCE(trace, 'id' || id) ORDER BY MAX(id) DESC LIMIT ?`).all(limit) as any[]).map((r) => {
+      const first = this.db.prepare("SELECT from_agent, from_session, message, kind FROM a2a_log WHERE id = ?").get(r.first) as any;
+      return { ...r, root: first, agents: [...new Set([first.from_agent, ...String(r.froms).split(","), ...String(r.tos).split(",")])] };
+    });
+  }
+
+  /** 一串调用的全部记录，按发生顺序 */
+  conversation(trace: string) {
+    return trace.startsWith("id") && /^id\d+$/.test(trace)
+      ? this.db.prepare("SELECT * FROM a2a_log WHERE id = ?").all(Number(trace.slice(2)))
+      : this.db.prepare("SELECT * FROM a2a_log WHERE trace = ? ORDER BY id").all(trace);
+  }
+
   private record(e: { kind: string; from: RunScope; to: string; toSession: string; message: string; status: string; reply?: string; ms?: number }) {
-    const r = this.db.prepare(`INSERT INTO a2a_log(ts, kind, from_agent, from_session, to_agent, to_session, message, reply, status, hop, ms)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(Date.now() / 1000, e.kind, e.from.agentId, e.from.sessionKey, e.to, e.toSession,
-      e.message.slice(0, 4000), (e.reply ?? "").slice(0, 4000), e.status, e.from.hop + (e.to !== e.from.agentId ? 1 : 0), e.ms ?? 0);
+    const r = this.db.prepare(`INSERT INTO a2a_log(ts, kind, from_agent, from_session, to_agent, to_session, message, reply, status, hop, ms, trace, parent)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(Date.now() / 1000, e.kind, e.from.agentId, e.from.sessionKey, e.to, e.toSession,
+      e.message.slice(0, 4000), (e.reply ?? "").slice(0, 4000), e.status, e.from.hop + (e.to !== e.from.agentId ? 1 : 0), e.ms ?? 0,
+      e.from.trace ?? null, e.from.a2aCall ?? null);
     return Number(r.lastInsertRowid);
   }
   private finish(id: number, status: string, reply: string, ms: number) {
@@ -118,11 +140,12 @@ export class A2A {
             const logId = this.record({ kind: "send", from: scope, to: p.agent, toSession: toKey, message: p.message, status: "running" });
             const text = `[来自 ${agent.name}（agent ${agent.id}）的消息] ${p.message}`;
             const t0 = Date.now();
-            const go = () => this.rt.run({ agentId: p.agent, sessionKey: toKey, kind: "main", channel: "a2a", text, purpose: "a2a", timeoutSecs: SEND_TIMEOUT });
+            const link = { trace: scope.trace, a2aCall: logId };
+            const go = () => this.rt.run({ agentId: p.agent, sessionKey: toKey, kind: "main", channel: "a2a", text, purpose: "a2a", timeoutSecs: SEND_TIMEOUT, ...link });
             if (p.wait === false) {
               const lineage = { hop: scope.hop + 1, chain: scope.chain, trusted: scope.trusted };
               outsideScope(() => {
-                this.rt.run({ agentId: p.agent, sessionKey: toKey, kind: "main", channel: "a2a", text, purpose: "a2a", lineage })
+                this.rt.run({ agentId: p.agent, sessionKey: toKey, kind: "main", channel: "a2a", text, purpose: "a2a", lineage, ...link })
                   .then((r) => this.finish(logId, "ok", r.text, Date.now() - t0))
                   .catch((e) => this.finish(logId, "error", String(e.message), Date.now() - t0));
               });
@@ -153,6 +176,7 @@ export class A2A {
               agentId: to, sessionKey: subKey, kind: "sub" as const, channel: "a2a", purpose: "spawn", timeoutSecs: SPAWN_TIMEOUT,
               text: `[子任务，来自 ${agent.name}] ${p.task}\n\n完成后直接给出结果（会原样交回给发起方），不要寒暄。`,
               toolAllow: (n: string) => n !== "sessions_spawn" && n !== "sessions_send",
+              trace: scope.trace, a2aCall: logId,
             };
             const t0 = Date.now();
             if (p.wait) {
@@ -169,7 +193,7 @@ export class A2A {
                 let result: string;
                 try { result = (await this.rt.run({ ...req, lineage })).text; this.finish(logId, "ok", result, Date.now() - t0); }
                 catch (e: any) { result = `（失败：${e.message}）`; this.finish(logId, "error", String(e.message), Date.now() - t0); }
-                await this.deliverResult(caller, p.task, to, result);
+                await this.deliverResult(caller, p.task, to, result, logId);
               })().catch((e) => console.log(`[a2a] ⚠️  子任务结果交回失败: ${e.message}`));
             });
             return ok(`已派出子任务（${subKey}），完成后结果会交回给你。现在可以先告诉主人你已经安排了。`);
@@ -181,11 +205,12 @@ export class A2A {
   }
 
   /** 后台子任务完成：把结果作为系统事件投回发起方会话，让它决定怎么告诉主人 */
-  private async deliverResult(caller: RunScope, task: string, who: string, result: string) {
+  private async deliverResult(caller: RunScope, task: string, who: string, result: string, call: number) {
     const r = await this.rt.run({
       agentId: caller.agentId, sessionKey: caller.sessionKey, kind: caller.kind as any, channel: caller.channel,
       deviceId: caller.deviceId, spokenTo: caller.channel === "device" ? caller.deviceId : undefined, purpose: "a2a", origin: caller.origin,
       lineage: { hop: caller.hop, chain: [], trusted: caller.trusted },
+      trace: caller.trace, a2aCall: call,       // 发起方收到结果这一轮还算这串调用里的一步
       text: `[系统事件] 你之前派出的子任务「${task.slice(0, 100)}」已由 ${who} 完成。结果：\n${result}\n\n需要告诉主人就直接说要说的话（会转达给主人）；不需要就只回 NO_REPLY。`,
       keepIf: (t) => !SILENT_RE.test(t),
     });
