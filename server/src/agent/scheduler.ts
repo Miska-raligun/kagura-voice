@@ -55,6 +55,8 @@ export const SILENT_RE = /^\s*(HEARTBEAT_OK|NO_REPLY)\s*[。.!！]?\s*$/i;
 /** 错过多久以内还补跑（服务端晚启动）。超过就跳到下一次，不在白天补一串错过的任务 */
 export const MISS_WINDOW = 15 * 60;
 const BUSY_DELAY = 60;
+/** heartbeat 会话留最近几条（它自己最近说过的话） */
+export const HEARTBEAT_KEEP = 6;
 
 export const HEARTBEAT_PROMPT = "[heartbeat] 现在是例行检查时间。按 HEARTBEAT.md 的清单看看有没有需要主动告诉主人的事。"
   + "开口前先看对话历史和 <recent_activity>（最近在别处跟主人说过的话）：主人已经回答过的别再问，你或别人刚说过的话题别再提，"
@@ -338,9 +340,13 @@ export class Scheduler {
       trusted: !j.untrusted,
     };
     if (j.kind === "heartbeat") {
-      // HEARTBEAT.md 由系统提示按场景加载（soul.ts 的 heartbeat 场景）
+      // HEARTBEAT.md 由系统提示按场景加载（soul.ts 的 heartbeat 场景）。
+      // 单独一个小会话（LRN 2026-10-30，症状「heartbeat 很费 token」）：以前跑在 main 会话里，每半小时把整段主对话（最多几万 token）再发一遍，
+      // 一天十几二十次。主对话里最近说了什么由系统提示里的近况（recent_activity）带上，这里只留最近几次 heartbeat 自己说过的，免得重复
+      const hbKey = `${agent.id}:heartbeat`;
+      this.rt.store(agent.id).keepLast(hbKey, HEARTBEAT_KEEP);
       return this.rt.run({
-        ...base, sessionKey: `${agent.id}:main`, kind: "main",
+        ...base, sessionKey: hbKey, kind: "isolated",
         text: j.message || HEARTBEAT_PROMPT,
         model: j.model || agent.cheap_model || this.rt.models.cheapRef(),
         keepIf: (text) => !SILENT_RE.test(text) && !!text,

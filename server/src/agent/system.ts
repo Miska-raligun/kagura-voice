@@ -63,7 +63,8 @@ export function createAgentSystem(cfg: Config, dirs: Dirs, fake: FakeLlm | null)
   const runtime = new Runtime(registry, models, cfg.runtime);
   const memories = new Memories(runtime, cfg.embedding && !fake ? new OpenAIEmbedder(cfg.embedding) : null);
   runtime.addTools(memories.tools());
-  runtime.beforeCompact = (agent, key) => memories.flush(agent, key);
+  // 压缩时摘要模型顺手挑出要记住的事直接写进记忆。以前是压缩前用整段上下文另跑一轮「记忆冲刷」（一次就是几万 token）
+  runtime.remember = (agent, target, text) => { memories.of(agent.id).write(target, text); };
   const skills = new Skills(dirs.skills);
   runtime.skillCatalog = (a) => skills.catalog(a);
   runtime.addTools(skills.tools());

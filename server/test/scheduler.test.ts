@@ -133,7 +133,8 @@ describe("调度器", () => {
     expect(fake.calls[0].purpose).toBe("heartbeat");
     await sched.tick(sched.get("hb-main")!.next_run! + 1); await sched.idle();
     expect(delivered.map((d) => d.text)).toEqual(["该喝水啦"]);
-    expect(rt.store("main").history("main:main").length).toBe(2);
+    expect(rt.store("main").history("main:heartbeat").length).toBe(2);   // heartbeat 有自己的小会话，不再塞进主会话
+    expect(rt.store("main").history("main:main").length).toBe(0);
     // 改配置后同步：关掉
     reg.update("main", { heartbeat: { enabled: false } as any });
     sched.syncHeartbeats();

@@ -311,6 +311,16 @@ CoreS3 (MicroPython) ──HTTP──▶ server/（TypeScript 单文件可执行
   各自 `timeout_secs`；某块失败 / 为空就记下这段里用户说过的话**照样压掉**——别改回「失败就下轮重试」，那样历史只会越来越大、越来越压不动。
   默认值（2026-10）：压缩阈值 6 万 / 保留 30 条（不超过主模型上下文的六成）；模型没填时上下文 12.8 万、单次输出 8192。
   agent.json 里原样存着旧默认（16000 / 16）的当成没改过、跟新默认走。
+  ⑦ **上下文预算**（LRN 2026-10-30，症状「compact 不生效、上下文爆了不回复 / 回复很慢、heartbeat 很费 token」）：
+  以前只拿「历史」跟 `max_tokens` 比——系统提示（人设 + 记忆 + 近况）、工具定义、输出预留都没算；压缩后按条数留 30 条，一轮干活的几条大工具结果
+  本身就超阈值，压了等于没压；一轮里工具调来调去中途就撑爆。现在：`execute` 先算系统提示和工具定义，阈值 = min(agent 设置, (窗口 − 系统 − 工具 − 输出预留) × 85%)；
+  压缩按 token 留最近的（`KEEP_RATIO` × 阈值、至少最近一轮）；`pruneToolResults` 在 `transformContext` 里每次调模型前截短工具结果
+  （之前几轮的留 `OLD_TOOL_CHARS`，这一轮单条 `TOOL_RESULT_MAX_CHARS`，总量超预算从这一轮最早的截；库里存原文）；大小一律按 `msgTokens`（含思考）×「截短后」算；
+  服务商报超长（`OVERFLOW_RE`）就 `limit: 0` 狠压一次再 `execute` 一次（出错的那轮没落盘，不会重复）；回复后到了阈值七成就 `compactAfterReply` 在会话队列里后台先压（测试里 `backgroundCompact = false`）。
+  上下文过半会打一行 `📏 … 系统提示 X + 工具 Y + 历史 Z`。**记忆冲刷不再单独跑**：以前压缩前用整段上下文另跑一轮（一次几万 token），
+  现在摘要模型顺手输出「【记住】长期：/今天：」，经 `runtime.remember` 写进 MEMORY.md / 当天笔记（`beforeCompact` 留着但默认不接）。
+  **heartbeat 不再跑在 main 会话里**：每半小时把整段主对话重发一遍太费，现在是 `<agent>:heartbeat` 小会话、只留最近 `HEARTBEAT_KEEP` 条，
+  主对话最近说了什么靠近况带上。
   ⑥ **内部小任务关思考**（`ModelRegistry.quick`，症状「压缩经常超时 / 思考把输出额度占满」）：压缩摘要、长回复压成口语都走 `quick`，
   按服务商地址自动加关思考的字段（MiniMax / DeepSeek / 智谱 → `thinking: {type: "disabled"}`，通义 → `enable_thinking: false`），经 pi-ai 的
   `samplingParams` 原样并进请求体；服务商报错里提到这个字段就去掉重试、本次运行不再发；正文里的 `<think>…</think>` 剥掉。

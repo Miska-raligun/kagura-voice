@@ -114,6 +114,12 @@ export class AgentStore {
     } catch { return ""; }
   }
 
+  /** 只留最近 n 条（更早的标记为已压缩，记录还在库里）。heartbeat 会话用：记得刚说过什么就够了 */
+  keepLast(key: string, n: number) {
+    const ids = (this.db.prepare("SELECT id FROM messages WHERE session = ? AND compacted = 0 ORDER BY id DESC LIMIT ?").all(key, n + 1) as any[]).map((r) => r.id);
+    if (ids.length > n) this.db.prepare("UPDATE messages SET compacted = 1 WHERE session = ? AND id <= ?").run(key, ids[n]);
+  }
+
   reset(key: string) {
     this.db.prepare("UPDATE messages SET compacted = 1 WHERE session = ?").run(key);
     this.db.prepare("UPDATE sessions SET summary = '' WHERE key = ?").run(key);

@@ -27,5 +27,6 @@ export function makeRuntime(opts: { roles?: any[]; cheap?: string } = {}) {
   const fake = new FakeCtl();
   models.enableFake(fake);
   const rt = new Runtime(reg, models, { maxConcurrency: 4, timeoutSecs: 10 });
+  rt.backgroundCompact = false;            // 后台预压缩会抢假模型的回复队列；需要的测试自己打开
   return { root, reg, models, fake, rt };
 }
