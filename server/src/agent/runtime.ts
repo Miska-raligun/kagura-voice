@@ -176,7 +176,7 @@ export class TurnGuard {
 }
 
 /** 会话页实时看到的一轮：已完成的消息 + 正在生成的思考 / 正文 + 正在执行的工具 */
-export interface LiveRun { purpose: string; channel: string; since: number; messages: any[]; partial: { thinking: string; text: string }; tools: string[] }
+export interface LiveRun { purpose: string; channel: string; since: number; messages: any[]; partial: { thinking: string; text: string }; tools: string[]; trace?: string }
 export type LiveEvent =
   | { type: "idle" } | { type: "start"; run: LiveRun } | { type: "end"; error?: string }
   | { type: "delta"; kind: "text" | "thinking"; delta: string } | { type: "message"; message: any } | { type: "tool"; name: string; running: boolean };
@@ -531,7 +531,9 @@ export class Runtime {
     if (req.signal?.aborted) ac.abort(); else req.signal?.addEventListener("abort", onOuter, { once: true });
     const info: RunInfo = { purpose: req.purpose ?? "chat", channel: req.channel, since: Date.now(), tool: "", stage: "准备", abort: () => ac.abort(), cancelled: false };
     if (!nestedRun) this.running.set(lockKey, info);
-    const liveRun: LiveRun | null = nestedRun ? null : { purpose: info.purpose, channel: req.channel, since: info.since, messages: [], partial: { thinking: "", text: "" }, tools: [] };
+    // a2a 会话 id（见 RunScope.trace）：先算出来，实时记录里也带上——会话页据此弹出这一轮的 Agent 通信实时动画
+    const traceId = req.trace ?? runScope()?.trace ?? `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
+    const liveRun: LiveRun | null = nestedRun ? null : { purpose: info.purpose, channel: req.channel, since: info.since, messages: [], partial: { thinking: "", text: "" }, tools: [], trace: traceId };
     if (liveRun) { this.live.set(lockKey, liveRun); this.emitLive(lockKey, { type: "start", run: liveRun }); }
     let liveError = "";
     try {
@@ -544,7 +546,7 @@ export class Runtime {
       chain: [...(parent?.chain ?? req.lineage?.chain ?? []), `${agent.id}|${req.sessionKey}`],
       meta: req.meta ?? {},
       trusted: req.trusted ?? parent?.trusted ?? req.lineage?.trusted ?? !IM_CHANNELS.has(req.channel),
-      trace: req.trace ?? parent?.trace ?? `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`,
+      trace: traceId,
       a2aCall: req.a2aCall,
     };
     const model = this.models.resolve(req.model || agent.model);
@@ -719,7 +721,7 @@ export class Runtime {
       const ui = out.findIndex((m) => m.role === "user");
       if (ui >= 0) out[ui] = { ...out[ui], ksrc: { channel: req.channel, purpose: scope.purpose, ...(req.deviceId ? { device: req.deviceId } : {}) } } as any;
       if (li >= 0) out[li] = { ...out[li], kctx: {
-        sys: fixedSys, tools: fixedTools, hist: histSize, win: ctxWin, calls: assistants.length, limit, toolCount: tools.length,
+        sys: fixedSys, tools: fixedTools, hist: histSize, win: ctxWin, calls: assistants.length, limit, toolCount: tools.length, a2a: toolCalls.some((n) => n === "sessions_send" || n === "sessions_spawn") ? scope.trace : undefined,
         // 系统层对上下文做了什么：加载了哪些文件、近况、摘要、自动回忆、截短了几条旧工具结果、单轮上限有没有叫停
         trace, recent: { chars: Array.from(recent).length, items: recent.split("\n").filter((l) => /^\s*-\s/.test(l)).length },
         recall: { hits: recalled.hits, ms: recalled.ms, why: recalled.why }, pruned, guard: guard.reason || undefined,

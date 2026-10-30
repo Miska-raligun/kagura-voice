@@ -301,7 +301,7 @@ table.matrix button.cell { background:none; border:0; padding:2px 8px; font-size
 .player input[type=range] { flex:1; accent-color:var(--accent); }
 ol.steps { list-style:none; counter-reset:st; margin:0; padding:0; }
 ol.steps li { counter-increment:st; position:relative; padding:8px 10px 8px 34px; border-radius:8px; cursor:pointer; }
-ol.steps li::before { content:counter(st); position:absolute; left:8px; top:9px; width:18px; height:18px; border-radius:50%; font-size:11px; line-height:18px; text-align:center; background:var(--sel); color:var(--muted); }
+ol.steps li::before { content:attr(data-n); position:absolute; left:8px; top:9px; width:18px; height:18px; border-radius:50%; font-size:11px; line-height:18px; text-align:center; background:var(--sel); color:var(--muted); }
 ol.steps li:hover { background:var(--hover); }
 ol.steps li.on { background:var(--sel); } ol.steps li.on::before { background:var(--accent); color:var(--primary-fg); }
 ol.steps li.later { opacity:.45; }
@@ -320,3 +320,18 @@ span.avatar.ini { display:inline-flex; align-items:center; justify-content:cente
 .chip .avatar { margin-right:4px; }
 span.who { display:inline-flex; align-items:center; }
 .graph .node image.subav { opacity:.75; }
+
+/* 会话页里弹出的实时 Agent 通信：从输入框上方滑出，挤小消息区，不挡输入 */
+.a2adock { position:relative; margin:8px 0 10px; background:var(--panel2); border:1px solid var(--line2); border-radius:12px; overflow:hidden;
+  animation:dockup .4s cubic-bezier(.2,.8,.2,1); }
+@keyframes dockup { from { max-height:0; opacity:0; transform:translateY(24px); } to { max-height:60vh; opacity:1; transform:none; } }
+.a2adock .dockbar { display:flex; align-items:center; gap:10px; padding:6px 12px; border-bottom:1px solid var(--line); }
+.a2adock.small .dockbar { border-bottom:0; }
+.a2adock .dockbody { display:grid; grid-template-columns:minmax(0,1.5fr) minmax(0,1fr); gap:12px; padding:6px 12px 10px; }
+.a2adock .dockgraph svg.graph { max-height:30vh; }
+.a2adock .docksteps { overflow:auto; max-height:34vh; }
+.chat.withdock .msgs { max-height:calc(100vh - 340px - 40vh); min-height:140px; }
+@media (max-width: 900px) { .a2adock .dockbody { grid-template-columns:1fr; } .a2adock .docksteps { display:none; } }
+.a2adock .dockgraph svg.graph { max-height:34vh; }
+.a2adock .dockbody { grid-template-columns:minmax(0,2fr) minmax(0,1fr); }
+.a2adock .dockgraph svg.graph { max-height:40vh; }

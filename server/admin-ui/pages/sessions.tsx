@@ -6,6 +6,7 @@ import { api, download, enc, fmtTime, go, money } from "../api.ts";
 import { Btn, Card, Empty, Err, Pop, SideList, Split, TextArea, confirmDo, toast, toastErr, useInterval, useLoad } from "../ui.tsx";
 import { AgentPicker, Message, useAgentId } from "./common.tsx";
 import { renderMarkdown } from "../md.ts";
+import { A2ADock } from "./a2a.tsx";
 
 const CHANNEL: Record<string, string> = { webchat: "网页", device: "设备", system: "定时任务", a2a: "agent 通信", feishu: "飞书", qq: "QQ", onebot: "OneBot" };
 
@@ -78,7 +79,11 @@ function Inbox({ agent, onNew }: { agent: string; onNew: () => void }) {
   );
 }
 
-interface LiveRun { purpose: string; channel: string; since: number; messages: any[]; partial: { thinking: string; text: string }; tools: string[] }
+interface LiveRun { purpose: string; channel: string; since: number; messages: any[]; partial: { thinking: string; text: string }; tools: string[]; trace?: string }
+const A2A_TOOLS = new Set(["sessions_send", "sessions_spawn"]);
+/** 这一轮有没有找别的 agent / 派子任务（正在调，或者已经调过） */
+const usesA2A = (r: LiveRun) => r.tools.some((t) => A2A_TOOLS.has(t))
+  || r.messages.some((m) => m.role === "assistant" && (m.content ?? []).some((c: any) => c.type === "toolCall" && A2A_TOOLS.has(c.name)));
 const PURPOSE: Record<string, string> = { heartbeat: "heartbeat", cron: "定时任务", task: "待办", a2a: "agent 通信", sub: "子任务" };
 
 /** 逐行读 NDJSON */
@@ -157,6 +162,13 @@ function Conversation({ agent, skey, onChange }: { agent: string; skey: string; 
   const [sending, setSending] = useState(false);
   const [showOld, setShowOld] = useState(false);
   const box = useRef<HTMLDivElement>(null);
+  // 这一轮她找了别的 agent：底部弹出实时的 Agent 通信动画（这一轮结束后留着，等主人关；同一串调用的后续轮次接着用这个）
+  const [dock, setDock] = useState<{ trace: string; live: boolean } | null>(null);
+  const [dockClosed, setDockClosed] = useState("");
+  useEffect(() => {
+    if (run?.trace && usesA2A(run) && dockClosed !== run.trace) setDock({ trace: run.trace, live: true });
+    else if (!run) setDock((d) => (d && d.live ? { ...d, live: false } : d));
+  }, [run]);
   useEffect(() => { box.current?.scrollTo(0, box.current.scrollHeight); }, [s, run, pending]);
 
   const send = async (text: string, images: Img[], files: Att[]) => {
@@ -183,7 +195,7 @@ function Conversation({ agent, skey, onChange }: { agent: string; skey: string; 
   const events: any[] = (s.events ?? []).filter((e: any) => showOld || !msgs.length || e.ts >= msgs[0].ts || !old);
   const evs = placeEvents(events, msgs);
   return (
-    <Card class="chat" title={s.fresh ? "新对话" : `${sourceOf(agent, { key: skey, channel: s.channel ?? "" }).label} · ${s.title || skey.slice(agent.length + 1)}`} actions={!s.fresh && <>
+    <Card class={`chat ${dock ? "withdock" : ""}`} title={s.fresh ? "新对话" : `${sourceOf(agent, { key: skey, channel: s.channel ?? "" }).label} · ${s.title || skey.slice(agent.length + 1)}`} actions={!s.fresh && <>
       <Btn small onClick={async () => { const r = await api(`${base}/compact`, { body: {} }); toast(r.compacted ? "已压缩" : "太短了，不用压缩"); reload(); }}>压缩</Btn>
       <Btn small onClick={() => download(`${skey.replace(/:/g, "_")}.json`, JSON.stringify(s, null, 2))}>导出</Btn>
       <Btn small onClick={confirmDo("清空上下文？历史记录保留。", async () => { await api(`${base}/reset`, { body: {} }); toast("已清空上下文"); reload(); })}>清空上下文</Btn>
@@ -215,6 +227,7 @@ function Conversation({ agent, skey, onChange }: { agent: string; skey: string; 
           </div>
         </>}
       </div>
+      {dock && <A2ADock key={dock.trace} trace={dock.trace} live={dock.live} onClose={() => { setDockClosed(dock.trace); setDock(null); }} />}
       <Composer busy={sending || !!run} onSend={send} />
     </Card>
   );
@@ -304,6 +317,7 @@ function turnInfo(msgs: any[], end: number) {
       {c.pruned > 0 && <div>之前几轮的工具结果有 {c.pruned} 条截短后放进上下文（库里存全文）</div>}
       {c.limit && <div>压缩阈值：历史超过 {k(c.limit)} token 时压缩</div>}
       {c.guard && <div class="over">单轮上限：{c.guard}</div>}
+      {c.a2a && <div><a onClick={() => go("a2a", c.a2a)}>看这一轮的 Agent 通信 →</a></div>}
     </>}
     {total > 0 && <>
       <h5>Token</h5>

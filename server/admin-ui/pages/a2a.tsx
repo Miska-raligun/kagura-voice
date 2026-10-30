@@ -140,19 +140,10 @@ function curve(a: Node, b: Node) {
 const KIND: Record<string, string> = { send: "发消息", spawn: "派子任务" };
 const bad = (c: any) => c.status === "error" || c.status === "rejected";
 
-function Conversation({ trace, name, role }: { trace: string; name: (id: string) => string; role: (id: string) => string | undefined }) {
-  // 头像加载失败的节点退回首字
-  const [noAvatar, setNoAvatar] = useState<Record<string, boolean>>({});
-  const [d, reload, err] = useLoad(() => api<any>(`/a2a/conversations/${enc(trace)}`), [trace]);
-  const calls: any[] = d?.calls ?? [];
-  const running = calls.some((c) => c.status === "running");
-  useInterval(() => { if (running) reload(); }, 3000);
-  const W = 860, H = 380;
-  const g = useMemo(() => buildGraph(calls, name, W, H), [JSON.stringify(calls.map((c) => [c.id, c.status, c.ms]))]);
-  const n = g.steps.length;
-  // 回放位置：0..n，整数 = 第几步刚完成；默认自动从头播一遍
+/** 回放进度：0..n（整数 = 第几步刚完成）。playing 时按 speed 往前走；n 变大（实时来了新步骤）且已追到末尾就接着播 */
+function usePlayback(n: number, autoplay = true) {
   const [pos, setPos] = useState(0);
-  const [playing, setPlaying] = useState(true);
+  const [playing, setPlaying] = useState(autoplay);
   const [speed, setSpeed] = useState(1);
   const raf = useRef(0);
   useEffect(() => {
@@ -170,92 +161,160 @@ function Conversation({ trace, name, role }: { trace: string; name: (id: string)
     raf.current = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf.current);
   }, [playing, speed, n]);
-
-  // 进行中的会话：回放已经追到末尾时，新来的步骤接着播
   const prevN = useRef(n);
   useEffect(() => { if (n > prevN.current && pos >= prevN.current - 0.01) setPlaying(true); prevN.current = n; }, [n]);
+  return { pos, setPos, playing, setPlaying, speed, setSpeed, n };
+}
+type Playback = ReturnType<typeof usePlayback>;
 
-  if (!d) return <Err msg={err} />;
-  if (!calls.length) return <Card title="Agent 通信"><Empty>没有这个会话</Empty><Btn onClick={() => go("a2a")}>← 返回</Btn></Card>;
+/** 拉一串调用；有还没回来的就每秒刷新（实时） */
+export function useConversation(trace: string, keepPolling = false) {
+  const [d, reload, err] = useLoad(() => api<any>(`/a2a/conversations/${enc(trace)}`), [trace]);
+  const calls: any[] = d?.calls ?? [];
+  const running = calls.some((c) => c.status === "running");
+  useInterval(() => { if (running || keepPolling) reload(); }, 1000);
+  return { d, calls, running, err };
+}
+
+const W = 860, H = 380;
+
+/** 调用图 + 播放条 */
+function A2AGraph({ g, pb, name, role, compact }: { g: ReturnType<typeof buildGraph> & { w: number; h: number }; pb: Playback; name: (id: string) => string; role: (id: string) => string | undefined; compact?: boolean }) {
+  const [noAvatar, setNoAvatar] = useState<Record<string, boolean>>({});
+  const { pos, n } = pb;
   const byId = new Map(g.nodes.map((x) => [x.id, x]));
   const cur = Math.min(n - 1, Math.floor(pos));
   const frac = pos - Math.floor(pos);
   const done = (i: number) => i < pos;           // 这一步已经开始（含正在走的）
-  // 每个节点此刻的状态：有调用进来还没回 = 在处理
+  // 有调用进来还没回 = 在处理
   const busy = new Set<string>();
   g.steps.forEach((s, i) => {
     if (s.dir !== "go" || !done(i)) return;
     const backIdx = g.steps.findIndex((x) => x.call === s.call && x.dir === "back");
     if (backIdx < 0 || backIdx >= pos) busy.add(s.to);
   });
+  const uid = compact ? "d" : "p";
+  return (
+    <>
+      <svg viewBox={`0 0 ${g.w} ${g.h}`} class="graph">
+        <defs>
+          <marker id={`arr-${uid}`} viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor" /></marker>
+        </defs>
+        {g.steps.map((s, i) => {
+          if (!done(i)) return null;
+          const a = byId.get(s.from)!, b = byId.get(s.to)!;
+          const cv = curve(a, b);
+          const active = i === cur && frac < 1 && pos < n;
+          const cls = `edge ${s.dir} ${bad(s.call) && s.dir === "back" ? "bad" : ""} ${active ? "active" : ""} ${i === cur ? "current" : ""}`;
+          return <g class={cls}>
+            <path d={cv.d} marker-end={`url(#arr-${uid})`} />
+            {active && (() => { const p = cv.at(frac); return <circle class="pulse" cx={p.x} cy={p.y} r="6" />; })()}
+            {i === cur && <text x={cv.mid.x} y={cv.mid.y - 8} text-anchor="middle" class="elabel">
+              {s.dir === "go" ? `${KIND[s.call.kind] ?? s.call.kind}：${clip(s.call.message, 18)}` : bad(s.call) ? `失败：${clip(s.call.reply, 18)}` : `${s.call.kind === "spawn" ? "结果" : "回复"}：${clip(s.call.reply, 18)}`}
+            </text>}
+          </g>;
+        })}
+        {g.nodes.map((x, i) => (
+          <g class={`node ${busy.has(x.id) ? "busy" : ""} ${i === 0 ? "root" : ""} ${x.sub ? "sub" : ""}`} transform={`translate(${x.x},${x.y})`}
+            onClick={() => go("sessions", `${x.agent}|${x.sub ? x.session : x.agent + ":main"}`)}>
+            <title>打开 {x.label} 的会话</title>
+            {busy.has(x.id) && <circle class="ring" r="30" />}
+            <circle class="dot" r="30" />
+            {role(x.agent) !== undefined && !noAvatar[x.agent]
+              ? <>
+                <clipPath id={`av-${uid}-${i}`}><circle r="27" /></clipPath>
+                <image href={avatarUrl(role(x.agent)!)} x="-27" y="-27" width="54" height="54" preserveAspectRatio="xMidYMin slice" clip-path={`url(#av-${uid}-${i})`}
+                  class={x.sub ? "subav" : ""} onError={() => setNoAvatar((m) => ({ ...m, [x.agent]: true }))} />
+              </>
+              : <text class="ini" text-anchor="middle" dy="6">{Array.from(name(x.agent))[0]}</text>}
+            <text class="name" text-anchor="middle" y="50">{x.label}</text>
+            {busy.has(x.id) && <text class="state" text-anchor="middle" y="66">处理中…</text>}
+          </g>
+        ))}
+      </svg>
+      <div class="player">
+        <Btn small onClick={() => { if (pos >= n) pb.setPos(0); pb.setPlaying(!pb.playing); }}>{pb.playing ? "⏸ 暂停" : pos >= n ? "⟲ 重播" : "▶ 播放"}</Btn>
+        <input type="range" min="0" max={n} step="0.01" value={pos} onInput={(e) => { pb.setPlaying(false); pb.setPos(Number((e.target as HTMLInputElement).value)); }} />
+        <span class="muted">{Math.min(n, Math.ceil(pos))} / {n}</span>
+        {!compact && <select value={pb.speed} onChange={(e) => pb.setSpeed(Number((e.target as HTMLSelectElement).value))}>
+          {[0.5, 1, 2, 4].map((v) => <option value={v}>{v}×</option>)}
+        </select>}
+      </div>
+    </>
+  );
+}
+
+/** 步骤列表：和动画同步高亮，点一步跳过去 */
+function Steps({ g, pb, limit }: { g: ReturnType<typeof buildGraph>; pb: Playback; limit?: number }) {
+  const byId = new Map(g.nodes.map((x) => [x.id, x]));
+  const cur = Math.min(pb.n - 1, Math.floor(pb.pos));
+  const list = g.steps.map((s, i) => ({ s, i }));
+  const shown = limit ? list.slice(Math.max(0, Math.min(list.length - limit, cur - 1)), Math.max(0, Math.min(list.length - limit, cur - 1)) + limit) : list;
+  return (
+    <ol class="steps">{shown.map(({ s, i }) => {
+      const a = byId.get(s.from)!, b = byId.get(s.to)!;
+      const text = s.dir === "go" ? s.call.message : s.call.reply;
+      const what = s.dir === "go" ? KIND[s.call.kind] ?? s.call.kind : bad(s.call) ? (s.call.status === "rejected" ? "被拒绝" : "失败") : s.call.kind === "spawn" ? "交回结果" : "回复";
+      return (
+        <li data-n={i + 1} class={`${i === cur && pb.pos < pb.n ? "on" : ""} ${i < pb.pos ? "" : "later"} ${bad(s.call) && s.dir === "back" ? "bad" : ""}`} onClick={() => { pb.setPlaying(false); pb.setPos(i + 0.999); }}>
+          <div class="head">
+            <b>{a.label}</b> → <b>{b.label}</b> <span class="what">{what}</span>
+            <small class="muted">{new Date(s.t * 1000).toLocaleTimeString("zh-CN", { hour12: false })}{s.dir === "back" && s.call.ms ? ` · 用时 ${secs(s.call.ms)}` : ""}{s.dir === "go" && s.call.hop > 1 ? ` · 第 ${s.call.hop} 跳` : ""}</small>
+          </div>
+          {text ? (limit ? <div class="muted small">{clip(text, 60)}</div> : <details><summary>{clip(text, 80)}</summary><div class="pre">{text}</div></details>)
+            : <div class="muted small">（{s.call.status === "running" ? "还没回来" : "没有内容"}）</div>}
+        </li>
+      );
+    })}</ol>
+  );
+}
+
+function Conversation({ trace, name, role }: { trace: string; name: (id: string) => string; role: (id: string) => string | undefined }) {
+  const { d, calls, running, err } = useConversation(trace);
+  const g = useMemo(() => ({ ...buildGraph(calls, name, W, H), w: W, h: H }), [JSON.stringify(calls.map((c) => [c.id, c.status, c.ms]))]);
+  const pb = usePlayback(g.steps.length);
+  if (!d) return <Err msg={err} />;
+  if (!calls.length) return <Card title="Agent 通信"><Empty>没有这个会话</Empty><Btn onClick={() => go("a2a")}>← 返回</Btn></Card>;
   const first = calls[0], lastT = Math.max(...g.steps.map((s) => s.t));
   const failed = calls.filter(bad).length;
   return (
     <>
       <div class="titlebar"><h3>Agent 通信 <small class="muted">{fmtTime(first.ts)} · {calls.length} 次调用 · {secs((lastT - first.ts) * 1000)}{failed ? ` · ${failed} 次失败` : ""}{running ? " · 进行中" : ""}</small></h3>
         <div class="actions"><Btn kind="ghost" onClick={() => go("a2a")}>← 返回</Btn></div></div>
-      <Card class="a2agraph">
-        <svg viewBox={`0 0 ${W} ${H}`} class="graph">
-          <defs>
-            <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor" /></marker>
-          </defs>
-          {g.steps.map((s, i) => {
-            if (!done(i)) return null;
-            const a = byId.get(s.from)!, b = byId.get(s.to)!;
-            const cv = curve(a, b);
-            const active = i === cur && frac < 1 && pos < n;
-            const cls = `edge ${s.dir} ${bad(s.call) && s.dir === "back" ? "bad" : ""} ${active ? "active" : ""} ${i === cur ? "current" : ""}`;
-            return <g class={cls}>
-              <path d={cv.d} marker-end="url(#arr)" />
-              {active && (() => { const p = cv.at(frac); return <circle class="pulse" cx={p.x} cy={p.y} r="6" />; })()}
-              {i === cur && <text x={cv.mid.x} y={cv.mid.y - 8} text-anchor="middle" class="elabel">
-                {s.dir === "go" ? `${KIND[s.call.kind] ?? s.call.kind}：${clip(s.call.message, 18)}` : bad(s.call) ? `失败：${clip(s.call.reply, 18)}` : `${s.call.kind === "spawn" ? "结果" : "回复"}：${clip(s.call.reply, 18)}`}
-              </text>}
-            </g>;
-          })}
-          {g.nodes.map((x, i) => (
-            <g class={`node ${busy.has(x.id) ? "busy" : ""} ${i === 0 ? "root" : ""} ${x.sub ? "sub" : ""}`} transform={`translate(${x.x},${x.y})`}
-              onClick={() => go("sessions", `${x.agent}|${x.sub ? x.session : x.agent + ":main"}`)}>
-              <title>打开 {x.label} 的会话</title>
-              {busy.has(x.id) && <circle class="ring" r="30" />}
-              <circle class="dot" r="30" />
-              {role(x.agent) !== undefined && !noAvatar[x.agent]
-                ? <>
-                  <clipPath id={`av-${i}`}><circle r="27" /></clipPath>
-                  <image href={avatarUrl(role(x.agent)!)} x="-27" y="-27" width="54" height="54" preserveAspectRatio="xMidYMin slice" clip-path={`url(#av-${i})`}
-                    class={x.sub ? "subav" : ""} onError={() => setNoAvatar((m) => ({ ...m, [x.agent]: true }))} />
-                </>
-                : <text class="ini" text-anchor="middle" dy="6">{Array.from(name(x.agent))[0]}</text>}
-              <text class="name" text-anchor="middle" y="50">{x.label}</text>
-              {busy.has(x.id) && <text class="state" text-anchor="middle" y="66">处理中…</text>}
-            </g>
-          ))}
-        </svg>
-        <div class="player">
-          <Btn small onClick={() => { if (pos >= n) setPos(0); setPlaying(!playing); }}>{playing ? "⏸ 暂停" : pos >= n ? "⟲ 重播" : "▶ 播放"}</Btn>
-          <input type="range" min="0" max={n} step="0.01" value={pos} onInput={(e) => { setPlaying(false); setPos(Number((e.target as HTMLInputElement).value)); }} />
-          <span class="muted">{Math.min(n, Math.ceil(pos))} / {n}</span>
-          <select value={speed} onChange={(e) => setSpeed(Number((e.target as HTMLSelectElement).value))}>
-            {[0.5, 1, 2, 4].map((v) => <option value={v}>{v}×</option>)}
-          </select>
-        </div>
-      </Card>
-      <Card title="经过">
-        <ol class="steps">{g.steps.map((s, i) => {
-          const a = byId.get(s.from)!, b = byId.get(s.to)!;
-          const text = s.dir === "go" ? s.call.message : s.call.reply;
-          const what = s.dir === "go" ? KIND[s.call.kind] ?? s.call.kind : bad(s.call) ? (s.call.status === "rejected" ? "被拒绝" : "失败") : s.call.kind === "spawn" ? "交回结果" : "回复";
-          return (
-            <li class={`${i === cur && pos < n ? "on" : ""} ${done(i) ? "" : "later"} ${bad(s.call) && s.dir === "back" ? "bad" : ""}`} onClick={() => { setPlaying(false); setPos(i + 0.999); }}>
-              <div class="head">
-                <b>{a.label}</b> → <b>{b.label}</b> <span class="what">{what}</span>
-                <small class="muted">{new Date(s.t * 1000).toLocaleTimeString("zh-CN", { hour12: false })}{s.dir === "back" && s.call.ms ? ` · 用时 ${secs(s.call.ms)}` : ""}{s.dir === "go" && s.call.hop > 1 ? ` · 第 ${s.call.hop} 跳` : ""}</small>
-              </div>
-              {text ? <details><summary>{clip(text, 80)}</summary><div class="pre">{text}</div></details> : <div class="muted small">（{s.call.status === "running" ? "还没回来" : "没有内容"}）</div>}
-            </li>
-          );
-        })}</ol>
-      </Card>
+      <Card class="a2agraph"><A2AGraph g={g} pb={pb} name={name} role={role} /></Card>
+      <Card title="经过"><Steps g={g} pb={pb} /></Card>
     </>
+  );
+}
+
+/**
+ * 会话页底部弹出的实时 Agent 通信：这一轮她找了别的 agent / 派了子任务，就从下面滑出来，每秒刷新、新步骤接着播。
+ * live = 发起的那一轮还在跑（跑完了也留着，等主人关）
+ */
+export function A2ADock({ trace, live, onClose }: { trace: string; live: boolean; onClose: () => void }) {
+  const [agents] = useLoad(() => api<any[]>("/agents"));
+  const { calls, running } = useConversation(trace, live);
+  const name = (id: string) => agents?.find((a) => a.id === id)?.name ?? id;
+  const role = (id: string) => agents?.find((a) => a.id === id)?.device_role as string | undefined;
+  // 会话页里地方小：画布也小一点，节点和字看起来就大
+  const g = useMemo(() => ({ ...buildGraph(calls, name, 600, 300), w: 600, h: 300 }), [JSON.stringify(calls.map((c) => [c.id, c.status, c.ms])), !!agents]);
+  const pb = usePlayback(g.steps.length);
+  const [small, setSmall] = useState(false);
+  if (!calls.length) return null;
+  return (
+    <div class={`a2adock ${small ? "small" : ""}`}>
+      <div class="dockbar">
+        <b>Agent 通信</b>
+        <small class="muted">{calls.length} 次调用{running || live ? " · 进行中" : " · 已结束"}</small>
+        <span class="grow" />
+        <Btn small kind="ghost" onClick={() => go("a2a", trace)}>打开详情</Btn>
+        <Btn small kind="ghost" onClick={() => setSmall(!small)}>{small ? "展开" : "收起"}</Btn>
+        <Btn small kind="ghost" onClick={onClose}>✕</Btn>
+      </div>
+      {!small && <div class="dockbody">
+        <div class="dockgraph"><A2AGraph g={g} pb={pb} name={name} role={role} compact /></div>
+        <div class="docksteps"><Steps g={g} pb={pb} limit={6} /></div>
+      </div>}
+    </div>
   );
 }
