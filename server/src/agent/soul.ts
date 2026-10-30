@@ -211,7 +211,7 @@ export function buildSystemPrompt(o: SoulOpts): string {
   // 长期记忆不在提示里：告诉她系统会按每句话自动附上相关的几条，不够再自己搜
   if (o.scene !== "guest" && !want.has("MEMORY.md") && fs.existsSync(path.join(ws, "MEMORY.md"))) {
     parts.push("<memory>\n长期记忆（MEMORY.md）不全文放在这里：系统会按主人每句话自动检索，相关的几条附在那条消息前的 [相关记忆] 里。"
-      + "没附上不代表没有——涉及以前的事、约定、主人的偏好时，拿不准就 memory_search 搜一下再答。\n</memory>");
+      + "没附上不代表没有——涉及以前的事、约定、主人的偏好时，拿不准就 memory_search 搜一下再答（每日笔记只能这样查，文件名就是那天的日期，那是当时的情况、不一定是现在）。\n</memory>");
   }
   if (o.trace) {
     o.trace.notLoaded = o.scene === "guest" ? [] : [...skipped, ...(want.has("daily") ? [] : ["daily"])];

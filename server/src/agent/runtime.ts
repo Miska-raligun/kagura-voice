@@ -13,7 +13,7 @@ import type { AgentRegistry, AgentInfo } from "./registry.ts";
 import { stripThinkText, type ModelRegistry } from "./models.ts";
 import { AgentStore } from "./store.ts";
 import { toSpoken } from "../util/text.ts";
-import { BUDGETS, buildSystemPrompt, dailyNotePath, loadMode, sceneOf, turnContext, type PromptTrace, type SessionKind } from "./soul.ts";
+import { BUDGETS, buildSystemPrompt, loadMode, sceneOf, turnContext, type PromptTrace, type SessionKind } from "./soul.ts";
 import { toolAllowed, guestLocked } from "./toolpolicy.ts";
 import { runScope, withScope, type RunScope } from "./scope.ts";
 
@@ -389,7 +389,7 @@ export class Runtime {
   /** 压缩时顺手挑出来的要记住的事（长期 → MEMORY.md，今天 → 当天笔记）。以前压缩前要用整段上下文另跑一轮「记忆冲刷」，很费 */
   remember: ((agent: AgentInfo, target: "long" | "daily" | "user", text: string) => void) | null = null;
   /** 自动回忆（memory 模块注入）：按这句话检索长期记忆，返回要附上的几条（「路径：内容」）。skip = 已整篇在提示里的文件 */
-  recall: ((agent: AgentInfo, text: string, skip: string[]) => Promise<{ line: string; why: string }[]>) | null = null;
+  recall: ((agent: AgentInfo, text: string) => Promise<{ line: string; why: string }[]>) | null = null;
   /** 每个会话上一轮算出来的压缩阈值（回复后在后台压缩时用） */
   private compactLimit = new Map<string, number>();
   /** 回复后在后台预先压缩（测试里关掉，免得和假模型的回复队列抢） */
@@ -796,14 +796,11 @@ export class Runtime {
     const scene = sceneOf(scope);
     if (scene === "guest") return none("群聊 / 陌生人不检索");
     if (loadMode(scene, "MEMORY.md") === "full") return none("这个场景整篇加载了 MEMORY.md");
-    const skip = loadMode(scene, "daily") === "full"
-      ? [new Date(), new Date(Date.now() - 86400_000)].map((d) => path.relative(agent.workspace, dailyNotePath(agent.workspace, d)).split(path.sep).join("/"))
-      : [];
     const t0 = Date.now();
     let late = false;
     try {
       const hits = await Promise.race([
-        this.recall(agent, req.text, skip),
+        this.recall(agent, req.text),
         new Promise<{ line: string; why: string }[]>((r) => setTimeout(() => { late = true; r([]); }, RECALL_WAIT_MS).unref?.()),
       ]);
       const ms = Date.now() - t0;

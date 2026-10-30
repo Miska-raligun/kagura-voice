@@ -123,23 +123,27 @@ describe("压缩前冲刷", () => {
 });
 
 describe("自动回忆（长期记忆不整篇注入）", () => {
-  it("只挑真正相关的：常见词单独命中不算；今天 / 昨天的笔记已在提示里就不重复", async () => {
+  it("只挑真正相关的：常见词单独命中不算；每日笔记不参与（分不清是哪天的事）", async () => {
     const { mem, a } = setup();
     fs.writeFileSync(path.join(a.workspace, "MEMORY.md"), "- 主人爱喝无糖乌龙茶\n\n- 今天的事情很多\n\n- 家里的猫叫团子\n");
     const today = new Date();
     const pad = (n: number) => String(n).padStart(2, "0");
     const todayRel = `memory/${today.getFullYear()}-${pad(today.getMonth() + 1)}-${pad(today.getDate())}.md`;
     fs.writeFileSync(path.join(a.workspace, todayRel), "- 下午给乌龙茶续了一壶\n");
+    fs.mkdirSync(path.join(a.workspace, "memory"), { recursive: true });
+    fs.writeFileSync(path.join(a.workspace, "memory/2026-09-01.md"), "- 主人今天乌龙茶喝多了睡不着\n");
     const idx = mem.of("main");
-    const hits = await idx.recall("帮我泡杯乌龙茶吧", { skip: [todayRel] });
+    const hits = await idx.recall("帮我泡杯乌龙茶吧");
     expect(hits.map((h) => h.text)).toEqual(["- 主人爱喝无糖乌龙茶"]);
+    // 旧笔记 agent 自己 memory_search 还查得到
+    expect((await idx.search("乌龙茶", 10)).map((h) => h.path)).toContain("memory/2026-09-01.md");
     expect(await idx.recall("今天好累")).toEqual([]);          // 只撞上「今天」一个词
     expect(await idx.recall("嗯嗯")).toEqual([]);             // 太短不搜
   });
 
   it("每轮自动附上相关记忆：模型看得到，落盘的历史里没有", async () => {
     const { rt, mem, fake, a } = setup();
-    rt.recall = async (ag, text, skip) => (await mem.of(ag.id).recall(text, { skip })).map((h) => ({ line: `${h.path}：${h.text}`, why: "" }));
+    rt.recall = async (ag, text) => (await mem.of(ag.id).recall(text)).map((h) => ({ line: `${h.path}：${h.text}`, why: "" }));
     fs.writeFileSync(path.join(a.workspace, "MEMORY.md"), "- 主人爱喝无糖乌龙茶\n");
     fake.queue.push("好的", "嗯");
     await rt.run({ kind: "main", channel: "device", agentId: "main", sessionKey: "main:main", text: "帮我泡杯乌龙茶吧", trusted: true });

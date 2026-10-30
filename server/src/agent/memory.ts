@@ -176,12 +176,14 @@ export class MemoryIndex {
     return this.sync();
   }
 
-  async search(query: string, k = 6): Promise<MemoryHit[]> {
+  /** paths = 只在这些文件里找（自动回忆只看 MEMORY.md）；不给 = 全部 */
+  async search(query: string, k = 6, paths?: string[]): Promise<MemoryHit[]> {
     await this.sync();
     const scores = new Map<number, { kw: number; vec: number }>();
     const q = ftsQuery(query);
+    const inPaths = paths ? ` AND c.path IN (${paths.map(() => "?").join(",")})` : "";
     if (q) {
-      const rows = this.db.prepare("SELECT chunk_id, bm25(mem_fts) AS s FROM mem_fts WHERE mem_fts MATCH ? ORDER BY s LIMIT 30").all(q) as any[];
+      const rows = this.db.prepare(`SELECT f.chunk_id, bm25(mem_fts) AS s FROM mem_fts f JOIN mem_chunks c ON c.id = f.chunk_id WHERE mem_fts MATCH ?${inPaths} ORDER BY s LIMIT 30`).all(q, ...(paths ?? [])) as any[];
       const best = rows.length ? -rows[0].s : 0;
       for (const r of rows) scores.set(r.chunk_id, { kw: best > 0 ? -r.s / best : 1, vec: 0 });
     }
@@ -189,7 +191,7 @@ export class MemoryIndex {
     if (this.embedder) {
       try {
         const [qv] = await this.embedder.embed([query]);
-        const rows = this.db.prepare("SELECT id, embedding FROM mem_chunks WHERE embedding IS NOT NULL").all() as any[];
+        const rows = this.db.prepare(`SELECT c.id, c.embedding FROM mem_chunks c WHERE c.embedding IS NOT NULL${inPaths}`).all(...(paths ?? [])) as any[];
         const sims = rows.map((r) => ({ id: r.id, s: cosine(qv, new Float32Array(new Uint8Array(r.embedding).buffer)) }))
           .sort((a, b) => b.s - a.s).slice(0, 30);
         for (const { id, s } of sims) {
@@ -214,26 +216,29 @@ export class MemoryIndex {
   /**
    * 自动回忆：拿主人这句话检索，挑真正相关的几条（附在这一轮消息上）。关键词分数是相对最高分归一化的，
    * 最好的那条永远是 1，所以另按「命中了几个不同的词」卡一道：两字词至少中 2 个（「今天」这种常见词单独命中不算），
-   * 向量相似度够高的直接算。skip = 已经整篇在提示里的文件（今天 / 昨天的笔记）。
+   * 向量相似度够高的直接算。
+   * 只看 MEMORY.md（LRN 2026-10-30）：每日笔记记的是「当时」的事（「今天有点累」「下午去超市」），检索出来混在消息里，
+   * 模型分不清是哪天的，容易当成现在的情况；旧笔记要查让 agent 自己 memory_search（结果带文件名 = 日期）。
    */
-  async recall(query: string, o: { k?: number; maxChars?: number; skip?: string[] } = {}): Promise<MemoryHit[]> {
+  async recall(query: string, o: { k?: number; maxChars?: number; paths?: string[] } = {}): Promise<MemoryHit[]> {
+    const paths = o.paths ?? ["MEMORY.md"];
     const q = query.replace(/^\[[^\]]*\]\s*/, "").trim();
     if (Array.from(q.replace(/[\s\p{P}]/gu, "")).length < 4) return [];
     // 先把常用词从这句话里抠掉再切词：不然「主人今天」会拼出「人今」这种跨词的两字，正好撞上「主人今天…」的记忆
     let qq = q.toLowerCase();
     for (const w of STOP_TERMS) qq = qq.split(w).join(" ");
     if (!ftsQuery(qq)) return [];
-    const hits0 = await this.search(qq, 12);
+    const hits0 = await this.search(qq, 12, paths);
     // 有信息量的词：去掉常用词，再去掉在记忆里到处都是的（出现在超过 15% 的块里）
-    const total = Math.max(1, (this.db.prepare("SELECT COUNT(*) AS n FROM mem_chunks").get() as any).n);
-    const dfStmt = this.db.prepare("SELECT COUNT(*) AS n FROM mem_chunks WHERE instr(lower(text), ?) > 0");
+    const inPaths = `path IN (${paths.map(() => "?").join(",")})`;
+    const total = Math.max(1, (this.db.prepare(`SELECT COUNT(*) AS n FROM mem_chunks WHERE ${inPaths}`).get(...paths) as any).n);
+    const dfStmt = this.db.prepare(`SELECT COUNT(*) AS n FROM mem_chunks WHERE ${inPaths} AND instr(lower(text), ?) > 0`);
     const df = new Map<string, number>();
     const terms = ftsQuery(qq).split(" OR ").map((t) => t.replace(/"/g, "").replace(/ /g, "")).filter((t) => t && !STOP_TERMS.has(t))
-      .filter((t) => { const n = (dfStmt.get(t) as any).n; df.set(t, n); return n <= Math.max(3, total * 0.15); });
+      .filter((t) => { const n = (dfStmt.get(...paths, t) as any).n; df.set(t, n); return n <= Math.max(3, total * 0.15); });
     const out: MemoryHit[] = [];
     let size = 0;
     for (const h of hits0) {
-      if (o.skip?.includes(h.path)) continue;
       const body = h.text.toLowerCase();
       const hit = terms.filter((t) => body.includes(t));
       const strongVec = h.via !== "keyword" && h.score >= 0.5;
