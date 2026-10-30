@@ -29,6 +29,7 @@ import { ChannelManager } from "../channels/manager.ts";
 import path from "node:path";
 import { TaskQueue } from "./tasks.ts";
 import { taskTools } from "./tools/tasks.ts";
+import { setSharedDir } from "./persona.ts";
 
 export interface AgentSystem {
   registry: AgentRegistry;
@@ -52,6 +53,7 @@ export function createAgentSystem(cfg: Config, dirs: Dirs, fake: FakeLlm | null)
   applyBudgets(cfg.promptBudgets);
   applyLoadout(cfg.promptFiles);
   applyToolPolicy(cfg.toolPolicy);
+  setSharedDir(path.join(cfg.dataDir, "shared_persona"));
   const registry = new AgentRegistry(dirs.agents);
   registry.load(cfg.roles);
   // 假服务商模式：所有 agent 都用按脚本回复的假模型

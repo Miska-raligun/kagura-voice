@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import type { AgentInfo } from "./registry.ts";
 import { parseLocalTime, strftime } from "../util/time.ts";
+import { personaText } from "./persona.ts";
 
 /** 每个文件注入的字数上限（字符数，中文一个字算一个） */
 // 每个人设文件最多注入多少字（超出部分截掉，文件本身不动）。默认与 OpenClaw 的 bootstrapMaxChars 一致：每个文件 2 万字。
@@ -165,6 +166,32 @@ export interface SoulOpts {
   peers?: { id: string; name: string }[];
   /** 投递目标是设备时按语音口径回复（定时任务播报） */
   voiceDelivery?: boolean;
+  /** 这一轮她手上的工具名：按它生成「什么时候用哪个」（toolGuide） */
+  tools?: string[];
+}
+
+/**
+ * 系统维护的用法守则（LRN 2026-10-30，以前写在每个 agent 的 AGENTS.md 模板里，加了新机制得一个个去补）：
+ * 每个工具自己的说明管「怎么调」，这里管「什么时候该用哪个」——跨工具的取舍、系统机制（待办、传话、子任务、记忆分工）。
+ * 只写这一轮手上有的工具，新加机制改这里，所有 agent 自动跟上。
+ */
+export function toolGuide(tools: string[]): string {
+  const has = (n: string) => tools.includes(n);
+  const g: string[] = [];
+  if (has("take_photo")) g.push("要看东西（「这是什么」「帮我看看」）就 take_photo，别凭空猜。");
+  if (has("set_volume")) g.push("主人嫌声音大 / 小就 set_volume。");
+  if (has("memory_write")) g.push("值得以后记得的事用 memory_write：大多数记 long（约定、经历、计划进展）；只跟今天有关的记 daily；只有主人本人的稳定信息（称呼、家人、作息、口味习惯）才记 user。");
+  if (has("memory_search")) g.push("涉及以前的事、约定、主人的偏好，拿不准先 memory_search 再答。");
+  if (has("cron_add")) g.push("到点要做的事（提醒、「每天 / 每周 / 几点」做什么）用 cron_add 建定时任务，别口头答应了就算。");
+  if (has("photo_schedule_add")) g.push("「每天几点拍一张看看」这类用 photo_schedule_add。");
+  if (has("task_add")) g.push("又大又不急的活（改代码、整理资料、批量处理文件、写长文档），主人没说要马上做，就 task_add 记成待办，夜里静默时段做、早上汇报；主人说「现在就做」才当场做。");
+  if (has("sessions_send")) g.push("别的 agent 更合适、或要问它 / 让它知道一件事，用 sessions_send（它在单独的对话里收，这次来回接得上；前情要写进消息）。");
+  if (has("sessions_spawn")) g.push("一件能独立做完的事（查资料、整理、跑一段流程）不想占着这次对话，用 sessions_spawn 派到后台，做完结果会自动交回给你。");
+  if (has("announce")) g.push("主人明确让你「跟家里说一声」时用 announce，平时回复不用它（系统会决定要不要播）。");
+  if (has("set_presence")) g.push("主人说要出门 / 到家了，用 set_presence 记下在家状态。");
+  if (has("exec")) g.push("exec 能在这台电脑上执行命令；会删改文件、花钱、对外发东西的操作先跟主人确认。");
+  if (has("skill_read")) g.push("<skills> 里有对口的技能就先 skill_read 读全文再照做。");
+  return g.length ? `<how_to>\n${g.map((x) => `- ${x}`).join("\n")}\n</how_to>` : "";
 }
 
 export function buildSystemPrompt(o: SoulOpts): string {
@@ -175,14 +202,14 @@ export function buildSystemPrompt(o: SoulOpts): string {
   for (const f of PROMPT_FILES) {
     if (f === "daily") continue;
     const mode = loadMode(o.scene, f);
-    const t = mode ? readSafe(path.join(ws, f)).trim() : "";
+    const t = mode ? personaText(ws, f).trim() : "";
     if (t && mode === "full") parts.push(`<${f}>\n${clip(t, BUDGETS[f])}\n</${f}>`);
     else if (t) parts.push(`<${f} only="目录">\n${tocOf(f, t)}\n</${f}>`);
     if (t && (mode === "full" || mode === "toc")) {
       const n = Array.from(t).length;
       o.trace?.files.push({ name: f, mode, chars: n, clipped: mode === "full" && n > BUDGETS[f] });
     }
-    else if (!mode && f !== "HEARTBEAT.md" && f !== "MEMORY.md" && fs.existsSync(path.join(ws, f))) skipped.push(f);
+    else if (!mode && f !== "HEARTBEAT.md" && f !== "MEMORY.md" && personaText(ws, f).trim()) skipped.push(f);
   }
   // 今天和昨天的笔记：新会话也能接上最近发生的事
   if (want.has("daily")) {
@@ -199,6 +226,7 @@ export function buildSystemPrompt(o: SoulOpts): string {
     parts.push("<skills>\n可用技能（需要时用 skill_read 读全文再照做；要跑的脚本用 exec 执行）：\n"
       + o.skills.map((s) => `- ${s.name}：${s.description}`).join("\n") + "\n</skills>");
   }
+  if (o.tools) { const g = toolGuide(o.tools); if (g) parts.push(g); }
   if (o.peers?.length) {
     parts.push("<agents>\n你可以联系的其他 agent（sessions_send / sessions_spawn）：\n"
       + o.peers.map((p) => `- ${p.id}（${p.name}）`).join("\n") + "\n</agents>");

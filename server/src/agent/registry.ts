@@ -13,6 +13,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { RoleDef } from "../config.ts";
+import { personaText, sharedDir, isShared, SHARED_TEMPLATES } from "./persona.ts";
 
 export const SOUL_FILES = ["SOUL.md", "IDENTITY.md", "USER.md", "AGENTS.md", "TOOLS.md", "HEARTBEAT.md", "MEMORY.md"] as const;
 const AGENT_ID_RE = /^[A-Za-z0-9_-]{1,32}$/;
@@ -88,15 +89,7 @@ export function templates(name: string): Record<string, string> {
     "SOUL.md": `# ${name} 的灵魂\n\n你是${name}，住在主人桌上那台小小的 CoreS3 设备里。\n性格温柔、俏皮，偶尔有点小脾气；真诚，不讨好，不说空话。\n`,
     "IDENTITY.md": `# 身份\n\n- 名字：${name}\n- 形态：一台带屏幕、摄像头、麦克风和扬声器的桌面小设备\n`,
     "USER.md": "# 主人\n\n（主人的稳定偏好写在这里，例如称呼、作息、口味。）\n",
-    "AGENTS.md": [
-      "# 守则",
-      "",
-      "- 语音对话时回复要口语化、简短，不要用 markdown、列表、表情符号。",
-      "- 需要看东西时调用 take_photo；要调音量时调用 set_volume。",
-      "- 值得长期记住的事（偏好、约定、重要日子）用 memory_write 记下来；不确定以前聊过什么时先 memory_search。",
-      "- 主人让你「每天/每周/几点」做某事时，用 cron_add 建定时任务。",
-      "",
-    ].join("\n"),
+    "AGENTS.md": SHARED_TEMPLATES["AGENTS.md"],
     "TOOLS.md": "# 工具备注\n\n",
     "HEARTBEAT.md": "# Heartbeat 清单\n\n（每次 heartbeat 检查这里列的事；没有需要主人知道的就只回 HEARTBEAT_OK。）\n",
     "MEMORY.md": "# 长期记忆\n\n",
@@ -228,7 +221,8 @@ export class AgentRegistry {
     const { id: _id, ...rest } = conf;
     fs.writeFileSync(path.join(dir, "agent.json"), JSON.stringify(rest, null, 2));
     // 指到一个已有的工作区（比如 OpenClaw 的）时别覆盖里面的人设
-    for (const [f, t] of Object.entries(templates(conf.name))) if (!fs.existsSync(path.join(ws, f))) fs.writeFileSync(path.join(ws, f), t);
+    // 共享的 USER / AGENTS / TOOLS 不再每个 agent 建一份（要补充时管理界面里再建）
+    for (const [f, t] of Object.entries(templates(conf.name))) if (!fs.existsSync(path.join(ws, f)) && !(sharedDir() && isShared(f))) fs.writeFileSync(path.join(ws, f), t);
     const info = this.read(id);
     this.agents.set(id, info);
     return info;
@@ -293,6 +287,6 @@ export class AgentRegistry {
   readFile(id: string, name: string): string {
     const a = this.get(id);
     if (!a) return "";
-    try { return fs.readFileSync(path.join(a.workspace, name), "utf8"); } catch { return ""; }
+    return personaText(a.workspace, name);
   }
 }

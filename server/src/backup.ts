@@ -104,6 +104,7 @@ function filesOf(dataDir: string, id: string): { files: string[]; sqlite: string
     }
     case "channels": return { files: [...file("channels.json"), ...file("clients.json")], sqlite: [] };
     case "jobs": return { files: [...file("reminders.json"), ...file("photo_schedules.json")], sqlite: file("system.sqlite") };
+    case "shared": return { files: dir("shared_persona"), sqlite: [] };
     case "device": return { files: [...dir("device_files"), ...dir("app_images")], sqlite: [] };
     case "snapshots": return { files: dir("snapshots"), sqlite: [] };
   }
@@ -127,6 +128,7 @@ export function catalog(dataDir: string): CatalogItem[] {
     );
   }
   items.push(
+    { id: "shared", group: "全局", label: "共享人设（USER.md、AGENTS.md、TOOLS.md，所有 agent 共用）", bytes: size("shared"), default: true },
     { id: "skills", group: "全局", label: "全局技能", bytes: size("skills"), default: true },
     { id: "extensions", group: "全局", label: "全局扩展与 MCP 服务器配置", bytes: size("extensions"), secret: true, default: true },
     { id: "packages", group: "全局", label: "扩展包（npm / git 装的导入后重新下载）", bytes: size("packages"), default: true },
@@ -227,7 +229,7 @@ export function itemOf(rel: string): string | null {
   const map: Record<string, string> = {
     "config.json": "settings", "roles_state.json": "settings", "minimax_voices.json": "settings", skills: "skills", extensions: "extensions", "mcp.json": "extensions",
     "packages.json": "packages", packages: "packages", "channels.json": "channels", "clients.json": "channels", "system.sqlite": "jobs", "reminders.json": "jobs",
-    "photo_schedules.json": "jobs", device_files: "device", app_images: "device", snapshots: "snapshots",
+    "photo_schedules.json": "jobs", device_files: "device", app_images: "device", snapshots: "snapshots", shared_persona: "shared",
   };
   return map[top] ?? null;
 }

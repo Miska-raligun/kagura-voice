@@ -590,7 +590,7 @@ export class Runtime {
     const promptOf = (summary?: string, trace?: PromptTrace) => buildSystemPrompt({
       agent, scene: sceneOf(scope), channel: req.channel, summary, trace,
       extra: [...(req.extraSystem ?? []), recent], skills: this.skillCatalog(agent), voiceDelivery: req.voiceDelivery,
-      peers: tools.some((t) => t.name.startsWith("sessions_")) ? peers : [],
+      peers: tools.some((t) => t.name.startsWith("sessions_")) ? peers : [], tools: tools.map((t) => t.name),
     });
     // 上下文预算：窗口减去系统提示、工具定义、输出预留，剩下的才是历史（含摘要）能用的
     const ctxWin = model.contextWindow || DEFAULT_CONTEXT_WINDOW;

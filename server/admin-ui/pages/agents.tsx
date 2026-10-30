@@ -118,15 +118,21 @@ function Basic({ a, save }: { a: any; save: (p: any) => Promise<void> }) {
 }
 
 const SOUL_DESC: Record<string, string> = {
-  "SOUL.md": "性格、语气、价值观", "IDENTITY.md": "名字、自我介绍、外形", "USER.md": "主人的稳定偏好",
-  "AGENTS.md": "操作守则：何时用哪个工具、语音要短……", "TOOLS.md": "工具使用备注", "HEARTBEAT.md": "heartbeat 检查清单",
+  "SOUL.md": "性格、语气、价值观", "IDENTITY.md": "名字、自我介绍、外形", "USER.md": "主人的称呼、家人、作息、口味与习惯",
+  "AGENTS.md": "你定的规矩（工具和系统机制怎么用系统会自动告诉她，不用写）", "TOOLS.md": "这台电脑的环境与经验：路径、网站、命令", "HEARTBEAT.md": "heartbeat 检查清单",
   "MEMORY.md": "长期记忆",
 };
 
-export function FileEditor({ id, path, budget, budgets, onBudget }: { id: string; path: string; budget?: number; budgets?: Record<string, number>; onBudget?: () => void }) {
+/** 编辑一个文件。src = 读写地址（默认这个 agent 的文件；共享人设传 /shared/file） */
+export function FileEditor({ id, path, budget, budgets, onBudget, src, onSaved, actions }: {
+  id: string; path: string; budget?: number; budgets?: Record<string, number>; onBudget?: () => void;
+  src?: string; onSaved?: () => void; actions?: any;
+}) {
+  const url = `${src ?? `/agents/${enc(id)}/file`}?path=${enc(path)}`;
   const [text, setText] = useState<string | null>(null);
   const [orig, setOrig] = useState("");
-  useEffect(() => { setText(null); api(`/agents/${enc(id)}/file?path=${enc(path)}`).then((r) => { setText(r.content); setOrig(r.content); }); }, [id, path]);
+  const [ver, setVer] = useState(0);
+  useEffect(() => { setText(null); api(url).then((r) => { setText(r.content); setOrig(r.content); }); }, [url, ver]);
   if (text === null) return <div class="muted">加载中…</div>;
   const n = chars(text.trim());
   return (
@@ -140,24 +146,57 @@ export function FileEditor({ id, path, budget, budgets, onBudget }: { id: string
           if (!v || !(nb > 0)) return;
           try { await api("/config", { method: "PUT", body: { prompt_budgets: { ...budgets, [path]: nb } } }); toast(`注入上限改成 ${nb}，下一轮对话生效`); onBudget?.(); } catch (e) { toastErr(e); }
         }}>改上限</Btn>}
+        {actions?.(() => setVer(ver + 1))}
         <span class="grow" />
         {text !== orig && <span class="muted">未保存</span>}
-        <Btn kind="primary" disabled={text === orig} onClick={async () => { await api(`/agents/${enc(id)}/file?path=${enc(path)}`, { method: "PUT", body: { content: text } }); setOrig(text); toast("已保存，下一轮对话生效"); }}>保存</Btn>
+        <Btn kind="primary" disabled={text === orig} onClick={async () => { await api(url, { method: "PUT", body: { content: text } }); setOrig(text); toast("已保存，下一轮对话生效"); onSaved?.(); }}>保存</Btn>
       </div>
     </>
   );
 }
 
+/** 恢复默认：先备份原文件（工作目录 .persona-backup-<时间>/），再换成默认内容 */
+function ResetBtns({ agent, path, shared, refresh }: { agent: string; path: string; shared?: boolean; refresh: () => void }) {
+  if (path === "MEMORY.md") return null;
+  const run = (who: string, msg: string) => confirmDo(msg, async () => {
+    try {
+      const r = await api<any>("/persona/reset", { method: "POST", body: { agent: who, path } });
+      toast(`已恢复默认${r.backups?.length ? `，原文件备份在 ${r.backups.join("；")}` : ""}`);
+      refresh();
+    } catch (e) { toastErr(e); }
+  });
+  if (shared) return <Btn small kind="ghost" onClick={run("_shared", `把共享的 ${path} 恢复成默认内容？原文件会先备份。`)}>恢复默认</Btn>;
+  return <>
+    <Btn small kind="ghost" onClick={run(agent, `把这个 agent 的 ${path} 恢复默认？原文件会先备份。`)}>恢复默认</Btn>
+    <Btn small kind="ghost" onClick={run("*", `把所有 agent 的 ${path} 都恢复默认？每个原文件都会先备份。`)}>所有 agent 一起恢复</Btn>
+  </>;
+}
+
 function SoulFiles({ id }: { id: string }) {
   const [meta, reloadMeta] = useLoad(() => api("/meta"));
+  const [list, reloadList] = useLoad(() => api<any[]>(`/agents/${enc(id)}/files`), [id]);
   const [file, setFile] = useState("SOUL.md");
+  const [part, setPart] = useState<"shared" | "own">("shared");
   const files: string[] = meta?.soul_files ?? Object.keys(SOUL_DESC);
+  const info = (list ?? []).find((x: any) => x.path === file);
+  const isShared = !!info?.shared;
+  const showShared = isShared && part === "shared";
   return (
     <>
     <Card>
       <Tabs value={file} onChange={setFile} tabs={files.map((f) => [f, f.replace(".md", "")] as [string, string])} />
       <p class="muted">{SOUL_DESC[file]}</p>
-      <FileEditor id={id} path={file} budget={meta?.budgets?.[file]} budgets={meta?.budgets} onBudget={reloadMeta} />
+      {isShared && <div class="row">
+        <Tabs value={part} onChange={setPart} tabs={[["shared", "共享（所有 agent）"], ["own", info.extra ? `只对这个 agent 的补充（${info.extra} 字）` : "只对这个 agent 的补充（无）"]]} />
+        <span class="grow" />
+        {part === "own" && info.extra > 0 && <Btn small kind="ghost" onClick={confirmDo(`把这个 agent 补充的内容挪进共享的 ${file}（所有 agent 都会看到），自己的清空？两边都会先备份。`, async () => {
+          try { const r = await api<any>("/persona/promote", { method: "POST", body: { agent: id, path: file } }); toast(`挪进共享了 ${r.moved} 字`); reloadList(); setPart("shared"); } catch (e) { toastErr(e); }
+        })}>挪进共享</Btn>}
+      </div>}
+      {isShared && part === "own" && <p class="muted">她看到的是共享那份 + 这里的补充（和共享重复的行会去掉）。没有要补充的就留空。</p>}
+      <FileEditor key={`${id}|${file}|${showShared}`} id={id} path={file} src={showShared ? "/shared/file" : undefined}
+        budget={meta?.budgets?.[file]} budgets={meta?.budgets} onBudget={reloadMeta} onSaved={reloadList}
+        actions={(refresh: () => void) => <ResetBtns agent={id} path={file} shared={showShared} refresh={() => { refresh(); reloadList(); }} />} />
     </Card>
     {meta?.loadout && <Loadout id={id} lo={meta.loadout} reload={reloadMeta} />}
     </>

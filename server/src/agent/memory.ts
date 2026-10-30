@@ -9,6 +9,7 @@ import type { DatabaseSync } from "node:sqlite";
 import type { AgentInfo } from "./registry.ts";
 import { dailyNotePath } from "./soul.ts";
 import { strftime } from "../util/time.ts";
+import { isShared, personaText, sharedPath } from "./persona.ts";
 
 export interface Embedder {
   embed(texts: string[]): Promise<Float32Array[]>;
@@ -267,11 +268,12 @@ export class MemoryIndex {
     if (target === "user") {
       // 关于主人的一条稳定信息是一句短话；长的多半是事情经过 / 进展，改记长期记忆（USER.md 每轮常驻，要少而精）
       if (Array.from(t).length > USER_ITEM_MAX) return this.write("long", t, now);
-      const p = path.join(ws, "USER.md");
+      // 有共享人设就记进共享的 USER.md：谁记的全家 agent 都知道
+      const p = sharedPath("USER.md") || path.join(ws, "USER.md");
       const cur = fs.existsSync(p) ? fs.readFileSync(p, "utf8") : "";
       const at = cur.indexOf(USER_AUTO_HEAD);
       const auto = at >= 0 ? cur.slice(at + USER_AUTO_HEAD.length) : "";
-      if (auto.includes(t)) return "USER.md";
+      if (auto.includes(t) || personaText(ws, "USER.md").includes(t)) return "USER.md";
       if (Array.from(auto).length + Array.from(t).length > USER_AUTO_MAX) {
         console.log(`[memory] ⚠️  ${this.agent.id} USER.md 的「自动记录」满了（${USER_AUTO_MAX} 字），这条改记进 MEMORY.md——到管理界面整理一下 USER.md`);
         return this.write("long", t, now);

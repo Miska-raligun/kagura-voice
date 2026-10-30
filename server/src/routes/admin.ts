@@ -7,7 +7,8 @@ import path from "node:path";
 import { json, viaProxy, type Req, type Res, type Router } from "../http/router.ts";
 import type { Ctx } from "../ctx.ts";
 import type { AgentSystem } from "../agent/system.ts";
-import { SOUL_FILES } from "../agent/registry.ts";
+import { SOUL_FILES, templates } from "../agent/registry.ts";
+import { SHARED_FILES, SHARED_TEMPLATES, isShared, ownExtra, sharedDir, sharedPath } from "../agent/persona.ts";
 import { POLICY, applyToolPolicy } from "../agent/toolpolicy.ts";
 import { BUDGETS, LOADOUT, SCENES, PROMPT_FILES, PRIVATE_FILES, TOC_FILES, applyBudgets, applyLoadout } from "../agent/soul.ts";
 import { Memories } from "../agent/tools/memory.ts";
@@ -160,7 +161,14 @@ export function registerAdmin(r: Router, ctx: Ctx, sys: AgentSystem) {
   };
   get("/api/admin/agents/<id>/files", (req) => {
     const a = agentOr404(req.params.id);
-    const list: { path: string; size: number }[] = [...SOUL_FILES].map((f) => ({ path: f as string, size: fs.existsSync(path.join(a.workspace, f)) ? fs.statSync(path.join(a.workspace, f)).size : 0 }));
+    const list: { path: string; size: number; shared?: boolean; extra?: number }[] = [...SOUL_FILES].map((f) => {
+      const p = path.join(a.workspace, f);
+      const size = fs.existsSync(p) ? fs.statSync(p).size : 0;
+      // 共享的三份：extra = 这个 agent 自己多出来的字数（0 = 只用共享的）
+      if (!sharedDir() || !isShared(f)) return { path: f as string, size };
+      const extra = ownExtra(fs.readFileSync(sharedPath(f), "utf8"), size ? fs.readFileSync(p, "utf8") : "");
+      return { path: f as string, size, shared: true, extra: Array.from(extra).length };
+    });
     for (const f of fs.readdirSync(path.join(a.workspace, "memory")).sort().reverse()) if (f.endsWith(".md")) list.push({ path: `memory/${f}`, size: fs.statSync(path.join(a.workspace, "memory", f)).size });
     return json(list);
   });
@@ -175,6 +183,70 @@ export function registerAdmin(r: Router, ctx: Ctx, sys: AgentSystem) {
     if (typeof content !== "string") return json({ error: "content 必须是字符串" }, 400);
     fs.writeFileSync(p, content);
     return json({ status: "ok", path: rel, chars: Array.from(content).length });
+  });
+
+  // ── 共享人设（USER / AGENTS / TOOLS 全家一份，agent 自己的同名文件只写补充）与恢复默认 ──
+  const sharedFileOr400 = (rel: string) => { if (!sharedDir() || !isShared(rel)) throw Object.assign(new Error("只有 USER.md / AGENTS.md / TOOLS.md 是共享的"), { status: 400 }); return sharedPath(rel); };
+  get("/api/admin/shared/files", () => json(sharedDir() ? SHARED_FILES.map((f) => ({ path: f, size: fs.existsSync(sharedPath(f)) ? fs.statSync(sharedPath(f)).size : 0 })) : []));
+  get("/api/admin/shared/file", (req) => {
+    const rel = req.query.get("path") ?? "";
+    const p = sharedFileOr400(rel);
+    return json({ path: rel, content: fs.existsSync(p) ? fs.readFileSync(p, "utf8") : "" });
+  });
+  put("/api/admin/shared/file", (req) => {
+    const rel = req.query.get("path") ?? "";
+    const p = sharedFileOr400(rel);
+    const content = (req.json() ?? {}).content;
+    if (typeof content !== "string") return json({ error: "content 必须是字符串" }, 400);
+    fs.writeFileSync(p, content);
+    return json({ status: "ok", path: rel, chars: Array.from(content).length });
+  });
+  /** 改之前先把原文件留一份：<目录>/.persona-backup-<时间>/<文件> */
+  const backupFile = (dir: string, rel: string) => {
+    const p = path.join(dir, rel);
+    if (!fs.existsSync(p) || !fs.readFileSync(p, "utf8").trim()) return "";
+    const d = new Date();
+    const stamp = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "0")}${String(d.getDate()).padStart(2, "0")}-${String(d.getHours()).padStart(2, "0")}${String(d.getMinutes()).padStart(2, "0")}${String(d.getSeconds()).padStart(2, "0")}`;
+    const bdir = path.join(dir, `.persona-backup-${stamp}`);
+    fs.mkdirSync(bdir, { recursive: true });
+    fs.copyFileSync(p, path.join(bdir, rel));
+    return path.relative(dir, path.join(bdir, rel)).split(path.sep).join("/");
+  };
+  /** 恢复默认：agent = 某个 id / "*"（所有 agent）/ "_shared"（共享那份）。MEMORY.md 不行——那是她的记忆，不是设定 */
+  post("/api/admin/persona/reset", (req) => {
+    const { agent, path: rel } = req.json() ?? {};
+    if (!(SOUL_FILES as readonly string[]).includes(rel) || rel === "MEMORY.md") return json({ error: "这个文件不能恢复默认" }, 400);
+    if (agent === "_shared") {
+      const p = sharedFileOr400(rel);
+      const backup = backupFile(path.dirname(p), rel);
+      fs.writeFileSync(p, SHARED_TEMPLATES[rel]);
+      return json({ status: "ok", reset: ["共享"], backups: backup ? [backup] : [] });
+    }
+    const targets = agent === "*" ? registry.list() : [agentOr404(String(agent))];
+    const reset: string[] = [], backups: string[] = [];
+    for (const a of targets) {
+      const backup = backupFile(a.workspace, rel);
+      // 共享的三份：agent 自己的恢复成「没有补充」（只用共享的）；其它按模板
+      const def = sharedDir() && isShared(rel) ? "" : templates(a.name)[rel] ?? "";
+      fs.writeFileSync(path.join(a.workspace, rel), def);
+      reset.push(a.id);
+      if (backup) backups.push(`${a.id}: ${backup}`);
+    }
+    return json({ status: "ok", reset, backups });
+  });
+  /** 把 agent 自己那份里多出来的内容挪进共享那份（追加到末尾），自己的清空（先备份） */
+  post("/api/admin/persona/promote", (req) => {
+    const { agent, path: rel } = req.json() ?? {};
+    const a = agentOr404(String(agent));
+    const sp = sharedFileOr400(rel);
+    const own = path.join(a.workspace, rel);
+    const extra = ownExtra(fs.readFileSync(sp, "utf8"), fs.existsSync(own) ? fs.readFileSync(own, "utf8") : "");
+    if (!extra) return json({ status: "ok", moved: 0 });
+    backupFile(path.dirname(sp), rel);
+    const backup = backupFile(a.workspace, rel);
+    fs.writeFileSync(sp, fs.readFileSync(sp, "utf8").replace(/\n*$/, "\n\n") + extra.replace(/^#\s.*\n*/, "") + "\n");
+    fs.writeFileSync(own, "");
+    return json({ status: "ok", moved: Array.from(extra).length, backup });
   });
 
   // ── 会话 ──

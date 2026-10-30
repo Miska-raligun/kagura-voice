@@ -1,5 +1,7 @@
 // 记忆工具：memory_search / memory_get / memory_write（§6.4），以及压缩前的「记忆冲刷」。
 import fs from "node:fs";
+import path from "node:path";
+import { isShared, personaText } from "../persona.ts";
 import { Type } from "@earendil-works/pi-ai";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import type { RunScope } from "../scope.ts";
@@ -62,8 +64,11 @@ export class Memories {
         execute: async (_id, p: any) => {
           try {
             const f = Memories.memoryPath(agent, String(p.path));
-            if (!fs.existsSync(f)) return fail("没有这个文件");
-            const all = fs.readFileSync(f, "utf8").split(/\r?\n/);
+            // USER / AGENTS / TOOLS 读到的是「共享 + 自己的补充」，和系统提示里的目录行号一致
+            const rel = path.relative(agent.workspace, f).split(path.sep).join("/");
+            const text = isShared(rel) ? personaText(agent.workspace, rel) : fs.existsSync(f) ? fs.readFileSync(f, "utf8") : null;
+            if (text === null || (isShared(rel) && !text.trim())) return fail("没有这个文件");
+            const all = text.split(/\r?\n/);
             const from = Math.max(1, Math.trunc(p.from ?? 1));
             const n = Math.min(400, Math.max(1, Math.trunc(p.lines ?? 200)));
             return ok(all.slice(from - 1, from - 1 + n).join("\n"));

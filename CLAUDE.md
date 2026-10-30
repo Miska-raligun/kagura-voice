@@ -371,6 +371,11 @@ CoreS3 (MicroPython) ──HTTP──▶ server/（TypeScript 单文件可执行
   先从这句话里抠掉常用词（`STOP_TERMS`）再切两字词、再去掉在记忆里到处都是的（出现在超过 15% 的块里）；中 2 个，或中 1 个很少见的（≤2 块），或向量 ≥0.5；最多 5 条 / 1200 字；**清单每一项单独成块**（`chunkMarkdown`，改切块要加 `CHUNKER_VERSION`，旧索引自动重建），**只检索 MEMORY.md**——每日笔记记的是当时的事，混进来模型分不清哪天、会当成现在（LRN 2026-10-30），旧笔记由 agent 自己 memory_search；最多等 `RECALL_WAIT_MS`），以 `RECALL_TAG` 开头附在**这一轮用户消息**里——不进系统提示（前缀缓存），
   落盘前 `stripRecall` 去掉。关于主人本人的稳定信息走常驻的 USER.md：压缩摘要的「【记住】主人：」和 `memory_write target=user` 追加到 USER.md 末尾 `USER_AUTO_HEAD` 那节，
   去重、上限 `USER_AUTO_MAX`，满了改记 MEMORY.md 并打日志，不碰手写部分。**USER.md 只放主人本人的稳定个人信息**（LRN 2026-10-30，症状「什么都往 USER.md 写」：MEMORY.md 不常驻后，模型觉得写进 USER 才「看得见」）：memory_write 默认 / 拿不准用 long、user 排最后且列明「不是 user」的；压缩摘要大多写「长期：」；单条超过 `USER_ITEM_MAX`（80 字）的改记 MEMORY.md。旧版整表保存过的默认（`OLD_DEFAULT`）当没改过、跟新默认走。
+- **共享人设与系统守则（`agent/persona.ts`、`soul.toolGuide`，LRN 2026-10-30，症状「每个 agent 七个人设文件维护太累；加了新机制要一个个去补 AGENTS.md」）**：
+  USER / AGENTS / TOOLS 全家一份，在 `<数据目录>/shared_persona/`（导出项 `shared`）；agent 自己的同名文件只写补充，`personaText` = 共享 + 自己多出来的行（和共享重复的行、只剩标题 / 括号说明的都去掉）。
+  **读这三个文件一律走 `personaText`**（系统提示、`memory_get`、`registry.readFile`），别再直接读 `workspace/USER.md`；`memory_write target=user` 写进共享的 USER.md。新建 agent 不再建这三份。
+  SOUL / IDENTITY / HEARTBEAT / MEMORY 仍每个 agent 一份。管理界面「人设文件」：共享 / 只对这个 agent 的补充两栏，「挪进共享」「恢复默认」「所有 agent 一起恢复」（都先备份到 `.persona-backup-<时间>/`，MEMORY.md 不给恢复）。
+  **工具和系统机制「什么时候用哪个」由系统写**：`toolGuide(这一轮的工具名)` → `<how_to>`，只写手上有的工具；新加机制改这里，所有 agent 自动跟上，**别再往 AGENTS.md 模板里加工具守则**。
 - **近况（`Runtime.recentActivity`，LRN 2026-10-26，症状「heartbeat / 主动聊天老问已经说过的事；换个 agent 又问一遍」）**：
   每个会话只看得见自己的历史——飞书私聊（没开 owner_main 时）、网页聊天、独立定时任务、别的 agent 各说各的，跨会话以前只能靠 agent 自己写记忆文件。
   现在每轮（只给可信会话、不给子任务 / 记忆冲刷）从库里摘最近 `RECENT_HOURS`（48）小时、**别处**跟主人的往来：本 agent 的其它会话 + 其他 agent 的，
