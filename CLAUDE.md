@@ -381,6 +381,10 @@ CoreS3 (MicroPython) ──HTTP──▶ server/（TypeScript 单文件可执行
   才删标记——别提前到 `setup()` 结束，那时还不知道新代码能不能跟服务端说上话；
   ④ `ota_state.json` 只记自己装过的文件，删除只删这些（手动传的文件不碰）；换了图要清 `ui._role_hit`/`_img_missing`；
   ⑤ `rev` 算法两边必须一致（`DeviceFiles.rev` ↔ `ota._rev`），`import_sim` 里专门对过。
+  ⑥ **反方向：从设备取回图片**（LRN 2026-10-30，症状「图当初用 File Manager 直接传到设备上，服务端没有，手机页面 / 头像没图、原图也找不到了」）：
+  管理界面按钮 → `POST /api/admin/device-files/pull` → MQTT `{"action":"upload_res"}` → 设备空闲时 `ota.upload_res()` 把 flash 上 `resource/[角色/]*.jpg` 逐张
+  `POST /device/upload-res` → 最后 `sync-result` 报 `scope: "upload"`。服务端只在点了之后 10 分钟内、受信设备、JPEG、`resource/` 下才收，**已有的不覆盖**（409）；
+  设备心跳 `pull: 1` 才显示按钮（旧代码先「更新设备代码」）。
 - **待办必须写状态行才算完成**（`tasks.ts` 的 `verdictOf` / `MAX_ROUNDS`，LRN 2026-10-30，症状「报了已完成实际没做完」）：模型说一句「接下来我改 X」就结束本轮、
   输出到上限被截断（`RunResult.stopReason === "length"`）、工具报错了却说搞定了，以前一律记 done。现在最后必须单独一行「状态：完成 / 没做完：… / 需要主人：…」，
   没写或被截断就在同一会话里用 `CONTINUE_PROMPT` 催，最多 `MAX_ROUNDS` 轮、总时长不超过单件上限；只有「完成」是 done，其余 `partial`（汇报照实说「没做完：…」），

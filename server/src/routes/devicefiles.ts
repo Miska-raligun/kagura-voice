@@ -17,10 +17,16 @@ const RES_SYNC_DEBOUNCE_MS = 1500;
 export interface SyncResult { scope: string; ok: boolean; changed: number; removed: number; error: string; ts: number }
 
 /** 设备固件认不认 sync 命令：带 ota 同步模块的固件心跳里有 ota/fw/res 字段（旧固件收到命令直接忽略） */
+/** 点了「从设备取回图片」之后多久内收设备传来的图 */
+const PULL_WINDOW_MS = 10 * 60_000;
+
 export const otaCapable = (hb: Record<string, any>) => hb.ota === 1 || "fw" in hb || "res" in hb;
 
 export function registerDeviceFiles(r: Router, ctx: Ctx, files: DeviceFiles, appImgs?: AppImages) {
   const results = new Map<string, SyncResult>();
+  /** 「从设备取回图片」：设备 → 允许上传到的时刻；以及这次收了几张 */
+  const pulling = new Map<string, number>();
+  const pulled = new Map<string, number>();
   let resTimer: NodeJS.Timeout | null = null;
 
   /** 给设备发同步命令。dev 为空 = 所有见过的设备 */
@@ -52,6 +58,26 @@ export function registerDeviceFiles(r: Router, ctx: Ctx, files: DeviceFiles, app
     return bytes(b, p.endsWith(".jpg") ? "image/jpeg" : "text/plain; charset=utf-8");
   });
 
+  /**
+   * 设备把自己 flash 上的图传回来（管理界面「从设备取回图片」→ MQTT upload_res → ota.upload_res()）。
+   * 只在管理界面点了之后 PULL_WINDOW 内、受信设备、resource/ 下的 JPEG 才收；服务端已有的不覆盖（409）。
+   */
+  r.post("/device/upload-res", (req) => {
+    let dev: string, p: string;
+    try { dev = validateDeviceId(req.query.get("device_id") ?? req.header("X-Device-Id") ?? ""); p = checkPath(req.query.get("p") ?? ""); }
+    catch (e: any) { return json({ error: e.message }, 400); }
+    if (!p.startsWith("resource/")) return json({ error: "只收图片" }, 400);
+    if ((pulling.get(dev) ?? 0) < Date.now() || !ctx.deviceTrusted(req, dev)) return json({ error: "没有发起取回，或设备未受信" }, 403);
+    const data = req.body;
+    if (data.length < 4 || data[0] !== 0xff || data[1] !== 0xd8) return json({ error: "不是 JPEG" }, 400);
+    if (files.isCustom(p)) return json({ status: "exists" }, 409);
+    files.put(p, data);
+    pulled.set(dev, (pulled.get(dev) ?? 0) + 1);
+    console.log(`[files] ⬆️  ${dev} 传回 ${p}（${data.length >> 10}KB）`);
+    resChanged();
+    return json({ status: "ok" });
+  });
+
   r.post("/device/sync-result", (req) => {
     const d = req.json() ?? {};
     const dev = validateDeviceId(d.device_id ?? "cores3");
@@ -60,6 +86,7 @@ export function registerDeviceFiles(r: Router, ctx: Ctx, files: DeviceFiles, app
       error: String(d.error ?? "").slice(0, 200), ts: now(),
     };
     results.set(dev, res);
+    if (res.scope === "upload") pulling.delete(dev);
     console.log(`[files] ${res.ok ? "✅" : "⚠️ "} ${dev} 同步(${res.scope}) ${res.ok ? `更新 ${res.changed} 个、删除 ${res.removed} 个` : res.error}`);
     return json({ status: "ok" });
   });
@@ -83,7 +110,7 @@ export function registerDeviceFiles(r: Router, ctx: Ctx, files: DeviceFiles, app
       roles: ctx.roles.all().map((ro) => ({ id: ro.id, name: ro.name })),
       devices: [...ctx.hb.devices.entries()].map(([id, rec]) => ({
         id, online: t - rec.ts < 200, ota_capable: otaCapable(rec.data),
-        code_rev: rec.data.fw ?? null, res_rev: rec.data.res ?? null, fw_version: rec.data.fwv ?? null,
+        code_rev: rec.data.fw ?? null, res_rev: rec.data.res ?? null, fw_version: rec.data.fwv ?? null, can_pull: !!rec.data.pull,
         last_sync: results.get(id) ?? null,
       })),
       mqtt: ctx.mqtt.ok,
@@ -132,6 +159,22 @@ export function registerDeviceFiles(r: Router, ctx: Ctx, files: DeviceFiles, app
     const targets = known.filter((id) => !unsupported.includes(id) && !offline.includes(id) && !upToDate.includes(id));
     for (const x of targets) { results.delete(x); sendSync(scope, x); }
     return json({ sent: targets, unsupported, offline, up_to_date: upToDate });
+  }));
+
+  /** 从设备取回图片：{ device }。设备空闲时把 flash 上 resource/ 里的 jpg 传回来，服务端已有的不覆盖 */
+  r.add("POST", "/api/admin/device-files/pull", guard((req) => {
+    const d = req.json() ?? {};
+    if (!ctx.mqtt.ok) return json({ error: "MQTT 不可用" }, 503);
+    const dev = validateDeviceId(String(d.device ?? ""));
+    const rec = ctx.hb.devices.get(dev);
+    if (!rec || now() - rec.ts >= 200) return json({ error: `${dev} 不在线` }, 409);
+    if (!rec.data.pull) return json({ error: `${dev} 的设备代码还不支持传图回来，先点「更新设备代码」` }, 409);
+    pulling.set(dev, Date.now() + PULL_WINDOW_MS);
+    pulled.set(dev, 0);
+    results.delete(dev);
+    ctx.mqtt.publish(`kagura/cmd/${dev}`, { action: "upload_res" });
+    console.log(`[files] ⬇️  请 ${dev} 传回设备上的图片`);
+    return json({ sent: dev });
   }));
 
   if (appImgs) registerAppImages(r, ctx, files, appImgs, guard, imagesChanged);

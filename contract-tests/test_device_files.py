@@ -98,3 +98,37 @@ def test_old_firmware_flagged_not_synced(srv):
         assert r["sent"] == [] and r["up_to_date"] == ["files3"]
     finally:
         d.close()
+
+
+def test_pull_images_from_device(srv):
+    """「从设备取回图片」：管理界面点了才收，受信设备、只收 JPEG、服务端已有的不覆盖。"""
+    d = Device(srv, "files4")
+    try:
+        srv.post("/heartbeat", json={"device_id": "files4", "ota": 1})
+        srv.post("/api/admin/devices/files4/trust", json={"trusted": True})
+        up = lambda p, body=JPG: srv.request("POST", f"/device/upload-res?device_id=files4&p={p}", data=body,
+                                             headers={"Content-Type": "image/jpeg", "X-Device-Id": "files4"})
+        # 没点「取回」不收
+        assert up("resource/img_bg.jpg").status_code == 403
+        # 固件不认 → 管理界面直接说要先更新代码
+        r = srv.post("/api/admin/device-files/pull", json={"device": "files4"})
+        assert r.status_code == 409 and "更新设备代码" in r.json()["error"]
+        srv.post("/heartbeat", json={"device_id": "files4", "ota": 1, "pull": 1})
+        assert srv.post("/api/admin/device-files/pull", json={"device": "files4"}).status_code == 200
+        d.wait("cmd", lambda m: m.get("action") == "upload_res", timeout=8)
+        assert _put(srv, "resource/files4keep/img_bg.jpg", JPG + b"mine").status_code == 200
+        assert up("resource/img_shake.jpg").status_code == 200
+        assert up("resource/files4keep/img_bg.jpg").status_code == 409       # 服务端已有：不覆盖
+        assert up("resource/img_bg.jpg", b"not a jpeg").status_code == 400
+        assert up("src/app.py").status_code == 400
+        assert srv.get("/device/file?p=resource/img_shake.jpg").content == JPG
+        assert srv.get("/device/file?p=resource/files4keep/img_bg.jpg").content == JPG + b"mine"
+        srv.post("/device/sync-result", json={"device_id": "files4", "scope": "upload", "ok": True, "changed": 1, "removed": 1})
+        dev = next(x for x in srv.get("/api/admin/device-files").json()["devices"] if x["id"] == "files4")
+        assert dev["can_pull"] and dev["last_sync"]["scope"] == "upload"
+        # 回报完就关窗口
+        assert up("resource/img_recording.jpg").status_code == 403
+    finally:
+        for p in ("resource/img_shake.jpg", "resource/files4keep/img_bg.jpg"):
+            srv.request("DELETE", f"/api/admin/device-files?p={p}")
+        d.close()

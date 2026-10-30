@@ -79,7 +79,7 @@ def _save_state():
 def _publish_info():
     """把同步状态交给心跳上报。"""
     st = _load_state()
-    info = {"ota": 1}      # 能力标记：管理界面靠它区分「固件太旧、不认 sync 命令」和「还没同步过」
+    info = {"ota": 1, "pull": 1}   # 能力标记：ota = 认 sync 命令；pull = 能把设备上的图传回服务端（upload_res）
     for k_src, k_dst in (("code", "fw"), ("res", "res"), ("ver", "fwv")):
         if st.get(k_src):
             info[k_dst] = st[k_src]
@@ -403,6 +403,62 @@ def _sync_code(entries, rev, ver):
 
 
 # ── 入口 ───────────────────────────────────────────────────────
+
+def upload_res():
+    """把设备上 resource/ 里的 jpg（含各角色目录）传回服务端：管理界面「从设备取回图片」。
+    用 File Manager 手动传到设备上的图服务端看不到，手机页面和管理界面的头像就没图可用。
+    一张一张传（每张 ≤100KB 量级，整张读进来再发），服务端已经有的它自己跳过，不会被覆盖。"""
+    cfg.St.stage = "ota"
+    found = []
+    todo = [(cfg.BASE_DIR + "/resource", "resource", 0)]   # resource/ 和下面一层角色目录
+    while todo:
+        d, rel, depth = todo.pop()
+        try:
+            names = uos.listdir(d)
+        except OSError:
+            continue
+        for nm in names:
+            full = d + "/" + nm
+            try:
+                is_dir = uos.stat(full)[0] & 0x4000
+            except OSError:
+                continue
+            if is_dir:
+                if depth == 0:
+                    todo.append((full, rel + "/" + nm, 1))
+            elif nm.endswith(".jpg") and _safe(rel + "/" + nm):
+                found.append((rel + "/" + nm, full))
+    sent = 0
+    kept = 0
+    err = ""
+    for p, full in found:
+        hw._wdt_feed()
+        gc.collect()
+        data = None
+        try:
+            with open(full, "rb") as f:
+                data = f.read()
+            resp = urequests.post(
+                cfg.SERVER_BASE + "/device/upload-res?device_id=" + cfg.DEVICE_ID + "&p=" + p,
+                data=data, headers={"Content-Type": "image/jpeg", "X-Device-Id": cfg.DEVICE_ID},
+                timeout=cfg.REQUEST_TIMEOUT_SHORT,
+            )
+            code = resp.status_code
+            resp.close()
+            if code == 200:
+                sent += 1
+            elif code == 409:
+                kept += 1
+            else:
+                err = "{} http {}".format(p, code)
+        except Exception as e:
+            err = "{} {}".format(p, e)
+        data = None
+        if err and "http 403" in err:
+            break                       # 没有授权（超时 / 设备没受信），后面的也不用试了
+    print("[ota] upload_res: sent", sent, "kept", kept, "err", err)
+    _report("upload", not err, changed=sent, removed=kept, error=err)
+
 
 def run_sync(scope, quiet=False):
     """主循环空闲时调用（MQTT sync 命令 / 开机）。quiet=True：开机那次，没变化就不上报。"""

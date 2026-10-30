@@ -90,14 +90,20 @@ export function DeviceFiles() {
         <Btn small onClick={() => sync("res")}>同步图片</Btn>
         <Btn small kind="primary" onClick={() => sync("code")}>更新设备代码</Btn></>}>
         {!d.mqtt && <p class="over">MQTT 不可用，没法通知设备。</p>}
-        {d.devices.length ? <table><thead><tr><th>设备</th><th>图片</th><th>代码</th><th>最近一次同步</th></tr></thead>
+        {d.devices.length ? <table><thead><tr><th>设备</th><th>图片</th><th>代码</th><th>最近一次同步</th><th /></tr></thead>
           <tbody>{d.devices.map((x: any) => (
             <tr>
               <td>{x.id} {!x.online && <Badge s="stopped" text="离线" />}</td>
               <td>{x.ota_capable ? <RevBadge dev={x.res_rev} want={d.res_rev} /> : <Badge s="error" text="固件太旧，不支持" />}</td>
               <td>{x.ota_capable ? <RevBadge dev={x.code_rev} want={d.code_rev} unknown="未知（手动烧录）" /> : <Badge s="error" text="先用 USB 刷一次" />}{x.fw_version && <small class="muted"> {x.fw_version}</small>}</td>
               <td>{x.last_sync ? <>{x.last_sync.ok ? <Badge s="ok" text="成功" /> : <Badge s="error" text="失败" />}{" "}
-                <small class="muted">{x.last_sync.ok ? `更新 ${x.last_sync.changed}、删除 ${x.last_sync.removed}` : x.last_sync.error} · {ago(Date.now() / 1000 - x.last_sync.ts)}</small></> : "—"}</td>
+                <small class="muted">{x.last_sync.scope === "upload"
+                  ? (x.last_sync.ok ? `取回 ${x.last_sync.changed} 张，${x.last_sync.removed} 张服务端已有` : x.last_sync.error)
+                  : x.last_sync.ok ? `更新 ${x.last_sync.changed}、删除 ${x.last_sync.removed}` : x.last_sync.error} · {ago(Date.now() / 1000 - x.last_sync.ts)}</small></> : "—"}</td>
+              <td class="actions">{x.ota_capable && x.online && <Btn small kind="ghost" title={x.can_pull ? "把设备上的图传回服务端（服务端已有的不覆盖）" : "设备代码太旧，先点「更新设备代码」"}
+                disabled={!x.can_pull} onClick={async () => {
+                  try { await api("/device-files/pull", { body: { device: x.id } }); toast(`已通知 ${x.id}，设备空闲时会把图传回来`); reload(); } catch (e) { toastErr(e); }
+                }}>从设备取回图片</Btn>}</td>
             </tr>))}</tbody></table> : <Empty>暂无设备</Empty>}
         <p class="muted">图片上传后自动同步；代码更新需在设备屏幕上确认，启动失败会自动回滚。</p>
         {d.devices.some((x: any) => !x.ota_capable) && <p class="over">部分设备固件不支持在线更新：请先通过 USB 上传固件包中的 <code>flash/main.py</code> 与 <code>flash/kagura/src/*.py</code>。</p>}

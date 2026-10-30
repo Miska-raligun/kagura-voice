@@ -213,6 +213,8 @@ def process_mqtt_queue():
                 _stream_runner(cmd)
         elif action == "sync":
             ota.run_sync(cmd.get("scope", "res"))   # 管理界面传了图 / 点了「更新设备代码」
+        elif action == "upload_res":
+            ota.upload_res()                         # 管理界面「从设备取回图片」
 
 
         # stream_stop：不在直播中收到就没有意义，丢弃即可
