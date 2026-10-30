@@ -338,6 +338,9 @@ CoreS3 (MicroPython) ──HTTP──▶ server/（TypeScript 单文件可执行
   上下文过半会打一行 `📏 … 系统提示 X + 工具 Y + 历史 Z`。**记忆冲刷不再单独跑**：以前压缩前用整段上下文另跑一轮（一次几万 token），
   现在摘要模型顺手输出「【记住】长期：/今天：」，经 `runtime.remember` 写进 MEMORY.md / 当天笔记（`beforeCompact` 留着但默认不接）。
   **heartbeat 不再跑在 main 会话里**：每半小时把整段主对话重发一遍太费，现在是 `<agent>:heartbeat` 小会话、只留最近 `HEARTBEAT_KEEP` 条，
+  **`keepLast` 只能在用户消息处切**（LRN 2026-10-30，症状「heartbeat 一直 400」）：按条数硬切会切在工具调用和结果之间，留下孤儿 toolResult。
+  另外 `repairHistory` 在发给模型前去掉没配对的工具调用 / 结果（打 `🩹`），库里不动——**任何新的「截历史」逻辑都要在一轮开头切**。
+
   主对话最近说了什么靠近况带上。**主动说出去的话要记进接收方会话**（`Runtime.note`）：heartbeat / 定时任务 / 待办汇报投递成功后，
   把那句话以「[heartbeat]（你主动开口…）+ 助手消息」一对记进接收方的会话——设备走 `runtime.sessionKey(agent, "device", dev)`，
   IM 走 `ChannelManager.sessionFor(target)`（`channels_sessions.json` 记着每个聊天实际用的会话，主人私聊开了 owner_main 就是 main）。

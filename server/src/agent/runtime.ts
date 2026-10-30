@@ -175,6 +175,32 @@ export class TurnGuard {
   }
 }
 
+/**
+ * 发给模型前把历史里没配对的工具调用 / 结果去掉：服务商要求每条工具结果都能找到前面那次调用、每次调用都有结果，
+ * 缺一边就整个请求 400（2026-10-30 heartbeat 会话被按条数硬切后就是这样，之后每轮都失败）。库里不动，只是这次不发
+ */
+export function repairHistory(msgs: Message[], label = ""): Message[] {
+  const calls = new Set<string>(), results = new Set<string>();
+  for (const m of msgs as any[]) {
+    if (m.role === "assistant") for (const c of m.content ?? []) if (c.type === "toolCall") calls.add(c.id);
+    if (m.role === "toolResult") results.add(m.toolCallId);
+  }
+  let fixed = 0;
+  const out: Message[] = [];
+  for (const m of msgs as any[]) {
+    if (m.role === "toolResult" && !calls.has(m.toolCallId)) { fixed++; continue; }
+    if (m.role === "assistant" && (m.content ?? []).some((c: any) => c.type === "toolCall" && !results.has(c.id))) {
+      const content = m.content.filter((c: any) => !(c.type === "toolCall" && !results.has(c.id)));
+      fixed++;
+      if (content.length) out.push({ ...m, content });
+      continue;
+    }
+    out.push(m);
+  }
+  if (fixed) console.log(`[agent] 🩹 ${label} 历史里有 ${fixed} 处工具调用 / 结果没配对，这次发给模型时先去掉`);
+  return out;
+}
+
 /** 会话页实时看到的一轮：已完成的消息 + 正在生成的思考 / 正文 + 正在执行的工具 */
 export interface LiveRun { purpose: string; channel: string; since: number; messages: any[]; partial: { thinking: string; text: string }; tools: string[]; trace?: string }
 export type LiveEvent =
@@ -581,7 +607,8 @@ export class Runtime {
     }
     info.stage = "生成回复";
     // kctx 是存在助手消息上的「这一轮上下文构成」统计，只给管理界面看，别发给模型
-    const history = store.history(req.sessionKey).map((h) => { const { kctx: _k, ksrc: _s, ...m } = h.msg as any; return m as Message; });
+    const history = repairHistory(store.history(req.sessionKey).map((h) => { const { kctx: _k, ksrc: _s, ...m } = h.msg as any; return m as Message; }),
+      `${agent.id} ${req.sessionKey}`);
     const session = store.getSession(req.sessionKey);
     const trace: PromptTrace = { scene: sceneOf(scope), files: [], notLoaded: [], daily: 0, skills: 0, peers: 0, summary: 0 };
     const systemPrompt = promptOf(session?.summary, trace);

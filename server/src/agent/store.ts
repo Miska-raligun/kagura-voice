@@ -119,9 +119,16 @@ export class AgentStore {
   }
 
   /** 只留最近 n 条（更早的标记为已压缩，记录还在库里）。heartbeat 会话用：记得刚说过什么就够了 */
+  // 只在一轮的开头（用户消息）切（LRN 2026-10-30，症状「heartbeat 报 400」）：以前按条数硬切，常常切在「发出工具调用」和「工具结果」之间——
+  // 调用被压掉、结果留下，下一轮服务商找不到这条结果对应的调用就拒绝整个请求。最近一轮本身就超过 n 条时整轮留着
   keepLast(key: string, n: number) {
-    const ids = (this.db.prepare("SELECT id FROM messages WHERE session = ? AND compacted = 0 ORDER BY id DESC LIMIT ?").all(key, n + 1) as any[]).map((r) => r.id);
-    if (ids.length > n) this.db.prepare("UPDATE messages SET compacted = 1 WHERE session = ? AND id <= ?").run(key, ids[n]);
+    const rows = this.db.prepare("SELECT id, role FROM messages WHERE session = ? AND compacted = 0 ORDER BY id DESC").all(key) as any[];
+    if (rows.length <= n) return;
+    let i = n - 1;
+    while (i >= 0 && rows[i].role !== "user") i--;                 // 往新的方向找：保留区从一条用户消息开始
+    if (i < 0) { i = n - 1; while (i < rows.length && rows[i].role !== "user") i++; }   // 最近一轮就超过 n 条：整轮留着
+    if (i >= rows.length - 1) return;                                // 前面没有可压的了
+    this.db.prepare("UPDATE messages SET compacted = 1 WHERE session = ? AND compacted = 0 AND id < ?").run(key, rows[i].id);
   }
 
   reset(key: string) {
