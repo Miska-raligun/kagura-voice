@@ -238,3 +238,7 @@ table.matrix button.cell { background:none; border:0; padding:2px 8px; font-size
 .msgs .sysev { font-size:12px; color:var(--muted); margin:6px 0 10px; padding:6px 10px; border:1px dashed var(--line, rgba(127,127,127,.3)); border-radius:8px; }
 .msgs .sysev summary { cursor:pointer; }
 .msgs .sysev > div { margin:3px 0 0 18px; }
+.chips { display:flex; flex-wrap:wrap; gap:6px; margin:10px 0 6px; }
+.chips a { font-size:12px; padding:3px 9px; border-radius:999px; border:1px solid var(--line, rgba(127,127,127,.3)); color:var(--muted); cursor:pointer; text-decoration:none; }
+.chips a.on { color:var(--fg); border-color:var(--accent, currentColor); }
+.msg .who small.src { margin-left:6px; padding:0 6px; border-radius:6px; border:1px solid var(--line, rgba(127,127,127,.3)); }

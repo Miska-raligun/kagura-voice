@@ -461,7 +461,7 @@ export class Runtime {
     return this.serial(`${agentId}|${sessionKey}`, async () => {
       store.touchSession(sessionKey, sessionKey.endsWith(":main") ? "main" : "chat", sessionKey.split(":")[1] ?? "system");
       store.append(sessionKey, [
-        { role: "user", content: [{ type: "text", text: `[${tag}]（你主动开口，下面是你发出去的话）` }], timestamp: t } as any,
+        { role: "user", content: [{ type: "text", text: `[${tag}]（你主动开口，下面是你发出去的话）` }], timestamp: t, ksrc: { channel: "system", purpose: "note", tag } } as any,
         { role: "assistant", content: [{ type: "text", text: text.trim() }], api: "openai-completions", provider: "kagura", model: "note", usage: zero, stopReason: "stop", timestamp: t } as any,
       ]);
     }).catch((e) => console.log(`[agent] ⚠️  记进会话 ${sessionKey} 失败: ${e.message}`));
@@ -574,7 +574,7 @@ export class Runtime {
     }
     info.stage = "生成回复";
     // kctx 是存在助手消息上的「这一轮上下文构成」统计，只给管理界面看，别发给模型
-    const history = store.history(req.sessionKey).map((h) => { const { kctx: _k, ...m } = h.msg as any; return m as Message; });
+    const history = store.history(req.sessionKey).map((h) => { const { kctx: _k, ksrc: _s, ...m } = h.msg as any; return m as Message; });
     const session = store.getSession(req.sessionKey);
     const trace: PromptTrace = { scene: sceneOf(scope), files: [], notLoaded: [], daily: 0, skills: 0, peers: 0, summary: 0 };
     const systemPrompt = promptOf(session?.summary, trace);
@@ -710,6 +710,9 @@ export class Runtime {
       const out = fresh.map((m) => stripImages(stripRecall(m), agent.workspace));
       // 这一轮的上下文构成（估算）记在最后一条助手消息上：会话页每轮下面显示 token 明细用
       const li = out.map((m) => m.role).lastIndexOf("assistant");
+      // 这条消息从哪来（同一个会话里可能混着设备、飞书、网页的消息，比如主会话）：会话页标在「用户」旁边
+      const ui = out.findIndex((m) => m.role === "user");
+      if (ui >= 0) out[ui] = { ...out[ui], ksrc: { channel: req.channel, purpose: scope.purpose, ...(req.deviceId ? { device: req.deviceId } : {}) } } as any;
       if (li >= 0) out[li] = { ...out[li], kctx: {
         sys: fixedSys, tools: fixedTools, hist: histSize, win: ctxWin, calls: assistants.length, limit, toolCount: tools.length,
         // 系统层对上下文做了什么：加载了哪些文件、近况、摘要、自动回忆、截短了几条旧工具结果、单轮上限有没有叫停

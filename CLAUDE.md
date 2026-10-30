@@ -312,6 +312,9 @@ CoreS3 (MicroPython) ──HTTP──▶ server/（TypeScript 单文件可执行
   近况条数、自动回忆命中（`recallFor` 返回 hits / 用时 / 没附的原因）、截短的旧工具结果条数、单轮上限叫停原因，会话页 `TurnContext`（⚙️）显示。
   压缩不属于某一轮，记成会话事件（`AgentStore.addEvent`，`events` 表，每会话留 200 条）：`compact`（`trigger` = before / background / overflow / manual，压了多少、剩多少、记进了哪些记忆）、
   `compact_failed`；会话接口带 `events`，页面按时间穿插（`SysEvent` 🗜️）。新加系统层对上下文的处理时也照这个记，别只打日志。
+  **会话来源**：所有入口（设备、飞书 / QQ、网页、heartbeat、定时任务、待办、子任务）的会话都在 agent 库里，会话页一律能看、能实时跟。
+  落盘时第一条用户消息带 `ksrc`（渠道 / 用途 / 设备），`Runtime.note` 记进来的带 `purpose: "note"`；和 `kctx` 一样**发给模型前去掉**。
+  列表按 key 认来源（`sourceOf`：`:main` 主会话、`:heartbeat` / `:cron:` / `:task:` / `:sub:` 后台），每 5 秒刷新。
   ④ **跨会话互相等待**（2026-10-24 真机日志：worker 的 heartbeat 拿着 `worker:main` 去 `sessions_send` 等 main，同时 main 那边一轮拿着 `main:main` 等 worker；
   手机设备 `device_in_main` 也走 `worker:main`，于是手机消息永远排不上）：`scope.chain` 只看得见同一条调用链，两条各自起头的链互等它看不出来。
   `Runtime.run` 记 `waitsFor`（拿着锁的会话 → 它在等的会话），发起嵌套等待前顺着走一圈，成环就立刻失败（日志 `🔁 互相等待`）；

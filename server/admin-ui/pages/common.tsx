@@ -33,6 +33,14 @@ function UserText({ text }: { text: string }) {
 }
 
 /** 一条消息的展示：用户 / 助手（Markdown 渲染，含工具调用）/ 工具结果（折叠） */
+const SRC: Record<string, string> = { webchat: "网页", device: "设备", feishu: "飞书", qq: "QQ", onebot: "QQ", a2a: "agent", system: "系统" };
+const PURPOSE_SRC: Record<string, string> = { heartbeat: "heartbeat", cron: "定时任务", task: "待办" };
+/** 这条用户消息从哪来：飞书 / 设备 cores3 / heartbeat… */
+function srcLabel(k: { channel: string; purpose?: string; device?: string }) {
+  if (k.purpose && PURPOSE_SRC[k.purpose]) return PURPOSE_SRC[k.purpose];
+  return (SRC[k.channel] ?? k.channel) + (k.device ? ` ${k.device}` : "");
+}
+
 export function Message({ m, agent = "" }: { m: any; agent?: string }) {
   const upl = (rel: string) => `/api/admin/agents/${encodeURIComponent(agent)}/uploads?path=${encodeURIComponent(rel)}`;
   const imgRef = (t: string) => /^\[图片 (uploads\/[^\]]+)\]$/.exec(t.trim())?.[1];
@@ -52,7 +60,7 @@ export function Message({ m, agent = "" }: { m: any; agent?: string }) {
   }
   return (
     <div class={`msg ${cls} ${m.compacted ? "old" : ""}`}>
-      <div class="who">{msg.role === "user" ? "用户" : "助手"}{time}{m.compacted ? <small>（已压缩）</small> : null}{msg.isError && <small class="over"> 出错</small>}</div>
+      <div class="who">{msg.role === "user" ? (msg.ksrc?.purpose === "note" ? `她主动说的（${msg.ksrc.tag}）` : "用户") : "助手"}{msg.role === "user" && msg.ksrc && msg.ksrc.purpose !== "note" ? <small class="src">{srcLabel(msg.ksrc)}</small> : null}{time}{m.compacted ? <small>（已压缩）</small> : null}{msg.isError && <small class="over"> 出错</small>}</div>
       {parts.map((c: any) => {
         // 运行时自动附在每条消息前的 [时间…] 行，淡化显示
         if (c.type === "text" && /^\[时间 [^\]]*\]$/.test(c.text)) return <div class="muted small">{c.text}</div>;

@@ -3,16 +3,39 @@
 // 路由：#/sessions/<agent>|<会话 key>
 import { useEffect, useRef, useState } from "preact/hooks";
 import { api, download, enc, fmtTime, go, money } from "../api.ts";
-import { Btn, Card, Empty, Err, Split, TextArea, confirmDo, toast, toastErr, useLoad } from "../ui.tsx";
+import { Btn, Card, Empty, Err, Split, TextArea, confirmDo, toast, toastErr, useInterval, useLoad } from "../ui.tsx";
 import { AgentPicker, Message, useAgentId } from "./common.tsx";
 import { renderMarkdown } from "../md.ts";
 
 const CHANNEL: Record<string, string> = { webchat: "网页", device: "设备", system: "定时任务", a2a: "agent 通信", feishu: "飞书", qq: "QQ", onebot: "OneBot" };
 
+/**
+ * 会话从哪来。按 key 认后台的几种（heartbeat / 定时任务 / 待办 / 子任务），其余看渠道；
+ * <agent>:main 是主会话（设备、主人私聊开了 owner_main 都进这里）
+ */
+function sourceOf(agent: string, s: { key: string; channel: string }): { group: string; label: string } {
+  const rest = s.key.slice(agent.length + 1);
+  if (rest === "main") return { group: "main", label: "主会话" };
+  if (rest === "heartbeat") return { group: "bg", label: "heartbeat" };
+  if (rest.startsWith("cron:")) return { group: "bg", label: "定时任务" };
+  if (rest.startsWith("task:")) return { group: "bg", label: "待办" };
+  if (rest.startsWith("sub:")) return { group: "bg", label: "子任务" };
+  if (s.channel === "a2a") return { group: "bg", label: "agent 通信" };
+  if (["feishu", "qq", "onebot"].includes(s.channel)) return { group: "im", label: CHANNEL[s.channel] ?? s.channel };
+  if (s.channel === "device") return { group: "device", label: "设备" };
+  if (s.channel === "webchat") return { group: "web", label: "网页" };
+  return { group: "bg", label: CHANNEL[s.channel] ?? s.channel };
+}
+const GROUPS: [string, string][] = [["", "全部"], ["main", "主会话"], ["web", "网页"], ["device", "设备"], ["im", "IM"], ["bg", "后台"]];
+
 export function Sessions({ arg }: { arg: string }) {
   const agent = useAgentId(arg);
   const key = arg.split("|")[1] ?? "";
   const [list, reload, err] = useLoad(() => (agent ? api<any[]>(`/agents/${enc(agent)}/sessions`) : Promise.resolve([])), [agent]);
+  // 飞书、设备、heartbeat 随时会新开会话 / 开始回复：列表每 5 秒刷新一次
+  useInterval(reload, 5000);
+  const [group, setGroup] = useState("");
+  const shown = (list ?? []).filter((s) => !group || sourceOf(agent, s).group === group);
   const newChat = () => go("sessions", `${agent}|${agent}:webchat:${Date.now().toString(36)}`);
   return (
     <>
@@ -20,10 +43,14 @@ export function Sessions({ arg }: { arg: string }) {
       <Split left={<>
         <Btn kind="primary" onClick={newChat}>＋ 新对话</Btn>
         <Err msg={err} />
-        {list?.length ? <ul class="list">{list.map((s) => (
+        <div class="chips">{GROUPS.map(([g, l]) => {
+          const n = g ? (list ?? []).filter((s) => sourceOf(agent, s).group === g).length : (list ?? []).length;
+          return n || !g ? <a class={g === group ? "on" : ""} onClick={() => setGroup(g)}>{l}{g ? ` ${n}` : ""}</a> : null;
+        })}</div>
+        {shown.length ? <ul class="list">{shown.map((s) => (
           <li class={s.key === key ? "on" : ""} onClick={() => go("sessions", `${agent}|${s.key}`)}>
             <b>{s.title || s.key.slice(agent.length + 1)}</b>
-            <small>{CHANNEL[s.channel] ?? s.channel} · {s.messages} 条 · {fmtTime(s.updated)}{s.busy ? " · 回复中" : ""}</small>
+            <small>{sourceOf(agent, s).label} · {s.messages} 条 · {fmtTime(s.updated)}{s.busy ? " · 回复中" : ""}</small>
           </li>))}</ul> : <Empty>暂无会话</Empty>}
       </>}>
         {key ? <Conversation key={key} agent={agent} skey={key} onChange={reload} /> : <Inbox agent={agent} onNew={newChat} />}
@@ -152,7 +179,7 @@ function Conversation({ agent, skey, onChange }: { agent: string; skey: string; 
   // 系统事件（压缩等）按时间穿插：已压缩的消息隐藏时，早于第一条可见消息的事件也不显示
   const events: any[] = (s.events ?? []).filter((e: any) => showOld || !msgs.length || e.ts >= msgs[0].ts || !old);
   return (
-    <Card class="chat" title={s.fresh ? "新对话" : `${CHANNEL[s.channel] ?? s.channel ?? ""} · ${s.title || skey.slice(agent.length + 1)}`} actions={!s.fresh && <>
+    <Card class="chat" title={s.fresh ? "新对话" : `${sourceOf(agent, { key: skey, channel: s.channel ?? "" }).label} · ${s.title || skey.slice(agent.length + 1)}`} actions={!s.fresh && <>
       <Btn small onClick={async () => { const r = await api(`${base}/compact`, { body: {} }); toast(r.compacted ? "已压缩" : "太短了，不用压缩"); reload(); }}>压缩</Btn>
       <Btn small onClick={() => download(`${skey.replace(/:/g, "_")}.json`, JSON.stringify(s, null, 2))}>导出</Btn>
       <Btn small onClick={confirmDo("清空上下文？历史记录保留。", async () => { await api(`${base}/reset`, { body: {} }); toast("已清空上下文"); reload(); })}>清空上下文</Btn>
@@ -274,6 +301,7 @@ function TurnUsage({ msgs, end }: { msgs: any[]; end: number }) {
   }
   const ctx = msgs[end].msg.kctx;
   const total = sum.input + sum.output + sum.cacheRead + sum.cacheWrite;
+  if (!total) return null;                // 主动开口记进来的那种，没调模型
   return (
     <details class="usage">
       <summary>

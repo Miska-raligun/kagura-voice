@@ -83,3 +83,19 @@ describe("系统处理详情", () => {
     expect(ev.at(-1)!.data.messages).toBeGreaterThan(0);
   });
 });
+
+describe("会话来源", () => {
+  it("用户消息记下从哪来，发给模型前去掉；主动开口记进来的标成 note", async () => {
+    const { rt, fake } = makeRuntime();
+    fake.queue.push("好", "嗯");
+    await rt.run({ agentId: "main", sessionKey: "main:main", kind: "main", channel: "device", deviceId: "cores3", text: "你好" });
+    await rt.note("main", "main:main", "heartbeat", "该喝水啦");
+    await rt.run({ agentId: "main", sessionKey: "main:main", kind: "main", channel: "feishu", trusted: true, text: "好的" });
+    const users = rt.store("main").history("main:main").map((h) => h.msg as any).filter((m) => m.role === "user");
+    expect(users.map((m) => m.ksrc)).toEqual([
+      { channel: "device", purpose: "chat", device: "cores3" },
+      { channel: "system", purpose: "note", tag: "heartbeat" },
+      { channel: "feishu", purpose: "chat" },
+    ]);
+  });
+});
