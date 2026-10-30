@@ -291,7 +291,7 @@ function Conversation({ trace, name, role }: { trace: string; name: (id: string)
  * 会话页底部弹出的实时 Agent 通信：这一轮她找了别的 agent / 派了子任务，就从下面滑出来，每秒刷新、新步骤接着播。
  * live = 发起的那一轮还在跑（跑完了也留着，等主人关）
  */
-export function A2ADock({ trace, live, onClose }: { trace: string; live: boolean; onClose: () => void }) {
+export function A2ADock({ trace, live, onClose, onSmall }: { trace: string; live: boolean; onClose: () => void; onSmall?: (v: boolean) => void }) {
   const [agents] = useLoad(() => api<any[]>("/agents"));
   const { calls, running } = useConversation(trace, live);
   const name = (id: string) => agents?.find((a) => a.id === id)?.name ?? id;
@@ -308,7 +308,7 @@ export function A2ADock({ trace, live, onClose }: { trace: string; live: boolean
         <small class="muted">{calls.length} 次调用{running || live ? " · 进行中" : " · 已结束"}</small>
         <span class="grow" />
         <Btn small kind="ghost" onClick={() => go("a2a", trace)}>打开详情</Btn>
-        <Btn small kind="ghost" onClick={() => setSmall(!small)}>{small ? "展开" : "收起"}</Btn>
+        <Btn small kind="ghost" onClick={() => { setSmall(!small); onSmall?.(!small); }}>{small ? "展开" : "收起"}</Btn>
         <Btn small kind="ghost" onClick={onClose}>✕</Btn>
       </div>
       {!small && <div class="dockbody">

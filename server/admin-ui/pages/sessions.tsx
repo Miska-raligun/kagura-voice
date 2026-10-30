@@ -165,6 +165,7 @@ function Conversation({ agent, skey, onChange }: { agent: string; skey: string; 
   // 这一轮她找了别的 agent：底部弹出实时的 Agent 通信动画（这一轮结束后留着，等主人关；同一串调用的后续轮次接着用这个）
   const [dock, setDock] = useState<{ trace: string; live: boolean } | null>(null);
   const [dockClosed, setDockClosed] = useState("");
+  const [dockSmall, setDockSmall] = useState(false);
   useEffect(() => {
     if (run?.trace && usesA2A(run) && dockClosed !== run.trace) setDock({ trace: run.trace, live: true });
     else if (!run) setDock((d) => (d && d.live ? { ...d, live: false } : d));
@@ -195,7 +196,7 @@ function Conversation({ agent, skey, onChange }: { agent: string; skey: string; 
   const events: any[] = (s.events ?? []).filter((e: any) => showOld || !msgs.length || e.ts >= msgs[0].ts || !old);
   const evs = placeEvents(events, msgs);
   return (
-    <Card class={`chat ${dock ? "withdock" : ""}`} title={s.fresh ? "新对话" : `${sourceOf(agent, { key: skey, channel: s.channel ?? "" }).label} · ${s.title || skey.slice(agent.length + 1)}`} actions={!s.fresh && <>
+    <Card class={`chat ${dock ? "withdock" : ""} ${dock && dockSmall ? "docksmall" : ""}`} title={s.fresh ? "新对话" : `${sourceOf(agent, { key: skey, channel: s.channel ?? "" }).label} · ${s.title || skey.slice(agent.length + 1)}`} actions={!s.fresh && <>
       <Btn small onClick={async () => { const r = await api(`${base}/compact`, { body: {} }); toast(r.compacted ? "已压缩" : "太短了，不用压缩"); reload(); }}>压缩</Btn>
       <Btn small onClick={() => download(`${skey.replace(/:/g, "_")}.json`, JSON.stringify(s, null, 2))}>导出</Btn>
       <Btn small onClick={confirmDo("清空上下文？历史记录保留。", async () => { await api(`${base}/reset`, { body: {} }); toast("已清空上下文"); reload(); })}>清空上下文</Btn>
@@ -227,7 +228,7 @@ function Conversation({ agent, skey, onChange }: { agent: string; skey: string; 
           </div>
         </>}
       </div>
-      {dock && <A2ADock key={dock.trace} trace={dock.trace} live={dock.live} onClose={() => { setDockClosed(dock.trace); setDock(null); }} />}
+      {dock && <A2ADock key={dock.trace} trace={dock.trace} live={dock.live} onClose={() => { setDockClosed(dock.trace); setDock(null); setDockSmall(false); }} onSmall={setDockSmall} />}
       <Composer busy={sending || !!run} onSend={send} />
     </Card>
   );

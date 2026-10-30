@@ -190,7 +190,10 @@ iframe.monitor { width:100%; height:calc(100vh - 170px); border:1px solid var(--
 .slot .ph img { position:absolute; inset:0; height:100%; } .slot .ph img.dim { opacity:.35; } .slot .ph span { position:relative; }
 
 /* 会话 / 聊天 */
-.chat .msgs { max-height:calc(100vh - 340px); min-height:200px; overflow:auto; padding:4px 2px 8px; }
+/* 对话框整体固定高，消息区吃掉剩下的（弹出面板、摘要展开都只挤消息区，框不变） */
+.card.chat { height:calc(100vh - 171px); min-height:460px; display:flex; flex-direction:column; box-sizing:border-box; }
+.chat .msgs { flex:1; min-height:0; overflow:auto; padding:4px 2px 8px; }
+.card.chat > header, .card.chat > details, .card.chat > .a2adock, .card.chat > .composer2 { flex:none; }
 .msg .md { word-break:break-word; line-height:1.65; } .msg .md > :first-child { margin-top:0; } .msg .md > :last-child { margin-bottom:0; }
 .msg .md p { margin:.4em 0; } .msg .md ul, .msg .md ol { margin:.3em 0; padding-left:1.4em; } .msg .md h1, .msg .md h2, .msg .md h3 { font-size:1.05em; margin:.6em 0 .3em; }
 .msg .md pre { background:var(--bg); border:1px solid var(--line); border-radius:8px; padding:8px 10px; overflow-x:auto; font-size:12.5px; }
@@ -328,10 +331,13 @@ span.who { display:inline-flex; align-items:center; }
 .a2adock .dockbar { display:flex; align-items:center; gap:10px; padding:6px 12px; border-bottom:1px solid var(--line); }
 .a2adock.small .dockbar { border-bottom:0; }
 .a2adock .dockbody { display:grid; grid-template-columns:minmax(0,1.5fr) minmax(0,1fr); gap:12px; padding:6px 12px 10px; }
-.a2adock .dockgraph svg.graph { max-height:30vh; }
-.a2adock .docksteps { overflow:auto; max-height:34vh; }
-.chat.withdock .msgs { max-height:calc(100vh - 340px - 40vh); min-height:140px; }
 @media (max-width: 900px) { .a2adock .dockbody { grid-template-columns:1fr; } .a2adock .docksteps { display:none; } }
-.a2adock .dockgraph svg.graph { max-height:34vh; }
 .a2adock .dockbody { grid-template-columns:minmax(0,2fr) minmax(0,1fr); }
-.a2adock .dockgraph svg.graph { max-height:40vh; }
+
+/* 对话框固定大小（别随内容 / 面板忽大忽小）：消息区固定高，弹出 Agent 通信面板时从里面让出固定的一块 */
+.a2adock .dockbody { height:34vh; box-sizing:border-box; }
+.a2adock .dockgraph { height:100%; display:flex; flex-direction:column; min-height:0; }
+.a2adock .dockgraph svg.graph { flex:1; min-height:0; height:100%; }
+.a2adock .docksteps { height:100%; overflow:auto; }
+.chat details.summary > div { max-height:24vh; overflow:auto; }
+.card.chat > header { min-height:30px; }
