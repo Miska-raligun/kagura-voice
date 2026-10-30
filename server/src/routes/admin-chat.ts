@@ -106,6 +106,27 @@ export function registerAdminChat(r: Router, sys: AgentSystem) {
     };
   }));
 
+  /**
+   * 实时看一个会话（NDJSON 长连接）：先 {type:"start",run} 或 {type:"idle"}，之后 delta / message / tool / end，
+   * 下一轮开始再来 start。不管这一轮是从哪来的（网页、飞书、设备、heartbeat、待办）都看得到；页面关了就断开。
+   */
+  r.add("GET", "/api/admin/agents/<id>/sessions/<key>/live", guard((req) => {
+    const a = registry.get(req.params.id);
+    if (!a) return json({ error: `没有 agent ${req.params.id}` }, 404);
+    return {
+      status: 200, headers: {}, body: "",
+      raw: async (res) => {
+        res.writeHead(200, { "Content-Type": "application/x-ndjson; charset=utf-8", "Cache-Control": "no-cache", "X-Accel-Buffering": "no" });
+        const send = (o: unknown) => { if (!res.writableEnded && !res.destroyed) res.write(JSON.stringify(o) + "\n"); };
+        const off = runtime.watchLive(a.id, req.params.key, send);
+        const ping = setInterval(() => send({ type: "ping" }), 15_000);
+        await new Promise<void>((done) => res.on("close", () => done()));
+        clearInterval(ping); off();
+        if (!res.writableEnded) res.end();
+      },
+    };
+  }));
+
   /** 会话里引用的图片 / 上传的文件（只认工作目录 uploads/ 下的） */
   r.add("GET", "/api/admin/agents/<id>/uploads", guard((req) => {
     const a = registry.get(req.params.id);

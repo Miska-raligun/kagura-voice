@@ -171,6 +171,23 @@ export class TurnGuard {
   }
 }
 
+/** 会话页实时看到的一轮：已完成的消息 + 正在生成的思考 / 正文 + 正在执行的工具 */
+export interface LiveRun { purpose: string; channel: string; since: number; messages: any[]; partial: { thinking: string; text: string }; tools: string[] }
+export type LiveEvent =
+  | { type: "idle" } | { type: "start"; run: LiveRun } | { type: "end"; error?: string }
+  | { type: "delta"; kind: "text" | "thinking"; delta: string } | { type: "message"; message: any } | { type: "tool"; name: string; running: boolean };
+const LIVE_TEXT_MAX = 8000;
+/** 推给页面的消息：去掉自动回忆、图片只留占位、超长工具结果截短 */
+function liveMessage(m: any): any {
+  const x = stripRecall(m) as any;
+  if (!Array.isArray(x.content)) return x;
+  return {
+    ...x,
+    content: x.content.map((c: any) => c.type === "image" ? { type: "image", mimeType: c.mimeType }
+      : c.type === "text" && x.role === "toolResult" && c.text.length > LIVE_TEXT_MAX ? { ...c, text: c.text.slice(0, LIVE_TEXT_MAX) + `\n…（共 ${c.text.length} 字）` } : c),
+  };
+}
+
 /** 自动回忆附在用户消息里的那一段（开头这几个字认它，落盘前去掉） */
 export const RECALL_TAG = "[相关记忆（系统按这句话自动检索的，不是主人说的，可能不全）]";
 export const RECALL_WAIT_MS = 2000;
@@ -290,6 +307,27 @@ export class Runtime {
   compactChunk = COMPACT_CHUNK_TOKENS;
   /** 每个会话正在跑的那一轮：卡住时日志里说清楚是谁占着 */
   private running = new Map<string, RunInfo>();
+  /** 正在跑的每一轮的实时记录（管理界面会话页订阅，见 watchLive） */
+  private live = new Map<string, LiveRun>();
+  private liveSubs = new Map<string, Set<(e: LiveEvent) => void>>();
+
+  /**
+   * 订阅一个会话的实时过程（LRN 2026-10-30，症状「网页上只有发消息的那个窗口看得到过程，切走再回来、或者飞书 / 设备触发的，只剩『回复中』」）。
+   * 以前过程只沿着发消息那个请求的流推，而且只推正文和工具名。现在每轮都留一份实时记录（已完成的消息 + 正在生成的思考 / 正文 + 正在执行的工具），
+   * 谁打开会话页谁订阅：先给快照，之后推增量，这一轮结束推 end（落盘的历史这时才有这一轮）。返回取消订阅。
+   */
+  watchLive(agentId: string, sessionKey: string, fn: (e: LiveEvent) => void): () => void {
+    const key = `${agentId}|${sessionKey}`;
+    let set = this.liveSubs.get(key);
+    if (!set) this.liveSubs.set(key, (set = new Set()));
+    set.add(fn);
+    const cur = this.live.get(key);
+    fn(cur ? { type: "start", run: cur } : { type: "idle" });
+    return () => { set!.delete(fn); if (!set!.size) this.liveSubs.delete(key); };
+  }
+  private emitLive(key: string, e: LiveEvent) {
+    for (const fn of this.liveSubs.get(key) ?? []) { try { fn(e); } catch { /* 页面断开了 */ } }
+  }
   /** 每个会话后面排着几轮 */
   private queued = new Map<string, number>();
 
@@ -489,6 +527,9 @@ export class Runtime {
     if (req.signal?.aborted) ac.abort(); else req.signal?.addEventListener("abort", onOuter, { once: true });
     const info: RunInfo = { purpose: req.purpose ?? "chat", channel: req.channel, since: Date.now(), tool: "", stage: "准备", abort: () => ac.abort(), cancelled: false };
     if (!nestedRun) this.running.set(lockKey, info);
+    const liveRun: LiveRun | null = nestedRun ? null : { purpose: info.purpose, channel: req.channel, since: info.since, messages: [], partial: { thinking: "", text: "" }, tools: [] };
+    if (liveRun) { this.live.set(lockKey, liveRun); this.emitLive(lockKey, { type: "start", run: liveRun }); }
+    let liveError = "";
     try {
     if (persist) store.touchSession(req.sessionKey, req.kind, req.channel);
     const parent = runScope();
@@ -585,6 +626,27 @@ export class Runtime {
         : setTimeout(() => stop("idle"), idleMs);
     };
     pi.subscribe((e: any) => {
+      if (liveRun) {
+        try {
+          if (e.type === "message_update") {
+            const ev = e.assistantMessageEvent;
+            const kind = ev?.type === "text_delta" ? "text" : ev?.type === "thinking_delta" ? "thinking" : "";
+            if (kind) { liveRun.partial[kind] += ev.delta; this.emitLive(lockKey, { type: "delta", kind, delta: ev.delta }); }
+          } else if (e.type === "message_end" && ["user", "assistant", "toolResult"].includes(e.message?.role)) {
+            const m = liveMessage(e.message);
+            liveRun.messages.push(m);
+            liveRun.partial = { thinking: "", text: "" };
+            this.emitLive(lockKey, { type: "message", message: m });
+          } else if (e.type === "tool_execution_start") {
+            liveRun.tools.push(e.toolName);
+            this.emitLive(lockKey, { type: "tool", name: e.toolName, running: true });
+          } else if (e.type === "tool_execution_end") {
+            const i = liveRun.tools.indexOf(e.toolName);
+            if (i >= 0) liveRun.tools.splice(i, 1);
+            this.emitLive(lockKey, { type: "tool", name: e.toolName, running: false });
+          }
+        } catch { /* 实时记录出错不影响这一轮 */ }
+      }
       if (e.type === "message_end" && e.message?.role === "assistant") {
         const hasCalls = (e.message.content ?? []).some((c: any) => c.type === "toolCall");
         if (guard.afterModel(e.message.usage, hasCalls)) stop("budget");
@@ -641,7 +703,12 @@ export class Runtime {
     const text = textOf(last) || assistants.map(textOf).filter(Boolean).join("\n");
     if (persist && (!req.keepIf || req.keepIf(text))) store.append(req.sessionKey, fresh.map((m) => stripImages(stripRecall(m), agent.workspace)));
     return { text, meta: scope.meta, toolCalls, usage, stopReason: String(last.stopReason ?? "") };
-    } finally { if (!nestedRun) this.running.delete(lockKey); req.signal?.removeEventListener("abort", onOuter); }
+    } catch (e: any) { liveError = OVERFLOW_RE.test(String(e?.message ?? "")) ? "" : String(e?.message ?? e); throw e; }
+    finally {
+      if (!nestedRun) this.running.delete(lockKey);
+      req.signal?.removeEventListener("abort", onOuter);
+      if (liveRun && this.live.get(lockKey) === liveRun) { this.live.delete(lockKey); this.emitLive(lockKey, { type: "end", ...(liveError ? { error: liveError } : {}) }); }
+    }
   }
 
   /**

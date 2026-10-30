@@ -48,50 +48,101 @@ function Inbox({ agent, onNew }: { agent: string; onNew: () => void }) {
   );
 }
 
-interface Live { user: any; text: string; tools: string[]; error?: string }
+interface LiveRun { purpose: string; channel: string; since: number; messages: any[]; partial: { thinking: string; text: string }; tools: string[] }
+const PURPOSE: Record<string, string> = { heartbeat: "heartbeat", cron: "定时任务", task: "待办", a2a: "agent 通信", sub: "子任务" };
+
+/** 逐行读 NDJSON */
+async function readLines(r: Response, on: (o: any) => void) {
+  const reader = r.body!.getReader();
+  const dec = new TextDecoder();
+  let buf = "";
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+    let nl;
+    while ((nl = buf.indexOf("\n")) >= 0) {
+      const line = buf.slice(0, nl); buf = buf.slice(nl + 1);
+      if (line.trim()) on(JSON.parse(line));
+    }
+  }
+}
+
+/**
+ * 订阅会话的实时过程（服务端 Runtime.watchLive）：不管这一轮是网页发的、飞书 / 设备来的、还是 heartbeat / 待办，
+ * 打开会话就能看到思考、工具调用和结果、正在生成的回复；中途切走再回来也接得上。断了 2 秒后重连。
+ */
+function useLive(base: string, onEnd: () => Promise<void>): LiveRun | null {
+  const [run, setRun] = useState<LiveRun | null>(null);
+  const endRef = useRef(onEnd);
+  endRef.current = onEnd;
+  useEffect(() => {
+    const ac = new AbortController();
+    let cur: LiveRun | null = null;
+    let raf = 0;
+    const flush = () => { raf = 0; setRun(cur ? { ...cur, messages: [...cur.messages], partial: { ...cur.partial }, tools: [...cur.tools] } : null); };
+    const later = () => { if (!raf) raf = requestAnimationFrame(flush); };
+    // 这一轮落盘了：先把历史重新拉回来再收起实时那块，免得中间空一下
+    const finish = (err?: string) => {
+      const was = cur;
+      cur = null;
+      if (raf) { cancelAnimationFrame(raf); raf = 0; }
+      if (err) toast(err, "err");
+      endRef.current().finally(() => { if (!cur || cur === was) flush(); });
+    };
+    const handle = (e: any) => {
+      if (e.type === "start") { cur = e.run; later(); }
+      else if (e.type === "idle") { if (cur) finish(); }
+      else if (e.type === "end") finish(e.error);
+      else if (!cur) return;
+      else if (e.type === "delta") { cur.partial[e.kind as "text" | "thinking"] += e.delta; later(); }
+      else if (e.type === "message") { cur.messages.push(e.message); cur.partial = { thinking: "", text: "" }; later(); }
+      else if (e.type === "tool") {
+        if (e.running) cur.tools.push(e.name);
+        else { const i = cur.tools.indexOf(e.name); if (i >= 0) cur.tools.splice(i, 1); }
+        later();
+      }
+    };
+    (async () => {
+      while (!ac.signal.aborted) {
+        try {
+          const r = await fetch(`/api/admin${base}/live`, { signal: ac.signal });
+          if (r.ok && r.body) await readLines(r, handle);
+        } catch { /* 断开了，下面重连 */ }
+        if (ac.signal.aborted) break;
+        await new Promise((ok) => setTimeout(ok, 2000));
+      }
+    })();
+    return () => { ac.abort(); if (raf) cancelAnimationFrame(raf); };
+  }, [base]);
+  return run;
+}
 
 function Conversation({ agent, skey, onChange }: { agent: string; skey: string; onChange: () => void }) {
   const base = `/agents/${enc(agent)}/sessions/${enc(skey)}`;
   const [s, reload] = useLoad(() => api(`${base}?limit=500`).catch((e) => (/没有这个会话/.test(e.message) ? { messages: [], fresh: true } : Promise.reject(e))), [agent, skey]);
-  const [live, setLive] = useState<Live | null>(null);
+  const run = useLive(base, async () => { await reload(); setPending(null); onChange(); });
+  // 刚发出去、这一轮还没开始（排队 / 整理上下文）时先把自己说的话摆上
+  const [pending, setPending] = useState<any>(null);
+  const [sending, setSending] = useState(false);
   const [showOld, setShowOld] = useState(false);
   const box = useRef<HTMLDivElement>(null);
-  useEffect(() => { box.current?.scrollTo(0, box.current.scrollHeight); }, [s, live]);
+  useEffect(() => { box.current?.scrollTo(0, box.current.scrollHeight); }, [s, run, pending]);
 
   const send = async (text: string, images: Img[], files: Att[]) => {
-    const user = { role: "user", content: [...images.map((i) => ({ type: "image", data: i.data, mimeType: i.mimeType })), ...(text ? [{ type: "text", text }] : []),
-      ...files.map((f) => ({ type: "text", text: `[附件 ${f.name}（${(f.size / 1024).toFixed(1)}KB）已保存到 …]` }))] };
-    const st: Live = { user, text: "", tools: [] };
-    setLive({ ...st });
+    setPending({ role: "user", content: [...images.map((i) => ({ type: "image", data: i.data, mimeType: i.mimeType })), ...(text ? [{ type: "text", text }] : []),
+      ...files.map((f) => ({ type: "text", text: `[附件 ${f.name}（${(f.size / 1024).toFixed(1)}KB）]` }))] });
+    setSending(true);
     try {
       const r = await fetch("/api/admin/chat?stream=1", {
         method: "POST", headers: { "content-type": "application/json" },
         body: JSON.stringify({ agent, session: skey, text, images: images.map(({ data, mimeType }) => ({ data, mimeType })), files: files.map(({ name, b64 }) => ({ name, b64 })) }),
       });
       if (!r.ok || !r.body) throw new Error((await r.json().catch(() => ({}))).error ?? `HTTP ${r.status}`);
-      const reader = r.body.getReader();
-      const dec = new TextDecoder();
-      let buf = "";
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buf += dec.decode(value, { stream: true });
-        let nl;
-        while ((nl = buf.indexOf("\n")) >= 0) {
-          const line = buf.slice(0, nl); buf = buf.slice(nl + 1);
-          if (!line.trim()) continue;
-          const e = JSON.parse(line);
-          if (e.type === "text") st.text += e.delta;
-          else if (e.type === "break") st.text += "\n\n";
-          else if (e.type === "tool") st.tools.push(e.name);
-          else if (e.type === "error") st.error = e.error;
-          else if (e.type === "done" && !st.text) st.text = e.reply;
-          setLive({ ...st, tools: [...st.tools] });
-        }
-      }
-      if (st.error) toastErr(new Error(st.error));
+      // 过程由 useLive 显示，这里只等结果（出错由实时那边提示）
+      await readLines(r, () => {});
     } catch (e) { toastErr(e); }
-    setLive(null);
+    setSending(false); setPending(null);
     reload(); onChange();
   };
 
@@ -109,18 +160,24 @@ function Conversation({ agent, skey, onChange }: { agent: string; skey: string; 
       {s.summary && <details class="summary"><summary><b>较早对话的摘要</b></summary><div>{s.summary}</div></details>}
       <div class="msgs" ref={box}>
         {old > 0 && <a class="muted small" onClick={() => setShowOld(true)}>还有 {old} 条已清空 / 已压缩的记录</a>}
-        {!msgs.length && !live && <Empty>支持粘贴或拖入图片与文件</Empty>}
+        {!msgs.length && !run && !pending && <Empty>支持粘贴或拖入图片与文件</Empty>}
         {msgs.map((m: any) => <Message m={m} agent={agent} />)}
-        {live && <>
-          <Message m={{ msg: live.user }} agent={agent} />
+        {pending && !run?.messages.length && <>
+          <Message m={{ msg: pending }} agent={agent} />
+          <div class="msg a"><div class="who">助手 <small class="muted">{run ? "整理上下文…" : "排队中…"}</small></div></div>
+        </>}
+        {run && (run.messages.length > 0 || !pending) && <>
+          {run.channel !== "webchat" || PURPOSE[run.purpose] ? <div class="muted small">— {PURPOSE[run.purpose] ?? CHANNEL[run.channel] ?? run.channel} 发起的一轮，进行中 —</div> : null}
+          {run.messages.map((m) => <Message m={{ msg: m }} agent={agent} />)}
           <div class="msg a">
-            <div class="who">助手 <small class="muted">{live.text ? "回复中…" : "思考中…"}</small></div>
-            {live.tools.map((t) => <div class="tool">🔧 <code>{t}</code></div>)}
-            {live.text && <div class="md" dangerouslySetInnerHTML={{ __html: renderMarkdown(live.text) }} />}
+            <div class="who">助手 <small class="muted">{run.tools.length ? "执行工具…" : run.partial.text ? "回复中…" : !run.messages.length ? "整理上下文…" : "思考中…"}</small></div>
+            {run.partial.thinking && <details class="think" open><summary>思考</summary>{run.partial.thinking}</details>}
+            {run.tools.map((t) => <div class="tool">🔧 <code>{t}</code> <span class="muted">执行中…</span></div>)}
+            {run.partial.text && <div class="md" dangerouslySetInnerHTML={{ __html: renderMarkdown(run.partial.text) }} />}
           </div>
         </>}
       </div>
-      <Composer busy={!!live} onSend={send} />
+      <Composer busy={sending || !!run} onSend={send} />
     </Card>
   );
 }

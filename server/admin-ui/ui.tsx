@@ -19,11 +19,11 @@ export function Toasts() {
 }
 
 /** 加载数据；返回 [数据, 重新加载, 错误] */
-export function useLoad<T>(fn: () => Promise<T>, deps: any[] = []): [T | undefined, () => void, string] {
+export function useLoad<T>(fn: () => Promise<T>, deps: any[] = []): [T | undefined, () => Promise<void>, string] {
   const [data, setData] = useState<T>();
   const [err, setErr] = useState("");
-  const load = useCallback(() => { fn().then((d) => { setData(d); setErr(""); }).catch((e) => setErr(String(e.message ?? e))); }, deps);
-  useEffect(load, [load]);
+  const load = useCallback(() => fn().then((d) => { setData(d); setErr(""); }).catch((e) => setErr(String(e.message ?? e))), deps);
+  useEffect(() => { load(); }, [load]);
   return [data, load, err];
 }
 
