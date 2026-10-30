@@ -144,8 +144,9 @@ function registerAppImages(r: Router, ctx: Ctx, files: DeviceFiles, imgs: AppIma
    * 手机上某个状态显示哪张图。先角色自己的、再默认的（角色对不上比画质差更糟）；同一层里手机的优先，
    * 手机这套缺了这个状态就用手机这套的待机图（别跟 CoreS3 的混着来，一会儿高清竖图一会儿 320×240）。
    */
-  const resolve = (role: string, name: string) => {
-    for (const ro of role ? [role, ""] : [""]) {
+  const resolve = (role: string, name: string, strict = false) => {
+    // strict：只找这个角色自己的（管理界面拿来当 agent 头像：别让小澪顶着默认角色的脸）
+    for (const ro of role && !strict ? [role, ""] : [role]) {
       for (const n of name === "img_bg" ? [name] : [name, "img_bg"]) {
         const a = imgs.read(ro, n);
         if (a) return { ...a, src: "app", role: ro, name: n };
@@ -166,7 +167,7 @@ function registerAppImages(r: Router, ctx: Ctx, files: DeviceFiles, imgs: AppIma
   // 手机页面直接 <img> / new Image() 取，带不了头——和 /device/file 一样不要令牌（都是角色图）
   r.get("/app/img", wrap((req) => {
     const role = checkRole(req.query.get("role") ?? ""), name = checkName(req.query.get("name") ?? "");
-    const hit = resolve(role, name);
+    const hit = resolve(role, name, req.query.get("strict") === "1");
     if (!hit) return json({ error: "没有图" }, 404);
     const etag = `"${hit.src}-${hit.role}-${hit.name}-${hit.data.length}-${Math.trunc(hit.mtime)}"`;
     if (req.header("If-None-Match") === etag) return { ...empty(304), headers: { ETag: etag } };

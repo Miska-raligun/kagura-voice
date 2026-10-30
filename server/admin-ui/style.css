@@ -314,3 +314,9 @@ ol.steps .pre { white-space:pre-wrap; font-size:12.5px; margin-top:4px; }
 .player input[type=range] { flex:1; min-width:120px; width:auto; height:auto; padding:0; border:0; background:none; box-shadow:none; }
 .player select { width:auto; flex:none; }
 .player .muted { white-space:nowrap; font-size:12.5px; }
+img.avatar, span.avatar { display:inline-block; vertical-align:middle; border-radius:50%; object-fit:cover; object-position:50% 25%; margin-right:5px; background:var(--panel2); border:1px solid var(--line2); }
+span.avatar.ini { display:inline-flex; align-items:center; justify-content:center; color:var(--fg); font-weight:600; box-sizing:border-box; }
+.chip { display:inline-flex; align-items:center; padding:1px 8px 1px 2px; }
+.chip .avatar { margin-right:4px; }
+span.who { display:inline-flex; align-items:center; }
+.graph .node image.subav { opacity:.75; }

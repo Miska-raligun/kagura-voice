@@ -1,6 +1,7 @@
 // 页面之间共用的小部件
 import { api, go } from "../api.ts";
 import { Select, useLoad } from "../ui.tsx";
+import { useState } from "preact/hooks";
 import { renderMarkdown } from "../md.ts";
 
 /** 顶部的 agent 选择器（切换时改路由参数） */
@@ -39,6 +40,19 @@ const PURPOSE_SRC: Record<string, string> = { heartbeat: "heartbeat", cron: "定
 function srcLabel(k: { channel: string; purpose?: string; device?: string }) {
   if (k.purpose && PURPOSE_SRC[k.purpose]) return PURPOSE_SRC[k.purpose];
   return (SRC[k.channel] ?? k.channel) + (k.device ? ` ${k.device}` : "");
+}
+
+/**
+ * agent 头像：用它在设备上那套角色图的待机图（手机那套优先、清楚些），只认它自己的角色目录；
+ * 没有图就显示名字的第一个字
+ */
+export const avatarUrl = (role: string) => `/app/img?role=${encodeURIComponent(role ?? "")}&name=img_bg&strict=1`;
+export function Avatar({ agent, size = 20 }: { agent: { name: string; device_role?: string }; size?: number }) {
+  const [bad, setBad] = useState(false);
+  const ch = Array.from(agent.name ?? "?")[0];
+  return bad || agent.device_role === undefined
+    ? <span class="avatar ini" style={{ width: size, height: size, fontSize: size * 0.5 }}>{ch}</span>
+    : <img class="avatar" src={avatarUrl(agent.device_role)} width={size} height={size} alt={ch} onError={() => setBad(true)} />;
 }
 
 export function Message({ m, agent = "" }: { m: any; agent?: string }) {

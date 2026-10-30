@@ -3,12 +3,14 @@
 import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 import { api, enc, fmtTime, go } from "../api.ts";
 import { Badge, Btn, Card, Empty, Err, Field, Input, Toggle, toast, useInterval, useLoad, usePage } from "../ui.tsx";
+import { Avatar, avatarUrl } from "./common.tsx";
 
 export function A2A({ arg }: { arg: string }) {
   const [agents] = useLoad(() => api<any[]>("/agents"));
   if (!agents) return null;
   const name = (id: string) => agents.find((a) => a.id === id)?.name ?? id;
-  return arg ? <Conversation trace={arg} name={name} /> : <List agents={agents} name={name} />;
+  const role = (id: string) => agents.find((a) => a.id === id)?.device_role as string | undefined;
+  return arg ? <Conversation trace={arg} name={name} role={role} /> : <List agents={agents} name={name} />;
 }
 
 const secs = (ms: number) => (ms >= 60_000 ? `${(ms / 60_000).toFixed(1)} 分` : `${(ms / 1000).toFixed(1)} 秒`);
@@ -32,8 +34,8 @@ function List({ agents, name }: { agents: any[]; name: (id: string) => string })
           <tbody>{rows.map((c) => (
             <tr onClick={() => go("a2a", c.trace)}>
               <td>{fmtTime(c.ts)}</td>
-              <td>{name(c.root.from_agent)}</td>
-              <td>{c.agents.map((a: string) => <span class="chip">{name(a)}</span>)}</td>
+              <td><span class="who"><Avatar agent={agents.find((a) => a.id === c.root.from_agent) ?? { name: c.root.from_agent }} />{name(c.root.from_agent)}</span></td>
+              <td>{c.agents.map((id: string) => <span class="chip"><Avatar agent={agents.find((a) => a.id === id) ?? { name: id }} size={16} />{name(id)}</span>)}</td>
               <td>{c.calls}{c.hops > 1 ? <small class="muted"> · {c.hops} 跳</small> : null}</td>
               <td>{c.running ? <Badge s="running" text="进行中" /> : c.failed ? <Badge s="error" text={`${c.failed} 次失败`} /> : <Badge s="ok" text="完成" />}</td>
               <td>{c.last > c.ts ? secs((c.last - c.ts) * 1000) : "—"}</td>
@@ -138,7 +140,9 @@ function curve(a: Node, b: Node) {
 const KIND: Record<string, string> = { send: "发消息", spawn: "派子任务" };
 const bad = (c: any) => c.status === "error" || c.status === "rejected";
 
-function Conversation({ trace, name }: { trace: string; name: (id: string) => string }) {
+function Conversation({ trace, name, role }: { trace: string; name: (id: string) => string; role: (id: string) => string | undefined }) {
+  // 头像加载失败的节点退回首字
+  const [noAvatar, setNoAvatar] = useState<Record<string, boolean>>({});
   const [d, reload, err] = useLoad(() => api<any>(`/a2a/conversations/${enc(trace)}`), [trace]);
   const calls: any[] = d?.calls ?? [];
   const running = calls.some((c) => c.status === "running");
@@ -215,7 +219,13 @@ function Conversation({ trace, name }: { trace: string; name: (id: string) => st
               <title>打开 {x.label} 的会话</title>
               {busy.has(x.id) && <circle class="ring" r="30" />}
               <circle class="dot" r="30" />
-              <text class="ini" text-anchor="middle" dy="6">{Array.from(name(x.agent))[0]}</text>
+              {role(x.agent) !== undefined && !noAvatar[x.agent]
+                ? <>
+                  <clipPath id={`av-${i}`}><circle r="27" /></clipPath>
+                  <image href={avatarUrl(role(x.agent)!)} x="-27" y="-27" width="54" height="54" preserveAspectRatio="xMidYMin slice" clip-path={`url(#av-${i})`}
+                    class={x.sub ? "subav" : ""} onError={() => setNoAvatar((m) => ({ ...m, [x.agent]: true }))} />
+                </>
+                : <text class="ini" text-anchor="middle" dy="6">{Array.from(name(x.agent))[0]}</text>}
               <text class="name" text-anchor="middle" y="50">{x.label}</text>
               {busy.has(x.id) && <text class="state" text-anchor="middle" y="66">处理中…</text>}
             </g>
