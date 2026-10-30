@@ -26,11 +26,13 @@ export type Announce = (scope: RunScope, text: string) => Promise<void>;
 const SEND_TIMEOUT = 90;
 const SPAWN_TIMEOUT = 300;
 /**
- * agent 间传话的会话（LRN 2026-10-30）：每次传话接收方都起一个全新会话 `<接收方>:a2a:<发起方>:<随机>`，不进自己的 main。
+ * agent 间传话的会话（LRN 2026-10-30）：一次交互一个会话 `<接收方>:a2a:<发起方>:<trace>`，不进接收方的 main。
+ * 「一次交互」= 同一串调用（`scope.trace`：主人一句话 / 一次 heartbeat 引出的所有传话），这期间来回几次都在同一个会话里接着说；
+ * 下一次发起是新的 trace，就开新会话，旧的不会越积越乱。
  * 进 main 的毛病：主人和她的聊天里混进别的 agent 的话；每次都背着整段主对话（贵）；占着 main 的会话锁，主人这时候找她要排队、两边容易互等。
- * 主人那边说过什么靠近况带上；要接着上次的话题，发起方在消息里把前情说清楚。
+ * 主人那边说过什么靠近况带上。
  */
-export const a2aKey = (to: string, from: string) => `${to}:a2a:${from}:${crypto.randomUUID().slice(0, 8)}`;
+export const a2aKey = (to: string, from: string, trace?: string) => `${to}:a2a:${from}:${trace || crypto.randomUUID().slice(0, 8)}`;
 
 export class A2A {
   db: DatabaseSync;
@@ -136,12 +138,12 @@ export class A2A {
       tools.push(
         {
           name: "sessions_send", label: "给其他 agent 发消息",
-          description: "给另一个 agent 发消息（它每次都在一个新对话里收，不打扰它和主人的对话，也不记得你们之前的传话——需要前情就写进 message）。wait=true（默认）时等它回复并把回复交给你。",
+          description: "给另一个 agent 发消息（它在专门的对话里收，不打扰它和主人的对话；这一次交互里来回几次它都记得，下次再找它就是新对话，需要以前的前情就写进 message）。wait=true（默认）时等它回复并把回复交给你。",
           parameters: Type.Object({ agent: Type.String(), message: Type.String(), wait: Type.Optional(Type.Boolean()) }),
           execute: async (_id, p: any) => {
             const err = this.check(scope, p.agent);
             if (err) { this.record({ kind: "send", from: scope, to: p.agent, toSession: "", message: p.message, status: "rejected", reply: err }); return fail(err); }
-            const toKey = a2aKey(p.agent, agent.id);
+            const toKey = a2aKey(p.agent, agent.id, scope.trace);
             if (scope.chain.some((c) => c.startsWith(`${p.agent}|`))) return fail(`${p.agent} 正在等你的回复（是它在问你），直接在回复里回答它即可`);
             const logId = this.record({ kind: "send", from: scope, to: p.agent, toSession: toKey, message: p.message, status: "running" });
             const text = `[来自 ${agent.name}（agent ${agent.id}）的消息] ${p.message}`;

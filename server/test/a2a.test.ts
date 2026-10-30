@@ -23,7 +23,7 @@ const waitFor = async (cond: () => boolean, ms = 2000) => {
 };
 
 describe("sessions_send", () => {
-  it("等对方回复：对方每次在新会话里收（不进它的 main），回复交回发起方；记进 a2a_log", async () => {
+  it("等对方回复：对方在这次交互的会话里收（不进它的 main），回复交回发起方；记进 a2a_log", async () => {
     const { rt, fake, a2a } = setup();
     fake.queue.push(
       { tool_calls: [{ name: "sessions_send", args: { agent: "mio", message: "明天天气怎么样？" } }], then: "小澪说明天晴" },
@@ -32,7 +32,7 @@ describe("sessions_send", () => {
     const r = await rt.run({ ...chat, agentId: "main", sessionKey: "main:main", text: "问问小澪明天天气" });
     expect(r.text).toBe("小澪说明天晴");
     expect(fake.calls[1]).toMatchObject({ agent: "mio", purpose: "a2a" });
-    expect(fake.calls[1].session).toMatch(/^mio:a2a:main:[0-9a-f]{8}$/);
+    expect(fake.calls[1].session).toMatch(/^mio:a2a:main:\w+$/);
     expect(fake.calls[1].message).toContain("来自 神乐");
     expect(rt.store("mio").history(fake.calls[1].session).length).toBe(2);
     expect(rt.store("mio").history("mio:main").length).toBe(0);
@@ -68,15 +68,22 @@ describe("sessions_send", () => {
     expect(results.some((t) => /互相等|正忙/.test(t))).toBe(false);
   }, 15_000);
 
-  it("每次传话都是新会话：第二次看不到第一次的内容", async () => {
+  it("同一次交互里来回几次是同一个会话；下一次发起才开新会话", async () => {
     const { rt, fake } = setup();
-    fake.queue.push({ tool_calls: [{ name: "sessions_send", args: { agent: "mio", message: "暗号是蓝莓" } }], then: "好" }, "收到");
+    fake.queue.push(
+      { tool_calls: [{ name: "sessions_send", args: { agent: "mio", message: "暗号是蓝莓" } }],
+        then: { tool_calls: [{ name: "sessions_send", args: { agent: "mio", message: "刚才的暗号是什么" } }], then: "好" } },
+      "收到", "蓝莓",
+    );
     await rt.run({ ...chat, agentId: "main", sessionKey: "main:main", text: "x" });
     fake.queue.push({ tool_calls: [{ name: "sessions_send", args: { agent: "mio", message: "暗号是什么" } }], then: "好" }, "不知道");
     await rt.run({ ...chat, agentId: "main", sessionKey: "main:main", text: "y" });
     const mio = fake.calls.filter((c) => c.agent === "mio");
-    expect(mio[0].session).not.toBe(mio[1].session);
-    expect(mio[1].full).not.toContain("蓝莓");
+    expect(mio.length).toBe(3);
+    expect(mio[1].session).toBe(mio[0].session);
+    expect(rt.store("mio").history(mio[0].session).length).toBe(4);     // 第二问是接着第一问说的
+    expect(mio[2].session).not.toBe(mio[0].session);
+    expect(rt.store("mio").history(mio[2].session).length).toBe(2);
   });
 
   it("死锁防护：B 被 A 问的时候反过来等 A → 拒绝（提示直接回复）", async () => {
