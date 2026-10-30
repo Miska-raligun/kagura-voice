@@ -63,3 +63,14 @@ describe("单轮上限", () => {
     expect(ran).toEqual([0, 0]);
   });
 });
+
+describe("token 上限可关", () => {
+  it("填 0 = 不限", async () => {
+    const { rt, fake, ran } = setup();
+    rt.setLimits({ maxTurnTokens: 0 });
+    fake.queue.push(chain(3, "做完了"));
+    const r = await rt.run({ ...dev, text: "帮我修一下" });
+    expect(r.text).toBe("做完了");
+    expect(ran).toEqual([1, 2, 3]);
+  });
+});

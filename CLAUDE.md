@@ -301,7 +301,7 @@ CoreS3 (MicroPython) ──HTTP──▶ server/（TypeScript 单文件可执行
   对方断开时 drain 永远不来，异步回复会一直回「还在想」。排队超过 20 秒会打一行 `⏳ … 在排队：上一轮还没结束（用途/渠道/阶段/工具）`——
   再遇到「不理人」先搜这行。新加任何在会话锁里 await 的东西都要问一句：它卡住了怎么办？
   **单轮上限（`TurnGuard`，LRN 2026-10-30，症状「等她回复，她一直 exec 兜圈子把 token 烧光」）**：无进展超时被每次工具调用刷新、总时长又有半小时，挡不住兜圈子。
-  现在每轮有工具调用次数（`max_tool_calls`，默认 40）和 token（`max_turn_tokens`，默认 50 万，含缓存读写）上限，待办 ×3；同一工具同样参数第 `REPEAT_LIMIT`（3）次直接拒绝。
+  现在每轮有工具调用次数（`max_tool_calls`，默认 40）和 token（`max_turn_tokens`，默认 200 万，含缓存读写，0 = 不限）上限，待办 ×3；同一工具同样参数第 `REPEAT_LIMIT`（3）次直接拒绝。
   到上限先软停：之后的工具调用都返回「别再调工具，告诉主人做到哪了」，再 `GUARD_GRACE` 次还在调就强制中止。日志 `🔁`。工具经 `guard.wrap` 包一层（保留原型）。
   **会话页实时过程（`Runtime.watchLive`，`GET /api/admin/agents/<id>/sessions/<key>/live`，LRN 2026-10-30，症状「网页上只有发消息那个窗口看得到过程，切走再回来、飞书 / 设备触发的只剩『回复中』」）**：
   每轮（非嵌套）在 `execute` 里留一份 `LiveRun`（已完成的消息 + 正在生成的思考 / 正文 + 正在执行的工具），会话页长连接订阅：先快照（start / idle），再 delta / message / tool，结束 end（带错误原因，超长重试那次不报）。

@@ -427,7 +427,7 @@ export function registerAdmin(r: Router, ctx: Ctx, sys: AgentSystem) {
     if (patch.runtime) {
       runtime.setLimits({
         timeoutSecs: Number(next.runtime.timeout_secs) || undefined, maxSecs: Number(next.runtime.max_secs) || undefined,
-        maxToolCalls: Number(next.runtime.max_tool_calls) || undefined, maxTurnTokens: Number(next.runtime.max_turn_tokens) || undefined,
+        maxToolCalls: Number(next.runtime.max_tool_calls) || undefined, maxTurnTokens: next.runtime.max_turn_tokens === undefined || next.runtime.max_turn_tokens === "" ? undefined : Number(next.runtime.max_turn_tokens),
       });
       hot.push("runtime");
     }

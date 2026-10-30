@@ -119,7 +119,8 @@ export function messageText(m: any): string {
  * 管理界面凭路径显示，agent 以后也能用 exec 处理它。存不下来就退回「[图片]」。
  */
 export const DEFAULT_MAX_TOOL_CALLS = 40;
-export const DEFAULT_MAX_TURN_TOKENS = 500_000;
+/** 单轮 token 上限的默认值（含缓存读写，每次调模型都重发整段上下文，所以涨得快）；配置填 0 = 不限 */
+export const DEFAULT_MAX_TURN_TOKENS = 2_000_000;
 /** 叫停之后还容她几次模型调用（用来写汇报）；还在调工具就强制中止 */
 const GUARD_GRACE = 2;
 /** 同一工具同样参数在一轮里第几次就拒绝 */
@@ -378,7 +379,7 @@ export class Runtime {
     if (l.timeoutSecs && l.timeoutSecs > 0) this.opts.timeoutSecs = l.timeoutSecs;
     if (l.maxSecs && l.maxSecs > 0) this.opts.maxSecs = l.maxSecs;
     if (l.maxToolCalls && l.maxToolCalls > 0) this.opts.maxToolCalls = l.maxToolCalls;
-    if (l.maxTurnTokens && l.maxTurnTokens > 0) this.opts.maxTurnTokens = l.maxTurnTokens;
+    if (l.maxTurnTokens !== undefined && l.maxTurnTokens >= 0) this.opts.maxTurnTokens = l.maxTurnTokens;
   }
 
   addTools(p: ToolProvider, opts: { plugin?: boolean } = {}) { (opts.plugin ? this.pluginProviders : this.providers).push(p); }
@@ -545,7 +546,7 @@ export class Runtime {
     // 单轮上限（LRN 2026-10-30，症状「等她回复，她一直在 exec 兜圈子，把 token 烧光了」）：见 TurnGuard
     const guard = new TurnGuard(
       (this.opts.maxToolCalls || DEFAULT_MAX_TOOL_CALLS) * (scope.purpose === "task" ? 3 : 1),
-      (this.opts.maxTurnTokens || DEFAULT_MAX_TURN_TOKENS) * (scope.purpose === "task" ? 3 : 1),
+      this.opts.maxTurnTokens === 0 ? Infinity : (this.opts.maxTurnTokens || DEFAULT_MAX_TURN_TOKENS) * (scope.purpose === "task" ? 3 : 1),
       `${agent.id} ${req.sessionKey}`,
     );
     const tools = this.toolsFor(scope, agent, req).map((t) => guard.wrap(t));

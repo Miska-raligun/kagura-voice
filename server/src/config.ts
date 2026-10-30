@@ -212,7 +212,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     models,
     embedding: emb && emb.base_url && emb.model ? { baseUrl: String(emb.base_url), apiKey: String(emb.api_key ?? ""), model: String(emb.model) } : null,
     runtime: { maxConcurrency: Number(rt.max_concurrency ?? 4), timeoutSecs: Number(rt.timeout_secs ?? 120), maxSecs: Number(rt.max_secs ?? 1800),
-      maxToolCalls: Number(rt.max_tool_calls ?? 40), maxTurnTokens: Number(rt.max_turn_tokens ?? 500_000) },
+      maxToolCalls: Number(rt.max_tool_calls ?? 40), maxTurnTokens: Number(rt.max_turn_tokens ?? 2_000_000) },
     a2a: { enabled: a2a.enabled ?? true, maxHops: Number(a2a.max_hops ?? 3), perPairPerMin: Number(a2a.per_pair_per_min ?? 10) },
     tools: parseToolsConfig(file.tools),
     promptBudgets: file.prompt_budgets && typeof file.prompt_budgets === "object" ? file.prompt_budgets : {},
