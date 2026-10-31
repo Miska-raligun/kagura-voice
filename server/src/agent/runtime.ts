@@ -1106,8 +1106,11 @@ export class Runtime {
     const max = agent?.voice_max_chars || 80;
     const plain = toSpoken(text, 100_000);
     if (!plain || Array.from(plain).length <= max * 1.2 || !agent) return plain;
+    const t0 = Date.now();
+    let modelRef = "";
     try {
       const model = this.models.resolve(agent.cheap_model || this.models.cheapRef() || agent.model);
+      modelRef = `${model.provider}/${model.id}`;
       const res = await Promise.race([
         withScope({ agentId, sessionKey: `${agentId}:voice`, kind: "isolated", channel: "system", purpose: "voice", hop: 0, chain: [], meta: {}, trusted: false },
           () => this.models.quick(model, {
@@ -1124,7 +1127,10 @@ export class Runtime {
       if (u) this.store(agentId).recordUsage(`${agentId}:voice`, "voice", { model: `${res.provider}/${res.model}`, input: u.input, output: u.output, cacheRead: u.cacheRead, cacheWrite: u.cacheWrite, cost: u.cost?.total ?? 0 });
       if (out) return out;
     } catch (e: any) {
-      console.log(`[agent] ⚠️  ${agentId} 语音摘要失败，改为截断: ${e.message}`);
+      const ms = Date.now() - t0;
+      // 20 秒到了时请求被中止，服务商那边报的是「This operation was aborted」，这里写明白是超时
+      const why = ms >= 19_500 ? `超时（20 秒没写完${/abort/i.test(String(e.message)) ? "，请求已中止" : ""}）` : e.message;
+      console.log(`[agent] ⚠️  ${agentId} 语音摘要失败，改为截断（${modelRef || "?"}，${(ms / 1000).toFixed(1)}s）: ${why}`);
     }
     return toSpoken(text, max);
   }
