@@ -482,7 +482,7 @@ export function registerAdmin(r: Router, ctx: Ctx, sys: AgentSystem) {
     // 能热更新的当场生效：模型、嵌入、agent 通信；端口、百度、token、大脑类型要重启
     const hot: string[] = [];
     if (!ctx.cfg.fakeProviders && next.models) {
-      const m = { providers: next.models.providers ?? [], default: String(next.models.default ?? ""), cheap: String(next.models.cheap ?? "") };
+      const m = { providers: next.models.providers ?? [], default: String(next.models.default ?? ""), cheap: String(next.models.cheap ?? ""), voice: String(next.models.voice ?? "") };
       ctx.cfg.models = m;
       sys.models = new ModelRegistry(m);
       runtime.models = sys.models;

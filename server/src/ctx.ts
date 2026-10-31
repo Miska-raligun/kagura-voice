@@ -19,6 +19,8 @@ import { rgb565ToJpeg, isJpeg, b64decodeLoose } from "./util/image.ts";
 import { audioStats } from "./util/wav.ts";
 import { now, sleep, strftime } from "./util/time.ts";
 import { hex, pyHead, pyLen } from "./util/text.ts";
+import { LivePushes } from "./speech/live-push.ts";
+import { SentenceSplitter, wavPcm } from "./speech/sentences.ts";
 
 export const MAX_IMAGE_B64_BYTES = 5 * 1024 * 1024;
 export const MAX_AUDIO_BYTES = 5 * 1024 * 1024;
@@ -55,6 +57,8 @@ export class Ctx {
   lastReply = new Map<string, { user: string; reply: string; ts: number }>();
   /** 正在进行中的设备对话数（调度器 idleOnly：设备正在对话时延后执行） */
   activeChats = new Map<string, number>();
+  /** 边合成边播的推送音频（/push-audio 来取时先找这里） */
+  livePush = new LivePushes();
   /** 最近一次在家状态（BLE 上报），内置 agent 每轮带上 */
   presence: { status: string; ts: string; dev: string } | null = null;
   /** 新版本提醒（main 里建好；没开就是 null） */
@@ -110,18 +114,53 @@ export class Ctx {
    */
   async sendPush(text: string, dev: string, agentId?: string | null): Promise<boolean> {
     if (!this.mqtt.ok) return false;
+    const t0 = Date.now();
     const cur = this.roles.get(dev);
     const role = agentId ? (cur.agent === agentId ? cur : this.roles.all().find((r) => r.agent === agentId)) : cur;
-    const wav = await this.voice.synthesize(text, role ? roleVoice(role) : this.agentVoice?.(agentId!) ?? roleVoice(cur));
+    const ref = role ? roleVoice(role) : this.agentVoice?.(agentId!) ?? roleVoice(cur);
+    const notify = (fname: string) => {
+      // 手机页面要把这句话显示出来；CoreS3 不需要，MQTT 包保持原样
+      const isPhone = !!this.clients?.list().some((c) => c.id === dev);
+      this.mqtt.publish(`kagura/push/${dev}`, { type: "push", url: `/push-audio/${fname}`, ...(role ? { role: role.id } : {}), ...(isPhone ? { text } : {}) });
+    };
+    const tag = role && role.id !== cur.id ? `（${role.name}）` : "";
+    const head = `${pyHead(text, 50)}${pyLen(text) > 50 ? "..." : ""}`;
+    // 不止一句：按句合成，第一句好了就发通知，设备来取时边合成边往下写（不等整段合成完）
+    const split = new SentenceSplitter();
+    const parts = [...split.push(text), ...split.flush()];
+    if (parts.length > 1) {
+      const synth = (s: string) => this.voice.synthesize(s, ref).then((p) => (p ? wavPcm(fs.readFileSync(p)) : null)).catch(() => null);
+      const pending = parts.map(() => null as Promise<Buffer | null> | null);
+      const get = (i: number) => (pending[i] ??= synth(parts[i]));
+      get(0); if (parts.length > 1) get(1);
+      const first = await get(0);
+      if (first) {
+        const fname = `${hex(8)}.wav`;
+        const live = this.livePush.create(fname);
+        live.add(first);
+        notify(fname);
+        console.log(`[push] → ${dev}${tag} via MQTT notify（边合成边播，${parts.length} 句，首句 ${((Date.now() - t0) / 1000).toFixed(1)}s）: ${head}`);
+        void (async () => {
+          let failed = 0;
+          for (let i = 1; i < parts.length; i++) {
+            if (i + 1 < parts.length) get(i + 1);
+            const pcm = await get(i);
+            if (pcm) live.add(pcm); else failed++;
+          }
+          live.finish();
+          console.log(`[push] ✓ ${dev} 合成完（${((Date.now() - t0) / 1000).toFixed(1)}s${failed ? `，${failed} 句没合成出来、跳过` : ""}）`);
+        })();
+        return true;
+      }
+      console.log(`[push] ⚠️  ${dev} 首句合成失败，改为整段合成`);
+    }
+    const wav = await this.voice.synthesize(text, ref);
     if (!wav) return false;
     const fname = `${hex(8)}.wav`;
     fs.copyFileSync(wav, path.join(this.dirs.pushAudio, fname));
     pruneDir(this.dirs.pushAudio, PUSH_AUDIO_MAX_FILES);
-    // 手机页面要把这句话显示出来；CoreS3 不需要，MQTT 包保持原样
-    const isPhone = !!this.clients?.list().some((c) => c.id === dev);
-    this.mqtt.publish(`kagura/push/${dev}`, { type: "push", url: `/push-audio/${fname}`, ...(role ? { role: role.id } : {}), ...(isPhone ? { text } : {}) });
-    const tag = role && role.id !== cur.id ? `（${role.name}）` : "";
-    console.log(`[push] → ${dev}${tag} via MQTT notify: ${pyHead(text, 50)}${pyLen(text) > 50 ? "..." : ""}`);
+    notify(fname);
+    console.log(`[push] → ${dev}${tag} via MQTT notify（合成 ${((Date.now() - t0) / 1000).toFixed(1)}s）: ${head}`);
     return true;
   }
 

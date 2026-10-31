@@ -279,6 +279,26 @@ def test_voice_push_policy(a):
         d.close()
 
 
+def test_webchat_voice_first(a):
+    """网页聊天的长回复：她先写的 <voice> 朗读版生成中就推给设备念，聊天里看不到这段；没写就事后处理（短的直接念）"""
+    d = Device(a, "ag_vf")
+    try:
+        a.post("/heartbeat", json={"device_id": "ag_vf"})          # 在线的设备才会被选来念
+        a.post("/presence", json={"status": "home", "device_id": "ag_vf"})
+        a.fake_llm("<voice>明天晴，记得防晒。</voice>\n明天的详细天气：上午多云，下午转晴。")
+        r = a.post("/api/admin/chat", json={"agent": "main", "text": "明天天气怎么样"}).json()
+        assert r["reply"] == "明天的详细天气：上午多云，下午转晴。"
+        d.wait("push")
+        assert any(t["text"] == "明天晴，记得防晒。" for t in a.fake_log()["tts"])
+        # 没写朗读版的短回复：照旧事后直接念正文
+        a.fake_llm("好的。")
+        a.post("/api/admin/chat", json={"agent": "main", "text": "嗯"})
+        d.wait("push")
+        assert a.fake_log()["tts"][-1]["text"].startswith("好的")
+    finally:
+        d.close()
+
+
 # ── agent 间通信 ────────────────────────────────────────────────────────────
 
 def test_a2a_send_and_matrix(a):

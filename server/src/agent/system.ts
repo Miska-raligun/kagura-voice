@@ -46,7 +46,9 @@ export interface AgentSystem {
   packages: PackageManager;
   outbox?: Outbox;
   /** 已经以文字发出去的回复顺带念一遍（网页聊天用） */
-  mirror?: (agentId: string, text: string, source: string, meta?: { announced?: boolean }) => Promise<void>;
+  mirror?: (agentId: string, text: string, source: string, meta?: { announced?: boolean; voice?: string }) => Promise<void>;
+  /** 会被顺带念的回复：给 RunRequest.onVoice 用（朗读版写好就先念）；按策略不念时 undefined */
+  voiceFirst?: (agentId: string, source: string) => ((text: string) => void) | undefined;
 }
 
 export function createAgentSystem(cfg: Config, dirs: Dirs, fake: FakeLlm | null): AgentSystem {
@@ -143,15 +145,30 @@ export function attachAgentSystem(sys: AgentSystem, ctx: Ctx) {
    * 已经以文字发出去的回复（IM、网页、投到 IM 的任务）顺带念一遍：短的去掉格式直接念，长的用便宜模型压成口语（按 agent 的语音字数）。
    * 这一轮已经用 announce 传过话的不再念，免得播两遍；按策略本来就不播的不去调模型。
    */
-  const mirror = async (agentId: string, text: string, source: string, meta?: { announced?: boolean }) => {
+  const mirror = async (agentId: string, text: string, source: string, meta?: { announced?: boolean; voice?: string }) => {
     if (meta?.announced || !text || !outbox.allowed()) return;
+    if (meta?.voice) return;          // 她写了朗读版，生成过程中已经念了
     try {
+      const t0 = Date.now();
       const said = await runtime.spoken(agentId, text);
-      if (said) await outbox.say({ text: said, agentId, mirror: true, source });
+      if (!said) return;
+      const r = await outbox.say({ text: said, agentId, mirror: true, source });
+      console.log(`[outbox] 🔈 ${agentId} 顺带朗读（${source}，没写朗读版，事后处理 ${((Date.now() - t0) / 1000).toFixed(1)}s）→ ${r.played ? `已推到 ${r.device}` : `没播（${r.reason ?? "?"}）`}`);
     } catch (e: any) { console.log(`[outbox] ⚠️  顺带朗读失败: ${e.message}`); }
   };
-  sys.channels.voice = { say: (agentId, text, meta) => mirror(agentId, text, "im", meta) };
+  /** 朗读版一写完就念（生成还在继续）：只在按策略会念的时候让她写 */
+  const voiceFirst = (agentId: string, source: string) => {
+    if (!outbox.allowed()) return undefined;
+    return (v: string) => {
+      const t0 = Date.now();
+      void outbox.say({ text: v, agentId, mirror: true, source })
+        .then((r) => console.log(`[outbox] 🔈 ${agentId} 朗读版（${source}）→ ${r.played ? `已推到 ${r.device}，用时 ${((Date.now() - t0) / 1000).toFixed(1)}s` : `没播（${r.reason ?? "?"}）`}`))
+        .catch((e) => console.log(`[outbox] ⚠️  朗读版推送失败: ${e.message}`));
+    };
+  };
+  sys.channels.voice = { say: (agentId, text, meta) => mirror(agentId, text, "im", meta), early: voiceFirst };
   sys.mirror = mirror;
+  sys.voiceFirst = voiceFirst;
   const scheduler = new Scheduler(ctx.dirs.systemDb, runtime, registry, {
     async deliver(agentId, delivery, text, meta) {
       const tag = meta?.source || "定时任务";

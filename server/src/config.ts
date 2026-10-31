@@ -138,6 +138,8 @@ export interface ModelsConfig {
   default: string;
   /** 压缩、记忆冲刷、heartbeat 用的便宜模型；不填就用默认模型 */
   cheap: string;
+  /** 长回复事后压成口语用的模型（她没写朗读版时的兜底）；不填用 agent 的便宜模型。按它自己的思考设置跑 */
+  voice?: string;
 }
 
 /** 各系统的应用数据目录（安装版默认位置）。 */
@@ -172,6 +174,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     providers: Array.isArray(m.providers) ? m.providers : [],
     default: String(m.default ?? ""),
     cheap: String(m.cheap ?? ""),
+    voice: String(m.voice ?? ""),
   };
   const fake = env.KAGURA_FAKE_PROVIDERS === "1";
   // 没写 brain 时：配了模型就用内置 agent，否则沿用 OpenClaw（老用户升级零配置）

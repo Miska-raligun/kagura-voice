@@ -443,6 +443,12 @@ CoreS3 (MicroPython) ──HTTP──▶ server/（TypeScript 单文件可执行
   这一轮调过就不再 mirror，免得播两遍），播不播完全是系统的事：agent 发给主人的每条消息——主人 IM 私聊 / 网页聊天的回复（`mirror`：`Runtime.spoken` 去格式后不超过 agent 的 `voice_max_chars`×1.2 直接念，
   更长的用便宜模型压成口语，失败退回截断；按策略不播时不去调模型）、
   定时任务 / heartbeat（投 `device:` 只播；投 IM / webchat 发文字再 mirror）、子任务结果、提醒、定时拍照识别——都经 `Outbox.say()`。
+  **朗读版写在最前 + 推送边合成边播**（LRN 2026-10-31，症状「飞书 / 网页的长回复要等全写完，再找便宜模型压成口语，20 秒压不完就截断着念」）：
+  会被顺带念的回复（主人 IM 私聊、网页聊天，且 `outbox.allowed()`）给 `RunRequest.onVoice`（`sys.voiceFirst` / `VoiceBridge.early`），系统提示加 `voicePrompt`：
+  长回复在最终回复最前面写 `<voice>口语版</voice>`。`VoiceTap` 在流式里扣下这段、一闭合就回调去念（不等正文、不再调模型），正文 / 落盘（`unvoice`）/ 实时页 / onEvent 都拆掉；
+  `meta.voice` 有值时事后的 mirror 不再念。没写就走 `spoken()` 兜底：短的直接念，长的用「朗读兜底模型」（`models.voice`，空 = 便宜模型）按它自己的思考设置跑（`quick(…, {think})`），不思考 20 秒 / 思考 60 秒。
+  **推送边合成边播**（`speech/live-push.ts`）：`sendPush` 多于一句就按句合成，第一句好了就发 MQTT 通知，`/push-audio/<名>` 先找 `ctx.livePush` 边合成边写（协议同边生成边播：占位长度的 WAV 头 + PCM，读到关连接）。
+  日志：`🗣️ 朗读版写好了`、`[outbox] 🔈 …`、`[push] → …（边合成边播，N 句，首句 Xs）`、`[push] ← … 来取（通知后 Xs）`、`[push] ✓ 合成完`。
   ① `voice_push`：`presence`（默认）在家播、不在家不播（未知按在家）；`always` / `never`。管理界面改了就地生效。
   ② `role_push`（设备当前不是说话的那个角色时）：`hold`（默认）留言，设备切到那个角色时（`ctx.onRoleSwitch`，等设备空闲、问候之后）合成一段播；
   mirror 的不留（文字已经发过了，切角色时冒出一串聊天回复很怪）。`switch`：照样推，`ctx.sendPush(text, dev, agentId)` 用那个角色的音色、

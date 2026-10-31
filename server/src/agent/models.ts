@@ -196,13 +196,21 @@ export class ModelRegistry {
    * 默认会先想一大段，又慢又可能把输出额度用光、正文为空。服务商不认关思考的字段（报错里提到它）就去掉重试一次，之后不再发。
    * 返回的正文去掉了 <think>…</think>。
    */
-  async quick(model: Model<any>, ctx: Parameters<MutableModels["completeSimple"]>[1], opts: { signal?: AbortSignal; maxTokens?: number } = {}) {
+  async quick(model: Model<any>, ctx: Parameters<MutableModels["completeSimple"]>[1], opts: { signal?: AbortSignal; maxTokens?: number; think?: boolean } = {}) {
+    // think：按这个模型自己设的思考等级跑（朗读兜底：关了思考效果差的模型可以开着想）；没设 / 设成关的照旧关
+    const level = opts.think ? this.thinkingOf(model) : "";
+    if (level && level !== "off" && model.provider !== "fake") {
+      const tp = thinkingParams(model.baseUrl ?? "", level, model.provider, model.id);
+      const res = await this.models.completeSimple(model, ctx, { signal: opts.signal, maxTokens: (opts.maxTokens ?? (model.maxTokens || DEFAULT_MAX_TOKENS)) + THINK_RESERVE[level], ...(tp ? { samplingParams: tp as any } : {}) });
+      return { ...res, content: res.content.map((c: any) => (c.type === "text" ? { ...c, text: stripThinkText(c.text) } : c)) };
+    }
     const extra = this.noThinkingParams(model);
-    let res = await this.models.completeSimple(model, ctx, { ...opts, ...(extra ? { samplingParams: extra as any } : {}) });
+    const { think: _t, ...base } = opts;
+    let res = await this.models.completeSimple(model, ctx, { ...base, ...(extra ? { samplingParams: extra as any } : {}) });
     if (extra && res.stopReason === "error" && !opts.signal?.aborted && /think|unrecogni[sz]ed|unknown|not support|extra|invalid param/i.test(res.errorMessage ?? "")) {
       this.noThinkRejected.add(model.provider);
       console.log(`[models] ${model.provider} 不认关思考的参数（${String(res.errorMessage).slice(0, 80)}），之后不再发`);
-      res = await this.models.completeSimple(model, ctx, opts);
+      res = await this.models.completeSimple(model, ctx, base);
     }
     return { ...res, content: res.content.map((c: any) => (c.type === "text" ? { ...c, text: stripThinkText(c.text) } : c)) };
   }
@@ -222,6 +230,8 @@ export class ModelRegistry {
 
   defaultRef() { return this.cfg.default; }
   cheapRef() { return this.cfg.cheap || this.cfg.default; }
+  /** 事后压成口语用的模型（没单独设就是空，调用方再退到便宜模型） */
+  voiceRef() { return this.cfg.voice || ""; }
 
   list() {
     return this.models.getModels().map((m) => ({ ref: `${m.provider}/${m.id}`, name: m.name, input: m.input, contextWindow: m.contextWindow }));

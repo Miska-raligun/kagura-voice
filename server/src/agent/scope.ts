@@ -18,7 +18,7 @@ export interface RunScope {
   hop: number;
   chain: string[];
   /** 本轮工具对 HTTP 响应的影响（take_photo → X-Need-Photo，set_volume → X-Volume） */
-  meta: { announced?: boolean; needPhoto?: boolean; volume?: string; photos?: string[] };
+  meta: { announced?: boolean; needPhoto?: boolean; volume?: string; photos?: string[]; /** 这一轮写的朗读版已经交给出口念了（事后不再顺带念） */ voice?: string };
   /** 这轮消息从哪来、结果该送回哪：device:<id> / feishu:<账号>:<聊天> …（后台子任务完成后按它转达） */
   origin?: string;
   /**

@@ -70,6 +70,19 @@ def test_push_audio_downloadable_once(srv, device):
     assert srv.fake_log()["tts"][-1]["text"] == "开饭啦"
 
 
+def test_push_multi_sentence_streams_whole_audio(srv, device):
+    """多句的推送：新服务端按句边合成边给（第一句好了就发通知），旧服务端整段合成——设备拿到的都得是完整的一段"""
+    text = "今天天气不错。下午可能有雨，记得带伞。晚上早点休息！"
+    assert srv.post("/push", json={"text": text, "device_id": device.id}).json()["status"] == "ok"
+    url = device.wait("push")["url"]
+    r = srv.get(url)
+    assert r.status_code == 200 and r.content[:4] == b"RIFF" and len(r.content) > 44
+    assert srv.get(url).status_code == 404, "取过一次就没了"
+    said = "".join(t["text"] for t in srv.fake_log()["tts"][-3:])
+    for part in ("今天天气不错", "记得带伞", "早点休息"):
+        assert part in said
+
+
 def test_push_audio_unknown_404(srv):
     assert srv.get("/push-audio/nope.wav").status_code == 404
 

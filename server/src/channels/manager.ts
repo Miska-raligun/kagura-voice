@@ -21,7 +21,9 @@ const LATE_MS = 5 * 60_000;
 /** 渠道回复同时在家里设备上播语音要用的东西（attachAgentSystem 里接上） */
 export interface VoiceBridge {
   /** 主人这边收到的回复交给出口顺带念一遍（播不播、播到哪由出口按语音推送策略定） */
-  say(agentId: string, text: string, meta?: { announced?: boolean }): Promise<void>;
+  say(agentId: string, text: string, meta?: { announced?: boolean; voice?: string }): Promise<void>;
+  /** 这一轮的回复会被念的话，给一个「朗读版写好了就先念」的回调（不会念就 undefined，也就不让她写） */
+  early?(agentId: string, source: string): ((text: string) => void) | undefined;
 }
 
 
@@ -200,6 +202,8 @@ export class ChannelManager {
         origin: `${m.kind}:${a.id}:${m.chatId}`,
         // 只有白名单里标了 owner 的人在私聊里说的才可信（能让 agent 执行命令）；群聊、配对的陌生人一律不可信
         trusted: m.chatType === "dm" && !!allowed?.owner,
+        // 主人私聊的回复会顺带念：让她先写朗读版，一写完就念，不等正文
+        onVoice: ownerDm ? this.voice?.early?.(agentId, "im") : undefined,
       });
       if (!r.text || SILENT_RE.test(r.text)) return;
       // take_photo 在 IM 里触发时，照片直接发回聊天

@@ -32,6 +32,12 @@ export function registerDevice(r: Router, ctx: Ctx) {
   /** 设备下载推送音频，下载后自动删除 */
   r.get("/push-audio/<filename>", (req) => {
     const name = req.params.filename;
+    // 还在边合成的：边写边给
+    const live = ctx.livePush.take(name);
+    if (live) {
+      console.log(`[push] ← ${req.header("x-device-id") || req.raw.socket.remoteAddress || "设备"} 来取 ${name}（通知后 ${((Date.now() - live.created) / 1000).toFixed(1)}s，已合成 ${live.chunks.length} 句${live.done ? "、全部完成" : ""}）`);
+      return { status: 200, headers: {}, body: "", raw: (res) => live.pipe(res) };
+    }
     const p = path.join(ctx.dirs.pushAudio, name);
     if (name.includes("/") || name.includes("\\") || name.startsWith(".") || !fs.existsSync(p)) return empty(404);
     const res = file(p, "audio/wav");

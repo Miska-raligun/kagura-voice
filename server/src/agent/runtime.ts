@@ -63,6 +63,11 @@ export interface RunRequest {
   onEvent?: (e: AgentStreamEvent) => void;
   /** 落盘前最后一道判断：返回 false 就不落盘（heartbeat 回 HEARTBEAT_OK 时不让它撑大历史） */
   keepIf?: (text: string) => boolean;
+  /**
+   * 这条回复写完会顺带在家里的设备上念（主人 IM 私聊 / 网页聊天，且按策略会播）：让她在最终回复最前面先写 <voice>朗读版</voice>，
+   * 一写完就回调（不等后面的正文），正文里拆掉。没写就由调用方事后走 spoken() 兜底
+   */
+  onVoice?: (text: string) => void;
 }
 
 /** 给边生成边播的事件：文本增量；一条助手消息结束（带不带工具调用）；一次工具执行结束 */
@@ -79,6 +84,8 @@ export interface RunResult {
   usage: { input: number; output: number; cost: number };
   /** 最后一条回复为什么停：stop / toolUse / length（输出到了上限被截断）… */
   stopReason?: string;
+  /** 她顺带写的朗读版（已经交给 onVoice 了） */
+  voice?: string;
 }
 
 export type ToolProvider = (scope: RunScope, agent: AgentInfo) => AgentTool<any>[];
@@ -208,7 +215,16 @@ export type LiveEvent =
   | { type: "delta"; kind: "text" | "thinking"; delta: string } | { type: "message"; message: any } | { type: "tool"; name: string; running: boolean };
 const LIVE_TEXT_MAX = 8000;
 /** 推给页面的消息：去掉自动回忆、图片只留占位、超长工具结果截短 */
+/** 落盘 / 给实时页的助手消息去掉 <voice> 段（只剩朗读版的就留朗读版当正文） */
+function unvoice(m: any, fired?: string): any {
+  if (m?.role !== "assistant" || !Array.isArray(m.content) || !m.content.some((c: any) => c.type === "text" && String(c.text).includes("<voice>"))) return m;
+  const content = m.content.map((c: any) => (c.type === "text" ? { ...c, text: stripVoice(String(c.text)) } : c));
+  const empty = !content.some((c: any) => (c.type === "text" && c.text.trim()) || c.type === "toolCall");
+  return { ...m, content: empty && fired ? [{ type: "text", text: fired }] : content };
+}
+
 function liveMessage(m: any): any {
+  m = unvoice(m);
   const x = stripRecall(m) as any;
   if (!Array.isArray(x.content)) return x;
   return {
@@ -331,6 +347,60 @@ export function parseCompactOutput(raw: string): { summary: string; remembered: 
   while ((m = re.exec(raw))) { take(kind, raw.slice(last, m.index)); kind = m[1]; last = m.index + m[0].length; }
   take(kind, raw.slice(last));
   return { summary: (parts.join("\n").trim() || loose.join("\n")).trim(), remembered };
+}
+
+/**
+ * 朗读版（LRN 2026-10-31，症状「飞书 / 网页的长回复要等全写完、再找便宜模型压成口语，20 秒压不完就截断着念」）：
+ * 会被顺带念的回复，让她在最终回复最前面先写 <voice>口语版</voice>。流式里一写完就交出去播（不等后面的正文、不再调模型），
+ * 正文、落盘、实时页里都拆掉这段。
+ */
+export const VOICE_RE = /<voice>([\s\S]*?)<\/voice>\s*/g;
+export function stripVoice(t: string): string {
+  return t.replace(VOICE_RE, "").replace(/^\s*<voice>\s*/, "");
+}
+export function voicePrompt(max: number): string {
+  return `<voice_first>\n这条回复写完会在家里的设备上念给主人听。回复会超过约 ${max} 字时，在最终回复的最开头先写一段 <voice>念给主人听的口语版</voice>，再接着写正文：`
+    + `口语版不超过 ${max} 字，保留结论和关键数字，不要 markdown、列表、表情、网址、代码；内容放不下就在最后说一句「详细的我发在消息里了」。`
+    + "短回复不用写，系统会直接念正文；先说一句再去调工具的那种过渡句也不用写。<voice> 这段主人在文字里看不到。\n</voice_first>";
+}
+/**
+ * 流式过滤：一条助手消息开头是 <voice> 就把这段扣下来（不给实时页 / 调用方看），一闭合就回调；其余照常放行。
+ * 开头还看不出是不是 <voice> 时先攒着；到消息结尾还没闭合就当普通正文放出去。
+ */
+export class VoiceTap {
+  private buf = "";
+  private mode: "undecided" | "pass" | "inside" = "undecided";
+  fired = "";
+  constructor(private onVoice: (t: string) => void) {}
+  /** 喂一段增量，返回应该放行给下游的文字 */
+  feed(d: string): string {
+    if (this.mode === "pass") return d;
+    this.buf += d;
+    if (this.mode === "undecided") {
+      const t = this.buf.replace(/^\s+/, "");
+      if (t.startsWith("<voice>")) this.mode = "inside";
+      else if ("<voice>".startsWith(t)) return "";
+      else { this.mode = "pass"; const out = this.buf; this.buf = ""; return out; }
+    }
+    if (this.mode === "inside") {
+      const end = this.buf.indexOf("</voice>");
+      if (end < 0) return "";
+      const voice = this.buf.slice(this.buf.indexOf("<voice>") + 7, end).trim();
+      const rest = this.buf.slice(end + 8).replace(/^\s+/, "");
+      this.buf = "";
+      this.mode = "pass";
+      if (voice && !this.fired) { this.fired = voice; try { this.onVoice(voice); } catch { /* 回调出错不影响这一轮 */ } }
+      return rest;
+    }
+    return d;
+  }
+  /** 一条消息结束：没闭合的 / 还没判断出来的原样放出去，下一条消息重新判断 */
+  end(): string {
+    const out = this.mode === "pass" ? "" : this.buf.replace(/^\s*<voice>\s*/, "");
+    this.buf = "";
+    this.mode = "undecided";
+    return out;
+  }
 }
 
 /** 模型正常结束却一个字没说、也没调工具（上下文快满时有的服务商会这样直接收尾）：execute 抛这个，run 压一压再试一次 */
@@ -625,7 +695,7 @@ export class Runtime {
     const recent = scope.trusted && req.kind !== "sub" && req.purpose !== "flush" ? this.recentActivity(agent, req.sessionKey) : "";
     const promptOf = (summary?: string, trace?: PromptTrace) => buildSystemPrompt({
       agent, scene: sceneOf(scope), channel: req.channel, summary, trace,
-      extra: [...(req.extraSystem ?? []), recent], skills: this.skillCatalog(agent), voiceDelivery: req.voiceDelivery,
+      extra: [...(req.extraSystem ?? []), recent, req.onVoice ? voicePrompt(agent.voice_max_chars || 80) : ""], skills: this.skillCatalog(agent), voiceDelivery: req.voiceDelivery,
       peers: tools.some((t) => t.name.startsWith("sessions_")) ? peers : [], tools: tools.map((t) => t.name),
     });
     // 上下文预算：窗口减去系统提示、工具定义、输出预留，剩下的才是历史（含摘要）能用的
@@ -702,15 +772,27 @@ export class Runtime {
     };
     // 这一轮已经说出口的字（被打断时记进历史用；中止时那条没说完的消息内容会被清空，只能自己攒）
     let spoken = "";
+    // 朗读版：开头的 <voice>…</voice> 扣下来一写完就交出去，实时页 / 调用方 / 已说出口的字里都不带它
+    const tap = req.onVoice ? new VoiceTap((v) => {
+      scope.meta.voice = v;
+      console.log(`[agent] 🗣️  ${agent.id} 朗读版写好了（开始这一轮后 ${((Date.now() - info.since) / 1000).toFixed(1)}s，${Array.from(v).length} 字），先拿去念`);
+      req.onVoice!(v);
+    }) : null;
     pi.subscribe((e: any) => {
-      if (e.type === "message_update" && e.assistantMessageEvent?.type === "text_delta") spoken += e.assistantMessageEvent.delta;
-      else if (e.type === "message_end" && e.message?.role === "assistant" && spoken && !spoken.endsWith("\n")) spoken += "\n";
+      const rawDelta = e.type === "message_update" && e.assistantMessageEvent?.type === "text_delta" ? String(e.assistantMessageEvent.delta ?? "") : null;
+      const textDelta = rawDelta === null ? null : tap ? tap.feed(rawDelta) : rawDelta;
+      const tail = tap && e.type === "message_end" && e.message?.role === "assistant" ? tap.end() : "";
+      if (textDelta) spoken += textDelta;
+      if (tail) spoken += tail;
+      if (e.type === "message_end" && e.message?.role === "assistant" && spoken && !spoken.endsWith("\n")) spoken += "\n";
       if (liveRun) {
         try {
+          if (tail) { liveRun.partial.text += tail; this.emitLive(lockKey, { type: "delta", kind: "text", delta: tail }); }
           if (e.type === "message_update") {
             const ev = e.assistantMessageEvent;
             const kind = ev?.type === "text_delta" ? "text" : ev?.type === "thinking_delta" ? "thinking" : "";
-            if (kind) { liveRun.partial[kind] += ev.delta; this.emitLive(lockKey, { type: "delta", kind, delta: ev.delta }); }
+            const delta = kind === "text" ? textDelta : ev?.delta;
+            if (kind && delta) { liveRun.partial[kind] += delta; this.emitLive(lockKey, { type: "delta", kind, delta }); }
           } else if (e.type === "message_end" && ["user", "assistant", "toolResult"].includes(e.message?.role)) {
             const m = liveMessage(e.message);
             liveRun.messages.push(m);
@@ -735,7 +817,8 @@ export class Runtime {
       kick();
       if (!req.onEvent) return;
       try {
-        if (e.type === "message_update" && e.assistantMessageEvent?.type === "text_delta") req.onEvent({ type: "text", delta: e.assistantMessageEvent.delta });
+        if (tail) req.onEvent({ type: "text", delta: tail });
+        if (textDelta) req.onEvent({ type: "text", delta: textDelta });
         else if (e.type === "message_end" && e.message?.role === "assistant") {
           const calls = (e.message.content ?? []).filter((c: any) => c.type === "toolCall");
           req.onEvent({ type: "message_end", toolCalls: calls.length, toolNames: calls.map((c: any) => String(c.name)) });
@@ -795,12 +878,13 @@ export class Runtime {
         model: `${a.provider}/${a.model}`, input: u.input, output: u.output, cacheRead: u.cacheRead, cacheWrite: u.cacheWrite, cost: u.cost?.total ?? 0,
       });
     }
-    const textOf = (a: AssistantMessage) => a.content.filter((c: any) => c.type === "text").map((c: any) => c.text).join("").trim();
-    const text = textOf(last) || assistants.map(textOf).filter(Boolean).join("\n");
+    const textOf = (a: AssistantMessage) => stripVoice(a.content.filter((c: any) => c.type === "text").map((c: any) => c.text).join("")).trim();
+    // 只写了 <voice> 没写正文：朗读版本身就当回复
+    const text = textOf(last) || assistants.map(textOf).filter(Boolean).join("\n") || (tap?.fired ?? "");
     // 一个字没说也没调工具：不落盘（库里不留空的助手消息），交给 run 压一压重试。调过工具的不重试——会把工具再执行一遍
     if (!text && !toolCalls.length) throw new Error(`空回复：模型没说话就结束了（${last.stopReason}，输出 ${last.usage?.output ?? "?"} token）`);
     if (persist && (!req.keepIf || req.keepIf(text))) {
-      const out = fresh.map((m) => stripImages(stripRecall(m), agent.workspace));
+      const out = fresh.map((m) => unvoice(stripImages(stripRecall(m), agent.workspace), tap?.fired));
       // 这一轮的上下文构成（估算）记在最后一条助手消息上：会话页每轮下面显示 token 明细用
       const li = out.map((m) => m.role).lastIndexOf("assistant");
       // 这条消息从哪来（同一个会话里可能混着设备、飞书、网页的消息，比如主会话）：会话页标在「用户」旁边
@@ -814,7 +898,7 @@ export class Runtime {
       } } as any;
       store.append(req.sessionKey, out);
     }
-    return { text, meta: scope.meta, toolCalls, usage, stopReason: String(last.stopReason ?? "") };
+    return { text, meta: scope.meta, toolCalls, usage, stopReason: String(last.stopReason ?? ""), voice: tap?.fired || undefined };
     } catch (e: any) { liveError = OVERFLOW_RE.test(String(e?.message ?? "")) || EMPTY_RE.test(String(e?.message ?? "")) ? "" : String(e?.message ?? e); throw e; }
     finally {
       if (!nestedRun) this.running.delete(lockKey);
@@ -1105,12 +1189,21 @@ export class Runtime {
     const agent = this.agents.get(agentId);
     const max = agent?.voice_max_chars || 80;
     const plain = toSpoken(text, 100_000);
-    if (!plain || Array.from(plain).length <= max * 1.2 || !agent) return plain;
+    if (!plain || Array.from(plain).length <= max * 1.2 || !agent) {
+      if (plain) console.log(`[agent] 🔈 ${agentId} 回复不长（${Array.from(plain).length} 字），直接念`);
+      return plain;
+    }
     const t0 = Date.now();
     let modelRef = "";
+    // 不开思考 20 秒；按模型设置开着思考的给 60 秒（文字早就发出去了，等的只是这段语音）
+    let limit = 20_000;
     try {
-      const model = this.models.resolve(agent.cheap_model || this.models.cheapRef() || agent.model);
+      const model = this.models.resolve(this.models.voiceRef() || agent.cheap_model || this.models.cheapRef() || agent.model);
       modelRef = `${model.provider}/${model.id}`;
+      const lv = this.models.thinkingOf(model);
+      const think = !!lv && lv !== "off";
+      if (think) limit = 60_000;
+      console.log(`[agent] 🔈 ${agentId} 回复 ${Array.from(plain).length} 字、没写朗读版，用 ${modelRef}${think ? `（思考：${lv}）` : ""}压成口语…`);
       const res = await Promise.race([
         withScope({ agentId, sessionKey: `${agentId}:voice`, kind: "isolated", channel: "system", purpose: "voice", hop: 0, chain: [], meta: {}, trusted: false },
           () => this.models.quick(model, {
@@ -1118,18 +1211,22 @@ export class Runtime {
               + `把它改写成适合朗读的口语，不超过 ${max} 字：保留结论和关键数字，省略细节、列表、代码和网址；`
               + "不要用 markdown、表情符号；内容放不下时最后说一句「详细的我发在消息里了」。只输出要念的话本身。",
             messages: [{ role: "user", content: text.slice(0, 6000), timestamp: Date.now() }],
-          }, { signal: AbortSignal.timeout(20_000) })),           // 到时真的中止请求，别在后台接着想
-        new Promise<never>((_, rej) => setTimeout(() => rej(new Error("超时")), 20_000)),
+          }, { signal: AbortSignal.timeout(limit), think })),           // 到时真的中止请求，别在后台接着想
+        new Promise<never>((_, rej) => setTimeout(() => rej(new Error("超时")), limit)),
       ]);
       if (res.stopReason === "error" || res.stopReason === "aborted") throw new Error(res.errorMessage || "模型调用失败");
       const out = toSpoken(res.content.filter((c: any) => c.type === "text").map((c: any) => c.text).join(""), max * 2);
       const u = res.usage;
       if (u) this.store(agentId).recordUsage(`${agentId}:voice`, "voice", { model: `${res.provider}/${res.model}`, input: u.input, output: u.output, cacheRead: u.cacheRead, cacheWrite: u.cacheWrite, cost: u.cost?.total ?? 0 });
-      if (out) return out;
+      if (out) {
+        console.log(`[agent] 🔈 ${agentId} 压成口语 ${Array.from(out).length} 字（${modelRef}，${((Date.now() - t0) / 1000).toFixed(1)}s）`);
+        return out;
+      }
+      throw new Error(`模型没写出正文（${res.stopReason}）`);
     } catch (e: any) {
       const ms = Date.now() - t0;
-      // 20 秒到了时请求被中止，服务商那边报的是「This operation was aborted」，这里写明白是超时
-      const why = ms >= 19_500 ? `超时（20 秒没写完${/abort/i.test(String(e.message)) ? "，请求已中止" : ""}）` : e.message;
+      // 到时请求被中止，服务商那边报的是「This operation was aborted」，这里写明白是超时
+      const why = ms >= limit - 500 ? `超时（${limit / 1000} 秒没写完${/abort/i.test(String(e.message)) ? "，请求已中止" : ""}）` : e.message;
       console.log(`[agent] ⚠️  ${agentId} 语音摘要失败，改为截断（${modelRef || "?"}，${(ms / 1000).toFixed(1)}s）: ${why}`);
     }
     return toSpoken(text, max);

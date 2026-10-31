@@ -74,7 +74,8 @@ export function registerAdminChat(r: Router, sys: AgentSystem) {
     if (/^\/(reset|new)\s*$/i.test(text)) { runtime.store(a.id).reset(key); return json({ reply: "好，我们重新开始吧。", tools: [], session: key }); }
     text = (text || (images.length ? "（发来了图片）" : "（发来了文件）")) + saveUploads(a.workspace, files);
     const kind = (runtime.store(a.id).getSession(key)?.kind as any) ?? "chat";
-    const reqBase = { agentId: a.id, sessionKey: key, kind, channel: "webchat", text, images: images.map((i: any) => ({ type: "image" as const, data: i.data, mimeType: i.mimeType })) };
+    const reqBase = { agentId: a.id, sessionKey: key, kind, channel: "webchat", text, images: images.map((i: any) => ({ type: "image" as const, data: i.data, mimeType: i.mimeType })),
+      onVoice: sys.voiceFirst?.(a.id, "webchat") };
     if (req.query.get("stream") !== "1") {
       const res = await runtime.run(reqBase);
       // 网页聊天的回复同样交给出口顺带念（和飞书私聊同一套判断）

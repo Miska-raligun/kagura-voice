@@ -129,6 +129,7 @@ function Models({ cfg, save }: { cfg: any; save: (p: any) => Promise<void> }) {
         <div class="form">
           <Field label="默认" hint="agent 未指定模型时使用"><Select value={m.default ?? ""} onChange={(v) => up((c) => (c.default = v))} options={[["", "未选"], ...refs]} /></Field>
           <Field label="便宜模型" hint="用于压缩、记忆整理、heartbeat"><Select value={m.cheap ?? ""} onChange={(v) => up((c) => (c.cheap = v))} options={[["", "同默认"], ...refs]} /></Field>
+          <Field label="朗读兜底模型" hint="她没写朗读版时，把长回复压成口语念出来；按这个模型自己的「思考」设置跑。建议选快的非推理模型"><Select value={m.voice ?? ""} onChange={(v) => up((c) => (c.voice = v))} options={[["", "同便宜模型"], ...refs]} /></Field>
         </div>
       </Card>
       <Card title="嵌入接口（可选）">
