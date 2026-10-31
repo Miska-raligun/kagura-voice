@@ -17,6 +17,7 @@ import type { AgentRegistry, AgentInfo } from "./registry.ts";
 import { outsideScope, type RunScope } from "./scope.ts";
 import { SILENT_RE } from "./scheduler.ts";
 import { ok, fail } from "./tools/device.ts";
+import { health } from "./health.ts";
 
 export interface A2AConfig { enabled: boolean; maxHops: number; perPairPerMin: number }
 
@@ -221,7 +222,11 @@ export class A2A {
                 catch (e: any) { result = `（失败：${e.message}）`; this.finish(logId, "error", String(e.message), Date.now() - t0); }
                 finally { done(); }
                 // 主人叫停了：别再拿「子任务失败」去惊动发起方（那又是一轮模型调用）
-                if (scope.cancel?.aborted) { console.log(`[a2a] 🛑 ${subKey} 随发起方一起停了，不再交回结果`); return; }
+                if (scope.cancel?.aborted) {
+                  console.log(`[a2a] 🛑 ${subKey} 随发起方一起停了，不再交回结果`);
+                  health.record({ kind: "sub_cancelled", ok: true, agent: to, session: subKey, ms: Date.now() - t0 });
+                  return;
+                }
                 console.log(`[a2a] 🧵 ${subKey} 做完了（${((Date.now() - t0) / 1000).toFixed(0)}s），结果交回 ${caller.agentId}`);
                 await this.deliverResult(caller, p.task, to, result, logId);
               })().catch((e) => console.log(`[a2a] ⚠️  子任务结果交回失败: ${e.message}`));

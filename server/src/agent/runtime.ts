@@ -16,6 +16,7 @@ import { toSpoken } from "../util/text.ts";
 import { BUDGETS, buildSystemPrompt, loadMode, sceneOf, turnContext, type PromptTrace, type SessionKind } from "./soul.ts";
 import { toolAllowed, guestLocked } from "./toolpolicy.ts";
 import { runScope, withScope, type RunScope } from "./scope.ts";
+import { health, errorClass } from "./health.ts";
 
 /** IM 渠道：消息可能来自陌生人，默认不可信（主人私聊由渠道层显式标 trusted） */
 export const IM_CHANNELS = new Set(["feishu", "qq", "onebot"]);
@@ -154,6 +155,8 @@ export class TurnGuard {
     if (this.reason) return;
     this.reason = why;
     console.log(`[agent] 🔁 ${this.label} ${why}，叫她停手汇报`);
+    const [agent, session] = this.label.split(" ");
+    health.record({ kind: "guard", ok: false, agent, session, detail: { why } });
   }
 
   wrap<T extends AgentTool<any>>(t: T): T {
@@ -603,7 +606,24 @@ export class Runtime {
   /** 会话是否正有一轮在跑（调度器的 idleOnly 用） */
   busy(agentId: string, sessionKey: string) { return this.locks.has(`${agentId}|${sessionKey}`); }
 
+  /** 跑一轮（排队、互等检测、超长 / 空回复兜底），结果记进运行状况 */
   async run(req: RunRequest): Promise<RunResult> {
+    const t0 = Date.now();
+    const base = { agent: req.agentId, session: req.sessionKey, purpose: req.purpose ?? "chat" };
+    try {
+      const r = await this.runInner(req);
+      health.record({ kind: "turn", ok: true, ...base, ms: Date.now() - t0 });
+      return r;
+    } catch (e: any) {
+      const msg = String(e?.message ?? e);
+      const cls = errorClass(msg);
+      if (cls !== "被取消") console.log(`[agent] ❌ ${req.agentId} ${req.sessionKey} 这一轮失败（${cls}，${((Date.now() - t0) / 1000).toFixed(1)}s）：${msg.slice(0, 200)}`);
+      health.record({ kind: "turn", ok: false, ...base, ms: Date.now() - t0, detail: { error: cls, message: msg.slice(0, 300) } });
+      throw e;
+    }
+  }
+
+  private async runInner(req: RunRequest): Promise<RunResult> {
     const parent = runScope();
     const nested = !!parent;          // 在另一轮运行里发起的（a2a 等待对方回复）：发起方手里还拿着自己的会话锁
     const key = `${req.agentId}|${req.sessionKey}`;
@@ -637,11 +657,13 @@ export class Runtime {
             if (empty) {
               // 空回复多半是上下文快满了：历史超过阈值一半就先压（不像超长那样压到只剩一轮），然后再试一次
               console.log(`[agent] 🫥 ${key} ${msg}，压一压再试一次`);
+              health.record({ kind: "empty_retry", ok: true, agent: req.agentId, session: req.sessionKey, purpose: req.purpose, detail: { message: msg.slice(0, 200) } });
               await this.maybeCompact(agent, this.store(agent.id), req.sessionKey, req.signal, { limit: Math.floor(agent.compaction.max_tokens / 2), trigger: "empty" });
               try { return await this.execute(req); }
               catch (e2: any) { throw EMPTY_RE.test(String(e2?.message ?? "")) ? new Error("模型连着两次返回了空回复，换个说法再试，或者在管理界面压缩一下这个会话") : e2; }
             }
             console.log(`[agent] 📏 ${key} 上下文超长（${msg.slice(0, 120)}），压缩后重试`);
+            health.record({ kind: "overflow", ok: true, agent: req.agentId, session: req.sessionKey, purpose: req.purpose, detail: { message: msg.slice(0, 200) } });
             await this.maybeCompact(agent, this.store(agent.id), req.sessionKey, req.signal, { limit: 0, keepTokens: 0, trigger: "overflow" });
             return await this.execute(req);
           }
@@ -794,6 +816,7 @@ export class Runtime {
     const tap = req.onVoice ? new VoiceTap((v) => {
       scope.meta.voice = v;
       console.log(`[agent] 🗣️  ${agent.id} 朗读版写好了（开始这一轮后 ${((Date.now() - info.since) / 1000).toFixed(1)}s，${Array.from(v).length} 字），先拿去念`);
+      health.record({ kind: "voice", ok: true, agent: agent.id, session: req.sessionKey, ms: Date.now() - info.since, detail: { via: "first" } });
       req.onVoice!(v);
     }) : null;
     pi.subscribe((e: any) => {
@@ -876,6 +899,7 @@ export class Runtime {
       if (i >= 0) fresh = fresh.filter((m: any, k) => k !== i && !(k === i - 1 && m.role === "assistant" && silentMsg(m)));
       const after = fresh.filter((m) => m.role === "assistant").at(-1);
       console.log(`[agent] 💭 ${agent.id} 催过之后${after && !silentMsg(after) ? "说话了" : "还是没说话"}`);
+      health.record({ kind: "nudge", ok: !!after && !silentMsg(after), agent: agent.id, session: req.sessionKey, purpose: scope.purpose, detail: { model: `${model.provider}/${model.id}` } });
     }
     const assistants = fresh.filter((m) => m.role === "assistant") as AssistantMessage[];
     const last = assistants.at(-1);
@@ -1074,6 +1098,7 @@ export class Runtime {
     catch (e: any) {
       console.log(`[agent] ⚠️  ${agent.id} 压缩${why === "已取消" ? "被取消" : "失败"}（下轮再试）: ${e.message}`);
       try { store.addEvent(key, "compact_failed", { trigger: o.trigger ?? "before", error: e.message, size, limit: o.limit }); } catch { /* 记不下就算了 */ }
+      health.record({ kind: "compact_failed", ok: false, agent: agent.id, session: key, detail: { trigger: o.trigger ?? "before", error: String(e.message).slice(0, 200) } });
     }
     finally { clearTimeout(timer); signal?.removeEventListener("abort", onAbort); }
   }
@@ -1204,6 +1229,7 @@ export class Runtime {
       try { this.remember?.(agent, target, text); } catch (e: any) { console.log(`[agent] ⚠️  ${agent.id} 记忆写入失败: ${e.message}`); }
     }
     console.log(`[agent] 🗜️  ${agent.id} ${key} 压缩 ${old.length} 条（${chunks.length} 段${failed ? `，${failed} 段没总结成` : ""}）→ 摘要 ${Array.from(summary).length} 字${remembered.length ? `，记下 ${remembered.length} 条` : ""}`);
+    health.record({ kind: "compact", ok: !failed, agent: agent.id, session: key, ms: Date.now() - t0, detail: { trigger, chunks: chunks.length, failed, messages: old.length } });
     // 会话页「系统事件」：什么时候、为什么压的，压了多少、剩多少，顺手记进了哪些记忆
     try {
       const sum = (a: Message[]) => a.reduce((n, m) => n + msgTokens(m), 0);
@@ -1227,6 +1253,7 @@ export class Runtime {
     const plain = toSpoken(text, 100_000);
     if (!plain || Array.from(plain).length <= max * 1.2 || !agent) {
       if (plain) console.log(`[agent] 🔈 ${agentId} 回复不长（${Array.from(plain).length} 字），直接念`);
+      if (plain && agent) health.record({ kind: "voice", ok: true, agent: agentId, detail: { via: "short" } });
       return plain;
     }
     const t0 = Date.now();
@@ -1256,6 +1283,7 @@ export class Runtime {
       if (u) this.store(agentId).recordUsage(`${agentId}:voice`, "voice", { model: `${res.provider}/${res.model}`, input: u.input, output: u.output, cacheRead: u.cacheRead, cacheWrite: u.cacheWrite, cost: u.cost?.total ?? 0 });
       if (out) {
         console.log(`[agent] 🔈 ${agentId} 压成口语 ${Array.from(out).length} 字（${modelRef}，${((Date.now() - t0) / 1000).toFixed(1)}s）`);
+        health.record({ kind: "voice", ok: true, agent: agentId, ms: Date.now() - t0, detail: { via: "summary", model: modelRef } });
         return out;
       }
       throw new Error(`模型没写出正文（${res.stopReason}）`);
@@ -1264,6 +1292,7 @@ export class Runtime {
       // 到时请求被中止，服务商那边报的是「This operation was aborted」，这里写明白是超时
       const why = ms >= limit - 500 ? `超时（${limit / 1000} 秒没写完${/abort/i.test(String(e.message)) ? "，请求已中止" : ""}）` : e.message;
       console.log(`[agent] ⚠️  ${agentId} 语音摘要失败，改为截断（${modelRef || "?"}，${(ms / 1000).toFixed(1)}s）: ${why}`);
+      health.record({ kind: "voice", ok: false, agent: agentId, ms, detail: { via: "cut", model: modelRef, why: String(why).slice(0, 200) } });
     }
     return toSpoken(text, max);
   }

@@ -117,6 +117,12 @@ export function installCrashLogging(onSignal?: (sig: string) => void) {
   }, 30 * 60_000).unref();
 }
 
+/** 当前日志文件（管理界面「日志」页读它） */
+export const logFilePath = () => logPath;
+
+/** 开机时发现上次没有正常退出（给运行状况记一条） */
+export let uncleanLastRun: { pid: string; started: number; lastLog: string } | null = null;
+
 // 「正在运行」标记：正常退出时删掉。开机时还在 = 上次是被强行结束 / 崩溃 / 断电
 const markPath = () => (logDir ? path.join(logDir, "running.pid") : "");
 function clearMark() { try { if (markPath()) fs.rmSync(markPath(), { force: true }); } catch { /* 删不了就算了 */ } }
@@ -127,6 +133,7 @@ function checkLastRun() {
       const [pid, since] = fs.readFileSync(p, "utf8").split(" ");
       let lastAlive = "";
       try { lastAlive = new Date(fs.statSync(logPath).mtimeMs).toLocaleString("zh-CN", { hour12: false }); } catch { /* 没有日志 */ }
+      uncleanLastRun = { pid, started: since ? Number(since) : 0, lastLog: lastAlive };
       console.log(`[main] ⚠️  上次运行（pid ${pid}，${since ? new Date(Number(since)).toLocaleString("zh-CN", { hour12: false }) : "?"} 启动）没有正常退出：被强行结束、崩溃或断电。`
         + `日志最后写入在 ${lastAlive || "?"}；logs/ 里有 report.*.json 就是内存耗尽或 V8 致命错误`);
     }

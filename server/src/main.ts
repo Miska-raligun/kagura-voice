@@ -35,7 +35,8 @@ import { SelfUpdater, installKind } from "./util/selfupdate.ts";
 import { applyPending } from "./backup.ts";
 import { registerAdminSystem } from "./routes/admin-system.ts";
 import type { PackageManager } from "./agent/packages.ts";
-import { initLogFile, installCrashLogging } from "./util/logfile.ts";
+import { initLogFile, installCrashLogging, uncleanLastRun } from "./util/logfile.ts";
+import { health } from "./agent/health.ts";
 import { startTray } from "./tray.ts";
 import { isGuiProcess, messageBox } from "./util/wingui.ts";
 import { waitForOldProcess, takeRestartNotice, restartSelf } from "./util/restart.ts";
@@ -95,6 +96,7 @@ async function main() {
   // 大脑：内置 agent（pi）或 OpenClaw CLI；假服务商模式下 OpenClaw 位置换成脚本假大脑
   // agent 系统总是建：OpenClaw 模式下管理界面、首次设置向导也要能用；只有「设备对话交给谁」随 brain 配置
   const sys = createAgentSystem(cfg, dirs, fake);
+  if (uncleanLastRun) health.record({ kind: "unclean_exit", ok: false, detail: uncleanLastRun });
   const pi = cfg.brain === "pi";
   const brain = pi ? new PiBrain(sys.runtime) : (fake ?? openclawBrain(cfg, dirs.visionTmp));
   const mqtt = new MqttHub();

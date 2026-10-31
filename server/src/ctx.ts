@@ -21,6 +21,7 @@ import { now, sleep, strftime } from "./util/time.ts";
 import { hex, pyHead, pyLen } from "./util/text.ts";
 import { LivePushes } from "./speech/live-push.ts";
 import { SentenceSplitter, wavPcm } from "./speech/sentences.ts";
+import { health } from "./agent/health.ts";
 
 export const MAX_IMAGE_B64_BYTES = 5 * 1024 * 1024;
 export const MAX_AUDIO_BYTES = 5 * 1024 * 1024;
@@ -155,7 +156,11 @@ export class Ctx {
       console.log(`[push] ⚠️  ${dev} 首句合成失败，改为整段合成`);
     }
     const wav = await this.voice.synthesize(text, ref);
-    if (!wav) return false;
+    if (!wav) {
+      console.log(`[push] ⚠️  ${dev} 语音合成失败，没推送：${head}`);
+      health.record({ kind: "push_failed", ok: false, agent: agentId ?? undefined, detail: { device: dev, text: head } });
+      return false;
+    }
     const fname = `${hex(8)}.wav`;
     fs.copyFileSync(wav, path.join(this.dirs.pushAudio, fname));
     pruneDir(this.dirs.pushAudio, PUSH_AUDIO_MAX_FILES);

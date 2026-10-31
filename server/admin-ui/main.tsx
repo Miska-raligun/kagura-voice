@@ -16,6 +16,7 @@ import { Channels } from "./pages/channels.tsx";
 import { Devices } from "./pages/devices.tsx";
 import { Usage } from "./pages/usage.tsx";
 import { Settings } from "./pages/settings.tsx";
+import { Logs } from "./pages/health.tsx";
 
 type Page = [id: string, label: string, icon: IconName, comp: (p: { arg: string }) => any];
 const GROUPS: [string, Page[]][] = [
@@ -38,6 +39,7 @@ const GROUPS: [string, Page[]][] = [
     ["devices", "设备", "cpu", Devices],
   ]],
   ["系统", [
+    ["logs", "日志", "list", Logs],
     ["settings", "设置", "gear", Settings],
   ]],
 ];

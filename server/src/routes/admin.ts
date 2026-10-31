@@ -8,6 +8,8 @@ import { json, viaProxy, type Req, type Res, type Router } from "../http/router.
 import type { Ctx } from "../ctx.ts";
 import type { AgentSystem } from "../agent/system.ts";
 import { SOUL_FILES, templates } from "../agent/registry.ts";
+import { health } from "../agent/health.ts";
+import { logFilePath } from "../util/logfile.ts";
 import { SHARED_FILES, SHARED_TEMPLATES, isShared, ownExtra, sharedDir, sharedPath } from "../agent/persona.ts";
 import { POLICY, applyToolPolicy } from "../agent/toolpolicy.ts";
 import { BUDGETS, LOADOUT, SCENES, PROMPT_FILES, PRIVATE_FILES, TOC_FILES, applyBudgets, applyLoadout } from "../agent/soul.ts";
@@ -102,6 +104,30 @@ export function registerAdmin(r: Router, ctx: Ctx, sys: AgentSystem) {
       channels: sys.channels.status(),
       runs: runtime.activeRuns(),
     });
+  });
+  // ── 运行状况：每天多少轮、成功多少、失败按类、兜底动作各几次；最近的异常 ──
+  get("/api/admin/health", (req) => {
+    const days = Math.min(30, Math.max(1, Number(req.query.get("days") ?? 7)));
+    return json({ days: health.summary(days), recent: health.recent(Math.min(500, Number(req.query.get("limit") ?? 100)), req.query.get("kind") ?? "") });
+  });
+  // ── 日志：读 kagura.log 末尾，按关键词 / 只看问题筛（不用再去翻文件）──
+  get("/api/admin/logs", (req) => {
+    const file = logFilePath();
+    if (!file || !fs.existsSync(file)) return json({ lines: [], file: "" });
+    const q = (req.query.get("q") ?? "").trim().toLowerCase();
+    const issues = req.query.get("level") === "issues";
+    const want = Math.min(2000, Math.max(50, Number(req.query.get("lines") ?? 500)));
+    // 只读末尾一段（日志最大 5MB），够看最近的事
+    const size = fs.statSync(file).size;
+    const len = Math.min(size, 3 * 1024 * 1024);
+    const fd = fs.openSync(file, "r");
+    const buf = Buffer.alloc(len);
+    try { fs.readSync(fd, buf, 0, len, size - len); } finally { fs.closeSync(fd); }
+    let lines = buf.toString("utf8").split("\n");
+    if (len < size) lines.shift();                 // 第一行多半被截了半截
+    const ISSUE = /⚠️|❌|🛑|🔁|💭|🫥|📏|\[crash\]|\[exit\]|ERROR|WARN|失败|出错|超时|429|没有正常退出/;
+    lines = lines.filter((l) => l && (!issues || ISSUE.test(l)) && (!q || l.toLowerCase().includes(q)));
+    return json({ lines: lines.slice(-want), total: lines.length, file, size });
   });
   // ── 正在运行的任务：看谁占着会话、手动终止 ──
   get("/api/admin/runs", () => json(runtime.activeRuns()));

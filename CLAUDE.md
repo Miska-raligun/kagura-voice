@@ -550,6 +550,10 @@ CoreS3 (MicroPython) ──HTTP──▶ server/（TypeScript 单文件可执行
   **会话页实时弹出**（`a2a.A2ADock`）：`LiveRun.trace` 带着这一轮的会话 id（`execute` 开头先算 `traceId`，start 事件里就有），实时过程里一出现 `sessions_send` / `sessions_spawn`
   就在输入框上方滑出这串调用的动画（**放在卡片里、别用 fixed 盖住输入框**）。对话框（`.card.chat`）整体固定高、消息区 `flex:1` 吃剩下的——**别再给消息区写 max-height**，那样内容少 / 弹面板时框会忽大忽小，每秒刷新；这一轮结束后留着，主人关了同一串就不再弹。历史轮次在 ⓘ 里有「看这一轮的 Agent 通信」（`kctx.a2a`）。
   详情页是回放：每次调用拆成「发出 / 回来」两步，按时间排，SVG 节点（每个 agent 一个，子任务会话单独一个）+ 沿弧线走的光点，下方步骤列表同步高亮，进行中的 3 秒刷新一次接着播。
+- **运行状况（`agent/health.ts`，管理界面总览「运行状况」卡片 +「日志」页，LRN 2026-10-31，症状「出了问题只能翻一个大日志文件，也说不清最常出的是哪种」）**：
+  每一轮（`Runtime.run` 外层）记成功 / 失败（`errorClass` 归类：限流 429、服务商出错、网络、超时、空回复、上下文超长、单轮上限、Key / 额度、被取消、其它）和用时，
+  兜底动作各记一条（`empty_retry` / `nudge` / `overflow` / `guard` / `compact` / `compact_failed` / `voice` / `push_failed` / `sub_cancelled` / `unclean_exit`），存 system.sqlite 的 `health_events`，留 30 天。
+  `/api/admin/health`（按天汇总 + 最近异常）、`/api/admin/logs`（读 kagura.log 末尾，关键词 / 只看问题）。失败的轮次日志里打 `❌`。**新加兜底 / 降级逻辑时顺手 `health.record` 一条**，不然首页看不出来它在起作用。
 - **管理界面的长列表**：侧边列表一律用 `ui.SideList`（搜索框、分组折叠、先显示一部分再「再显示」），表格用 `ui.usePage` 分页（每页 20）。
   新加会越积越多的列表 / 记录时直接用这两个，别平铺。
 - **新版本提醒（`util/update.ts`）**：启动 30 秒后、之后每 12 小时查一次 GitHub Releases，只提示不安装；

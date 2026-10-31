@@ -1,5 +1,6 @@
 import { api, ago, fmtTime, go, money } from "../api.ts";
 import { Badge, Btn, Card, Empty, Err, Stat, toast, useInterval, useLoad } from "../ui.tsx";
+import { HealthCard } from "./health.tsx";
 
 const PURPOSE: Record<string, string> = { chat: "对话", heartbeat: "heartbeat", cron: "定时任务", a2a: "agent 间", spawn: "子任务", flush: "记忆整理" };
 const CHANNEL: Record<string, string> = { device: "设备 / 手机", webchat: "网页", a2a: "agent 间", system: "系统", feishu: "飞书", qq: "QQ" };
@@ -58,6 +59,7 @@ export function Overview() {
         <Stat label="渠道在线" value={`${chOk}/${d.channels.length}`} />
       </div>
       <div class="grid">
+        <HealthCard />
         <Card title={`正在运行${d.runs?.length ? `（${d.runs.length}）` : ""}`}>
           <Runs runs={d.runs ?? []} reload={reload} />
         </Card>
