@@ -152,6 +152,34 @@ describe("sessions_spawn", () => {
     expect(fake.calls.at(-1).session).toBe("main:main");
   });
 
+  it("主人叫停发起的那一轮：它派出去的后台子任务一起停，也不再拿结果去惊动发起方", async () => {
+    const { rt, fake } = setup();
+    const slow = (t: string) => ({ text: t + "很长很长的内容，".repeat(60), tps: 5 });
+    fake.queue.push(
+      { tool_calls: [{ name: "sessions_spawn", args: { agent: "mio", task: "查很多首歌" } }], then: slow("我让小澪去查了，") },
+      slow("第一首……"),                        // 子 agent：慢慢地想
+    );
+    const p = rt.run({ ...chat, agentId: "main", sessionKey: "main:main", text: "查歌" }).catch((e) => e);
+    await waitFor(() => rt.activeRuns().some((r: any) => r.key.startsWith("mio|mio:sub:")), 5000);
+    expect(rt.cancelRun("main|main:main")).toBe(true);
+    await p;
+    await waitFor(() => rt.activeRuns().length === 0, 5000);
+    const n = fake.calls.length;
+    await new Promise((r) => setTimeout(r, 300));
+    expect(fake.calls.length).toBe(n);                  // 没有「子任务失败」那一轮
+  }, 15_000);
+
+  it("同时在后台跑的子任务有上限", async () => {
+    const { rt, fake } = setup();
+    const slow = { text: "慢慢想" + "……".repeat(80), tps: 10 };
+    const calls = [1, 2, 3, 4].map((i) => ({ name: "sessions_spawn", args: { task: `活${i}` } }));
+    fake.queue.push({ tool_calls: calls, then: "派好了" }, slow, slow, slow);
+    await rt.run({ ...chat, agentId: "main", sessionKey: "main:main", text: "x" });
+    const results = rt.store("main").history("main:main").map((h) => h.msg as any).filter((m) => m.role === "toolResult");
+    expect(results.filter((m: any) => m.isError && /上限/.test(m.content[0].text)).length).toBe(1);
+    for (const r of rt.activeRuns() as any[]) rt.cancelRun(r.key);
+  }, 15_000);
+
   it("子 agent 不能再 spawn / send、不能写记忆；wait=true 直接拿结果", async () => {
     const { rt, fake, reg } = setup();
     fake.queue.push(

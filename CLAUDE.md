@@ -319,6 +319,10 @@ CoreS3 (MicroPython) ──HTTP──▶ server/（TypeScript 单文件可执行
   手机设备 `device_in_main` 也走 `worker:main`，于是手机消息永远排不上）：`scope.chain` 只看得见同一条调用链，两条各自起头的链互等它看不出来。
   `Runtime.run` 记 `waitsFor`（拿着锁的会话 → 它在等的会话），发起嵌套等待前顺着走一圈，成环就立刻失败（日志 `🔁 互相等待`）；
   嵌套等待（手里拿着自己的锁去等别人）还有上限 `lockWaitMs.a2a`（90 秒），等不到就放弃——但排着的位置要等前面真完了才让出去，别让后面的插队。
+  **叫停要连带后台子任务**（`RunScope.cancel`，LRN 2026-10-31，症状「叫停了她，派出去的子 agent 还在后台一直想，直到服务商 429」）：每轮有一个只在被取消时触发的信号
+  （管理界面终止、设备按住取消、上一级被取消；正常结束 / 超时不触发），`sessions_spawn` / `sessions_send` 派出的运行都挂上它（`signal: scope.cancel`），嵌套运行也听上一级的。
+  随发起方停掉的子任务不再 `deliverResult`（又是一轮模型调用）。子任务预算：调用次数一半、token 四分之一、总时长 `SPAWN_MAX_SECS`；同一 agent 同时最多 `MAX_RUNNING_SUBS` 个，日志 `🧵`。
+  **新加任何「后台替她跑一轮」的入口都要传 `signal: scope.cancel`**。
   管理界面总览的「正在运行」卡片（`Runtime.activeRuns` / `cancelRun`，`/api/admin/runs`）：每个会话正在跑的那一轮、阶段 / 工具、排队数、在等谁，能手动终止。
   终止走每轮自己的 `AbortController`（调用方的 `req.signal` 也接在它上面），和取消同一条路：中止模型和工具，最多 2 秒放开会话锁。
   **手动终止的那一轮要留痕**（LRN 2026-10-30）：`info.cancelled`（管理界面「停止 / 停止并发送」、总览终止）时把用户消息 + 已经说出口的字（`spoken`，按 text_delta 攒——中止后那条没说完的消息内容是空的）

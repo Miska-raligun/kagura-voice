@@ -25,6 +25,10 @@ export type Announce = (scope: RunScope, text: string) => Promise<void>;
 
 const SEND_TIMEOUT = 90;
 const SPAWN_TIMEOUT = 300;
+/** 一个子任务最多跑多久（总时长；思考一直在出字也算进来） */
+const SPAWN_MAX_SECS = 600;
+/** 同一个 agent 同时在后台跑的子任务上限：再多就让她等前面的做完（2026-10-31：一口气派了好几个，一起撞上服务商限流 429） */
+export const MAX_RUNNING_SUBS = 3;
 /**
  * agent 间传话的会话（LRN 2026-10-30）：一次交互一个会话 `<接收方>:a2a:<发起方>:<trace>`，不进接收方的 main。
  * 「一次交互」= 同一串调用（`scope.trace`：主人一句话 / 一次 heartbeat 引出的所有传话），这期间来回几次都在同一个会话里接着说；
@@ -103,6 +107,9 @@ export class A2A {
     return null;
   }
 
+  /** 每个 agent 正在跑的子任务数 */
+  private subsRunning = new Map<string, number>();
+
   tools() {
     return (scope: RunScope, agent: AgentInfo): AgentTool<any>[] => {
       if (!this.cfg.enabled) return [];
@@ -149,11 +156,11 @@ export class A2A {
             const text = `[来自 ${agent.name}（agent ${agent.id}）的消息] ${p.message}`;
             const t0 = Date.now();
             const link = { trace: scope.trace, a2aCall: logId };
-            const go = () => this.rt.run({ agentId: p.agent, sessionKey: toKey, kind: "isolated", channel: "a2a", text, purpose: "a2a", timeoutSecs: SEND_TIMEOUT, ...link });
+            const go = () => this.rt.run({ agentId: p.agent, sessionKey: toKey, kind: "isolated", channel: "a2a", text, purpose: "a2a", timeoutSecs: SEND_TIMEOUT, signal: scope.cancel, ...link });
             if (p.wait === false) {
               const lineage = { hop: scope.hop + 1, chain: scope.chain, trusted: scope.trusted };
               outsideScope(() => {
-                this.rt.run({ agentId: p.agent, sessionKey: toKey, kind: "isolated", channel: "a2a", text, purpose: "a2a", lineage, ...link })
+                this.rt.run({ agentId: p.agent, sessionKey: toKey, kind: "isolated", channel: "a2a", text, purpose: "a2a", lineage, signal: scope.cancel, ...link })
                   .then((r) => this.finish(logId, "ok", r.text, Date.now() - t0))
                   .catch((e) => this.finish(logId, "error", String(e.message), Date.now() - t0));
               });
@@ -178,21 +185,32 @@ export class A2A {
             const to = p.agent || agent.id;
             const err = this.check(scope, to, { allowSelf: true });
             if (err) { this.record({ kind: "spawn", from: scope, to, toSession: "", message: p.task, status: "rejected", reply: err }); return fail(err); }
+            const busy = this.subsRunning.get(agent.id) ?? 0;
+            if (busy >= MAX_RUNNING_SUBS) {
+              this.record({ kind: "spawn", from: scope, to, toSession: "", message: p.task, status: "rejected", reply: "子任务太多" });
+              return fail(`你已经有 ${busy} 个子任务在后台跑了（上限 ${MAX_RUNNING_SUBS} 个）。等它们做完、结果交回来再派，或者这件自己做。`);
+            }
             const subKey = `${to}:sub:${crypto.randomUUID().slice(0, 8)}`;
             const logId = this.record({ kind: "spawn", from: scope, to, toSession: subKey, message: p.task, status: "running" });
             const req = {
-              agentId: to, sessionKey: subKey, kind: "sub" as const, channel: "a2a", purpose: "spawn", timeoutSecs: SPAWN_TIMEOUT,
+              agentId: to, sessionKey: subKey, kind: "sub" as const, channel: "a2a", purpose: "spawn", timeoutSecs: SPAWN_TIMEOUT, maxSecs: SPAWN_MAX_SECS,
+              // 发起这一轮的被主人叫停了，子任务一起停（不管等不等它）
+              signal: scope.cancel,
               text: `[子任务，来自 ${agent.name}] ${p.task}\n\n完成后直接给出结果（会原样交回给发起方），不要寒暄。`,
               toolAllow: (n: string) => n !== "sessions_spawn" && n !== "sessions_send",
               trace: scope.trace, a2aCall: logId,
             };
             const t0 = Date.now();
+            this.subsRunning.set(agent.id, busy + 1);
+            const done = () => this.subsRunning.set(agent.id, Math.max(0, (this.subsRunning.get(agent.id) ?? 1) - 1));
+            console.log(`[a2a] 🧵 ${agent.id} 派出子任务 ${subKey}（${p.wait ? "等它做完" : "后台"}，现在共 ${busy + 1} 个在跑）：${String(p.task).slice(0, 60)}`);
             if (p.wait) {
               try {
                 const r = await this.rt.run(req);
                 this.finish(logId, "ok", r.text, Date.now() - t0);
                 return ok(`子任务完成：${r.text}`);
               } catch (e: any) { this.finish(logId, "error", String(e.message), Date.now() - t0); return fail(`子任务失败：${e.message}`); }
+              finally { done(); }
             }
             const caller = { ...scope, meta: {} };
             const lineage = { hop: scope.hop + (to !== agent.id ? 1 : 0), chain: scope.chain, trusted: scope.trusted };
@@ -201,6 +219,10 @@ export class A2A {
                 let result: string;
                 try { result = (await this.rt.run({ ...req, lineage })).text; this.finish(logId, "ok", result, Date.now() - t0); }
                 catch (e: any) { result = `（失败：${e.message}）`; this.finish(logId, "error", String(e.message), Date.now() - t0); }
+                finally { done(); }
+                // 主人叫停了：别再拿「子任务失败」去惊动发起方（那又是一轮模型调用）
+                if (scope.cancel?.aborted) { console.log(`[a2a] 🛑 ${subKey} 随发起方一起停了，不再交回结果`); return; }
+                console.log(`[a2a] 🧵 ${subKey} 做完了（${((Date.now() - t0) / 1000).toFixed(0)}s），结果交回 ${caller.agentId}`);
                 await this.deliverResult(caller, p.task, to, result, logId);
               })().catch((e) => console.log(`[a2a] ⚠️  子任务结果交回失败: ${e.message}`));
             });

@@ -659,9 +659,16 @@ export class Runtime {
     // 自己的中止信号：调用方取消（req.signal）和管理界面「终止」都走它
     const ac = new AbortController();
     const signal = ac.signal;
-    const onOuter = () => ac.abort();
-    if (req.signal?.aborted) ac.abort(); else req.signal?.addEventListener("abort", onOuter, { once: true });
-    const info: RunInfo = { purpose: req.purpose ?? "chat", channel: req.channel, since: Date.now(), tool: "", stage: "准备", abort: () => ac.abort(), cancelled: false };
+    // 「被取消」单独一个信号（正常结束、超时不触发）：这一轮派出去的后台子任务挂在它上面，主人叫停时一起停
+    const cancelAc = new AbortController();
+    const cancelAll = () => { ac.abort(); cancelAc.abort(); };
+    const onOuter = () => cancelAll();
+    if (req.signal?.aborted) cancelAll(); else req.signal?.addEventListener("abort", onOuter, { once: true });
+    // 上一级（嵌套调用里的发起方）被取消，这一轮也停
+    const parentCancel = runScope()?.cancel;
+    const onParent = () => cancelAll();
+    if (parentCancel?.aborted) cancelAll(); else parentCancel?.addEventListener("abort", onParent, { once: true });
+    const info: RunInfo = { purpose: req.purpose ?? "chat", channel: req.channel, since: Date.now(), tool: "", stage: "准备", abort: cancelAll, cancelled: false };
     if (!nestedRun) this.running.set(lockKey, info);
     // a2a 会话 id（见 RunScope.trace）：先算出来，实时记录里也带上——会话页据此弹出这一轮的 Agent 通信实时动画
     const traceId = req.trace ?? runScope()?.trace ?? `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
@@ -680,12 +687,15 @@ export class Runtime {
       trusted: req.trusted ?? parent?.trusted ?? req.lineage?.trusted ?? !IM_CHANNELS.has(req.channel),
       trace: traceId,
       a2aCall: req.a2aCall,
+      cancel: cancelAc.signal,
     };
     const model = this.models.resolve(req.model || agent.model);
     // 单轮上限（LRN 2026-10-30，症状「等她回复，她一直在 exec 兜圈子，把 token 烧光了」）：见 TurnGuard
+    // 子任务（sessions_spawn 派出去的）只给一半调用次数、四分之一 token：它们在后台跑、主人看不见，还可能同时派好几个
+    const factor = scope.purpose === "task" ? 3 : req.kind === "sub" ? 0.5 : 1;
     const guard = new TurnGuard(
-      (this.opts.maxToolCalls || DEFAULT_MAX_TOOL_CALLS) * (scope.purpose === "task" ? 3 : 1),
-      this.opts.maxTurnTokens === 0 ? Infinity : (this.opts.maxTurnTokens || DEFAULT_MAX_TURN_TOKENS) * (scope.purpose === "task" ? 3 : 1),
+      Math.max(5, Math.round((this.opts.maxToolCalls || DEFAULT_MAX_TOOL_CALLS) * factor)),
+      this.opts.maxTurnTokens === 0 ? Infinity : (this.opts.maxTurnTokens || DEFAULT_MAX_TURN_TOKENS) * (req.kind === "sub" ? 0.25 : factor),
       `${agent.id} ${req.sessionKey}`,
     );
     const tools = this.toolsFor(scope, agent, req).map((t) => guard.wrap(t));
@@ -903,6 +913,7 @@ export class Runtime {
     finally {
       if (!nestedRun) this.running.delete(lockKey);
       req.signal?.removeEventListener("abort", onOuter);
+      parentCancel?.removeEventListener("abort", onParent);
       if (liveRun && this.live.get(lockKey) === liveRun) { this.live.delete(lockKey); this.emitLive(lockKey, { type: "end", ...(liveError ? { error: liveError } : {}) }); }
     }
   }
