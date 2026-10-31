@@ -214,12 +214,13 @@ describe("会话与压缩", () => {
     reg.update("main", { compaction: { max_tokens: 10_000, keep_messages: 2 } });
     // 约 1.8 万字 → 超过阈值；要压的 5 轮每条截到 1500 字，约 7500 字 → 按 5000 一块分成两块
     (rt as any).compactChunk = 5000;                                     // 单测里把块调小
-    fake.queue.push("摘要一：前几件事", "", "这轮照常");               // 第二块模型给了空正文
+    fake.queue.push("摘要一：前几件事", "", "", "这轮照常");           // 第二块模型两次都给了空正文（第一次空的会再要一次）
     const r = await rt.run({ ...dev, agentId: "main", sessionKey: key, text: "还记得吗" });
     expect(r.text).toBe("这轮照常");
     const compacts = fake.calls.filter((c) => c.purpose === "compact");
-    expect(compacts.length).toBe(2);
+    expect(compacts.length).toBe(3);
     expect(compacts[1].message).toContain("此前的摘要：\n摘要一：前几件事");
+    expect(compacts[2].message).toContain("务必先写【摘要】");
     expect(compacts[1].message).toContain("（第 2/2 段）");
     const s = rt.store("main").getSession(key)!;
     expect(s.summary).toContain("摘要一：前几件事");
@@ -228,7 +229,7 @@ describe("会话与压缩", () => {
     expect(rt.store("main").history(key).length).toBeLessThanOrEqual(4);
     fake.queue.push("好");
     await rt.run({ ...dev, agentId: "main", sessionKey: key, text: "嗯" });
-    expect(fake.calls.filter((c) => c.purpose === "compact").length).toBe(2);   // 已经压下去了，不再重试
+    expect(fake.calls.filter((c) => c.purpose === "compact").length).toBe(3);   // 已经压下去了，不再重试
   }, 20_000);
 
   it("管理界面看得到正在跑的轮次和排队数，能手动终止，排着的消息接着处理", async () => {
@@ -527,5 +528,42 @@ describe("近况（跨会话 / 跨 agent）", () => {
     fake.queue.push("嗯");
     await rt.run({ ...im, agentId: "main", sessionKey: "main:feishu:oc_owner", text: "对了", trusted: true });
     expect(fake.calls.at(-1).system).not.toMatch(/\[飞书\] 主人：我周六要去爬山/);
+  });
+});
+
+describe("摘要输出不认顺序 / 空回复重试", () => {
+  it("【记住】写在最前也拆得开：正文照样是摘要；只有【记住】就拿记住的当摘要", async () => {
+    const { parseCompactOutput } = await import("../src/agent/runtime.ts");
+    expect(parseCompactOutput("【摘要】\n- 主人在改代码\n【记住】\n长期：项目在 D 盘")).toEqual({ summary: "- 主人在改代码", remembered: ["长期\n项目在 D 盘"] });
+    expect(parseCompactOutput("【记住】\n长期：项目在 D 盘\n【摘要】\n- 主人在改代码")).toEqual({ summary: "- 主人在改代码", remembered: ["长期\n项目在 D 盘"] });
+    expect(parseCompactOutput("【记住】\n- 长期：每次改完要跑测试\n- 主人在改设备代码，约定先备份")).toEqual({ summary: "- 主人在改设备代码，约定先备份", remembered: ["长期\n每次改完要跑测试"] });
+    expect(parseCompactOutput("【记住】\n无").summary).toBe("");
+    expect(parseCompactOutput("- 只有正文").summary).toBe("- 只有正文");
+  });
+
+  it("压缩时模型只写了【记住】：拿记住的几条当摘要，不再退成十几句用户原话", async () => {
+    const { rt, reg, fake } = makeRuntime();
+    rt.remember = () => {};
+    const key = "main:main";
+    for (let i = 0; i < 4; i++) { fake.queue.push("好"); await rt.run({ ...dev, agentId: "main", sessionKey: key, text: `约束${i}：` + "细节".repeat(800) }); }
+    reg.update("main", { compaction: { max_tokens: 2000, keep_messages: 2 } });
+    fake.queue.push("【记住】\n长期：改代码前先备份\n长期：每次改完跑测试", "收到");
+    await rt.run({ ...dev, agentId: "main", sessionKey: key, text: "继续" });
+    const s = rt.store("main").getSession(key)!;
+    expect(s.summary).toContain("改代码前先备份");
+    expect(s.summary).not.toContain("没能总结");
+  }, 20_000);
+
+  it("模型一个字没说就结束：不落空消息，压一压再试一次；两次都空就报错", async () => {
+    const { rt, fake } = makeRuntime();
+    fake.queue.push("", "这次说了");
+    const r = await rt.run({ ...dev, agentId: "main", sessionKey: "main:main", text: "在吗" });
+    expect(r.text).toBe("这次说了");
+    const h = rt.store("main").history("main:main").map((x) => x.msg as any);
+    expect(h.length).toBe(2);
+    expect(h.every((m) => m.role !== "assistant" || JSON.stringify(m.content).includes("这次说了"))).toBe(true);
+    fake.queue.push("", "");
+    await expect(rt.run({ ...dev, agentId: "main", sessionKey: "main:main", text: "在吗" })).rejects.toThrow(/两次返回了空回复/);
+    expect(rt.store("main").history("main:main").length).toBe(2);
   });
 });

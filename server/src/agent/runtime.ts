@@ -308,6 +308,33 @@ export function pruneToolResults<T extends { role: string }>(msgs: T[], budget =
 }
 
 /** 服务商报的「上下文超长」 */
+/**
+ * 拆开摘要模型的输出：【摘要】正文 + 【记住】要记的事（每条 "主人|长期|今天\n内容"）。
+ * 不认顺序：模型偶尔把【记住】写在最前，以前按「【记住】之前的才是摘要」切，正文就成了空，整段对话只剩兜底的十几句用户原话。
+ */
+export function parseCompactOutput(raw: string): { summary: string; remembered: string[] } {
+  const remembered: string[] = [];
+  const parts: string[] = [];
+  const loose: string[] = [];      // 【记住】段里不像「长期：…」的行：模型先写【记住】再接着写的摘要正文多半在这
+
+  // 按标记切段：标记前的（没写【摘要】时）也算摘要
+  const re = /【(摘要|记住)】/g;
+  let kind = "摘要", last = 0, m: RegExpExecArray | null;
+  const take = (k: string, body: string) => {
+    if (k === "摘要") { if (body.trim()) parts.push(body.trim()); return; }
+    for (const ln of body.split("\n")) {
+      const mm = /^\s*[-*·\d.、]*\s*(主人|长期|今天)\s*[:：]\s*(.+)$/.exec(ln);
+      if (mm) { if (!/^无[。.]?$/.test(mm[2].trim())) remembered.push(`${mm[1]}\n${mm[2].trim()}`); }
+      else if (ln.trim() && !/^\s*[-*·]?\s*无[。.]?\s*$/.test(ln)) loose.push(ln.trim());
+    }
+  };
+  while ((m = re.exec(raw))) { take(kind, raw.slice(last, m.index)); kind = m[1]; last = m.index + m[0].length; }
+  take(kind, raw.slice(last));
+  return { summary: (parts.join("\n").trim() || loose.join("\n")).trim(), remembered };
+}
+
+/** 模型正常结束却一个字没说、也没调工具（上下文快满时有的服务商会这样直接收尾）：execute 抛这个，run 压一压再试一次 */
+export const EMPTY_RE = /^空回复：/;
 export const OVERFLOW_RE = /context[_ ]?(length|window)|maximum context|prompt is too long|too many tokens|input (length|tokens?)|token limit|exceed(s|ed)? .*(context|token)|上下文.*(超|长)|超长|超出.*(长度|限制)/i;
 
 /** 一个工具最多执行多久（工具自己不理超时、卡在网络上时的兜底；exec 自己的上限是 10 分钟） */
@@ -525,10 +552,19 @@ export class Runtime {
           try { return await this.execute(req); }
           catch (e: any) {
             // 服务商说上下文超长：狠狠压一次（只留最近一轮）再试一次。这一轮出错时什么都没落盘，重试不会重复
-            if (req.persist === false || !OVERFLOW_RE.test(String(e?.message ?? ""))) throw e;
+            const msg = String(e?.message ?? "");
+            const empty = EMPTY_RE.test(msg);
+            if (req.persist === false || !(empty || OVERFLOW_RE.test(msg))) throw e;
             const agent = this.agents.get(req.agentId);
             if (!agent) throw e;
-            console.log(`[agent] 📏 ${key} 上下文超长（${String(e.message).slice(0, 120)}），压缩后重试`);
+            if (empty) {
+              // 空回复多半是上下文快满了：历史超过阈值一半就先压（不像超长那样压到只剩一轮），然后再试一次
+              console.log(`[agent] 🫥 ${key} ${msg}，压一压再试一次`);
+              await this.maybeCompact(agent, this.store(agent.id), req.sessionKey, req.signal, { limit: Math.floor(agent.compaction.max_tokens / 2), trigger: "empty" });
+              try { return await this.execute(req); }
+              catch (e2: any) { throw EMPTY_RE.test(String(e2?.message ?? "")) ? new Error("模型连着两次返回了空回复，换个说法再试，或者在管理界面压缩一下这个会话") : e2; }
+            }
+            console.log(`[agent] 📏 ${key} 上下文超长（${msg.slice(0, 120)}），压缩后重试`);
             await this.maybeCompact(agent, this.store(agent.id), req.sessionKey, req.signal, { limit: 0, keepTokens: 0, trigger: "overflow" });
             return await this.execute(req);
           }
@@ -761,6 +797,8 @@ export class Runtime {
     }
     const textOf = (a: AssistantMessage) => a.content.filter((c: any) => c.type === "text").map((c: any) => c.text).join("").trim();
     const text = textOf(last) || assistants.map(textOf).filter(Boolean).join("\n");
+    // 一个字没说也没调工具：不落盘（库里不留空的助手消息），交给 run 压一压重试。调过工具的不重试——会把工具再执行一遍
+    if (!text && !toolCalls.length) throw new Error(`空回复：模型没说话就结束了（${last.stopReason}，输出 ${last.usage?.output ?? "?"} token）`);
     if (persist && (!req.keepIf || req.keepIf(text))) {
       const out = fresh.map((m) => stripImages(stripRecall(m), agent.workspace));
       // 这一轮的上下文构成（估算）记在最后一条助手消息上：会话页每轮下面显示 token 明细用
@@ -777,7 +815,7 @@ export class Runtime {
       store.append(req.sessionKey, out);
     }
     return { text, meta: scope.meta, toolCalls, usage, stopReason: String(last.stopReason ?? "") };
-    } catch (e: any) { liveError = OVERFLOW_RE.test(String(e?.message ?? "")) ? "" : String(e?.message ?? e); throw e; }
+    } catch (e: any) { liveError = OVERFLOW_RE.test(String(e?.message ?? "")) || EMPTY_RE.test(String(e?.message ?? "")) ? "" : String(e?.message ?? e); throw e; }
     finally {
       if (!nestedRun) this.running.delete(lockKey);
       req.signal?.removeEventListener("abort", onOuter);
@@ -998,32 +1036,34 @@ export class Runtime {
       if (signal?.aborted) throw new Error("已取消");
       let text = "";
       try {
+        // 只写了【记住】没写摘要（模型偶尔把【记住】放最前）：记住的那几条拿来当摘要；一条都没有就再要一次，还不行才走兜底
+        for (let attempt = 0; ; attempt++) {
         const sig = signal ? AbortSignal.any([signal, AbortSignal.timeout(perCall)]) : AbortSignal.timeout(perCall);
         const res = await withScope({ agentId: agent.id, sessionKey: key, kind: "isolated", channel: "system", purpose: "compact", hop: 0, chain: [], meta: {}, trusted: false },
           () => this.models.quick(model, {
             systemPrompt: "你负责把一段对话压缩成摘要，供之后继续对话时参考。保留：人物、约定、待办、偏好、未解决的问题、重要事实与数字。"
               + "省略寒暄与重复。用第三人称、中文、条目式，不超过 800 字。直接输出，不要思考过程。"
-              + (this.remember ? "\n摘要之后另起一行写「【记住】」，下面每行一条这段对话里新出现、以后还用得着的事："
+              + (this.remember ? "\n先写「【摘要】」和摘要正文；摘要之后另起一行写「【记住】」，下面每行一条这段对话里新出现、以后还用得着的事："
                 + "大多数以「长期：」开头（约定、经历过的事、计划与进展、项目、重要日子）；只跟今天有关的以「今天：」开头；"
                 + "只有主人本人的稳定个人信息（称呼、家人、生日、长期作息、口味与忌口、习惯和喜好）才以「主人：」开头，这类很少，拿不准就写成「长期：」。"
                 + "已有记忆里有的别重复，没有就写「无」。" : ""),
-            messages: [{ role: "user", content: (memTail && i === 0 ? `已有的记忆（节选，别重复）：\n${memTail}\n\n` : "") + (summary ? `此前的摘要：\n${summary}\n\n` : "") + `需要并进摘要的对话${chunks.length > 1 ? `（第 ${i + 1}/${chunks.length} 段）` : ""}：\n${chunk.join("\n")}`, timestamp: Date.now() }],
+            messages: [{ role: "user", content: (memTail && i === 0 ? `已有的记忆（节选，别重复）：\n${memTail}\n\n` : "") + (summary ? `此前的摘要：\n${summary}\n\n` : "") + `需要并进摘要的对话${chunks.length > 1 ? `（第 ${i + 1}/${chunks.length} 段）` : ""}：\n${chunk.join("\n")}`
+              + (attempt ? "\n\n（上一次只写了【记住】、没写摘要正文。这次务必先写【摘要】和正文。）" : ""), timestamp: Date.now() }],
           }, { signal: sig, maxTokens: Math.max(model.maxTokens || 0, COMPACT_MAX_OUTPUT) }));
         if (signal?.aborted) throw new Error("已取消");          // 放弃等待之后才回来：别再改历史（下一轮可能已经在用了）
         const u = res.usage;
         if (u) store.recordUsage(key, "compact", { model: `${res.provider}/${res.model}`, input: u.input, output: u.output, cacheRead: u.cacheRead, cacheWrite: u.cacheWrite, cost: u.cost?.total ?? 0 });
         if (res.stopReason === "error" || res.stopReason === "aborted") throw new Error(res.errorMessage || "摘要模型调用失败");
-        text = stripThinkText(res.content.filter((c: any) => c.type === "text").map((c: any) => c.text).join("")).trim();
-        const mark = text.indexOf("【记住】");
-        if (mark >= 0) {
-          for (const ln of text.slice(mark + 4).split("\n")) {
-            const m = /^\s*[-*·\d.、]*\s*(主人|长期|今天)\s*[:：]\s*(.+)$/.exec(ln);
-            if (m && !/^无[。.]?$/.test(m[2].trim())) remembered.push(`${m[1]}\n${m[2].trim()}`);
-          }
-          text = text.slice(0, mark).trim();
+        const parsed = parseCompactOutput(stripThinkText(res.content.filter((c: any) => c.type === "text").map((c: any) => c.text).join("")));
+        text = parsed.summary;
+        if (!text && parsed.remembered.length) {
+          console.log(`[agent] ⚠️  ${agent.id} 摘要第 ${i + 1}/${chunks.length} 段只有【记住】没有正文，拿记住的 ${parsed.remembered.length} 条当摘要`);
+          text = parsed.remembered.map((r) => `- ${r.split("\n")[1]}`).join("\n");
         }
-        text = text.replace(/^【摘要】\s*/, "");
-        if (!text) throw new Error(`摘要为空（${res.stopReason === "length" ? "输出额度被思考用完了" : res.stopReason}）`);
+        if (text || attempt >= 1) { remembered.push(...parsed.remembered); break; }
+        console.log(`[agent] ⚠️  ${agent.id} 摘要第 ${i + 1}/${chunks.length} 段为空（${res.stopReason}），再要一次`);
+        }
+        if (!text) throw new Error("摘要为空（两次都没写出正文）");
       } catch (e: any) {
         if (signal?.aborted) throw new Error("已取消");
         failed++;
