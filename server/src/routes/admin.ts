@@ -537,7 +537,7 @@ export function registerAdmin(r: Router, ctx: Ctx, sys: AgentSystem) {
   /** 退出服务端（托盘菜单「退出」用；只允许本机） */
   post("/api/admin/quit", () => {
     console.log("[admin] 收到退出请求，服务端即将结束");
-    setTimeout(() => void gracefulExit(0), 200);       // 先关 IM 长连接再退（安装包更新前也调这个）
+    setTimeout(() => void gracefulExit(0, "管理界面 / 托盘 / 安装包要求退出"), 200);       // 先关 IM 长连接再退（安装包更新前也调这个）
     return json({ status: "quitting" });
   });
   /** 试一下联网搜索（按当前设置） */

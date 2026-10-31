@@ -108,7 +108,7 @@ export class SelfUpdater {
   private slowBps: number;
   private slowWindowMs: number;
   constructor(private dataDir: string, private fetchFn: typeof fetch = fetch, private kind: InstallKind = installKind(),
-              private onRestart: () => void = () => setTimeout(() => void gracefulExit(0), 800),
+              private onRestart: () => void = () => setTimeout(() => void gracefulExit(0, "在线更新"), 800),
               opts: { mirrors?: string[]; stallMs?: number; slowBps?: number; slowWindowMs?: number; port?: number } = {}) {
     this.port = opts.port ?? 5000;
     this.mirrors = opts.mirrors ?? UPDATE_MIRRORS;

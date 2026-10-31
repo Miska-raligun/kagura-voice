@@ -517,7 +517,10 @@ CoreS3 (MicroPython) ──HTTP──▶ server/（TypeScript 单文件可执行
   抛未捕获异常，托盘版进程无声消失（CI 冒烟在 Windows 上抓到，undici 7/8 都在）。用 Node 自带 http/https，代理走 CONNECT 隧道。
   **Windows 安装期间服务端不先退出**：等用户点了 UAC「是」、安装包的 `PrepareToInstall` 才结束它，装完 `run-update.ps1` 再拉起；
   点「否」/ 装失败服务照常运行，进度看 `updates/update.log`（脚本用 Start-Process 起，别 spawn）。release.yml 有 Windows 在线更新冒烟。
-  `main()` 装了 `installCrashLogging`：未捕获异常同步写进 kagura.log 再退出——托盘版没控制台，以前这类崩溃一个字都不留。大请求体只对本机来源放宽（`Router.bigBodyPaths`）。
+  `main()` 装了 `installCrashLogging`：未捕获异常同步写进 kagura.log 再退出——托盘版没控制台，以前这类崩溃一个字都不留。
+  **进程死因留痕**（LRN 2026-10-31，症状「运行中无声退出，日志里一个字都没有」）：日志改成同步写（以前写入流在强行结束时会丢掉最后几行），运行中也按大小滚动；
+  每次退出都写 `[exit] code=…（原因）`（`gracefulExit(code, reason)` 带原因）——**日志末尾没有这行 = 被外部强行结束 / 原生崩溃 / 内存耗尽**；
+  `logs/running.pid` 开机时还在就记一行「上次没有正常退出」；V8 致命错误写 `logs/report.*.json`；每 30 分钟一行 `[mem]`；SIGHUP（关控制台窗口）/ SIGBREAK 也走正常退出。大请求体只对本机来源放宽（`Router.bigBodyPaths`）。
 - **优雅退出（`util/shutdown.ts`，LRN 2026-10-24，症状「在线更新之后神乐的飞书十几分钟收不到消息，状态却显示在线」）**：
   以前退出 / 重启 / 更新都是直接结束进程，飞书长连接没断开，飞书把事件继续投给死连接，直到租约过期。现在 `gracefulExit` 先跑 `onShutdown`
   （关 IM 渠道，最多等 3 秒）再退；`/api/admin/quit`、`restartSelf`、SIGINT/SIGTERM 都走它。Windows 安装包的 `PrepareToInstall` 先

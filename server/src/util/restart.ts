@@ -22,7 +22,7 @@ export function restartSelf(dataDir: string, notice: Omit<RestartNotice, "at"> |
   console.log("[restart] 🔄 收到重启命令");
   if (env.INVOCATION_ID) {
     // systemd：交给它重启（kagura.service 里 Restart=on-failure）
-    setTimeout(() => void gracefulExit(75), 500);
+    setTimeout(() => void gracefulExit(75, "重启"), 500);
     return;
   }
   // 单文件可执行：argv = [exe, exe, ...参数]；node 跑脚本：argv = [node, 脚本, ...参数]
@@ -36,7 +36,7 @@ export function restartSelf(dataDir: string, notice: Omit<RestartNotice, "at"> |
     windowsHide: false,
   });
   child.unref();
-  setTimeout(() => void gracefulExit(0), 500);
+  setTimeout(() => void gracefulExit(0, "重启"), 500);
 }
 
 /** 新进程开头调：等发起重启的旧进程退出（最多 20 秒） */

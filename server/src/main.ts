@@ -87,7 +87,7 @@ async function main() {
 
   const dirs = makeDirs(cfg);
   initLogFile(cfg.dataDir);
-  installCrashLogging();
+  installCrashLogging(() => void gracefulExit(0));
   const proxy = applyProxy(cfg.tools.web.proxy);
   const fake = cfg.fakeProviders ? new FakeProviders(dirs.ttsCache) : null;
   const speech = fake ? null : new SpeechHub(cfg.baidu, dirs.ttsCache, cfg.speech);
@@ -156,7 +156,7 @@ async function main() {
     .then(() => reinstallImportedPackages(cfg.dataDir, sys.packages));
   // 退出 / 重启 / 更新前先正常断开 IM 长连接（飞书：不断开的话事件会继续投给死连接十几分钟）
   onShutdown("关闭 IM 渠道", () => sys.channels.stopAll());
-  for (const sig of ["SIGINT", "SIGTERM"] as const) process.on(sig, () => { console.log(`[main] 收到 ${sig}，正在退出`); void gracefulExit(0); });
+  for (const sig of ["SIGINT", "SIGTERM"] as const) process.on(sig, () => { void gracefulExit(0, `收到 ${sig}`); });
   sys.channels.startAll().then(async () => {
     // /restart 之前在哪个聊天里发的，回来在那说一声
     const n = takeRestartNotice(cfg.dataDir);
