@@ -554,7 +554,7 @@ describe("摘要输出不认顺序 / 空回复重试", () => {
     expect(s.summary).not.toContain("没能总结");
   }, 20_000);
 
-  it("模型一个字没说就结束：不落空消息，压一压再试一次；两次都空就报错", async () => {
+  it("模型一个字没说就结束：先催一句（不让想）；催了还不说就压一压再试一次；两次都空就报错；历史里不留空消息和催的那句", async () => {
     const { rt, fake } = makeRuntime();
     fake.queue.push("", "这次说了");
     const r = await rt.run({ ...dev, agentId: "main", sessionKey: "main:main", text: "在吗" });
@@ -562,8 +562,23 @@ describe("摘要输出不认顺序 / 空回复重试", () => {
     const h = rt.store("main").history("main:main").map((x) => x.msg as any);
     expect(h.length).toBe(2);
     expect(h.every((m) => m.role !== "assistant" || JSON.stringify(m.content).includes("这次说了"))).toBe(true);
-    fake.queue.push("", "");
+    fake.queue.push("", "", "", "");          // 第一次 + 催一句，重试一次 + 再催一句
     await expect(rt.run({ ...dev, agentId: "main", sessionKey: "main:main", text: "在吗" })).rejects.toThrow(/两次返回了空回复/);
     expect(rt.store("main").history("main:main").length).toBe(2);
+  });
+});
+
+describe("想完了没说话", () => {
+  it("调过工具之后只想不说：催一句、这次不开思考，拿到回复；历史里不留催的那句和空回复", async () => {
+    const { rt, fake } = makeRuntime();
+    rt.addTools(new Memories(rt, null).tools());
+    fake.queue.push({ tool_calls: [{ name: "memory_search", args: { query: "歌" } }], then: "" }, "查到了三首。");
+    const r = await rt.run({ ...dev, agentId: "main", sessionKey: "main:main", text: "帮我查歌" });
+    expect(r.text).toBe("查到了三首。");
+    expect(fake.calls.at(-1).message).toContain("没有说出来");
+    const h = JSON.stringify(rt.store("main").history("main:main").map((x) => x.msg));
+    expect(h).not.toContain("没有说出来");
+    const roles = rt.store("main").history("main:main").map((x) => (x.msg as any).role);
+    expect(roles).toEqual(["user", "assistant", "toolResult", "assistant"]);
   });
 });

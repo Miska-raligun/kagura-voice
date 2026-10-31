@@ -125,7 +125,7 @@ describe("sessions_send", () => {
 
   it("全局开关关掉：sessions_* 工具整个不出现", async () => {
     const { rt, fake } = setup({ enabled: false, maxHops: 3, perPairPerMin: 10 });
-    fake.queue.push({ tool_calls: [{ name: "sessions_send", args: { agent: "mio", message: "hi" } }], then: "" });
+    fake.queue.push({ tool_calls: [{ name: "sessions_send", args: { agent: "mio", message: "hi" } }], then: "好" });
     await rt.run({ ...chat, agentId: "main", sessionKey: "main:main", text: "x" });
     expect(fake.calls.length).toBe(1);
     expect(fake.calls[0].system).not.toContain("你可以联系的其他 agent");

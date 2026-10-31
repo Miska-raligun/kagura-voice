@@ -36,6 +36,8 @@ export interface RunScope {
    * 它派出去的子任务、不等回复的传话都挂在这上面——主人叫停了，后台的也一起停（LRN 2026-10-31）
    */
   cancel?: AbortSignal;
+  /** 这一轮剩下的模型调用不开思考（她想完了却没说话，催她直接说的时候） */
+  noThink?: boolean;
   /** 这一轮是哪次 a2a 调用引起的（a2a_log 的 id）：它再发起的调用记成那次的下一步 */
   a2aCall?: number;
   /** 假模型：工具结果回来后的续写脚本 */

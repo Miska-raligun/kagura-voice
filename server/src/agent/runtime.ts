@@ -403,6 +403,13 @@ export class VoiceTap {
   }
 }
 
+/** 一条助手消息只有思考、没有正文也没调工具 */
+export function silentMsg(m: any): boolean {
+  const c = m?.content ?? [];
+  return !c.some((x: any) => (x.type === "text" && String(x.text).trim()) || x.type === "toolCall");
+}
+export const NUDGE_TEXT = "[系统] 你刚才只在心里想了，没有说出来，主人什么都没收到。现在直接把要对主人说的话写出来（不用再想，也不要再调工具）。";
+
 /** 模型正常结束却一个字没说、也没调工具（上下文快满时有的服务商会这样直接收尾）：execute 抛这个，run 压一压再试一次 */
 export const EMPTY_RE = /^空回复：/;
 export const OVERFLOW_RE = /context[_ ]?(length|window)|maximum context|prompt is too long|too many tokens|input (length|tokens?)|token limit|exceed(s|ed)? .*(context|token)|上下文.*(超|长)|超长|超出.*(长度|限制)/i;
@@ -782,6 +789,7 @@ export class Runtime {
     };
     // 这一轮已经说出口的字（被打断时记进历史用；中止时那条没说完的消息内容会被清空，只能自己攒）
     let spoken = "";
+    let nudged = false;
     // 朗读版：开头的 <voice>…</voice> 扣下来一写完就交出去，实时页 / 调用方 / 已说出口的字里都不带它
     const tap = req.onVoice ? new VoiceTap((v) => {
       scope.meta.voice = v;
@@ -846,12 +854,29 @@ export class Runtime {
       const work = withScope(scope, async () => {
         await pi.prompt({ role: "user", content, timestamp: Date.now() } as any);
         await pi.waitForIdle();
+        // 想完了却一个字没说（推理型模型常见：思考把输出额度用光，或者想着想着就结束了）：催一句、这次不让想，直接说
+        const lastMsg = pi.state.messages.at(-1) as any;
+        if (!timedOut && lastMsg?.role === "assistant" && !["error", "aborted"].includes(lastMsg.stopReason) && silentMsg(lastMsg)) {
+          const think = (lastMsg.content ?? []).filter((c: any) => c.type === "thinking").reduce((n: number, c: any) => n + Array.from(String(c.thinking ?? "")).length, 0);
+          console.log(`[agent] 💭 ${agent.id} ${req.sessionKey} 想了 ${think} 字却没说话（${lastMsg.stopReason}，输出 ${lastMsg.usage?.output ?? "?"} token），不让想、催她直接说`);
+          nudged = true;
+          scope.noThink = true;
+          await pi.prompt({ role: "user", content: [{ type: "text", text: NUDGE_TEXT }], timestamp: Date.now(), knudge: true } as any);
+          await pi.waitForIdle();
+        }
       });
       work.catch(() => {});                          // 放弃等待之后它再报错也别变成未处理的 rejection
       await Promise.race([work, gaveUp]);
     } finally { clearTimeout(hardTimer); if (idleTimer) clearTimeout(idleTimer); idleTimer = null; signal.removeEventListener("abort", onCancel); }
 
-    const fresh = pi.state.messages.slice(start).filter((m: any) => ["user", "assistant", "toolResult"].includes(m.role)) as Message[];
+    let fresh = pi.state.messages.slice(start).filter((m: any) => ["user", "assistant", "toolResult"].includes(m.role)) as Message[];
+    // 催她说话的那句和前面那条只有思考的空回复不进历史（连着两条助手消息、或者一句「[系统] 你刚才没说话」留在历史里都怪）
+    if (nudged) {
+      const i = fresh.findIndex((m: any) => m.knudge);
+      if (i >= 0) fresh = fresh.filter((m: any, k) => k !== i && !(k === i - 1 && m.role === "assistant" && silentMsg(m)));
+      const after = fresh.filter((m) => m.role === "assistant").at(-1);
+      console.log(`[agent] 💭 ${agent.id} 催过之后${after && !silentMsg(after) ? "说话了" : "还是没说话"}`);
+    }
     const assistants = fresh.filter((m) => m.role === "assistant") as AssistantMessage[];
     const last = assistants.at(-1);
     const why = timedOut as "" | "idle" | "max" | "cancel" | "budget";      // 在回调里赋值，TS 看不出来

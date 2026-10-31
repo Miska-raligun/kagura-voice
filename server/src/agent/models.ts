@@ -174,7 +174,7 @@ export class ModelRegistry {
    * 调用方显式给了 maxTokens / samplingParams 的照旧以调用方为准。
    */
   chatStream = (model: Model<any>, ctx: any, opts?: SimpleStreamOptions) => {
-    const level = this.thinkingOf(model);
+    const level: ThinkingLevel = runScope()?.noThink ? "off" : this.thinkingOf(model);
     const extra = model.provider === "fake" ? undefined : thinkingParams(model.baseUrl ?? "", level, model.provider, model.id);
     return this.models.streamSimple(model, ctx, {
       ...opts,
