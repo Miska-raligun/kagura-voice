@@ -120,7 +120,9 @@ summary { cursor:pointer; } summary::marker { color:var(--faint); }
 
 /* ── 表格 ── */
 table { width:100%; border-collapse:collapse; }
-th, td { text-align:left; padding:9px 10px; border-bottom:1px solid var(--line); vertical-align:top; }
+th, td { text-align:left; padding:9px 10px; border-bottom:1px solid var(--line); vertical-align:middle; }
+th { white-space:nowrap; }
+.ellip { display:inline-block; max-width:260px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; vertical-align:bottom; }
 tbody tr:last-child td, tbody tr:last-child th { border-bottom:0; }
 th { color:var(--faint); font-weight:600; font-size:11px; letter-spacing:.1em; text-transform:uppercase; }
 table.hover tr:hover td { background:var(--hover); cursor:pointer; } tr.on td { background:var(--sel); }

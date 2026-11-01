@@ -18,12 +18,12 @@ function Runs(p: { runs: any[]; reload: () => void }) {
     <table><thead><tr><th>Agent / 会话</th><th>在做什么</th><th>已运行</th><th>排队</th><th></th></tr></thead>
       <tbody>{p.runs.map((r) => (
         <tr>
-          <td><a href={`#/agents/${r.agent}`}>{r.agent}</a> <small class="muted">{r.session}</small></td>
-          <td>{PURPOSE[r.purpose] ?? r.purpose} · <span class="muted">{CHANNEL[r.channel] ?? r.channel}</span><br />
-            <small class="muted">{r.stage}{r.tool ? `：${r.tool}` : ""}{r.waiting_for ? ` · 在等 ${r.waiting_for}` : ""}</small></td>
-          <td>{r.secs >= 120 ? <Badge s="error" text={ago(r.secs).replace("前", "")} /> : <span class="mono">{r.secs} 秒</span>}</td>
+          <td><a href={`#/agents/${r.agent}`}>{r.agent}</a> <small class="muted ellip" title={r.session}>{r.session}</small></td>
+          <td class="nowrap">{PURPOSE[r.purpose] ?? r.purpose} · <span class="muted">{CHANNEL[r.channel] ?? r.channel}</span><br />
+            <small class="muted ellip" title={`${r.stage}${r.tool ? `：${r.tool}` : ""}`}>{r.stage}{r.tool ? `：${r.tool}` : ""}{r.waiting_for ? ` · 在等 ${r.waiting_for}` : ""}</small></td>
+          <td class="nowrap">{r.secs >= 120 ? <Badge s="error" text={ago(r.secs).replace("前", "")} /> : <span class="mono">{r.secs} 秒</span>}</td>
           <td class="mono">{r.queued ? <Badge s="running" text={`${r.queued} 条`} /> : "—"}</td>
-          <td>{r.cancelling ? <small class="muted">正在终止…</small> : <Btn small kind="danger" onClick={() => kill(r)}>终止</Btn>}</td>
+          <td class="nowrap">{r.cancelling ? <small class="muted">正在终止…</small> : <Btn small kind="danger" onClick={() => kill(r)}>终止</Btn>}</td>
         </tr>))}</tbody></table>
   );
 }
@@ -36,6 +36,11 @@ export function Overview() {
   const cost = d.agents.reduce((n: number, a: any) => n + (a.today.cost ?? 0), 0);
   const online = d.devices.filter((x: any) => x.online).length;
   const chOk = d.channels.filter((c: any) => c.state === "online").length;
+  const runsCard = (
+        <Card key="runs" title={`正在运行${d.runs?.length ? `（${d.runs.length}）` : ""}`} class={d.runs?.length ? "wide" : ""}>
+          <Runs runs={d.runs ?? []} reload={reload} />
+        </Card>
+  );
   return (
     <>
       {d.update?.newer && (
@@ -59,10 +64,10 @@ export function Overview() {
         <Stat label="渠道在线" value={`${chOk}/${d.channels.length}`} />
       </div>
       <div class="grid">
-        <HealthCard />
-        <Card title={`正在运行${d.runs?.length ? `（${d.runs.length}）` : ""}`}>
-          <Runs runs={d.runs ?? []} reload={reload} />
-        </Card>
+        {/* 有在跑的就占满一行、放最前面：半宽时表格被挤得一个字一行；放在运行状况后面又会把它右边空出一块 */}
+        {d.runs?.length ? runsCard : null}
+        <HealthCard key="health" />
+        {d.runs?.length ? null : runsCard}
         <Card title="Agents">
           <table><thead><tr><th>Agent</th><th>模型</th><th>今日对话</th><th>今日费用</th></tr></thead>
             <tbody>{d.agents.map((a: any) => (
