@@ -1,7 +1,7 @@
 // 定时任务：列表 + 新建向导（at/every/cron、会话、投递、活跃时段）；立即运行；运行历史；从 OpenClaw 导入
 import { useState } from "preact/hooks";
 import { api, enc, fmtTime, go, money } from "../api.ts";
-import { Badge, Btn, Card, Empty, Err, Field, Input, Select, TextArea, Toggle, confirmDo, toast, toastErr, useInterval, useLoad } from "../ui.tsx";
+import { Badge, Btn, Card, Empty, Err, Field, Input, Select, TextArea, Toggle, confirmDo, toast, toastErr, useInterval, useLoad, usePage } from "../ui.tsx";
 
 export function scheduleText(s: any) {
   if (!s) return "—";
@@ -22,10 +22,47 @@ export function Jobs({ arg }: { arg: string }) {
     <>
       <div class="row"><Btn kind="primary" onClick={() => go("jobs", "new")}>＋ 新建任务</Btn><ImportOpenClaw done={reload} /></div>
       <Err msg={err} />
-      <Card>
-        {jobs?.length ? <table class="hover">
+      <Card>{jobs?.length ? <JobTable jobs={jobs} reload={reload} /> : <Empty>暂无定时任务</Empty>}</Card>
+    </>
+  );
+}
+
+/** 任务多了以后：搜索、按 agent / 状态筛、分页（每页 20） */
+function JobTable({ jobs, reload }: { jobs: any[]; reload: () => void }) {
+  const [q, setQ] = useState("");
+  const [agent, setAgent] = useState("");
+  const [state, setState] = useState("");
+  const agents = [...new Set(jobs.map((j) => j.agent))].sort();
+  const STATES: [string, string, (j: any) => boolean][] = [
+    ["", "全部", () => true],
+    ["on", "启用中", (j) => j.enabled],
+    ["off", "已暂停", (j) => !j.enabled],
+    ["fail", "失败", (j) => j.last_status === "error"],
+    ["hb", "heartbeat", (j) => j.kind === "heartbeat"],
+  ];
+  const needle = q.trim().toLowerCase();
+  const shown = jobs
+    .filter((j) => !agent || j.agent === agent)
+    .filter(STATES.find(([k]) => k === state)![2])
+    .filter((j) => !needle || `${j.name} ${j.agent} ${j.delivery} ${j.prompt ?? ""}`.toLowerCase().includes(needle))
+    // 失败的排前面，再按下次运行时间
+    .sort((a, b) => (b.last_status === "error" ? 1 : 0) - (a.last_status === "error" ? 1 : 0) || (a.enabled ? 0 : 1) - (b.enabled ? 0 : 1) || (a.next_run ?? 9e12) - (b.next_run ?? 9e12));
+  const [page, pager] = usePage(shown, 20);
+  const count = (f: (j: any) => boolean) => jobs.filter((j) => (!agent || j.agent === agent) && f(j)).length;
+  return (
+    <>
+      <div class="row">
+        <Input value={q} onInput={setQ} placeholder="搜索任务名、内容、投递目标…" />
+        {agents.length > 1 && <Select value={agent} onChange={setAgent} options={[["", "所有 agent"], ...agents.map((a) => [a, a] as [string, string])]} />}
+      </div>
+      <div class="chips">{STATES.map(([k, l, f]) => {
+        const n = count(f);
+        return k && !n ? null : <a class={k === state ? "on" : ""} onClick={() => setState(k)}>{l}{k ? ` ${n}` : ""}</a>;
+      })}</div>
+      {shown.length ? <>
+        <table class="hover">
           <thead><tr><th>名称</th><th>agent</th><th>时间</th><th>投递</th><th>下次</th><th>上次</th><th>启用</th></tr></thead>
-          <tbody>{jobs.map((j) => (
+          <tbody>{page.map((j: any) => (
             <tr onClick={() => go("jobs", j.id)}>
               <td>{j.name}{j.kind === "heartbeat" && <small class="tag">heartbeat</small>}{j.source === "openclaw" && <small class="tag">OpenClaw 导入</small>}</td>
               <td>{j.agent}</td><td>{scheduleText(j.schedule)}</td><td><code>{j.delivery}</code></td>
@@ -34,8 +71,9 @@ export function Jobs({ arg }: { arg: string }) {
               <td onClick={(e) => e.stopPropagation()}><input type="checkbox" checked={j.enabled} onChange={async (e) => {
                 await api(`/jobs/${enc(j.id)}`, { method: "PATCH", body: { enabled: (e.target as HTMLInputElement).checked } }); reload();
               }} /></td>
-            </tr>))}</tbody></table> : <Empty>暂无定时任务</Empty>}
-      </Card>
+            </tr>))}</tbody></table>
+        {pager}
+      </> : <Empty>没有符合条件的任务</Empty>}
     </>
   );
 }
@@ -124,6 +162,7 @@ function JobForm({ j, done }: { j?: any; done: () => void }) {
 function JobDetail({ j, reload }: { j: any; reload: () => void }) {
   const [edit, setEdit] = useState(false);
   const [runs, reloadRuns] = useLoad(() => api<any[]>(`/jobs/${enc(j.id)}/runs`), [j.id]);
+  const [runPage, runPager] = usePage(runs ?? [], 20);
   if (edit) return <JobForm j={j} done={() => { setEdit(false); reload(); }} />;
   return (
     <>
@@ -144,10 +183,11 @@ function JobDetail({ j, reload }: { j: any; reload: () => void }) {
       </Card>
       <Card title="运行历史">
         {runs?.length ? <table><thead><tr><th>时间</th><th>结果</th><th>输出</th><th>token</th><th>费用</th><th>投递</th></tr></thead>
-          <tbody>{runs.map((r) => (
+          <tbody>{runPage.map((r: any) => (
             <tr><td>{fmtTime(r.started)}</td><td><Badge s={r.status} /></td>
               <td class="pre clip">{r.error || r.output}</td><td>{r.tokens_in}/{r.tokens_out}</td><td>{money(r.cost)}</td><td><code>{r.delivered || "—"}</code></td></tr>))}</tbody></table>
           : <Empty>暂无记录</Empty>}
+        {runPager}
       </Card>
     </>
   );
