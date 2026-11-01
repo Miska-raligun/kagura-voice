@@ -87,6 +87,8 @@ export interface RunResult {
   stopReason?: string;
   /** 她顺带写的朗读版（已经交给 onVoice 了） */
   voice?: string;
+  /** 这一轮被单轮上限叫停的原因（没叫停就没有） */
+  guard?: string;
 }
 
 export type ToolProvider = (scope: RunScope, agent: AgentInfo) => AgentTool<any>[];
@@ -405,6 +407,9 @@ export class VoiceTap {
     return out;
   }
 }
+
+/** 单轮上限叫停后她还不停、被强制中止时的报错开头（待办据此判断「额度用完了」而不是真出错） */
+export const GUARD_STOP = "agent 停下了：";
 
 /** 一条助手消息只有思考、没有正文也没调工具 */
 export function silentMsg(m: any): boolean {
@@ -904,7 +909,7 @@ export class Runtime {
     const assistants = fresh.filter((m) => m.role === "assistant") as AssistantMessage[];
     const last = assistants.at(-1);
     const why = timedOut as "" | "idle" | "max" | "cancel" | "budget";      // 在回调里赋值，TS 看不出来
-    if (why === "budget") throw new Error(`agent 停下了：${guard.reason}，叫她停手汇报也没停（多半在兜圈子）`);
+    if (why === "budget") throw new Error(`${GUARD_STOP}${guard.reason}，叫她停手汇报也没停（多半在兜圈子）`);
     if (why === "cancel") {
       // 主人手动终止（管理界面「停止」/「停止并发送」）：问题和已经说出口的那部分照样记进历史，注明被打断——
       // 不然紧接着发的新消息她不知道刚才在聊什么。工具调用和结果不留（没配对的 toolCall 下一轮服务商会拒）
@@ -957,7 +962,7 @@ export class Runtime {
       } } as any;
       store.append(req.sessionKey, out);
     }
-    return { text, meta: scope.meta, toolCalls, usage, stopReason: String(last.stopReason ?? ""), voice: tap?.fired || undefined };
+    return { text, meta: scope.meta, toolCalls, usage, stopReason: String(last.stopReason ?? ""), voice: tap?.fired || undefined, guard: guard.reason || undefined };
     } catch (e: any) { liveError = OVERFLOW_RE.test(String(e?.message ?? "")) || EMPTY_RE.test(String(e?.message ?? "")) ? "" : String(e?.message ?? e); throw e; }
     finally {
       if (!nestedRun) this.running.delete(lockKey);

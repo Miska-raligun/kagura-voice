@@ -410,6 +410,7 @@ CoreS3 (MicroPython) ──HTTP──▶ server/（TypeScript 单文件可执行
   输出到上限被截断（`RunResult.stopReason === "length"`）、工具报错了却说搞定了，以前一律记 done。现在最后必须单独一行「状态：完成 / 没做完：… / 需要主人：…」，
   没写或被截断就在同一会话里用 `CONTINUE_PROMPT` 催，最多 `MAX_ROUNDS` 轮、总时长不超过单件上限；只有「完成」是 done，其余 `partial`（汇报照实说「没做完：…」），
   `requeue` 对 partial 默认 `resume`（接着原会话，提示词「[继续待办…]」），否则 `host.reset` 清会话从头来。状态行不进汇报正文。
+  **额度用完接着做**（`MAX_GUARD_CONTINUES`，LRN 2026-11-01，症状「待办做到一半单轮 token 触顶就停了、标成没做完」）：每次 `host.run` 是新的一轮、各有一份单轮上限；被叫停（`RunResult.guard`，或强制中止的 `GUARD_STOP` 报错）且没做完，就在同一会话里换一轮新额度接着做（`GUARD_CONTINUE_PROMPT`），最多续 2 轮，仍受单件总时长限制。日志 `🔋`。
 - **待办 / 延迟执行（`agent/tasks.ts` `TaskQueue`、工具 `tools/tasks.ts`、管理界面「待办」，LRN 2026-10-27）**：白天遇到改代码这类大而不急的活，
   agent 用 `task_add` 记下（只在可信会话里有；执行待办的那一轮、子任务里没有），夜间静默时段（默认 01:00-06:00）一件件做，订阅制额度白天留给对话。
   存 system.sqlite 的 `tasks` / `task_settings`。别改坏的点：① **一次只做一件**（`running`），做完 `setImmediate` 接着看下一件——按真实时钟判断时段，测试里要自己逐个 `tick(t)`；

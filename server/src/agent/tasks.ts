@@ -15,6 +15,7 @@ import crypto from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { inActiveHours } from "./cron.ts";
 import type { RunRequest, RunResult } from "./runtime.ts";
+import { GUARD_STOP } from "./runtime.ts";
 import type { AgentRegistry } from "./registry.ts";
 
 export type TaskStatus = "queued" | "running" | "done" | "partial" | "failed" | "cancelled";
@@ -40,6 +41,11 @@ export interface Task {
 
 /** 每次执行最多催几轮「接着做」（不算第一轮） */
 export const MAX_ROUNDS = 4;
+/**
+ * 一轮的额度（单轮上限：工具次数 / token）用完被叫停，还没做完：换一轮新的额度接着做，最多再接这么多轮（LRN 2026-11-01，
+ * 症状「待办做到一半 token 触顶就停了，标成没做完，要人第二天手动点继续」）。和 MAX_ROUNDS、单件总时长一起封顶，不会无限续
+ */
+export const MAX_GUARD_CONTINUES = 2;
 const STATUS_LINE = /(?:^|\n)\s*[*_`#>\-\s]*状态\s*[:：]\s*(完成|没做完|需要主人)\s*[:：，,]?\s*([^\n]*)\s*$/;
 export type Verdict = { v: "done" | "partial" | "blocked" | "none"; why: string; body: string };
 
@@ -58,6 +64,8 @@ const FINISH_RULE = "最后单独一行写状态（必须写，系统靠它判�
   + "- 「状态：没做完：原因」——卡住了、出错了或时间不够；\n"
   + "- 「状态：需要主人：要主人决定什么」。\n"
   + "别把计划当成完成：说了「接下来我会…」就接着去做，做完再写状态。";
+const GUARD_CONTINUE_PROMPT = "[继续待办] 上一轮的额度（工具调用次数 / token）用完了，系统给你换了一轮新的额度。"
+  + "先简单回顾一下已经做完了什么、还差什么，然后接着把剩下的做完——别从头再来，也别重复已经做过的步骤。\n";
 const CONTINUE_PROMPT = "[继续待办] 你还没写最后的「状态：…」那一行，说明这件事还没做完。接着做下去；"
   + "已经做完的话先检查一遍结果，再汇报并写状态行。\n" + FINISH_RULE;
 
@@ -289,27 +297,47 @@ export class TaskQueue {
           + "删除、付钱、对外发消息这类不可撤回的事不要做，需要主人拍板的写进汇报。"
           + "最后用几句话汇报做了什么、结果在哪、还有什么要主人处理——这段汇报会原样转给主人。）\n" + FINISH_RULE;
       let r: RunResult | null = null, verdict: Verdict = { v: "none", why: "", body: "" }, rounds = 0;
-      for (; rounds <= MAX_ROUNDS; rounds++) {
+      let guardContinues = 0, nextPrompt = first;
+      for (; rounds <= MAX_ROUNDS + MAX_GUARD_CONTINUES; rounds++) {
         const left = Math.floor((deadline - Date.now()) / 1000);
-        if (rounds > 0 && left < 30) break;              // 时间不够再催一轮了
-        r = await this.host.run({
-          agentId: t.agent, sessionKey: sessionKeyOf(t), kind: "isolated", channel: "system", purpose: "task",
-          trusted: t.trusted, origin: t.origin || undefined, signal: ac.signal, maxSecs: Math.max(30, left),
-          toolAllow: (n) => !n.startsWith("task_"),
-          text: rounds === 0 ? first : CONTINUE_PROMPT,
-        });
-        usage.input += r.usage.input; usage.output += r.usage.output; usage.cost += r.usage.cost;
+        if (rounds > 0 && left < 30) { console.log(`[tasks] ⏱️  「${t.title}」单件时长（${s.max_minutes} 分钟）用完了`); break; }
+        let guarded = "";
+        try {
+          r = await this.host.run({
+            agentId: t.agent, sessionKey: sessionKeyOf(t), kind: "isolated", channel: "system", purpose: "task",
+            trusted: t.trusted, origin: t.origin || undefined, signal: ac.signal, maxSecs: Math.max(30, left),
+            toolAllow: (n) => !n.startsWith("task_"),
+            text: nextPrompt,
+          });
+          usage.input += r.usage.input; usage.output += r.usage.output; usage.cost += r.usage.cost;
+          guarded = r.guard ?? "";
+        } catch (e: any) {
+          // 叫停了还不停、被强制中止：也是额度用完，不是真出错
+          if (!String(e?.message ?? "").startsWith(GUARD_STOP)) throw e;
+          guarded = String(e.message).slice(GUARD_STOP.length);
+          r = { text: "", meta: {}, toolCalls: [], usage: { input: 0, output: 0, cost: 0 }, guard: guarded };
+        }
         if (this.get(id)?.status === "cancelled") return;
         verdict = verdictOf(r.text);
-        // 写了状态行、又不是被截断的，就是她的结论；否则催她接着做
+        // 这一轮的额度用完了还没做完：换一轮新的额度接着做（有上限）
+        if (guarded && verdict.v !== "done" && verdict.v !== "blocked" && guardContinues < MAX_GUARD_CONTINUES) {
+          guardContinues++;
+          console.log(`[tasks] 🔋 「${t.title}」第 ${rounds + 1} 轮额度用完（${guarded}），换一轮新的额度接着做（${guardContinues}/${MAX_GUARD_CONTINUES}）`);
+          nextPrompt = GUARD_CONTINUE_PROMPT + FINISH_RULE;
+          continue;
+        }
+        // 写了状态行、又不是被截断的，就是她的结论；否则催她接着做（这种催最多 MAX_ROUNDS 次）
         if (verdict.v !== "none" && r.stopReason !== "length") break;
+        if (rounds - guardContinues >= MAX_ROUNDS) break;
         console.log(`[tasks] ↻ 「${t.title}」第 ${rounds + 1} 轮没给结论${r.stopReason === "length" ? "（输出被截断）" : ""}，催她接着做`);
+        nextPrompt = CONTINUE_PROMPT;
       }
       const body = verdict.body || r?.text.trim() || "（没有输出）";
       const done = verdict.v === "done";
       const why = verdict.v === "partial" ? `没做完：${verdict.why || "没说原因"}`
         : verdict.v === "blocked" ? `需要你决定：${verdict.why || "见汇报"}`
         : verdict.v === "none" ? `催了 ${rounds} 轮也没给出「完成」的结论，可能没做完` : "";
+      if (!done && guardContinues >= MAX_GUARD_CONTINUES) console.log(`[tasks] 🔋 「${t.title}」续了 ${guardContinues} 轮额度还没做完，先停下（这件事可能太大，拆小一点或明晚接着做）`);
       this.save({ ...this.get(id)!, status: done ? "done" : "partial", result: body, error: why, resume: false, finished: nowS(), updated: nowS(),
         tokens_in: usage.input, tokens_out: usage.output, cost: usage.cost });
       console.log(done ? `[tasks] ✅ 「${t.title}」做完了` : `[tasks] ⏸️  「${t.title}」${why}`);

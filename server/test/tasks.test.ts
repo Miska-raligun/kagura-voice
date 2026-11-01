@@ -173,3 +173,29 @@ describe("待办", () => {
     expect(resets).toEqual([`main:task:${d.id}`]);
   });
 });
+
+describe("额度用完接着做", () => {
+  it("一轮被单轮上限叫停、没做完：换一轮新额度接着做，做完算完成；续轮有上限", async () => {
+    let n = 0;
+    const { q, runs } = setup({
+      run: async () => {
+        n++;
+        if (n === 1) return { text: "做了一半。\n状态：没做完：额度用完了", meta: {}, toolCalls: [], usage: { input: 1, output: 1, cost: 0 }, guard: "本轮已用 3047k token" };
+        if (n === 2) throw new Error("agent 停下了：本轮工具调用超过 40 次，叫她停手汇报也没停（多半在兜圈子）");
+        return { text: "剩下的也做完了。\n状态：完成", meta: {}, toolCalls: [], usage: { input: 1, output: 1, cost: 0 } };
+      },
+    });
+    const a = q.add({ agent: "main", title: "大活", detail: "很多步" });
+    await q.tick(at(3)); await q.idle();
+    expect(runs.length).toBe(3);
+    expect(runs[1].text).toContain("额度");
+    expect(runs[1].sessionKey).toBe(runs[0].sessionKey);           // 接着原会话
+    expect(q.get(a.id)!.status).toBe("done");
+    // 一直额度用完：续 2 轮后停下，记没做完
+    const { q: q2, runs: runs2 } = setup({ run: async () => ({ text: "还差点。\n状态：没做完：额度用完了", meta: {}, toolCalls: [], usage: { input: 1, output: 1, cost: 0 }, guard: "超了" }) });
+    const b = q2.add({ agent: "main", title: "更大的活", detail: "无穷多步" });
+    await q2.tick(at(3)); await q2.idle();
+    expect(runs2.length).toBe(3);
+    expect(q2.get(b.id)!.status).toBe("partial");
+  });
+});
