@@ -124,6 +124,19 @@ def test_role_cycle_returns_greeting_in_new_voice(roles_server):
     assert s.post("/role/cycle", headers={"X-Device-Id": "rd3"}).headers["X-Role"] == ""
 
 
+def test_role_cycle_still_switches_when_tts_fails(roles_server):
+    """语音服务商额度用完 / 限流时：ROLE 键照样切角色（回一小段静音），以前回 500、设备只显示 error"""
+    import pytest
+    s = roles_server
+    s.fake_reset()
+    if s.post("/__fake/tts", json={"fail": 1}).status_code == 404:
+        pytest.skip("旧服务端没有模拟合成失败的开关")
+    s.post("/role", json={"device_id": "rd5", "role": "", "greet": False})
+    r = s.post("/role/cycle", headers={"X-Device-Id": "rd5"})
+    assert r.status_code == 200 and r.content[:4] == b"RIFF" and r.headers["X-Role"] == "mio"
+    assert "小澪" in b64text(r.headers["X-Reply-Text"])
+
+
 def test_role_post_notifies_device_then_greets(roles_server):
     from conftest import Device
     s = roles_server

@@ -12,6 +12,8 @@ import { withTouch } from "../shortcut/touch.ts";
 import { b64Header } from "../util/text.ts";
 import { b64decodeLoose } from "../util/image.ts";
 import { now } from "../util/time.ts";
+import { health } from "../agent/health.ts";
+import { silentWav } from "../util/wav.ts";
 
 const tooMany = () => json({ error: "请求过于频繁，请稍后再试" }, 429);
 
@@ -191,10 +193,10 @@ export function registerChat(r: Router, ctx: Ctx) {
 
       const tLlm = now();
       const wavOut = await ctx.voice.synthesize(reply, roleVoice(role));
-      if (!wavOut) return json({ error: "TTS 生成失败" }, 500);
       ctx.logTiming(dev, t0, tAsr, tLlm);
       ctx.hb.seen(dev);
-      const data = fs.readFileSync(wavOut);
+      // 合成失败（多半是语音服务商额度用完 / 限流）别整个报错：响应头里的切角色、音量、拍照、屏显文字照样要送到
+      const data = wavOut ? fs.readFileSync(wavOut) : ttsFailed(dev, reply);
       console.log(`[${dev}] 📤  WAV ${data.length} bytes`);
       ctx.lastReply.set(dev, { user: userText, reply, ts: now() });
       const headers: Record<string, string> = { ...extra };
@@ -254,10 +256,9 @@ export function registerChat(r: Router, ctx: Ctx) {
       console.log(`[${dev}] 💬  ${preview(reply)}`);
       const tLlm = now();
       const wavOut = await ctx.voice.synthesize(reply, roleVoice(role));
-      if (!wavOut) return json({ error: "TTS 生成失败" }, 500);
       ctx.logTiming(dev, t0, tAsr, tLlm);
       ctx.hb.seen(dev);
-      const out = fs.readFileSync(wavOut);
+      const out = wavOut ? fs.readFileSync(wavOut) : ttsFailed(dev, reply);
       console.log(`[${dev}] 📤  WAV ${out.length} bytes`);
       ctx.lastReply.set(dev, { user: userText, reply, ts: now() });
       return bytes(out, "audio/wav", { "X-User-Text": b64Header(userText), "X-Reply-Text": b64Header(reply), "X-Role": role.id });
@@ -267,6 +268,13 @@ export function registerChat(r: Router, ctx: Ctx) {
     }
   });
 
+  /** 语音合成失败：回一小段静音（设备照常解析响应头、屏幕照常显示文字），记一笔 */
+  const ttsFailed = (dev: string, text: string): Buffer => {
+    console.log(`[${dev}] ⚠️  语音合成失败（服务商额度 / 限流 / 网络？），这次不出声，文字照常显示：${preview(text)}`);
+    health.record({ kind: "tts_failed", ok: false, detail: { device: dev, text: String(text).slice(0, 80) } });
+    return silentWav(300);
+  };
+
   /** 设备顶栏 ROLE 键：切到下一个角色，直接回新角色的问候语音 */
   r.post("/role/cycle", async (req) => {
     const dev = validateDeviceId(req.header("X-Device-Id"));
@@ -275,8 +283,8 @@ export function registerChat(r: Router, ctx: Ctx) {
     const target = ctx.roles.set(dev, ctx.roles.next(dev).id)!;
     const text = ctx.roles.greeting(target);
     const wavOut = await ctx.voice.synthesize(text, roleVoice(target));
-    if (!wavOut) return json({ error: "TTS 生成失败" }, 500);
     console.log(`[${dev}] 🎭  [role/tap] → ${target.name} (${target.agent})`);
-    return bytes(fs.readFileSync(wavOut), "audio/wav", { "X-Role": target.id, "X-Reply-Text": b64Header(text) });
+    // 问候合成不出来也照样切：设备靠 X-Role 换角色，以前这里回 500，设备只显示 error、角色也没切过去
+    return bytes(wavOut ? fs.readFileSync(wavOut) : ttsFailed(dev, text), "audio/wav", { "X-Role": target.id, "X-Reply-Text": b64Header(text) });
   });
 }

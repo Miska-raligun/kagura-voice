@@ -66,6 +66,9 @@ CoreS3 (MicroPython) ──HTTP──▶ server/（TypeScript 单文件可执行
   那几秒有效）；说「不聊了/退出对话」（服务端回 `X-Cont-Exit`）；连续
   `CONT_EMPTY_EXIT` 次 `X-Asr-Empty`（连续模式下没听清**不播**"没听清"，悄悄接着听）；
   `CONT_IDLE_EXIT_SECS` 没有一轮有效对话。单次模式下录音中轻点 = 说完了立刻发送。
+- **语音合成失败不能让整个请求报错**（`routes/chat.ts` 的 `ttsFailed`，LRN 2026-11-01，症状「模型额度用完后设备点 ROLE 键只显示 error、角色也没切；管理页面切换却正常」）：
+  语音合成和模型常是同一家同一把 Key，额度一满合成也失败。以前 `/role/cycle`、`/chat` 合成失败就回 500，响应头里的 `X-Role` / `X-Volume` / `X-Need-Photo` / 屏显文字全丢了。
+  现在合成失败回 300ms 静音 WAV（`silentWav`）、头照常带上，记 `tts_failed`。契约测试用 `/__fake/tts {fail: n}` 模拟。
 - **TTS 缓存**：`synthesize()` 按 md5(文本+音色参数) 缓存于 `tts_cache/`；
   改音色参数必须同步改 cache key。
 - **响应头协议**（设备读取）：`X-Need-Photo`、`X-Volume: up/down`、

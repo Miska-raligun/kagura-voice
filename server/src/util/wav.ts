@@ -21,6 +21,12 @@ export function wavHeader(dataLen: number, sr = SAMPLE_RATE, ch = 1, bits = 16):
 }
 
 /** 1 秒 440Hz 正弦波（/test-tone），与 Python 版逐样本一致 */
+/** 一小段静音 WAV（语音合成失败时代替，设备照常解析响应头） */
+export function silentWav(ms = 300): Buffer {
+  const n = Math.round((SAMPLE_RATE * ms) / 1000) * 2;
+  return Buffer.concat([wavHeader(n), Buffer.alloc(n)]);
+}
+
 export function testTone(): Buffer {
   const sr = 16000, n = sr;
   const pcm = Buffer.alloc(n * 2);

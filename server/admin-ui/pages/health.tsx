@@ -14,6 +14,7 @@ export const KIND_LABEL: Record<string, string> = {
   compact_failed: "压缩失败",
   "voice:cut": "朗读兜底失败、截断着念",
   push_failed: "推送语音合成失败",
+  tts_failed: "语音合成失败（没出声）",
   sub_cancelled: "子任务随叫停一起停",
   unclean_exit: "上次没有正常退出",
 };
@@ -58,7 +59,7 @@ function detailText(e: any): string {
   if (e.kind === "compact") return `${d.failed}/${d.chunks} 段没总结成（${d.trigger}）`;
   if (e.kind === "compact_failed") return `${d.trigger}：${d.error ?? ""}`;
   if (e.kind === "unclean_exit") return `pid ${d.pid}，日志最后写入 ${d.lastLog}`;
-  if (e.kind === "push_failed") return `${d.device}：${d.text}`;
+  if (e.kind === "push_failed" || e.kind === "tts_failed") return `${d.device}：${d.text}`;
   return d.message ?? d.model ?? "";
 }
 
@@ -72,7 +73,7 @@ function Events() {
   return (
     <>
       <Err msg={err} />
-      <div class="chips">{[["", "全部"], ["turn", "失败的轮次"], ["nudge", "催说话"], ["empty_retry", "空回复"], ["overflow", "超长"], ["guard", "单轮叫停"], ["compact", "压缩"], ["voice", "朗读"], ["unclean_exit", "异常退出"]]
+      <div class="chips">{[["", "全部"], ["turn", "失败的轮次"], ["nudge", "催说话"], ["empty_retry", "空回复"], ["overflow", "超长"], ["guard", "单轮叫停"], ["compact", "压缩"], ["voice", "朗读"], ["tts_failed", "合成失败"], ["unclean_exit", "异常退出"]]
         .map(([k, l]) => <a class={k === kind ? "on" : ""} onClick={() => setKind(k)}>{l}</a>)}</div>
       {list.length ? <>
         <table><thead><tr><th>时间</th><th>Agent / 会话</th><th>发生了什么</th><th>详情</th></tr></thead>

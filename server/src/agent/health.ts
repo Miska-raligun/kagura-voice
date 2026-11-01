@@ -13,6 +13,7 @@ export type HealthKind =
   | "compact_failed"
   | "voice"           // 顺带朗读：detail.via = first（她写了朗读版）/ short（直接念）/ summary（事后压成口语）/ cut（失败截断）
   | "push_failed"     // 推送语音合成失败
+  | "tts_failed"      // 对话 / 切角色时语音合成失败（回了静音，文字照常）
   | "sub_cancelled"   // 子任务随发起方一起停了
   | "unclean_exit";   // 上次运行没有正常退出
 

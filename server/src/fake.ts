@@ -23,7 +23,9 @@ export class FakeProviders implements Voice, Brain, FakeLlm {
   log = { asr: 0, llm: [] as any[], tts: [] as any[] };
   constructor(private ttsDir: string) {}
 
-  reset() { this.asrQueue = []; this.llmQueue = []; this.log = { asr: 0, llm: [], tts: [] }; }
+  /** 接下来几次合成直接失败（模拟语音服务商额度用完 / 限流） */
+  ttsFail = 0;
+  reset() { this.asrQueue = []; this.llmQueue = []; this.log = { asr: 0, llm: [], tts: [] }; this.ttsFail = 0; }
 
   async transcribe(): Promise<string> {
     this.log.asr++;
@@ -45,6 +47,7 @@ export class FakeProviders implements Voice, Brain, FakeLlm {
   async synthesize(text: string, v?: number | VoiceRef): Promise<string | null> {
     const clean = stripMarkdown(text);
     if (!clean) return null;
+    if (this.ttsFail > 0) { this.ttsFail--; return null; }
     const ref: VoiceRef = typeof v === "number" ? { per: v } : v ?? {};
     const per = ref.per ?? 111;
     this.log.tts.push({ text: clean, per, ...(ref.provider ? { provider: ref.provider, voice: ref.voice ?? "" } : {}) });
@@ -66,6 +69,7 @@ export class FakeProviders implements Voice, Brain, FakeLlm {
     r.post("/__fake/asr", (req) => { this.asrQueue.push(...((req.json() ?? {}).queue ?? [])); return json({ ok: true }); });
     r.post("/__fake/llm", (req) => { this.llmQueue.push(...((req.json() ?? {}).queue ?? [])); return json({ ok: true }); });
     r.get("/__fake/log", () => json(this.log));
+    r.post("/__fake/tts", (req) => { this.ttsFail = Number((req.json() ?? {}).fail ?? 0); return json({ ok: true }); });
     console.log("[fake] 假服务商已启用：ASR/LLM/TTS 由 /__fake/* 控制");
   }
 }
