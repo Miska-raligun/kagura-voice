@@ -97,6 +97,19 @@ const cosine = (a: Float32Array, b: Float32Array) => {
 
 /** USER.md 里系统自动追加的那一节（标题之后都算） */
 export const USER_AUTO_HEAD = "## 自动记录（她从对话里记下的，可以挪到上面、改、删）";
+/**
+ * 一条要记的事像不像「当天的流水」：开头是时刻 / 日期（「22:14 heartbeat…」「10-31 …」），或「今天 / 刚才 / 今晚…」起头。
+ * 这种写进 MEMORY.md 会被当成长期事实、每轮自动回忆出来，过几天就成了误导
+ */
+export function looksLikeLog(t: string): boolean {
+  const s = t.trim().replace(/^\[/, "");
+  if (/^(\d{4}[-/年])?(0?[1-9]|1[0-2])[-/月](0?[1-9]|[12]\d|3[01])(日|\s|$)/.test(s)) return true;       // 10-31 / 2026-10-31 / 10月31日
+  if (/^\d{1,2}[:：]\d{2}(?!\d)/.test(s)) return true;                                                // 22:14 …
+  if (/^(heartbeat|定时任务|待办)\b|^(heartbeat|定时任务|待办)\]/i.test(s)) return true;
+  // 「今天…」「刚才…」是当天的事；「今天起 / 从今天开始」说的是以后，不算
+  return /^(今天|今日|今早|今晚|刚才|刚刚|方才)/.test(s) && !/^(今天|今日|今晚)(起|开始)/.test(s);
+}
+
 /** USER.md 自动记录里单条的上限：超过就不像「关于主人的一条稳定信息」了，改记 MEMORY.md */
 export const USER_ITEM_MAX = 80;
 export const USER_AUTO_MAX = 1500;
@@ -263,8 +276,15 @@ export class MemoryIndex {
    */
   write(target: string, text: string, now = new Date()): string {
     const ws = this.agent.workspace;
-    const t = text.trim().replace(/\n+/g, " ");
+    // 多行压成一行（清单一项一块）用「；」接，别挤成一串；开头自带的「- 」去掉（不然写出来是「- - …」）
+    const t = text.trim().split(/\n+/).map((l) => l.trim().replace(/^([-*•]\s+)+/, "")).filter(Boolean).join("；");
     if (!t) throw new Error("内容为空");
+    // 长期记忆只放以后还成立的事：带时刻 / 日期开头、「今天…」「刚才…」这种当天的流水，改记进今天的笔记（LRN 2026-11-01）
+    if (target === "long" && looksLikeLog(t)) {
+      const where = this.write("daily", t, now);
+      console.log(`[memory] ↪️  ${this.agent.id} 这条像当天的流水，没记进 MEMORY.md、改记 ${where}：${t.slice(0, 60)}`);
+      return `${where}（这条像当天发生的事，记进了今天的笔记；长期记忆只放以后还成立的事实、约定、偏好、结论）`;
+    }
     if (target === "user") {
       // 关于主人的一条稳定信息是一句短话；长的多半是事情经过 / 进展，改记长期记忆（USER.md 每轮常驻，要少而精）
       if (Array.from(t).length > USER_ITEM_MAX) return this.write("long", t, now);

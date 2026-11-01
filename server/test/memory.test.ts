@@ -189,3 +189,18 @@ describe("自动回忆不再随机", () => {
     expect((await idx.recall("团子在干嘛呢")).map((h) => h.text)).toEqual(["- 家里的猫叫团子"]);
   });
 });
+
+describe("long 不收流水", () => {
+  it("带时刻 / 日期、「今天…」「刚才…」开头的改记今天的笔记；以后还成立的照常进 MEMORY.md；开头的「- 」去掉、多行用「；」接", async () => {
+    const { looksLikeLog } = await import("../src/agent/memory.ts");
+    for (const t of ["22:14 heartbeat 无事", "- 23:59 memory 文件名整理", "10-31 跑了股票早报", "今天主人去了医院", "刚才查到三首歌", "[heartbeat] 一切正常"]) expect(looksLikeLog(t.replace(/^- /, ""))).toBe(true);
+    for (const t of ["主人晚上十一点睡", "早报推送最长 2.4MB", "今天起主人改喝咖啡", "项目代码在 D:\\\\work", "16:9 的屏幕更合适"]) expect(looksLikeLog(t)).toBe(false);
+    const { mem, a } = setup();
+    const idx = mem.of("main");
+    const where = idx.write("long", "- - 22:14 heartbeat 无事发生");
+    expect(where).toMatch(/^memory\/\d{4}-\d{2}-\d{2}\.md（这条像当天发生的事/);
+    expect(fs.existsSync(path.join(a.workspace, "MEMORY.md")) ? fs.readFileSync(path.join(a.workspace, "MEMORY.md"), "utf8") : "").not.toContain("22:14");
+    expect(idx.write("long", "- 主人的项目代码在 D 盘\n- 改完要跑测试")).toBe("MEMORY.md");
+    expect(fs.readFileSync(path.join(a.workspace, "MEMORY.md"), "utf8")).toContain("- 主人的项目代码在 D 盘；改完要跑测试\n");
+  });
+});

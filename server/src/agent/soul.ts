@@ -180,7 +180,7 @@ export function toolGuide(tools: string[]): string {
   const g: string[] = [];
   if (has("take_photo")) g.push("要看东西（「这是什么」「帮我看看」）就 take_photo，别凭空猜。");
   if (has("set_volume")) g.push("主人嫌声音大 / 小就 set_volume。");
-  if (has("memory_write")) g.push("值得以后记得的事用 memory_write：大多数记 long（约定、经历、计划进展）；只跟今天有关的记 daily；只有主人本人的稳定信息（称呼、家人、作息、口味习惯）才记 user。");
+  if (has("memory_write")) g.push("记事用 memory_write，按「过几天再读到它还成立吗」选：当天发生的、做了什么、heartbeat / 定时任务的记录记 daily；以后还成立的事实、约定、偏好、结论记 long；只有主人本人的稳定信息（称呼、家人、作息、口味习惯）才记 user。");
   if (has("memory_search")) g.push("涉及以前的事、约定、主人的偏好，拿不准先 memory_search 再答。");
   if (has("cron_add")) g.push("到点要做的事（提醒、「每天 / 每周 / 几点」做什么）用 cron_add 建定时任务，别口头答应了就算。");
   if (has("photo_schedule_add")) g.push("「每天几点拍一张看看」这类用 photo_schedule_add。");
