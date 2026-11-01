@@ -458,7 +458,7 @@ export function registerAdmin(r: Router, ctx: Ctx, sys: AgentSystem) {
     volSet.set(req.params.id, level);
     setTimeout(() => volSet.delete(req.params.id), 90_000).unref?.();      // 之后以心跳为准
     console.log(`[${req.params.id}] 🔊  [admin] 音量 → ${level}%`);
-    if (d.test) await ctx.sendPush(`现在的音量是百分之${level}。`, req.params.id).catch(() => false);
+    if (d.test) await ctx.sendPush(`现在的音量是百分之${level}。`, req.params.id, null, { fixed: true }).catch(() => false);
     return json({ status: "ok", level });
   });
   /** 清空留给这台设备的话（等切到对应角色才播的） */
@@ -475,7 +475,7 @@ export function registerAdmin(r: Router, ctx: Ctx, sys: AgentSystem) {
     if (!role) return json({ error: "没有这个角色" }, 400);
     if (ctx.mqtt.ok) {
       ctx.mqtt.publish(`kagura/cmd/${req.params.id}`, { action: "role", role: role.id });
-      if (d.greet ?? true) await ctx.sendPush(ctx.roles.greeting(role), req.params.id).catch(() => false);
+      if (d.greet ?? true) await ctx.sendPush(ctx.roles.greeting(role), req.params.id, null, { fixed: true }).catch(() => false);
     }
     console.log(`[${req.params.id}] 🎭  [role/admin] → ${role.name} (${role.agent})`);
     return json({ id: req.params.id, agent: role.agent, role: role.id });

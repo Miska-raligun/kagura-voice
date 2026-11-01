@@ -14,7 +14,7 @@ import crypto from "node:crypto";
 import { stripMarkdown, pyHead, pyLen } from "../util/text.ts";
 import { wavHeader, SAMPLE_RATE, normalizeLoudness } from "../util/wav.ts";
 import { BaiduVoice, pruneDir, TTS_CACHE_MAX_FILES, type BaiduEndpoints, BAIDU_ENDPOINTS } from "./baidu.ts";
-import type { Voice, VoiceRef } from "./types.ts";
+import type { Voice, VoiceRef, SynthOpts } from "./types.ts";
 
 export type SpeechKind = "baidu" | "openai" | "minimax";
 export interface SpeechProvider {
@@ -298,17 +298,37 @@ export class SpeechHub implements Voice {
     catch (e: any) { console.log(`[asr] ❌ ${p.id}: ${e.message}`); return ""; }
   }
 
-  async synthesize(text: string, v?: number | VoiceRef): Promise<string | null> {
+  async synthesize(text: string, v?: number | VoiceRef, opts?: SynthOpts): Promise<string | null> {
     const ref: VoiceRef = typeof v === "number" ? { per: v } : v ?? {};
     const want = this.provider(ref.provider) ?? this.provider(this.cfg.tts);
     const fallback = this.provider(this.cfg.tts);
+    // 固定的话（LRN 2026-11-01，症状「额度用完后点 ROLE 键切不了角色——问候语明明每次都一样」）：
+    // 普通缓存只留最近 TTS_CACHE_MAX_FILES 条，边生成边播一句一条，聊几轮问候语就被挤掉了、只能重新合成。
+    // 这类话存进 fixed/（pruneDir 只清顶层），合成过一次就一直用；key 含服务商配置，换音色 / 服务商自然重合成
+    const pin = opts?.fixed ? this.fixedPath(text, ref, want) : "";
+    if (pin && fs.existsSync(pin)) { console.log(`[tts] 📌 固定语音: ${pyHead(stripMarkdown(text), 30)}`); return pin; }
     try {
-      return await this.synthWith(want, text, ref);
+      const out = await this.synthWith(want, text, ref);
+      if (out && pin) {
+        try {
+          fs.mkdirSync(path.dirname(pin), { recursive: true });
+          const tmp = `${pin}.${crypto.randomUUID()}.part`;
+          fs.copyFileSync(out, tmp); fs.renameSync(tmp, pin);
+          return pin;
+        } catch { /* 存不下照样返回普通缓存 */ }
+      }
+      return out;
     } catch (e: any) {
       if (!want || !fallback || want.id === fallback.id) throw e;
       console.log(`[tts] ⚠️  ${want.id} 合成失败，改用 ${fallback.id}: ${e.message}`);
       return this.synthWith(fallback, text, { per: ref.per });
     }
+  }
+
+  private fixedPath(text: string, ref: VoiceRef, p: SpeechProvider | undefined): string {
+    const conf = p && p.kind !== "baidu" ? { kind: p.kind, id: p.id, base_url: p.base_url, model: p.model, voice: p.voice, speed: p.speed } : { kind: "baidu" };
+    const key = crypto.createHash("md5").update(`${stripMarkdown(text)}|${JSON.stringify(ref)}|${JSON.stringify(conf)}|${this.cfg.tts ?? ""}|norm1`, "utf8").digest("hex");
+    return path.join(this.cacheDir, "fixed", `${key}.wav`);
   }
 
   private async synthWith(p: SpeechProvider | undefined, text: string, ref: VoiceRef): Promise<string | null> {

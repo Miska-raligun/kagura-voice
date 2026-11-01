@@ -192,7 +192,8 @@ export function registerChat(r: Router, ctx: Ctx) {
       console.log(`[${dev}] 💬  ${preview(reply)}`);
 
       const tLlm = now();
-      const wavOut = await ctx.voice.synthesize(reply, roleVoice(role));
+      // 没听清 / 退出 / 切角色这些不记 last_quick 的都是固定的话：语音常驻，额度用完也照样有声
+      const wavOut = await ctx.voice.synthesize(reply, roleVoice(role), remember ? undefined : { fixed: true });
       ctx.logTiming(dev, t0, tAsr, tLlm);
       ctx.hb.seen(dev);
       // 合成失败（多半是语音服务商额度用完 / 限流）别整个报错：响应头里的切角色、音量、拍照、屏显文字照样要送到
@@ -282,7 +283,7 @@ export function registerChat(r: Router, ctx: Ctx) {
     ctx.deviceHere(dev);
     const target = ctx.roles.set(dev, ctx.roles.next(dev).id)!;
     const text = ctx.roles.greeting(target);
-    const wavOut = await ctx.voice.synthesize(text, roleVoice(target));
+    const wavOut = await ctx.voice.synthesize(text, roleVoice(target), { fixed: true });
     console.log(`[${dev}] 🎭  [role/tap] → ${target.name} (${target.agent})`);
     // 问候合成不出来也照样切：设备靠 X-Role 换角色，以前这里回 500，设备只显示 error、角色也没切过去
     return bytes(wavOut ? fs.readFileSync(wavOut) : ttsFailed(dev, text), "audio/wav", { "X-Role": target.id, "X-Reply-Text": b64Header(text) });

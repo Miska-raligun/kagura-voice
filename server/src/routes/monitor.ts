@@ -63,7 +63,7 @@ export function registerMonitor(r: Router, ctx: Ctx) {
     if (!target) return json({ error: "unknown role" }, 400);
     if (ctx.mqtt.ok) {
       ctx.mqtt.publish(`kagura/cmd/${dev}`, { action: "role", role: target.id });
-      if (data.greet ?? true) await ctx.sendPush(ctx.roles.greeting(target), dev);
+      if (data.greet ?? true) await ctx.sendPush(ctx.roles.greeting(target), dev, null, { fixed: true });
     }
     console.log(`[${dev}] 🎭  [role/api] → ${target.name} (${target.agent})`);
     return json({ role: target.id, name: target.name });

@@ -7,7 +7,8 @@ import { wavHeader, SAMPLE_RATE } from "../util/wav.ts";
 import { sleep } from "../util/time.ts";
 import type { Voice } from "./types.ts";
 
-export const TTS_CACHE_MAX_FILES = 200;
+// 边生成边播一句一条，200 条聊几轮就满；固定的话另存 fixed/，不受这个上限影响
+export const TTS_CACHE_MAX_FILES = 1000;
 
 /** 百度 OAuth access token 缓存，过期前自动刷新；并发请求共用同一次刷新 */
 /** 百度接口地址。测试用本地假服务器替换 */

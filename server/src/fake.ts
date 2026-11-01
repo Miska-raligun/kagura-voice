@@ -7,7 +7,7 @@ import crypto from "node:crypto";
 import { stripMarkdown } from "./util/text.ts";
 import { wavHeader } from "./util/wav.ts";
 import { json, type Router } from "./http/router.ts";
-import type { Voice, VoiceRef } from "./voice/types.ts";
+import type { Voice, VoiceRef, SynthOpts } from "./voice/types.ts";
 import type { Brain, ChatRequest } from "./brain/types.ts";
 import type { ServerState } from "./state.ts";
 import type { FakeLlm, FakeStep } from "./agent/models.ts";
@@ -44,18 +44,23 @@ export class FakeProviders implements Voice, Brain, FakeLlm {
     return item;
   }
 
-  async synthesize(text: string, v?: number | VoiceRef): Promise<string | null> {
+  /** 合成过的固定语音（真实现存 tts_cache/fixed/，不会被挤掉；额度用完也照样有） */
+  private fixed = new Map<string, string>();
+  async synthesize(text: string, v?: number | VoiceRef, opts?: SynthOpts): Promise<string | null> {
     const clean = stripMarkdown(text);
     if (!clean) return null;
-    if (this.ttsFail > 0) { this.ttsFail--; return null; }
     const ref: VoiceRef = typeof v === "number" ? { per: v } : v ?? {};
     const per = ref.per ?? 111;
     this.log.tts.push({ text: clean, per, ...(ref.provider ? { provider: ref.provider, voice: ref.voice ?? "" } : {}) });
+    const fk = `${clean}|${JSON.stringify(v ?? null)}`;
+    if (opts?.fixed && this.fixed.has(fk)) return this.fixed.get(fk)!;
+    if (this.ttsFail > 0) { this.ttsFail--; return null; }
     const p = path.join(this.ttsDir, crypto.createHash("md5").update(`fake|${clean}|${per}|${ref.provider ?? ""}|${ref.voice ?? ""}`).digest("hex") + ".wav");
     if (!fs.existsSync(p)) {
       const body = Buffer.alloc(BYTES_PER_CHAR * Array.from(clean).length);
       fs.writeFileSync(p, Buffer.concat([wavHeader(body.length), body]));
     }
+    if (opts?.fixed) this.fixed.set(fk, p);
     return p;
   }
 

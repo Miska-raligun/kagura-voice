@@ -137,6 +137,23 @@ def test_role_cycle_still_switches_when_tts_fails(roles_server):
     assert "小澪" in b64text(r.headers["X-Reply-Text"])
 
 
+def test_role_cycle_greeting_is_pinned(roles_server):
+    """问候语每次都一样：合成过一次就常驻，额度用完时 ROLE 键也照样有声（不是静音）"""
+    import pytest
+    s = roles_server
+    s.fake_reset()
+    if s.post("/__fake/tts", json={"fail": 0}).status_code == 404:
+        pytest.skip("旧服务端没有模拟合成失败的开关")
+    s.post("/role", json={"device_id": "rd6", "role": "", "greet": False})
+    first = s.post("/role/cycle", headers={"X-Device-Id": "rd6"})
+    assert first.headers["X-Role"] == "mio"
+    s.post("/role", json={"device_id": "rd6", "role": "", "greet": False})
+    s.post("/__fake/tts", json={"fail": 5})
+    again = s.post("/role/cycle", headers={"X-Device-Id": "rd6"})
+    s.post("/__fake/tts", json={"fail": 0})
+    assert again.headers["X-Role"] == "mio" and again.content == first.content
+
+
 def test_role_post_notifies_device_then_greets(roles_server):
     from conftest import Device
     s = roles_server

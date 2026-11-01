@@ -113,7 +113,8 @@ export class Ctx {
    * agentId：说话的 agent。它对应某个角色时，用那个角色的音色，并在通知里带上 role——
    * 设备当前不是这个角色就在播放期间临时换成它的图（一台设备多个角色共用）。不传 = 设备当前角色。
    */
-  async sendPush(text: string, dev: string, agentId?: string | null): Promise<boolean> {
+  /** fixed：固定的话（切角色问候、试听音量），语音常驻缓存、不按句拆开（拆开的每句不固定） */
+  async sendPush(text: string, dev: string, agentId?: string | null, opts?: { fixed?: boolean }): Promise<boolean> {
     if (!this.mqtt.ok) return false;
     const t0 = Date.now();
     const cur = this.roles.get(dev);
@@ -129,7 +130,7 @@ export class Ctx {
     // 不止一句：按句合成，第一句好了就发通知，设备来取时边合成边往下写（不等整段合成完）
     const split = new SentenceSplitter();
     const parts = [...split.push(text), ...split.flush()];
-    if (parts.length > 1) {
+    if (parts.length > 1 && !opts?.fixed) {
       const synth = (s: string) => this.voice.synthesize(s, ref).then((p) => (p ? wavPcm(fs.readFileSync(p)) : null)).catch(() => null);
       const pending = parts.map(() => null as Promise<Buffer | null> | null);
       const get = (i: number) => (pending[i] ??= synth(parts[i]));
@@ -155,7 +156,7 @@ export class Ctx {
       }
       console.log(`[push] ⚠️  ${dev} 首句合成失败，改为整段合成`);
     }
-    const wav = await this.voice.synthesize(text, ref);
+    const wav = await this.voice.synthesize(text, ref, opts?.fixed ? { fixed: true } : undefined);
     if (!wav) {
       console.log(`[push] ⚠️  ${dev} 语音合成失败，没推送：${head}`);
       health.record({ kind: "push_failed", ok: false, agent: agentId ?? undefined, detail: { device: dev, text: head } });

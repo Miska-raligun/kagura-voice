@@ -120,6 +120,21 @@ describe("合成", () => {
     } finally { failOpenai = false; }
   });
 
+  it("固定的话常驻 fixed/：普通缓存被清掉、服务商挂了也照样有；换了音色重新合成", async () => {
+    const hub = mk({ tts: "vs", providers: providers() });
+    const p = (await hub.synthesize("我是小澪，有什么事吗？", { per: 4 }, { fixed: true }))!;
+    expect(p).toContain(`${path.sep}fixed${path.sep}`);
+    const dir = path.dirname(path.dirname(p));
+    for (const f of fs.readdirSync(dir)) if (f.endsWith(".wav")) fs.unlinkSync(path.join(dir, f));   // 普通缓存被挤掉
+    failOpenai = true;
+    try {
+      expect(await hub.synthesize("我是小澪，有什么事吗？", { per: 4 }, { fixed: true })).toBe(p);
+      await expect(hub.synthesize("我是小澪，有什么事吗？", { per: 4 })).rejects.toThrow(/HTTP 500/);   // 不带 fixed 就得重新合成
+    } finally { failOpenai = false; }
+    const q = await hub.synthesize("我是小澪，有什么事吗？", { per: 4, provider: "vs", voice: "other" }, { fixed: true });
+    expect(q).not.toBe(p);
+  });
+
   it("默认服务商本身失败就报错（不吞）", async () => {
     failOpenai = true;
     try { await expect(mk({ tts: "vs", providers: providers() }).synthesize("x")).rejects.toThrow(/HTTP 500/); }

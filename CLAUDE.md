@@ -70,7 +70,11 @@ CoreS3 (MicroPython) ──HTTP──▶ server/（TypeScript 单文件可执行
   语音合成和模型常是同一家同一把 Key，额度一满合成也失败。以前 `/role/cycle`、`/chat` 合成失败就回 500，响应头里的 `X-Role` / `X-Volume` / `X-Need-Photo` / 屏显文字全丢了。
   现在合成失败回 300ms 静音 WAV（`silentWav`）、头照常带上，记 `tts_failed`。契约测试用 `/__fake/tts {fail: n}` 模拟。
 - **TTS 缓存**：`synthesize()` 按 md5(文本+音色参数) 缓存于 `tts_cache/`；
-  改音色参数必须同步改 cache key。
+  改音色参数必须同步改 cache key。普通缓存只留最近 `TTS_CACHE_MAX_FILES`（1000）条，边生成边播一句一条，很快就轮换。
+  **固定的话传 `{ fixed: true }`**（LRN 2026-11-01，症状「额度用完后 ROLE 键切不了角色——问候语明明每次都一样，却要重新合成」）：
+  存进 `tts_cache/fixed/`（`pruneDir` 只清顶层，不会被挤掉），合成过一次就一直用，key 含服务商配置，换音色自然重合成。
+  现在用在：切角色问候（`/role/cycle`、语音切换、管理界面 / 监控页切换的推送）、`/chat` 里不记 last_quick 的短路回复（没听清 / 退出 / 「我就是 X 呀」）、试听音量。
+  `sendPush(..., { fixed: true })` 不按句拆（拆开的每句不固定）。**新加固定说辞时顺手带上。**
 - **响应头协议**（设备读取）：`X-Need-Photo`、`X-Volume: up/down`、
   `X-User-Text`/`X-Reply-Text`（b64 UTF-8，屏显用；`/chat` 与 `/chat-vision`
   都会带）。请求头：`X-Device-Id`、`X-Local-Time`、`X-Touch`（体感摘要）、
