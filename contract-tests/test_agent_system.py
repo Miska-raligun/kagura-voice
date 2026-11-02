@@ -785,13 +785,16 @@ def test_pi_packages_install_local_and_upload(a, tmp_path):
 
 def test_deferred_tasks(a):
     """待办：对话里记下（不马上做）→ 管理界面改开始时间 / 立即执行 → 后台做完、结果和执行过程可查；撤销、重新排队、设置"""
+    assert a.get("/api/admin/tasks").json()["settings"]["window"] == "01:00-06:00"
+    # 默认静默时段 01:00-06:00：CI 正好在这段时间跑（UTC）的话，记下的待办会马上开始做。挪到离现在 12 小时的地方，最后恢复
+    h = (time.localtime().tm_hour + 12) % 24
+    a.request("PUT", "/api/admin/tasks-settings", json={"window": f"{h:02d}:00-{(h + 1) % 24:02d}:00", "report_at": "08:00", "max_minutes": 60})
     a.fake_llm(tool("task_add", _then="好，记下了，今晚做。", title="整理报告", detail="把 notes 目录整理成一份周报"))
     r = a.post("/chat", data=wav(), headers={"X-Device-Id": "ag_task"})
     assert b64text(r.headers["X-Reply-Text"]) == "好，记下了，今晚做。"
     d = a.get("/api/admin/tasks").json()
     t = next(x for x in d["tasks"] if x["title"] == "整理报告")
     assert t["status"] == "queued" and t["run_at"] is None and t["origin"] == "device:ag_task" and t["trusted"] is True
-    assert d["settings"]["window"] == "01:00-06:00"
 
     # 改开始时间、立即执行
     assert a.request("PATCH", f"/api/admin/tasks/{t['id']}", json={"run_at": time.time() + 7200, "detail": "改过：整理成周报"}).json()["detail"] == "改过：整理成周报"
