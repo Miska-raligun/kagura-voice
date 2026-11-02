@@ -16,6 +16,7 @@ import { DatabaseSync } from "node:sqlite";
 import { inActiveHours } from "./cron.ts";
 import type { RunRequest, RunResult } from "./runtime.ts";
 import { GUARD_STOP } from "./runtime.ts";
+import { WATCHDOG_TAG } from "./watchdog.ts";
 import type { AgentRegistry } from "./registry.ts";
 
 export type TaskStatus = "queued" | "running" | "done" | "partial" | "failed" | "cancelled";
@@ -320,7 +321,8 @@ export class TaskQueue {
         if (this.get(id)?.status === "cancelled") return;
         verdict = verdictOf(r.text);
         // 这一轮的额度用完了还没做完：换一轮新的额度接着做（有上限）
-        if (guarded && verdict.v !== "done" && verdict.v !== "blocked" && guardContinues < MAX_GUARD_CONTINUES) {
+        // 监工判定在兜圈子叫停的（WATCHDOG_TAG）不续额度：换一轮新额度只会接着兜
+        if (guarded && !guarded.startsWith(WATCHDOG_TAG) && verdict.v !== "done" && verdict.v !== "blocked" && guardContinues < MAX_GUARD_CONTINUES) {
           guardContinues++;
           console.log(`[tasks] 🔋 「${t.title}」第 ${rounds + 1} 轮额度用完（${guarded}），换一轮新的额度接着做（${guardContinues}/${MAX_GUARD_CONTINUES}）`);
           nextPrompt = GUARD_CONTINUE_PROMPT + FINISH_RULE;

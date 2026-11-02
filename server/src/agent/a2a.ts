@@ -110,6 +110,15 @@ export class A2A {
 
   /** 每个 agent 正在跑的子任务数 */
   private subsRunning = new Map<string, number>();
+  /** 正在跑的后台子任务：子任务会话 → 谁派的、做什么（插话、每轮备注用） */
+  subs = new Map<string, { owner: string; ownerSession: string; to: string; task: string; started: number }>();
+
+  /** 每轮系统备注：这个 agent 派出去、还在跑的子任务（她插话时要用会话名） */
+  note(agentId: string): string {
+    const t = Date.now();
+    return [...this.subs.entries()].filter(([, s]) => s.owner === agentId)
+      .map(([k, s]) => `- 子任务 ${k}（${s.to === agentId ? "你的分身" : s.to}，已跑 ${Math.round((t - s.started) / 60000)} 分钟）：${s.task.slice(0, 80)}`).join("\n");
+  }
 
   tools() {
     return (scope: RunScope, agent: AgentInfo): AgentTool<any>[] => {
@@ -143,6 +152,19 @@ export class A2A {
         },
       ];
       if (scope.kind === "sub") return tools;     // 子 agent 只能看，不能再派活、不能传话
+      tools.push({
+        name: "sessions_steer", label: "给子任务补充",
+        description: "给你派出去、还在后台跑的子任务补充要求或纠正方向（主人追加了要求、你发现交代错了）。它下一步就能看到，不用等它做完再重派。session 是 sessions_spawn 返回的子任务会话名。",
+        parameters: Type.Object({ session: Type.String(), message: Type.String() }),
+        execute: async (_id, p: any) => {
+          const sub = this.subs.get(String(p.session));
+          if (!sub || sub.owner !== agent.id) return fail(`没有正在跑的子任务 ${p.session}（可能已经做完了，结果会交回给你）`);
+          const okd = this.rt.steer(sub.to, String(p.session), `[来自发起方 ${agent.name} 的补充] ${p.message}`);
+          if (!okd) return fail(`子任务 ${p.session} 正在收尾，插不进去了。等它的结果交回来再说`);
+          console.log(`[a2a] 🧵 ${agent.id} 给子任务 ${p.session} 补充：${String(p.message).slice(0, 60)}`);
+          return ok(`已转给子任务 ${p.session}，它下一步就会看到`);
+        },
+      });
       tools.push(
         {
           name: "sessions_send", label: "给其他 agent 发消息",
@@ -203,7 +225,8 @@ export class A2A {
             };
             const t0 = Date.now();
             this.subsRunning.set(agent.id, busy + 1);
-            const done = () => this.subsRunning.set(agent.id, Math.max(0, (this.subsRunning.get(agent.id) ?? 1) - 1));
+            this.subs.set(subKey, { owner: agent.id, ownerSession: scope.sessionKey, to, task: String(p.task), started: t0 });
+            const done = () => { this.subs.delete(subKey); this.subsRunning.set(agent.id, Math.max(0, (this.subsRunning.get(agent.id) ?? 1) - 1)); };
             console.log(`[a2a] 🧵 ${agent.id} 派出子任务 ${subKey}（${p.wait ? "等它做完" : "后台"}，现在共 ${busy + 1} 个在跑）：${String(p.task).slice(0, 60)}`);
             if (p.wait) {
               try {
@@ -241,12 +264,22 @@ export class A2A {
 
   /** 后台子任务完成：把结果作为系统事件投回发起方会话，让它决定怎么告诉主人 */
   private async deliverResult(caller: RunScope, task: string, who: string, result: string, call: number) {
+    await this.wake(caller,
+      `[系统事件] 你之前派出的子任务「${task.slice(0, 100)}」已由 ${who} 完成。结果：\n${result}\n\n需要告诉主人就直接说要说的话（会转达给主人）；不需要就只回 NO_REPLY。`,
+      { purpose: "a2a", call });
+  }
+
+  /**
+   * 后台的事做完了（子任务、后台命令）：把结果当一条新消息投回发起的那个会话跑一轮，她决定要不要告诉主人；
+   * 要说的按消息来源转达（announce）。可信度、调用链照发起时的带上
+   */
+  async wake(caller: RunScope, text: string, o: { purpose?: string; call?: number } = {}) {
     const r = await this.rt.run({
       agentId: caller.agentId, sessionKey: caller.sessionKey, kind: caller.kind as any, channel: caller.channel,
-      deviceId: caller.deviceId, spokenTo: caller.channel === "device" ? caller.deviceId : undefined, purpose: "a2a", origin: caller.origin,
+      deviceId: caller.deviceId, spokenTo: caller.channel === "device" ? caller.deviceId : undefined, purpose: o.purpose ?? "event", origin: caller.origin,
       lineage: { hop: caller.hop, chain: [], trusted: caller.trusted },
-      trace: caller.trace, a2aCall: call,       // 发起方收到结果这一轮还算这串调用里的一步
-      text: `[系统事件] 你之前派出的子任务「${task.slice(0, 100)}」已由 ${who} 完成。结果：\n${result}\n\n需要告诉主人就直接说要说的话（会转达给主人）；不需要就只回 NO_REPLY。`,
+      trace: caller.trace, a2aCall: o.call,       // 发起方收到结果这一轮还算这串调用里的一步
+      text,
       keepIf: (t) => !SILENT_RE.test(t),
     });
     if (r.text && !SILENT_RE.test(r.text)) await this.announce(caller, r.text);

@@ -102,7 +102,7 @@ export function estimateTokens(text: string): number {
 
 const SILENT = /^\s*(HEARTBEAT_OK|NO_REPLY)\s*[。.!！]?\s*$/i;
 /** 系统替主人发起的那些「用户消息」（heartbeat、定时任务、系统事件、别的 agent 传话）：不是主人说的，近况里不算 */
-const NOT_OWNER = /^\s*\[(heartbeat|定时任务|系统事件|来自 |子任务|这条消息是|待办)/;
+const NOT_OWNER = /^\s*\[(heartbeat|定时任务|系统事件|来自 |子任务|这条消息是|待办|后台命令|主人补充)/;
 const CHANNEL_NAME: Record<string, string> = { device: "设备", webchat: "网页", feishu: "飞书", qq: "QQ", onebot: "QQ", system: "定时", a2a: "agent 间" };
 /** 近况看多久以内的 */
 export const RECENT_HOURS = 48;
@@ -153,7 +153,7 @@ export class TurnGuard {
   private afterStop = 0;
   constructor(private maxCalls: number, private maxTokens: number, private label: string) {}
 
-  private halt(why: string) {
+  halt(why: string) {
     if (this.reason) return;
     this.reason = why;
     console.log(`[agent] 🔁 ${this.label} ${why}，叫她停手汇报`);
@@ -242,9 +242,11 @@ function liveMessage(m: any): any {
 /** 自动回忆附在用户消息里的那一段（开头这几个字认它，落盘前去掉） */
 export const RECALL_TAG = "[相关记忆（系统按这句话自动检索的，不是主人说的，可能不全）]";
 export const RECALL_WAIT_MS = 2000;
+/** 系统每轮附的备注（见 Runtime.turnNotes），落盘前和自动回忆一起去掉 */
+export const TURN_NOTE_TAG = "[系统备注：你这边正在后台进行的事（系统自动附的，不是主人说的）]";
 function stripRecall(m: Message): Message {
   if (m.role !== "user" || !Array.isArray(m.content)) return m;
-  const content = m.content.filter((c: any) => !(c.type === "text" && String(c.text).startsWith(RECALL_TAG)));
+  const content = m.content.filter((c: any) => !(c.type === "text" && (String(c.text).startsWith(RECALL_TAG) || String(c.text).startsWith(TURN_NOTE_TAG))));
   return content.length === m.content.length ? m : { ...m, content } as Message;
 }
 
@@ -268,7 +270,13 @@ function saveImageRef(c: { data: string; mimeType: string }, workspace?: string)
   } catch { return "[图片]"; }
 }
 
-interface RunInfo { purpose: string; channel: string; since: number; tool: string; stage: string; abort: () => void; cancelled: boolean }
+interface RunInfo {
+  purpose: string; channel: string; since: number; tool: string; stage: string; abort: () => void; cancelled: boolean;
+  /** 往这一轮里插一句话（下一次调模型前带上）。这一轮已经收尾、插不进去就是 null */
+  steer?: ((text: string) => void) | null;
+  /** 这一轮的单轮上限（监工判定在兜圈子时经它软停） */
+  guard?: TurnGuard;
+}
 
 /** 压缩时每次交给摘要模型的对话量（估算 token）；太大推理型模型会把输出额度全花在思考上 */
 export const COMPACT_CHUNK_TOKENS = 16_000;
@@ -611,6 +619,41 @@ export class Runtime {
   /** 会话是否正有一轮在跑（调度器的 idleOnly 用） */
   busy(agentId: string, sessionKey: string) { return this.locks.has(`${agentId}|${sessionKey}`); }
 
+  /** 等这个会话前面排着的都跑完（渠道合并连发消息用：等她空下来，把这期间收到的几条一起交给她） */
+  async whenIdle(agentId: string, sessionKey: string): Promise<void> {
+    const key = `${agentId}|${sessionKey}`;
+    for (let p = this.locks.get(key); p; p = this.locks.get(key)) await p.catch(() => {});
+  }
+
+  /**
+   * 往某个会话正在跑的那一轮里插一句话（借鉴 DeepSeek Super-agent「后续消息直达干活的那个会话」，2026-11）：
+   * 她下一次调模型前就能看到，不用等这一轮做完再排队。主会话给后台子任务补充要求就走这里。
+   * 返回 false = 那个会话现在没在跑（或者已经在收尾），没插进去
+   */
+  steer(agentId: string, sessionKey: string, text: string): boolean {
+    const r = this.running.get(`${agentId}|${sessionKey}`);
+    if (!r?.steer || r.cancelled) return false;
+    r.steer(text);
+    return true;
+  }
+
+  /** 监工判定某一轮在兜圈子：软停（之后的工具调用都返回「别再调了，汇报做到哪了」） */
+  haltRun(key: string, why: string): boolean {
+    const r = this.running.get(key);
+    if (!r?.guard || r.guard.reason) return false;
+    r.guard.halt(why);
+    return true;
+  }
+
+  /** 某一轮的实时记录（监工看最近几步在干什么） */
+  liveOf(key: string): LiveRun | undefined { return this.live.get(key); }
+
+  /**
+   * 每轮附在用户消息后面的系统备注（正在后台跑的子任务、后台命令……）。和自动回忆一样附在消息里、不进系统提示，
+   * 不破坏前缀缓存；落盘前去掉（以 TURN_NOTE_TAG 开头的文本块）
+   */
+  turnNotes: ((scope: RunScope) => string)[] = [];
+
   /** 跑一轮（排队、互等检测、超长 / 空回复兜底），结果记进运行状况 */
   async run(req: RunRequest): Promise<RunResult> {
     const t0 = Date.now();
@@ -732,11 +775,12 @@ export class Runtime {
       this.opts.maxTurnTokens === 0 ? Infinity : (this.opts.maxTurnTokens || DEFAULT_MAX_TURN_TOKENS) * (req.kind === "sub" ? 0.25 : factor),
       `${agent.id} ${req.sessionKey}`,
     );
+    info.guard = guard;
     const tools = this.toolsFor(scope, agent, req).map((t) => guard.wrap(t));
     const peers = this.agents.list().filter((p) => this.agents.canContact(agent.id, p.id)).map((p) => ({ id: p.id, name: p.name }));
     if (persist && scope.trusted) store.markOwner(req.sessionKey);
     // 近况：这个会话看不到的、最近在别处跟主人说过的话。只给可信的会话（主人本人），陌生人 / 群聊不给
-    const recent = scope.trusted && req.kind !== "sub" && req.purpose !== "flush" ? this.recentActivity(agent, req.sessionKey) : "";
+    const recent = scope.trusted && req.kind !== "sub" && req.purpose !== "flush" ? this.recentActivity(agent, req.sessionKey, tools.some((t) => t.name === "sessions_history")) : "";
     const promptOf = (summary?: string, trace?: PromptTrace) => buildSystemPrompt({
       agent, scene: sceneOf(scope), channel: req.channel, summary, trace,
       extra: [...(req.extraSystem ?? []), recent, req.onVoice ? voicePrompt(agent.voice_max_chars || 80) : ""], skills: this.skillCatalog(agent), voiceDelivery: req.voiceDelivery,
@@ -777,6 +821,8 @@ export class Runtime {
     }
     const recalled = await this.recallFor(agent, scope, req);
     if (recalled.text) content.push({ type: "text", text: recalled.text });
+    const notes = this.turnNotes.map((f) => { try { return f(scope); } catch { return ""; } }).filter(Boolean);
+    if (notes.length) content.push({ type: "text", text: `${TURN_NOTE_TAG}\n${notes.join("\n")}` });
     content.push({ type: "text", text: req.text });
 
     const pi = new Agent({
@@ -788,6 +834,8 @@ export class Runtime {
       transformContext: async (msgs) => { try { return pruneToolResults(msgs as any[], histBudget) as any; } catch { return msgs; } },
     });
     const start = pi.state.messages.length;
+    // 插话（Runtime.steer）：排进 pi 的插话队列，下一次调模型前带上。收尾之后就不收了（见下面 waitForIdle 之后）
+    if (!nestedRun) info.steer = (t: string) => pi.steer({ role: "user", content: [{ type: "text", text: t }], timestamp: Date.now() } as any);
     const toolCalls: string[] = [];
     // 超时按「多久没有进展」算，不按一轮总时长：模型在出字、工具在执行都算在干活，长任务不会被半路掐掉。
     // 工具执行期间不计时（命令有自己的超时）；另有总时长上限兜底，防卡死、防死循环
@@ -882,6 +930,10 @@ export class Runtime {
       const work = withScope(scope, async () => {
         await pi.prompt({ role: "user", content, timestamp: Date.now() } as any);
         await pi.waitForIdle();
+        // 刚好在她说完最后一句时插进来的话：pi 已经停了、队列里还压着，接着跑一次把它处理掉
+        const okEnd = () => { const m = pi.state.messages.at(-1) as any; return m?.role === "assistant" && !["error", "aborted"].includes(m.stopReason); };
+        while (!timedOut && pi.hasQueuedMessages() && okEnd()) { await pi.continue(); await pi.waitForIdle(); }
+        info.steer = null;
         // 想完了却一个字没说（推理型模型常见：思考把输出额度用光，或者想着想着就结束了）：催一句、这次不让想，直接说
         const lastMsg = pi.state.messages.at(-1) as any;
         if (!timedOut && lastMsg?.role === "assistant" && !["error", "aborted"].includes(lastMsg.stopReason) && silentMsg(lastMsg)) {
@@ -1005,11 +1057,11 @@ export class Runtime {
    * 这里直接从库里摘最近 RECENT_HOURS 小时、别处（自己的其它会话 + 其他 agent）跟主人的往来，按时间排好放进系统提示，
    * 并明说「说过的别再问、别再重复」。零额外模型调用；字数上限 BUDGETS.recent（0 = 关）。
    */
-  recentActivity(agent: AgentInfo, currentKey: string): string {
+  recentActivity(agent: AgentInfo, currentKey: string, lookup = false): string {
     const budget = BUDGETS.recent ?? 0;
     if (budget <= 0) return "";
     const since = Date.now() / 1000 - RECENT_HOURS * 3600;
-    const items: { ts: number; line: string }[] = [];
+    const items: { ts: number; line: string; ref: string }[] = [];
     // 同一句话可能同时在 heartbeat 会话和接收方会话里（主动消息会记进接收方会话），只列一次
     const seenText = new Set<string>();
     for (const a of this.agents.list()) {
@@ -1030,21 +1082,31 @@ export class Runtime {
         const tag = mine ? where : `${a.name}·${where}`;
         const d = new Date(r.ts * 1000);
         const when = `${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
-        items.push({ ts: r.ts, line: `- ${when} [${tag}] ${who}：${Array.from(text).slice(0, 160).join("")}` });
+        items.push({ ts: r.ts, line: `- ${when} [${tag}#] ${who}：${Array.from(text).slice(0, 160).join("")}`, ref: `${a.id}\u0000${r.key}` });
       }
     }
     if (!items.length) return "";
     items.sort((x, y) => y.ts - x.ts);
+    // 每个会话一个编号（借鉴 DeepSeek Super-agent 的 Chain of Recall）：每条截到 160 字，要前后文时凭编号去查那个会话，
+    // 不用把整段对话塞进来。编号按出现先后排，同一会话的几条共用一个
+    const refs = new Map<string, number>();
     const out: string[] = [];
     let used = 0;
     for (const it of items) {
-      used += it.line.length + 1;
+      const n = refs.get(it.ref) ?? refs.size + 1;
+      const line = lookup ? it.line.replace(/#\]/, ` #${n}]`) : it.line.replace(/#\]/, "]");
+      const legend = lookup && !refs.has(it.ref) ? 30 : 0;
+      used += line.length + 1 + legend;
       if (used > budget) break;
-      out.push(it.line);
+      refs.set(it.ref, n);
+      out.push(line);
     }
+    const legend = lookup && refs.size
+      ? "\n会话编号（要看前后文就用 sessions_history 读那个会话）：" + [...refs.entries()].map(([k, n]) => { const [a, key] = k.split("\u0000"); return `#${n} = agent ${a} / session ${key}`; }).join("；")
+      : "";
     return "<recent_activity>\n最近两天在别的对话里（你在其它渠道、以及家里其他 agent）跟主人的往来，按时间排列、已截断。"
       + "这些都已经发生过：主人说过的事别再问，你或别人已经说过的话别再重复，需要时自然地接上。\n"
-      + out.reverse().join("\n") + "\n</recent_activity>";
+      + out.reverse().join("\n") + legend + "\n</recent_activity>";
   }
 
   /** 某个 agent 在普通会话里能看到的全部内置工具（管理界面白名单用，不过滤白名单本身） */

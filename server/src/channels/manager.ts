@@ -14,6 +14,7 @@ import { QQAdapter } from "./qq.ts";
 import { OneBotAdapter } from "./onebot.ts";
 import { runCommand, type CommandDeps } from "./commands.ts";
 import { SeenMessages } from "./seen.ts";
+import { health } from "../agent/health.ts";
 
 /** 晚到多久就在消息前注明（断线后补投的老消息，agent 得知道这不是刚说的） */
 const LATE_MS = 5 * 60_000;
@@ -56,6 +57,11 @@ export class ChannelManager {
   voice: VoiceBridge | null = null;
 
   private seen: SeenMessages;
+  /**
+   * 她正忙（这个会话有一轮在跑）时同一个聊天又来的消息：先攒着，等她空下来合成一轮（借鉴 DeepSeek Super-agent 的积压合并，2026-11）。
+   * 以前每条各排一轮：连发三条就要回三遍，后两轮还各背一遍整段上下文。key = 会话 + 账号 + 聊天（主人飞书和 QQ 都进 main 时别混到一起）
+   */
+  private pending = new Map<string, { msgs: InboundMessage[]; undos: Promise<(() => Promise<void>) | null>[] }>();
 
   constructor(public store: ChannelStore, private rt: Runtime, private agents: AgentRegistry, private factory: AdapterFactory = defaultFactory, seenFile: string | null = null) {
     this.seen = new SeenMessages(seenFile);
@@ -187,18 +193,38 @@ export class ChannelManager {
       if (!c.warned) { c.warned = true; await this.reply(m, "今天的对话额度用完了，明天再聊吧。"); }
       return;
     }
-    const who = m.chatType === "group" ? `[${m.senderName || m.sender.slice(-6)}] ` : "";
+    const who = (x: InboundMessage) => x.chatType === "group" ? `[${x.senderName || x.sender.slice(-6)}] ` : "";
     console.log(`[channel] 💬 ${a.kind}/${a.id} ${m.chatType} ${m.chatId} → ${agentId}: ${m.text.slice(0, 60)}`);
     // 主人私聊的回复同时交给出口念（播不播由系统按语音推送策略定）。群聊、陌生人的消息不往家里喇叭上念
     const ownerDm = m.chatType === "dm" && !!allowed?.owner;
     // 先给这条消息贴个「正在处理」的表情（飞书），回复发出后撤掉。不等它：贴表情慢不能拖慢回复
     const reacting = this.adapters.get(m.account)?.react?.(m.messageId).catch(() => null) ?? Promise.resolve(null);
+    // 她正忙：攒着，等空下来跟同一聊天这期间的其它消息合成一轮（第一条负责等，后面的交给它就返回）
+    const pkey = `${sessionKey}|${a.id}|${m.chatId}`;
+    const waiting = this.pending.get(pkey);
+    if (waiting) { waiting.msgs.push(m); waiting.undos.push(reacting); return; }
+    let batch: InboundMessage[] = [m];
+    let undos = [reacting];
+    if (this.rt.busy(agentId, sessionKey)) {
+      const entry = { msgs: batch, undos };
+      this.pending.set(pkey, entry);
+      try { await this.rt.whenIdle(agentId, sessionKey); } finally { this.pending.delete(pkey); }
+      ({ msgs: batch, undos } = entry);
+      if (batch.length > 1) {
+        console.log(`[channel] 📚 ${a.kind}/${a.id} ${m.chatId} 她忙的时候来了 ${batch.length} 条，合成一轮`);
+        health.record({ kind: "im_merged", ok: true, agent: agentId, session: sessionKey, detail: { n: batch.length } });
+      }
+    }
+    const lastMsg = batch[batch.length - 1];
+    const lineOf = (x: InboundMessage) => late(x) + who(x) + (x.text || "（发来一张图片）");
+    const text = batch.length === 1 ? lineOf(m)
+      : `[你刚才在忙，这期间连着收到 ${batch.length} 条，一起回复]\n${batch.map(lineOf).join("\n")}`;
     let released = false;
-    const release = () => { if (!released) { released = true; void reacting.then((undo) => undo?.()); } };
+    const release = () => { if (!released) { released = true; for (const u of undos) void u.then((undo) => undo?.()); } };
     try {
       const r = await this.rt.run({
         agentId, sessionKey, kind: ownerMain ? "main" : "chat", channel: m.kind, purpose: "chat",
-        text: late(m) + who + (m.text || "（发来一张图片）"), images: m.images.map((i) => ({ type: "image" as const, ...i })),
+        text, images: batch.flatMap((x) => x.images).map((i) => ({ type: "image" as const, ...i })),
         origin: `${m.kind}:${a.id}:${m.chatId}`,
         // 只有白名单里标了 owner 的人在私聊里说的才可信（能让 agent 执行命令）；群聊、配对的陌生人一律不可信
         trusted: m.chatType === "dm" && !!allowed?.owner,
@@ -208,12 +234,12 @@ export class ChannelManager {
       if (!r.text || SILENT_RE.test(r.text)) return;
       // take_photo 在 IM 里触发时，照片直接发回聊天
       const photo = r.meta.photos?.[0];
-      await this.reply(m, r.text, photo && fs.existsSync(photo) ? fs.readFileSync(photo) : undefined);
+      await this.reply(lastMsg, r.text, photo && fs.existsSync(photo) ? fs.readFileSync(photo) : undefined);
       release();
       // 跑完才判断：主人这条消息里说了「我到家了」（set_presence）也算
       if (ownerDm) await this.voice?.say(agentId, r.text, r.meta);
     } catch (e: any) {
-      await this.reply(m, `（出错了：${String(e.message).slice(0, 100)}）`);
+      await this.reply(lastMsg, `（出错了：${String(e.message).slice(0, 100)}）`);
     } finally {
       release();
     }

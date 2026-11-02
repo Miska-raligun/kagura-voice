@@ -15,6 +15,8 @@ export type HealthKind =
   | "push_failed"     // 推送语音合成失败
   | "tts_failed"      // 对话 / 切角色时语音合成失败（回了静音，文字照常）
   | "sub_cancelled"   // 子任务随发起方一起停了
+  | "watchdog"        // 监工判定在兜圈子，叫停（detail.why）
+  | "im_merged"       // 她忙的时候 IM 连发的几条合成一轮（detail.n）
   | "unclean_exit";   // 上次运行没有正常退出
 
 export interface HealthEvent { ts: number; kind: HealthKind; ok: boolean; agent?: string; session?: string; purpose?: string; ms?: number; detail?: Record<string, unknown> }

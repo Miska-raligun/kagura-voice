@@ -190,6 +190,8 @@ export function toolGuide(tools: string[]): string {
   if (has("announce")) g.push("主人明确让你「跟家里说一声」时用 announce，平时回复不用它（系统会决定要不要播）。");
   if (has("set_presence")) g.push("主人说要出门 / 到家了，用 set_presence 记下在家状态。");
   if (has("exec")) g.push("exec 能在这台电脑上执行命令；会删改文件、花钱、对外发东西的操作先跟主人确认。");
+  if (has("exec_jobs")) g.push("估计要跑一两分钟以上的命令用 exec 的 background=true 放到后台，先回复主人；跑完结果会作为新消息交回给你。");
+  if (has("sessions_steer")) g.push("子任务还在跑时主人追加了要求、或者你发现交代错了，用 sessions_steer 直接告诉它，别等它做完再重派。");
   if (has("skill_read")) g.push("<skills> 里有对口的技能就先 skill_read 读全文再照做。");
   return g.length ? `<how_to>\n${g.map((x) => `- ${x}`).join("\n")}\n</how_to>` : "";
 }

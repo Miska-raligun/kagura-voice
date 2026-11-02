@@ -558,6 +558,16 @@ CoreS3 (MicroPython) ──HTTP──▶ server/（TypeScript 单文件可执行
   **会话页实时弹出**（`a2a.A2ADock`）：`LiveRun.trace` 带着这一轮的会话 id（`execute` 开头先算 `traceId`，start 事件里就有），实时过程里一出现 `sessions_send` / `sessions_spawn`
   就在输入框上方滑出这串调用的动画（**放在卡片里、别用 fixed 盖住输入框**）。对话框（`.card.chat`）整体固定高、消息区 `flex:1` 吃剩下的——**别再给消息区写 max-height**，那样内容少 / 弹面板时框会忽大忽小，每秒刷新；这一轮结束后留着，主人关了同一串就不再弹。历史轮次在 ⓘ 里有「看这一轮的 Agent 通信」（`kctx.a2a`）。
   详情页是回放：每次调用拆成「发出 / 回来」两步，按时间排，SVG 节点（每个 agent 一个，子任务会话单独一个）+ 沿弧线走的光点，下方步骤列表同步高亮，进行中的 3 秒刷新一次接着播。
+- **借鉴 DeepSeek Super-agent 的几处（2026-11）**：
+  ① **插话**（`Runtime.steer`）：往某会话正在跑的一轮里插一句（pi 的 steer 队列，下一次调模型前带上）；收尾时队列里还压着就 `continue` 接着跑，`info.steer = null` 之后插不进（返回 false）。
+  ② **给子任务补充**（`sessions_steer`）：主会话把追加的要求直接插进还在跑的后台子任务（`A2A.subs` 记着谁派的），不用等它做完重派。
+  ③ **后台命令**（`exec` 的 `background=true`、`exec_jobs`、`BgJobs`）：长命令立刻返回编号，不占着会话锁；跑完结果经 `A2A.wake`（子任务结果也走它）当新消息投回发起的会话、她决定要不要说；
+  发起那一轮被叫停（`scope.cancel`）一起停，停掉的不再交回；子任务 / 待办里没有后台模式（结果没人接）。只在内存里，重启就没了。
+  ④ **每轮系统备注**（`Runtime.turnNotes` / `TURN_NOTE_TAG`）：正在后台跑的子任务、后台命令附在这一轮用户消息里（同自动回忆：不进系统提示、落盘前去掉、只给可信会话）。
+  ⑤ **监工**（`agent/watchdog.ts`，`runtime.watchdog: false` 关）：每分钟看跑了 8 分钟以上的轮次，最近几步交给便宜模型判「推进 / 兜圈子」，**连着两次**兜圈子才经 `haltRun` 软停（同 TurnGuard）；
+  原因以 `WATCHDOG_TAG` 开头，待办见到它不再续额度。日志 `👀`，health `watchdog`。
+  ⑥ **IM 连发合并**（`ChannelManager.pending`）：会话正忙时同一聊天的新消息先攒着，第一条 `whenIdle` 等她空下来，合成一轮、回复挂在最后一条上；日志 `📚`，health `im_merged`。
+  ⑦ **近况编号**：有 `sessions_history` 时近况每条带会话编号、末尾列编号对应的会话，要前后文就去查，不往近况里多塞。
 - **运行状况（`agent/health.ts`，管理界面总览「运行状况」卡片 +「日志」页，LRN 2026-10-31，症状「出了问题只能翻一个大日志文件，也说不清最常出的是哪种」）**：
   每一轮（`Runtime.run` 外层）记成功 / 失败（`errorClass` 归类：限流 429、服务商出错、网络、超时、空回复、上下文超长、单轮上限、Key / 额度、被取消、其它）和用时，
   兜底动作各记一条（`empty_retry` / `nudge` / `overflow` / `guard` / `compact` / `compact_failed` / `voice` / `push_failed` / `sub_cancelled` / `unclean_exit`），存 system.sqlite 的 `health_events`，留 30 天。

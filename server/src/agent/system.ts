@@ -16,7 +16,8 @@ import { Scheduler } from "./scheduler.ts";
 import { cronTools } from "./tools/cron.ts";
 import { A2A } from "./a2a.ts";
 import { Skills } from "./skills.ts";
-import { execTools } from "./tools/exec.ts";
+import { BgJobs, execTools } from "./tools/exec.ts";
+import { Watchdog } from "./watchdog.ts";
 import { webTools } from "./tools/web.ts";
 import { McpManager } from "./mcp.ts";
 import { Extensions, extensionTools, setExtAgentDir } from "./extensions.ts";
@@ -80,7 +81,10 @@ export function createAgentSystem(cfg: Config, dirs: Dirs, fake: FakeLlm | null)
   const a2a = new A2A(dirs.systemDb, runtime, registry, cfg.a2a);
   runtime.addTools(a2a.tools());
   // 执行命令（只给可信会话）+ 联网搜索 / 读网页。cfg.tools 由管理界面就地更新，改了立即生效
-  runtime.addTools(execTools(cfg.tools));
+  // 后台命令跑完、子任务做完，结果都经 a2a.wake 投回发起的会话；她正在后台进行的事每轮附在消息后面
+  const bgJobs = new BgJobs();
+  runtime.addTools(execTools(cfg.tools, { jobs: bgJobs, notify: (scope, text) => a2a.wake(scope, text, { purpose: "exec" }) }));
+  runtime.turnNotes.push((scope) => scope.kind === "sub" || !scope.trusted ? "" : [a2a.note(scope.agentId), bgJobs.note(scope.agentId)].filter(Boolean).join("\n"));
   runtime.addTools(webTools(cfg.tools));
   // 扩展（pi 格式，agent 也能自己写）与 MCP 服务器；启动后由 main 在后台加载 / 连接（startPlugins）
   const mcp = new McpManager(path.join(cfg.dataDir, "mcp.json"), { fetch: proxiedFetch, cwd: cfg.dataDir, version: VERSION });
@@ -95,6 +99,9 @@ export function createAgentSystem(cfg: Config, dirs: Dirs, fake: FakeLlm | null)
   runtime.addTools(extensionTools(extensions));
   runtime.addTools(extensions.tools(), { plugin: true });
   runtime.addTools(mcp.tools(), { plugin: true });
+  // 监工：每分钟看一眼跑得久的轮次是不是在兜圈子（便宜模型判断，连着两次才叫停）
+  const watchdog = new Watchdog(runtime, models, () => !fake && cfg.runtime.watchdog !== false);
+  watchdog.start();
   const channels = new ChannelManager(new ChannelStore(path.join(cfg.dataDir, "channels.json")), runtime, registry, undefined, path.join(cfg.dataDir, "channels_seen.json"));
   return { registry, models, runtime, memories, scheduler: null, tasks: null, a2a, skills, channels, mcp, extensions, packages };
 }
