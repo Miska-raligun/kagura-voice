@@ -567,7 +567,12 @@ CoreS3 (MicroPython) ──HTTP──▶ server/（TypeScript 单文件可执行
   ⑤ **监工**（`agent/watchdog.ts`，`runtime.watchdog: false` 关）：每分钟看跑了 8 分钟以上的轮次，最近几步交给便宜模型判「推进 / 兜圈子」，**连着两次**兜圈子才经 `haltRun` 软停（同 TurnGuard）；
   原因以 `WATCHDOG_TAG` 开头，待办见到它不再续额度。日志 `👀`，health `watchdog`。
   ⑥ **IM 连发合并**（`ChannelManager.pending`）：会话正忙时同一聊天的新消息先攒着，第一条 `whenIdle` 等她空下来，合成一轮、回复挂在最后一条上；日志 `📚`，health `im_merged`。
-  ⑦ **近况编号**：有 `sessions_history` 时近况每条带会话编号、末尾列编号对应的会话，要前后文就去查，不往近况里多塞。
+  ⑦ **近况编号**：有 `read_ref` 时近况每条带会话编号、末尾列编号对应的 `session:<会话>`，要前后文就去读，不往近况里多塞。
+  ⑧ **链式召回**（`tools/recall.ts` 的 `read_ref`，只给可信会话）：放不下的不硬塞、留编号，她按编号读原文。压缩只打标记、原文一直在库里，所以都读得到。
+  编号来源：截短的工具结果写 `ref=tool:<调用编号>`（`pruneToolResults(…, readable)`；这一轮的原文在 `scope.toolOriginals`，之前的按 `toolCallId` 查库）；
+  压缩时每条对话标 `[#m<id>]`、让摘要在要点后注「（#m123）」，兜底的要点也带编号（读的时候连带前后两条，`m100-m130` 读一段）；
+  `Runtime.note(…, ref)` 把 `task:` / `job:` 记进接收方会话，子任务结果带 `a2a:` 和 `session:`；`Runtime.refs` 登记前缀解析函数（system.ts），新加记进会话的系统事件就登记一个。
+  编号只进会话、**别写进发给主人的话**。另有 `query` 在当前会话全部记录（含已压缩的）里搜关键词。
 - **运行状况（`agent/health.ts`，管理界面总览「运行状况」卡片 +「日志」页，LRN 2026-10-31，症状「出了问题只能翻一个大日志文件，也说不清最常出的是哪种」）**：
   每一轮（`Runtime.run` 外层）记成功 / 失败（`errorClass` 归类：限流 429、服务商出错、网络、超时、空回复、上下文超长、单轮上限、Key / 额度、被取消、其它）和用时，
   兜底动作各记一条（`empty_retry` / `nudge` / `overflow` / `guard` / `compact` / `compact_failed` / `voice` / `push_failed` / `sub_cancelled` / `unclean_exit`），存 system.sqlite 的 `health_events`，留 30 天。

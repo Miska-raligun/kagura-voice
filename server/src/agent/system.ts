@@ -17,6 +17,7 @@ import { cronTools } from "./tools/cron.ts";
 import { A2A } from "./a2a.ts";
 import { Skills } from "./skills.ts";
 import { BgJobs, execTools } from "./tools/exec.ts";
+import { recallTools } from "./tools/recall.ts";
 import { Watchdog } from "./watchdog.ts";
 import { webTools } from "./tools/web.ts";
 import { McpManager } from "./mcp.ts";
@@ -80,6 +81,13 @@ export function createAgentSystem(cfg: Config, dirs: Dirs, fake: FakeLlm | null)
   runtime.addTools(skills.tools());
   const a2a = new A2A(dirs.systemDb, runtime, registry, cfg.a2a);
   runtime.addTools(a2a.tools());
+  // 按编号读原文（链式召回）：截短的工具结果、摘要出处、近况里的会话、记下的待办 / 定时任务 / 通信记录
+  runtime.addTools(recallTools(runtime, registry));
+  runtime.refs.set("a2a", (agent, id) => {
+    const r = a2a.db.prepare("SELECT * FROM a2a_log WHERE id = ?").get(Number(id)) as any;
+    if (!r || (r.from_agent !== agent.id && r.to_agent !== agent.id)) return null;
+    return `${r.kind === "spawn" ? "子任务" : "传话"} ${r.from_agent} → ${r.to_agent}（${r.status}，${Math.round(r.ms / 1000)} 秒）\n会话：session:${r.to_session}\n发出：${r.message}\n回来：${r.reply || "（还没有）"}`;
+  });
   // 执行命令（只给可信会话）+ 联网搜索 / 读网页。cfg.tools 由管理界面就地更新，改了立即生效
   // 后台命令跑完、子任务做完，结果都经 a2a.wake 投回发起的会话；她正在后台进行的事每轮附在消息后面
   const bgJobs = new BgJobs();
@@ -185,14 +193,14 @@ export function attachAgentSystem(sys: AgentSystem, ctx: Ctx) {
         // 只投设备：按策略不播记为「静音」、角色不对记为「留言」，都不算失败
         const r = await outbox.say({ text, agentId, device: delivery.slice("device:".length), source: "job" });
         // 播出去（或留了言）的话记进那台设备的会话：主人对着设备接话时上一句就在历史里
-        if (r.played || r.held) void runtime.note(agentId, runtime.sessionKey(agentId, "device", r.device || delivery.slice("device:".length)), tag, text);
+        if (r.played || r.held) void runtime.note(agentId, runtime.sessionKey(agentId, "device", r.device || delivery.slice("device:".length)), tag, text, meta?.ref);
         return r.played ? `device:${r.device}` : r.held ? `held:${r.device}` : r.reason === "away" || r.reason === "policy" ? `muted:${r.reason}` : "";
       }
       const ok = delivery === "webchat" || (await sys.channels.deliver(delivery, text));   // webchat：运行记录里就是投递内容
       if (ok) {
         // 发到 IM 的记进那个聊天的会话：主人在飞书里直接回这个话题也接得上
         const key = delivery === "webchat" ? null : sys.channels.sessionFor(delivery, agentId);
-        if (key) void runtime.note(agentId, key, tag, text);
+        if (key) void runtime.note(agentId, key, tag, text, meta?.ref);
         await mirror(agentId, text, "job", meta);
       }
       return ok ? delivery : "";
@@ -203,29 +211,43 @@ export function attachAgentSystem(sys: AgentSystem, ctx: Ctx) {
     },
   });
   sys.scheduler = scheduler;
+  runtime.refs.set("job", (agent, id) => {
+    const j = scheduler.get(id);
+    if (!j || j.agent !== agent.id) return null;
+    const key = j.kind === "heartbeat" ? `${agent.id}:heartbeat` : j.session === "main" ? `${agent.id}:main` : `${agent.id}:cron:${j.id}`;
+    const runs = scheduler.runs(j.id, 3).map((r) => `- ${new Date(r.started * 1000).toLocaleString("zh-CN", { hour12: false })} ${r.status}：${(r.output || r.error).slice(0, 600)}`);
+    return `定时任务「${j.name}」（${j.enabled ? "启用" : "暂停"}，投递到 ${j.delivery}）\n执行会话：session:${key}\n内容：${j.message}\n最近几次：\n${runs.join("\n") || "（还没跑过）"}`;
+  });
   // 待办：夜间静默时段一件件做，早上按来源汇报
-  const report = async (agentId: string, origin: string, text: string): Promise<string> => {
+  const report = async (agentId: string, origin: string, text: string, refs: string[] = []): Promise<string> => {
+    const ref = refs.join(" ");
     if (origin.startsWith("device:")) {
       const said = await runtime.spoken(agentId, text).catch(() => text);
       const r = await outbox.say({ text: said || text, agentId, device: origin.slice("device:".length), source: "task" });
-      if (r.played || r.held) void runtime.note(agentId, runtime.sessionKey(agentId, "device", r.device || origin.slice("device:".length)), "待办汇报", text);
+      if (r.played || r.held) void runtime.note(agentId, runtime.sessionKey(agentId, "device", r.device || origin.slice("device:".length)), "待办汇报", text, ref);
       return r.played ? origin : r.held ? `held:${r.device}` : r.reason ? `muted:${r.reason}` : "";
     }
     if (/^(feishu|qq|onebot):/.test(origin)) {
       const ok = await sys.channels.deliver(origin, text);
       if (ok) {
         const key = sys.channels.sessionFor(origin, agentId);
-        if (key) void runtime.note(agentId, key, "待办汇报", text);
+        if (key) void runtime.note(agentId, key, "待办汇报", text, ref);
         await mirror(agentId, text, "task");
       }
       return ok ? origin : "";
     }
     // 网页聊天 / 管理界面记的：送到 agent 的 heartbeat 投递目标（没设就只在管理界面看）
     const d = registry.get(agentId)?.heartbeat.delivery ?? "";
-    return d && d !== "none" && d !== "webchat" && d !== origin ? report(agentId, d, text) : "";
+    return d && d !== "none" && d !== "webchat" && d !== origin ? report(agentId, d, text, refs) : "";
   };
   const tasks = new TaskQueue(ctx.dirs.systemDb, registry, { run: (req) => runtime.run(req), report, reset: (a, k) => runtime.store(a).reset(k) });
   sys.tasks = tasks;
+  runtime.refs.set("task", (agent, id) => {
+    const t = tasks.get(id);
+    if (!t || t.agent !== agent.id) return null;
+    const at = (s: number | null) => (s ? new Date(s * 1000).toLocaleString("zh-CN", { hour12: false }) : "—");
+    return `待办「${t.title}」（${t.status}，开始 ${at(t.started)}，结束 ${at(t.finished)}）\n执行过程：session:${agent.id}:task:${t.id}\n要做的：${t.detail}\n结果：${t.result || t.error || "（还没有）"}`;
+  });
   runtime.addTools(taskTools(tasks));
   // 后台子任务的结果回到发起方后，按消息来源转达：设备 → 推送语音；IM → 发回原聊天并顺带念
   sys.a2a.announce = async (scope, text) => {

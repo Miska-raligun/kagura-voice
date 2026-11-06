@@ -251,7 +251,7 @@ export class A2A {
                   return;
                 }
                 console.log(`[a2a] 🧵 ${subKey} 做完了（${((Date.now() - t0) / 1000).toFixed(0)}s），结果交回 ${caller.agentId}`);
-                await this.deliverResult(caller, p.task, to, result, logId);
+                await this.deliverResult(caller, p.task, to, result, logId, subKey);
               })().catch((e) => console.log(`[a2a] ⚠️  子任务结果交回失败: ${e.message}`));
             });
             return ok(`已派出子任务（${subKey}），完成后结果会交回给你。现在可以先告诉主人你已经安排了。`);
@@ -263,9 +263,9 @@ export class A2A {
   }
 
   /** 后台子任务完成：把结果作为系统事件投回发起方会话，让它决定怎么告诉主人 */
-  private async deliverResult(caller: RunScope, task: string, who: string, result: string, call: number) {
+  private async deliverResult(caller: RunScope, task: string, who: string, result: string, call: number, sub: string) {
     await this.wake(caller,
-      `[系统事件] 你之前派出的子任务「${task.slice(0, 100)}」已由 ${who} 完成。结果：\n${result}\n\n需要告诉主人就直接说要说的话（会转达给主人）；不需要就只回 NO_REPLY。`,
+      `[系统事件] 你之前派出的子任务「${task.slice(0, 100)}」已由 ${who} 完成（a2a:${call}；它的过程见 session:${sub}）。结果：\n${result}\n\n需要告诉主人就直接说要说的话（会转达给主人）；不需要就只回 NO_REPLY。`,
       { purpose: "a2a", call });
   }
 

@@ -40,6 +40,8 @@ export interface RunScope {
   noThink?: boolean;
   /** 这一轮是哪次 a2a 调用引起的（a2a_log 的 id）：它再发起的调用记成那次的下一步 */
   a2aCall?: number;
+  /** 这一轮工具结果的原文（调用编号 → 文字）：截短后 read_ref 读 tool:<编号> 用，这一轮结束才落盘 */
+  toolOriginals?: Map<string, string>;
   /** 假模型：工具结果回来后的续写脚本 */
   fakeAfterTool?: any;
 }

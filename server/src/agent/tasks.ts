@@ -90,7 +90,8 @@ export interface TaskHost {
   /** 清空某个会话的历史（「重新开始」时用） */
   reset?(agentId: string, sessionKey: string): void;
   /** 把汇报送到来源；返回实际送到哪（空 = 没送出去，只在管理界面看得到） */
-  report(agentId: string, origin: string, text: string): Promise<string>;
+  /** refs：这次汇报的是哪几件（task:<id>），记进接收方会话时带上，她之后能 read_ref 查来龙去脉 */
+  report(agentId: string, origin: string, text: string, refs?: string[]): Promise<string>;
 }
 
 const nowS = () => Date.now() / 1000;
@@ -382,7 +383,7 @@ export class TaskQueue {
           : x.status === "partial" ? `「${x.title}」${x.error}。目前的进展：${x.result}` : `「${x.title}」没做成：${x.error}`;
         const text = list.length === 1 ? line(list[0]) : `之前记下的 ${list.length} 件待办：\n${list.map((x, i) => `${i + 1}. ${line(x)}`).join("\n")}`;
         let delivered = "";
-        try { delivered = await this.host.report(agentId, origin, text); }
+        try { delivered = await this.host.report(agentId, origin, text, list.map((x) => `task:${x.id}`)); }
         catch (e: any) { console.log(`[tasks] ⚠️  汇报失败: ${e.message}`); }
         // 送没送出去都算报过了：送不出去的在管理界面看，别每分钟重试刷屏
         for (const x of list) { const cur = this.get(x.id); if (cur) this.save({ ...cur, reported: true, delivered }); }

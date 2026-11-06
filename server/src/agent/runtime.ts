@@ -314,23 +314,29 @@ export function msgTokens(m: any): number {
   return n;
 }
 
-const clipText = (m: any, max: number) => ({
+/**
+ * 截短工具结果。readable = 这一轮有 read_ref：留一个指回原文的编号（tool:<调用编号>），她要细节就去读，
+ * 不用把工具再跑一遍（有的工具重跑有副作用、要花钱；原文本来就在库里 / 这一轮的在内存里）——链式召回的「溢出留指针」
+ */
+export const TOOL_REF = "tool:";
+const clipText = (m: any, max: number, readable = false) => ({
   ...m,
   content: (m.content ?? []).map((c: any) => c.type === "text" && String(c.text).length > max
-    ? { ...c, text: `${String(c.text).slice(0, max)}\n…（工具结果已截短，原文 ${String(c.text).length} 字；要细节就再调一次工具）` } : c),
+    ? { ...c, text: `${String(c.text).slice(0, max)}\n…（工具结果已截短，原文 ${String(c.text).length} 字；`
+      + (readable && m.toolCallId ? `要细节用 read_ref 读 ref=${TOOL_REF}${m.toolCallId}，不用重跑工具）` : "要细节就再调一次工具）") } : c),
 });
 
 /** 进上下文前截短工具结果：之前几轮的只留开头；这一轮的单条有上限，总量还超 budget 就从这一轮最早的开始截 */
-export function pruneToolResults<T extends { role: string }>(msgs: T[], budget = Infinity): T[] {
+export function pruneToolResults<T extends { role: string }>(msgs: T[], budget = Infinity, readable = false): T[] {
   let lastUser = -1;
   for (let i = msgs.length - 1; i >= 0; i--) if (msgs[i].role === "user") { lastUser = i; break; }
-  const out = msgs.map((m, i) => (m.role === "toolResult" && Array.isArray((m as any).content) ? clipText(m, i < lastUser ? OLD_TOOL_CHARS : TOOL_RESULT_MAX_CHARS) : m)) as T[];
+  const out = msgs.map((m, i) => (m.role === "toolResult" && Array.isArray((m as any).content) ? clipText(m, i < lastUser ? OLD_TOOL_CHARS : TOOL_RESULT_MAX_CHARS, readable) : m)) as T[];
   if (budget === Infinity) return out;
   let size = out.reduce((n, m) => n + msgTokens(m), 0);
   for (let i = Math.max(0, lastUser); i < out.length && size > budget; i++) {
     if (out[i].role !== "toolResult") continue;
     const before = msgTokens(out[i]);
-    out[i] = clipText(out[i], OLD_TOOL_CHARS) as T;
+    out[i] = clipText(out[i], OLD_TOOL_CHARS, readable) as T;
     size -= before - msgTokens(out[i]);
   }
   return out;
@@ -601,7 +607,7 @@ export class Runtime {
    * 不用靠近况去猜（LRN 2026-10-30：heartbeat 搬出主会话以后，主人回它的话题对不上）。
    * 记成一对「[来源] 用户消息 + 助手消息」（有的服务商不接受连着两条助手消息）；排在这个会话的队里，不打断正在跑的那轮
    */
-  note(agentId: string, sessionKey: string, tag: string, text: string): Promise<void> {
+  note(agentId: string, sessionKey: string, tag: string, text: string, ref = ""): Promise<void> {
     const agent = this.agents.get(agentId);
     if (!agent || !text.trim()) return Promise.resolve();
     const store = this.store(agentId);
@@ -610,7 +616,7 @@ export class Runtime {
     return this.serial(`${agentId}|${sessionKey}`, async () => {
       store.touchSession(sessionKey, sessionKey.endsWith(":main") ? "main" : "chat", sessionKey.split(":")[1] ?? "system");
       store.append(sessionKey, [
-        { role: "user", content: [{ type: "text", text: `[${tag}]（你主动开口，下面是你发出去的话）` }], timestamp: t, ksrc: { channel: "system", purpose: "note", tag } } as any,
+        { role: "user", content: [{ type: "text", text: `[${tag}]（你主动开口，下面是你发出去的话${ref ? `；来龙去脉见 ${ref}` : ""}）` }], timestamp: t, ksrc: { channel: "system", purpose: "note", tag, ...(ref ? { ref } : {}) } } as any,
         { role: "assistant", content: [{ type: "text", text: text.trim() }], api: "openai-completions", provider: "kagura", model: "note", usage: zero, stopReason: "stop", timestamp: t } as any,
       ]);
     }).catch((e) => console.log(`[agent] ⚠️  记进会话 ${sessionKey} 失败: ${e.message}`));
@@ -653,6 +659,13 @@ export class Runtime {
    * 不破坏前缀缓存；落盘前去掉（以 TURN_NOTE_TAG 开头的文本块）
    */
   turnNotes: ((scope: RunScope) => string)[] = [];
+
+  /**
+   * 编号 → 原文（链式召回，借鉴 DeepSeek Super-agent 的 Chain of Recall，2026-11）：会话里记下的东西带编号（task:… / job:… / a2a:…），
+   * read_ref 按前缀交给这里登记的解析函数。消息（m…）、工具结果（tool:…）、会话（session:…）由 read_ref 自己读库。
+   * 解析函数返回 null = 没有 / 没权限
+   */
+  refs = new Map<string, (agent: AgentInfo, id: string, scope: RunScope) => string | null>();
 
   /** 跑一轮（排队、互等检测、超长 / 空回复兜底），结果记进运行状况 */
   async run(req: RunRequest): Promise<RunResult> {
@@ -780,7 +793,7 @@ export class Runtime {
     const peers = this.agents.list().filter((p) => this.agents.canContact(agent.id, p.id)).map((p) => ({ id: p.id, name: p.name }));
     if (persist && scope.trusted) store.markOwner(req.sessionKey);
     // 近况：这个会话看不到的、最近在别处跟主人说过的话。只给可信的会话（主人本人），陌生人 / 群聊不给
-    const recent = scope.trusted && req.kind !== "sub" && req.purpose !== "flush" ? this.recentActivity(agent, req.sessionKey, tools.some((t) => t.name === "sessions_history")) : "";
+    const recent = scope.trusted && req.kind !== "sub" && req.purpose !== "flush" ? this.recentActivity(agent, req.sessionKey, tools.some((t) => t.name === "read_ref")) : "";
     const promptOf = (summary?: string, trace?: PromptTrace) => buildSystemPrompt({
       agent, scene: sceneOf(scope), channel: req.channel, summary, trace,
       extra: [...(req.extraSystem ?? []), recent, req.onVoice ? voicePrompt(agent.voice_max_chars || 80) : ""], skills: this.skillCatalog(agent), voiceDelivery: req.voiceDelivery,
@@ -806,7 +819,8 @@ export class Runtime {
     const session = store.getSession(req.sessionKey);
     const trace: PromptTrace = { scene: sceneOf(scope), files: [], notLoaded: [], daily: 0, skills: 0, peers: 0, summary: 0 };
     const systemPrompt = promptOf(session?.summary, trace);
-    const prunedHist = pruneToolResults(history);
+    const readable = tools.some((t) => t.name === "read_ref");
+    const prunedHist = pruneToolResults(history, Infinity, readable);
     const histSize = estimateTokens(session?.summary ?? "") + prunedHist.reduce((n, m) => n + msgTokens(m), 0);
     const pruned = prunedHist.filter((m, i) => m !== history[i]).length;
     if (fixedSys + fixedTools + histSize > ctxWin * 0.5) {
@@ -831,7 +845,7 @@ export class Runtime {
       sessionId: `${agent.id}:${req.sessionKey}`,
       toolExecution: "sequential",
       // 每次调模型前截短工具结果，一轮里调很多次工具也撑不爆上下文（库里存的还是原文）
-      transformContext: async (msgs) => { try { return pruneToolResults(msgs as any[], histBudget) as any; } catch { return msgs; } },
+      transformContext: async (msgs) => { try { return pruneToolResults(msgs as any[], histBudget, readable) as any; } catch { return msgs; } },
     });
     const start = pi.state.messages.length;
     // 插话（Runtime.steer）：排进 pi 的插话队列，下一次调模型前带上。收尾之后就不收了（见下面 waitForIdle 之后）
@@ -901,6 +915,10 @@ export class Runtime {
             this.emitLive(lockKey, { type: "tool", name: e.toolName, running: false });
           }
         } catch { /* 实时记录出错不影响这一轮 */ }
+      }
+      // 这一轮的工具结果原文留在内存里：截短后 read_ref 读 tool:<编号> 从这里拿（这一轮结束才落盘）
+      if (e.type === "message_end" && e.message?.role === "toolResult" && e.message.toolCallId) {
+        (scope.toolOriginals ??= new Map()).set(String(e.message.toolCallId), (e.message.content ?? []).filter((c: any) => c.type === "text").map((c: any) => c.text).join("\n"));
       }
       if (e.type === "message_end" && e.message?.role === "assistant") {
         const hasCalls = (e.message.content ?? []).some((c: any) => c.type === "toolCall");
@@ -1102,7 +1120,7 @@ export class Runtime {
       out.push(line);
     }
     const legend = lookup && refs.size
-      ? "\n会话编号（要看前后文就用 sessions_history 读那个会话）：" + [...refs.entries()].map(([k, n]) => { const [a, key] = k.split("\u0000"); return `#${n} = agent ${a} / session ${key}`; }).join("；")
+      ? "\n会话编号（要看前后文就用 read_ref 读 ref=session:<会话>）：" + [...refs.entries()].map(([k, n]) => { const [, key] = k.split("\u0000"); return `#${n} = session:${key}`; }).join("；")
       : "";
     return "<recent_activity>\n最近两天在别的对话里（你在其它渠道、以及家里其他 agent）跟主人的往来，按时间排列、已截断。"
       + "这些都已经发生过：主人说过的事别再问，你或别人已经说过的话别再重复，需要时自然地接上。\n"
@@ -1225,9 +1243,10 @@ export class Runtime {
     // 分块滚动摘要：把要压的对话切成每块 COMPACT_CHUNK_TOKENS 左右，「上一版摘要 + 这一块」→ 新摘要。
     // 以前一次塞几万 token 进去：推理型模型（MiniMax-M3 等）把输出额度花在思考上，正文为空 → 「摘要为空」，
     // 而且每轮重试、历史越积越大（2026-10-24 真机：冲刷那次输入 6.9 万 token，连着两轮空摘要）
+    // 每条前面标上消息编号（#m<id>）：让摘要在要点后面注明出处，以后她要细节就用 read_ref 读原文（链式召回）
     const lines = old.map((h) => {
       const who = h.msg.role === "user" ? "用户" : h.msg.role === "assistant" ? agent.name : "工具结果";
-      return `${who}：${messageText(h.msg).slice(0, h.msg.role === "toolResult" ? 600 : 1500)}`;
+      return `[#m${h.id}] ${who}：${messageText(h.msg).slice(0, h.msg.role === "toolResult" ? 600 : 1500)}`;
     });
     const chunks: string[][] = [[]];
     let size = 0;
@@ -1255,6 +1274,7 @@ export class Runtime {
           () => this.models.quick(model, {
             systemPrompt: "你负责把一段对话压缩成摘要，供之后继续对话时参考。保留：人物、约定、待办、偏好、未解决的问题、重要事实与数字。"
               + "省略寒暄与重复。用第三人称、中文、条目式，不超过 800 字。直接输出，不要思考过程。"
+              + "对话每条前面的 [#m数字] 是原话编号：重要的要点（约定、数字、结论、没解决的问题）末尾用「（#m数字）」注明出自哪条，一条要点标一个就够；此前摘要里已有的编号原样保留。"
               + (this.remember ? "\n先写「【摘要】」和摘要正文；摘要之后另起一行写「【记住】」，下面每行一条这段对话里新出现、以后还用得着的事："
                 + "以后还成立的（事实、约定、偏好、计划、项目的结论、重要日子）以「长期：」开头；当天发生的事、做了什么、进行到哪一步以「今天：」开头；"
                 + "只有主人本人的稳定个人信息（称呼、家人、生日、长期作息、口味与忌口、习惯和喜好）才以「主人：」开头，这类很少，拿不准就写成「长期：」。"
@@ -1281,7 +1301,8 @@ export class Runtime {
         failed++;
         console.log(`[agent] ⚠️  ${agent.id} 摘要第 ${i + 1}/${chunks.length} 段失败，这段改记要点: ${e.message}`);
         // 兜底：不再每轮重试、让历史越积越大——留下这段里用户说过的话（各截一点），照样压掉
-        const said = chunk.filter((l) => l.startsWith("用户：")).map((l) => "- " + Array.from(l.slice(3).replace(/^\[[^\]]*\]\s*/, "")).slice(0, 60).join("")).slice(-12);
+        const said = chunk.map((l) => l.match(/^\[(#m\d+)\] 用户：([\s\S]*)$/)).filter((x): x is RegExpMatchArray => !!x)
+          .map((x) => "- " + Array.from(x[2].replace(/^\[[^\]]*\]\s*/, "")).slice(0, 60).join("") + `（${x[1]}）`).slice(-12);
         text = [summary, `（有一段较早的对话没能总结，用户当时说过：）`, ...said].filter(Boolean).join("\n");
       }
       summary = text;

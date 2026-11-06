@@ -81,6 +81,38 @@ export class AgentStore {
       .map((r) => ({ id: r.id, ts: r.ts, role: r.role, compacted: r.compacted, msg: JSON.parse(r.data) }));
   }
 
+  // ── 按编号读原文（read_ref 用，LRN 2026-11：链式召回）。压缩只是打标记，原文一直在库里 ──
+  /** 一条消息（含已压缩的） */
+  message(id: number): { id: number; session: string; ts: number; role: string; compacted: number; msg: Message } | undefined {
+    const r = this.db.prepare("SELECT * FROM messages WHERE id = ?").get(id) as any;
+    return r ? { id: r.id, session: r.session, ts: r.ts, role: r.role, compacted: r.compacted, msg: JSON.parse(r.data) } : undefined;
+  }
+  /** 同一会话里 id 在 [from, to] 之间的消息（含已压缩的），最多 limit 条 */
+  range(session: string, from: number, to: number, limit = 40): { id: number; ts: number; role: string; msg: Message }[] {
+    return (this.db.prepare("SELECT * FROM messages WHERE session = ? AND id BETWEEN ? AND ? ORDER BY id LIMIT ?").all(session, from, to, limit) as any[])
+      .map((r) => ({ id: r.id, ts: r.ts, role: r.role, msg: JSON.parse(r.data) }));
+  }
+  /** 某条消息前后各 n 条（同一会话） */
+  around(session: string, id: number, n: number) {
+    const before = (this.db.prepare("SELECT id FROM messages WHERE session = ? AND id < ? ORDER BY id DESC LIMIT ?").all(session, id, n) as any[]).at(-1)?.id ?? id;
+    const after = (this.db.prepare("SELECT id FROM messages WHERE session = ? AND id > ? ORDER BY id LIMIT ?").all(session, id, n) as any[]).at(-1)?.id ?? id;
+    return this.range(session, before, after, 2 * n + 1);
+  }
+  /** 按工具调用编号找那条工具结果（原文，没截短的） */
+  toolResult(session: string, callId: string): { id: number; msg: Message } | undefined {
+    const rows = this.db.prepare("SELECT id, data FROM messages WHERE session = ? AND role = 'toolResult' AND instr(data, ?) > 0 ORDER BY id DESC LIMIT 5")
+      .all(session, JSON.stringify(callId)) as any[];
+    for (const r of rows) { const m = JSON.parse(r.data); if (m.toolCallId === callId) return { id: r.id, msg: m }; }
+    return undefined;
+  }
+  /** 会话全部记录（含已压缩的）里按关键词找，新的在前 */
+  search(session: string, words: string[], limit = 8): { id: number; ts: number; role: string; compacted: number; msg: Message }[] {
+    if (!words.length) return [];
+    const where = words.map(() => "instr(data, ?) > 0").join(" AND ");
+    return (this.db.prepare(`SELECT * FROM messages WHERE session = ? AND role IN ('user', 'assistant', 'toolResult') AND ${where} ORDER BY id DESC LIMIT ?`)
+      .all(session, ...words, limit) as any[]).map((r) => ({ id: r.id, ts: r.ts, role: r.role, compacted: r.compacted, msg: JSON.parse(r.data) }));
+  }
+
   append(key: string, msgs: Message[]) {
     const ins = this.db.prepare("INSERT INTO messages(session, ts, role, data) VALUES (?, ?, ?, ?)");
     const t = Date.now() / 1000;

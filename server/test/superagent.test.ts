@@ -207,18 +207,18 @@ describe("IM 连发合并", () => {
 });
 
 describe("近况编号", () => {
-  it("每个会话一个编号，末尾列出编号对应的会话，要前后文时用 sessions_history 去查；没有这个工具就不编号", async () => {
+  it("每个会话一个编号，末尾列出编号对应的会话，要前后文时用 read_ref 读那个会话；没有这个工具就不编号", async () => {
     const { rt, reg, fake } = makeRuntime();
     fake.queue.push("好的，一路顺风", "记住了");
     await rt.run({ agentId: "main", sessionKey: "main:webchat:a", kind: "chat", channel: "webchat", text: "我明天出差" });
     await rt.run({ agentId: "main", sessionKey: "main:webchat:b", kind: "chat", channel: "webchat", text: "帮我记一下车牌" });
     const ra = rt.recentActivity(reg.get("main")!, "main:webchat:c", true);
     expect(ra).toMatch(/\[网页 #\d\] 主人：我明天出差/);
-    expect(ra).toContain("session main:webchat:a");
-    expect(ra).toContain("session main:webchat:b");
-    expect(ra).toContain("sessions_history");
+    expect(ra).toContain("session:main:webchat:a");
+    expect(ra).toContain("session:main:webchat:b");
+    expect(ra).toContain("read_ref");
     const plain = rt.recentActivity(reg.get("main")!, "main:webchat:c");
     expect(plain).toContain("[网页] 主人：我明天出差");
-    expect(plain).not.toContain("sessions_history");
+    expect(plain).not.toContain("read_ref");
   });
 });
