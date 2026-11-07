@@ -168,9 +168,15 @@ describe("自动回忆（长期记忆不整篇注入）", () => {
     expect(t.startsWith("# 主人\n叫小明\n\n## 自动记录")).toBe(true);
     expect(t.match(/朵朵/g)!.length).toBe(1);
     expect(t.trimEnd().endsWith("- 晚上十一点睡")).toBe(true);
-    expect(idx.write("user", "很长".repeat(800))).toBe("MEMORY.md");
+    // 改记别处时说清楚为什么（以前只回「MEMORY.md」，她以为工具说一套做一套）
+    expect(idx.write("user", "很长".repeat(800))).toMatch(/^MEMORY\.md（没记进 USER\.md：超过 80 字/);
     // 一条很长的（多半是事情经过 / 进展）不进 USER.md
-    expect(idx.write("user", "主人今天下午把客厅的灯换成了智能灯，接进了家里的系统，说以后想让我晚上十点自动调暗，还提到下周要再买两个放卧室和书房，预算大概三百块左右，等双十一打折的时候再下单，到时候提醒一下")).toBe("MEMORY.md");
+    expect(idx.write("user", "主人今天下午把客厅的灯换成了智能灯，接进了家里的系统，说以后想让我晚上十点自动调暗，还提到下周要再买两个放卧室和书房，预算大概三百块左右，等双十一打折的时候再下单，到时候提醒一下")).toMatch(/^MEMORY\.md（没记进 USER\.md/);
+    // 自动记录一节满了：短的也改记 MEMORY.md，并说是满了、让主人整理
+    for (let i = 0; i < 60; i++) idx.write("user", `第${i}条稳定习惯：每天早上七点起床然后喝一杯温水再出门散步半小时`);
+    const guitar = "每周日晚上八点半到九点十五一般去上吉他课，这段时间不要推消息也不要提醒";
+    expect(idx.write("user", guitar)).toMatch(/^MEMORY\.md（没记进 USER\.md：USER\.md 的「自动记录」已满 1500 字.*管理界面整理/);
+    expect(fs.readFileSync(path.join(a.workspace, "MEMORY.md"), "utf8")).toContain(guitar);
   });
 });
 

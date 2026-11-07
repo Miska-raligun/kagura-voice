@@ -287,7 +287,8 @@ export class MemoryIndex {
     }
     if (target === "user") {
       // 关于主人的一条稳定信息是一句短话；长的多半是事情经过 / 进展，改记长期记忆（USER.md 每轮常驻，要少而精）
-      if (Array.from(t).length > USER_ITEM_MAX) return this.write("long", t, now);
+      // 改记别处时把原因说清楚（LRN 2026-11-07，症状「她说 memory_write 说要写 USER.md、结果落到了 MEMORY.md，工具说一套做一套」：以前只回「已记到 MEMORY.md」）
+      if (Array.from(t).length > USER_ITEM_MAX) return `${this.write("long", t, now)}（没记进 USER.md：超过 ${USER_ITEM_MAX} 字，不像一句关于主人的稳定信息，记进了长期记忆）`;
       // 有共享人设就记进共享的 USER.md：谁记的全家 agent 都知道
       const p = sharedPath("USER.md") || path.join(ws, "USER.md");
       const cur = fs.existsSync(p) ? fs.readFileSync(p, "utf8") : "";
@@ -296,7 +297,7 @@ export class MemoryIndex {
       if (auto.includes(t) || personaText(ws, "USER.md").includes(t)) return "USER.md";
       if (Array.from(auto).length + Array.from(t).length > USER_AUTO_MAX) {
         console.log(`[memory] ⚠️  ${this.agent.id} USER.md 的「自动记录」满了（${USER_AUTO_MAX} 字），这条改记进 MEMORY.md——到管理界面整理一下 USER.md`);
-        return this.write("long", t, now);
+        return `${this.write("long", t, now)}（没记进 USER.md：USER.md 的「自动记录」已满 ${USER_AUTO_MAX} 字，先记进了长期记忆；告诉主人到管理界面整理一下 USER.md，别自己去改文件）`;
       }
       const base = at >= 0 ? cur.replace(/\n*$/, "\n") : cur.replace(/\n*$/, cur.trim() ? "\n\n" : "") + USER_AUTO_HEAD + "\n";
       fs.writeFileSync(p, base + `- ${t}\n`);
