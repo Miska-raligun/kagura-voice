@@ -573,6 +573,10 @@ CoreS3 (MicroPython) ──HTTP──▶ server/（TypeScript 单文件可执行
   压缩时每条对话标 `[#m<id>]`、让摘要在要点后注「（#m123）」，兜底的要点也带编号（读的时候连带前后两条，`m100-m130` 读一段）；
   `Runtime.note(…, ref)` 把 `task:` / `job:` 记进接收方会话，子任务结果带 `a2a:` 和 `session:`；`Runtime.refs` 登记前缀解析函数（system.ts），新加记进会话的系统事件就登记一个。
   编号只进会话、**别写进发给主人的话**。另有 `query` 在当前会话全部记录（含已压缩的）里搜关键词。
+- **用户消息发出去前合成一段**（`runtime.flattenUser`，Agent 的 `convertToLlm`，LRN 2026-11-07，症状「她说正文消息是空的，然后从记忆里找到了我发的话」）：
+  一轮的用户消息是几段拼的（`[时间…]`、自动回忆、系统备注、主人的话），按多段格式发出去，有的兼容 OpenAI 的服务商只认第一段（只看到时间）、有的首尾直接粘起来（主人的话贴在记忆最后一条后面）。
+  现在发之前合成一段、空行隔开，有回忆 / 备注时在主人的话前面加 `MSG_DIVIDER`；库里照旧分段（`stripRecall` 靠分段去掉回忆 / 备注）。**新加附在用户消息里的系统块也放在主人的话前面**。
+  `test/wire.test.ts` 用本地假服务商看真实请求体；假模型（`models.ts` 的 fakeStream）按分隔句 / 时间行认出主人的话。
 - **运行状况（`agent/health.ts`，管理界面总览「运行状况」卡片 +「日志」页，LRN 2026-10-31，症状「出了问题只能翻一个大日志文件，也说不清最常出的是哪种」）**：
   每一轮（`Runtime.run` 外层）记成功 / 失败（`errorClass` 归类：限流 429、服务商出错、网络、超时、空回复、上下文超长、单轮上限、Key / 额度、被取消、其它）和用时，
   兜底动作各记一条（`empty_retry` / `nudge` / `overflow` / `guard` / `compact` / `compact_failed` / `voice` / `push_failed` / `sub_cancelled` / `unclean_exit`），存 system.sqlite 的 `health_events`，留 30 天。

@@ -136,7 +136,10 @@ export class ModelRegistry {
     const lastUser = [...msgs].reverse().find((x) => x.role === "user");
     const content = lastUser?.content;
     // 只取最后一段文字：前面那段是运行时自动附的 [时间…]（soul.turnContext）
-    const text = typeof content === "string" ? content : ((content ?? []).filter((c: any) => c.type === "text").at(-1)?.text ?? "");
+    const raw = typeof content === "string" ? content : ((content ?? []).filter((c: any) => c.type === "text").at(-1)?.text ?? "");
+    // 发出去之前几段合成了一段（runtime.flattenUser）：像真模型一样，分隔句之后、或开头那行 [时间…] 之后才是这条消息
+    const cut = raw.lastIndexOf("下面才是这条消息：）\n\n");
+    const text = cut >= 0 ? raw.slice(cut + "下面才是这条消息：）\n\n".length) : raw.replace(/^\[时间 [^\]]*\]\n\n/, "");
     const image = Array.isArray(content) && content.some((c: any) => c.type === "image");
     const scope = runScope();
     // 只记「回应用户消息」的那一次调用；工具结果之后的续写不算新的 LLM 请求

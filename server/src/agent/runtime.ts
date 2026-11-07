@@ -250,6 +250,28 @@ function stripRecall(m: Message): Message {
   return content.length === m.content.length ? m : { ...m, content } as Message;
 }
 
+/** 合成一段时，系统附的参考和这条消息之间的分隔（只在有自动回忆 / 系统备注时加） */
+export const MSG_DIVIDER = "（以上是系统附的参考，不是这条消息的内容。下面才是这条消息：）";
+
+/**
+ * 发给模型前，把一条用户消息里的几段文字合成一段（LRN 2026-11-07，症状「她说正文消息是空的，然后从记忆里找到了我发的话」）。
+ * 一轮的用户消息是好几段拼的：[时间…]、自动回忆、系统备注、最后才是主人说的话。按多段格式发出去，有的兼容 OpenAI 的服务商
+ * 只认第一段（只看到时间 → 「正文是空的」），有的把几段首尾直接粘起来（主人的话贴在记忆列表最后一条后面 → 当成记忆里的内容）。
+ * 合成一段、空行隔开，有参考块时再明确标出哪部分才是这条消息；图片照常放前面。库里存的还是分段的（落盘前去掉回忆 / 备注靠分段）
+ */
+export function flattenUser<T extends { role: string; content?: any }>(msgs: T[]): T[] {
+  return msgs.map((m) => {
+    if (m.role !== "user" || !Array.isArray(m.content)) return m;
+    const texts = m.content.filter((c: any) => c.type === "text" && String(c.text).trim()).map((c: any) => String(c.text));
+    if (texts.length < 2) return m;
+    const others = m.content.filter((c: any) => c.type !== "text");
+    const ctx = texts.slice(0, -1);
+    const refs = ctx.some((t) => t.startsWith(RECALL_TAG) || t.startsWith(TURN_NOTE_TAG));
+    const text = [...ctx, ...(refs ? [MSG_DIVIDER] : []), texts.at(-1)!].join("\n\n");
+    return { ...m, content: [...others, { type: "text", text }] };
+  });
+}
+
 export const IMAGE_REF_RE = /^\[图片 (uploads\/[^\]]+)\]$/;
 function stripImages(m: Message, workspace?: string): Message {
   if ((m.role === "user" || m.role === "toolResult") && Array.isArray(m.content)) {
@@ -845,6 +867,8 @@ export class Runtime {
       sessionId: `${agent.id}:${req.sessionKey}`,
       toolExecution: "sequential",
       // 每次调模型前截短工具结果，一轮里调很多次工具也撑不爆上下文（库里存的还是原文）
+      // 多段的用户消息合成一段再发（见 flattenUser）
+      convertToLlm: (msgs) => flattenUser((msgs as any[]).filter((m) => ["system", "user", "assistant", "toolResult"].includes(m.role))) as any,
       transformContext: async (msgs) => { try { return pruneToolResults(msgs as any[], histBudget, readable) as any; } catch { return msgs; } },
     });
     const start = pi.state.messages.length;
