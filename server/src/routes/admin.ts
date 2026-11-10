@@ -233,7 +233,8 @@ export function registerAdmin(r: Router, ctx: Ctx, sys: AgentSystem) {
     const a = agentOr404(req.params.id);
     if (!sys.tidy) return json({ error: "记忆整理只在内置 agent 模式下可用" }, 400);
     const { describe } = await import("../agent/tidy.ts");
-    const r = await sys.tidy.run(a.id, "manual");
+    const scope = (req.json() ?? {}).scope;
+    const r = await sys.tidy.run(a.id, "manual", Date.now(), scope === "memory" || scope === "docs" ? scope : "all");
     return json({ ...r, text: describe(r) });
   });
   /** 改之前先把原文件留一份：<目录>/.persona-backup-<时间>/<文件> */

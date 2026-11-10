@@ -172,20 +172,25 @@ function ResetBtns({ agent, path, shared, refresh }: { agent: string; path: stri
   </>;
 }
 
-/** 记忆整理：合并重复、删掉过时和流水、该常驻的挪进 USER.md（删掉的进 MEMORY.archive.md，改之前备份）。系统每周也会自动做 */
-function TidyBtn({ id, refresh }: { id: string; refresh: () => void }) {
+/**
+ * 整理：记忆（USER.md 自动记录 + MEMORY.md）或守则（AGENTS / TOOLS / HEARTBEAT）。合并重复、删掉过时的，删掉的进归档文件，改之前备份。
+ * 系统每周也会自动做。SOUL / IDENTITY 是主人写的设定，不整理
+ */
+function TidyBtn({ id, scope, refresh }: { id: string; scope: "memory" | "docs"; refresh: () => void }) {
   const [busy, setBusy] = useState(false);
   const [st, reload] = useLoad(() => api<any>("/memory-tidy"));
   const last = st?.last?.[id];
   const when = last ? new Date(last.at * 1000).toLocaleString("zh-CN", { hour12: false, month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "";
   return <>
     {last && <span class="muted" title={last.why || last.summary || ""}>上次整理 {when}（{({ done: "改了", nochange: "没改", skipped: "没动", failed: "失败" } as any)[last.status] ?? last.status}）</span>}
-    <Btn small kind="ghost" disabled={busy} onClick={confirmDo("现在整理一遍这个 agent 的记忆（USER.md 自动记录 + MEMORY.md）？会先备份，删掉的放进 MEMORY.archive.md。要一两分钟。", async () => {
+    <Btn small kind="ghost" disabled={busy} onClick={confirmDo(scope === "memory"
+      ? "现在整理一遍这个 agent 的记忆（USER.md 自动记录 + MEMORY.md）？会先备份，删掉的放进 MEMORY.archive.md。要一两分钟。"
+      : "现在整理一遍守则文件（AGENTS / TOOLS / HEARTBEAT，共享的和这个 agent 自己的）？合并重复、删掉过时的；会先备份，删掉的放进 PERSONA.archive.md。要一两分钟。", async () => {
       setBusy(true);
-      try { const r = await api<any>(`/agents/${enc(id)}/memory-tidy`, { method: "POST" }); toast(r.text); refresh(); reload(); }
+      try { const r = await api<any>(`/agents/${enc(id)}/memory-tidy`, { method: "POST", body: { scope } }); toast(r.text); refresh(); reload(); }
       catch (e) { toastErr(e); }
       finally { setBusy(false); }
-    })}>{busy ? "整理中…" : "整理记忆"}</Btn>
+    })}>{busy ? "整理中…" : scope === "memory" ? "整理记忆" : "整理守则"}</Btn>
   </>;
 }
 
@@ -215,7 +220,8 @@ function SoulFiles({ id }: { id: string }) {
         budget={meta?.budgets?.[file]} budgets={meta?.budgets} onBudget={reloadMeta} onSaved={reloadList}
         actions={(refresh: () => void) => <>
           <ResetBtns agent={id} path={file} shared={showShared} refresh={() => { refresh(); reloadList(); }} />
-          {(file === "MEMORY.md" || file === "USER.md") && <TidyBtn id={id} refresh={() => { refresh(); reloadList(); }} />}
+          {(file === "MEMORY.md" || file === "USER.md") && <TidyBtn id={id} scope="memory" refresh={() => { refresh(); reloadList(); }} />}
+          {(file === "AGENTS.md" || file === "TOOLS.md" || file === "HEARTBEAT.md") && <TidyBtn id={id} scope="docs" refresh={() => { refresh(); reloadList(); }} />}
         </>} />
     </Card>
     {meta?.loadout && <Loadout id={id} lo={meta.loadout} reload={reloadMeta} />}

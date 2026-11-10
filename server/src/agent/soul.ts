@@ -194,7 +194,7 @@ export function toolGuide(tools: string[]): string {
   if (has("exec")) g.push("exec 能在这台电脑上执行命令（跑脚本、装东西、调本机程序）；会删改文件、花钱、对外发东西的操作先跟主人确认。");
   if (has("exec_jobs")) g.push("估计要跑一两分钟以上的命令用 exec 的 background=true 放到后台，先回复主人；跑完结果会作为新消息交回给你。");
   if (has("sessions_steer")) g.push("子任务还在跑时主人追加了要求、或者你发现交代错了，用 sessions_steer 直接告诉它，别等它做完再重派。");
-  if (has("memory_tidy")) g.push("主人让你整理记忆、或者你发现记忆里重复 / 过时的很多，用 memory_tidy，别自己用文件工具去大改 USER.md / MEMORY.md。");
+  if (has("memory_tidy")) g.push("主人让你整理记忆 / 守则，或者你发现记忆、AGENTS / TOOLS / HEARTBEAT 里重复、过时的很多，用 memory_tidy（会备份、删掉的进归档），别自己用文件工具去大改这些文件。");
   if (has("read_ref")) g.push("看到截短的工具结果、摘要里的 #m 出处、近况里的 session:、记下的 task: / job: / a2a: 编号，要细节就 read_ref 按编号读原文，别重跑工具、别凭印象猜；只记得大概就用它的 query 在这个会话里搜。");
   if (has("skill_read")) g.push("<skills> 里有对口的技能就先 skill_read 读全文再照做。");
   return g.length ? `<how_to>\n${g.map((x) => `- ${x}`).join("\n")}\n</how_to>` : "";

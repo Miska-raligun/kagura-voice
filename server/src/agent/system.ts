@@ -1,6 +1,6 @@
 // 内置 agent 系统的装配：注册表 + 模型 + 运行时 + 各工具模块。main.ts 只调这里。
 import { HB_SILENT_SECS } from "../heartbeat.ts";
-import { applyBudgets, applyLoadout } from "./soul.ts";
+import { applyBudgets, applyLoadout, toolGuide } from "./soul.ts";
 import { applyToolPolicy } from "./toolpolicy.ts";
 import { VERSION } from "../cli.ts";
 import { restartSelf } from "../util/restart.ts";
@@ -254,6 +254,7 @@ export function attachAgentSystem(sys: AgentSystem, ctx: Ctx) {
     window: () => tasks.settings().window,
     busy: (id) => runtime.activeRuns().some((r) => r.agent === id),
     report: async (id, text) => { await report(id, "", text); },
+    guide: (a) => toolGuide(runtime.allToolNames(a).map((t) => t.name)),
   }, path.join(ctx.cfg.dataDir, "memory_tidy.json"));
   tidy.start();
   sys.tidy = tidy;

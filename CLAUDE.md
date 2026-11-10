@@ -440,7 +440,12 @@ CoreS3 (MicroPython) ──HTTP──▶ server/（TypeScript 单文件可执行
   每 `memory_tidy.every_days`（默认 7，0 = 不自动）天、在待办的静默时段、她没在跑的时候，用这个 agent 自己的主模型（`quick(…, {think})`）读 USER.md 自动记录 + MEMORY.md，输出 JSON（user / memory_md / removed / summary）。
   别改坏的点：① USER.md `USER_AUTO_HEAD` 之前的手写部分一字不动；② 写之前备份（`.persona-backup-<时间>/`），删掉的追加进 `MEMORY.archive.md`（不注入、不检索）；
   ③ 整理后条目总字数不到原来 `MIN_KEEP`（40%）、输出不是 JSON、被截断（`length`）一律不写；USER 里超过 `USER_ITEM_MAX` 或总量超 `USER_AUTO_MAX` 的放回 MEMORY；MEMORY.md 超 `TIDY_MAX_CHARS` 不整理。
-  自动整理的结果按 heartbeat 投递目标告诉主人（同待办汇报），没做成的第二天再试；状态 `memory_tidy.json`。入口：她的 `memory_tidy` 工具（可信、非子任务）、管理界面人设文件 MEMORY / USER 页「整理记忆」（`POST /api/admin/agents/<id>/memory-tidy`）。日志 `🧹`，health `memory_tidy`。
+  **守则文件一起整理**（`DOC_FILES` = AGENTS / TOOLS / HEARTBEAT；SOUL / IDENTITY 是主人写的设定，不动）：一份文件一次调用，输出 `<file>` / `<removed>` / `<summary>`（长 Markdown 塞 JSON 容易坏）。
+  有共享人设时共享那份和 agent 自己的补充各整理各的，补充拿共享那份 + 系统自动给的用法（`host.guide` = `toolGuide`）当参考、重复的去掉。
+  内容不到 `DOC_MIN_CHARS`（150，模板那几行）不看；**自动整理时上次整理后没变过的不看**（`docHash`，按路径记 sha1，所以共享那份一晚只整理一次），手动 / 她自己叫的都看；
+  整理后不到原来 `DOC_MIN_KEEP`（50%，按真正多出来的部分算）不写；删掉的进同目录 `PERSONA.archive.md`。结果在 `TidyResult.docs`，`memStatus` 是记忆那部分，`status` 是整趟的。
+  自动整理的结果按 heartbeat 投递目标告诉主人（同待办汇报），没做成的第二天再试；状态 `memory_tidy.json`（`{agents, docs}`）。入口：她的 `memory_tidy` 工具（`scope` = all / memory / docs，可信、非子任务）、
+  管理界面人设文件页 MEMORY / USER 的「整理记忆」、AGENTS / TOOLS / HEARTBEAT 的「整理守则」（`POST /api/admin/agents/<id>/memory-tidy {scope}`）。日志 `🧹`，health `memory_tidy`。
 - **文件工具（`server/src/agent/tools/files.ts`，LRN 2026-11-10，症状「她改文件全靠 exec 拼 cat / sed / grep，容易改错也难自查」）**：
   `read_file`（带行号、offset / limit 分段）/ `edit_file`（精确替换、必须唯一或 `replace_all`，返回改完前后几行）/ `write_file` / `search_files`（正则，跳过 node_modules、.git、二进制、>5MB）/ `list_files`（通配，新改的在前）。
   **改已有文件前必须在这个会话里 read_file 读过、且读完没被改过**（按 mtime + 大小记在内存里，重启就清空；她自己 edit / write 后会更新）。
