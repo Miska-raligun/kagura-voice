@@ -189,7 +189,9 @@ export function toolGuide(tools: string[]): string {
   if (has("sessions_spawn")) g.push("一件能独立做完的事（查资料、整理、跑一段流程）不想占着这次对话，用 sessions_spawn 派到后台，做完结果会自动交回给你。");
   if (has("announce")) g.push("主人明确让你「跟家里说一声」时用 announce，平时回复不用它（系统会决定要不要播）。");
   if (has("set_presence")) g.push("主人说要出门 / 到家了，用 set_presence 记下在家状态。");
-  if (has("exec")) g.push("exec 能在这台电脑上执行命令；会删改文件、花钱、对外发东西的操作先跟主人确认。");
+  if (has("read_file")) g.push("看、找、改文件用 read_file / search_files / list_files / edit_file / write_file，别用 exec 拼 cat、grep、sed、echo >。"
+    + "改之前先读；改完看 edit_file 返回的那几行对不对，写进去的东西别只凭印象说「改好了」。");
+  if (has("exec")) g.push("exec 能在这台电脑上执行命令（跑脚本、装东西、调本机程序）；会删改文件、花钱、对外发东西的操作先跟主人确认。");
   if (has("exec_jobs")) g.push("估计要跑一两分钟以上的命令用 exec 的 background=true 放到后台，先回复主人；跑完结果会作为新消息交回给你。");
   if (has("sessions_steer")) g.push("子任务还在跑时主人追加了要求、或者你发现交代错了，用 sessions_steer 直接告诉它，别等它做完再重派。");
   if (has("read_ref")) g.push("看到截短的工具结果、摘要里的 #m 出处、近况里的 session:、记下的 task: / job: / a2a: 编号，要细节就 read_ref 按编号读原文，别重跑工具、别凭印象猜；只记得大概就用它的 query 在这个会话里搜。");

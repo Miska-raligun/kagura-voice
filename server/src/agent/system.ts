@@ -18,6 +18,7 @@ import { A2A } from "./a2a.ts";
 import { Skills } from "./skills.ts";
 import { BgJobs, execTools } from "./tools/exec.ts";
 import { recallTools } from "./tools/recall.ts";
+import { fileTools } from "./tools/files.ts";
 import { Watchdog } from "./watchdog.ts";
 import { webTools } from "./tools/web.ts";
 import { McpManager } from "./mcp.ts";
@@ -94,6 +95,8 @@ export function createAgentSystem(cfg: Config, dirs: Dirs, fake: FakeLlm | null)
   runtime.addTools(execTools(cfg.tools, { jobs: bgJobs, notify: (scope, text) => a2a.wake(scope, text, { purpose: "exec" }) }));
   runtime.turnNotes.push((scope) => scope.kind === "sub" || !scope.trusted ? "" : [a2a.note(scope.agentId), bgJobs.note(scope.agentId)].filter(Boolean).join("\n"));
   runtime.addTools(webTools(cfg.tools));
+  // 读 / 改 / 搜文件（权限同 exec），比拼命令行稳、改完能顺手确认
+  runtime.addTools(fileTools(cfg.tools));
   // 扩展（pi 格式，agent 也能自己写）与 MCP 服务器；启动后由 main 在后台加载 / 连接（startPlugins）
   const mcp = new McpManager(path.join(cfg.dataDir, "mcp.json"), { fetch: proxiedFetch, cwd: cfg.dataDir, version: VERSION });
   const extensions = new Extensions(dirs.extensions, registry);

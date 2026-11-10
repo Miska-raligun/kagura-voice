@@ -436,6 +436,11 @@ CoreS3 (MicroPython) ──HTTP──▶ server/（TypeScript 单文件可执行
   其它渠道可信；嵌套调用（a2a）沿用上层，后台派出的经 `lineage.trusted` 带过去；**不可信会话里 cron_add / cron_update
   的任务标 `untrusted`，跑起来也不可信**（管理界面改过才清掉）——新加任何「替别人跑一轮」的入口都要把可信度带上，
   漏一处就是让陌生人借道执行命令。联网走 `util/proxy.ts`：配了代理就换全局 dispatcher（含调模型），本机地址直连。
+- **文件工具（`server/src/agent/tools/files.ts`，LRN 2026-11-10，症状「她改文件全靠 exec 拼 cat / sed / grep，容易改错也难自查」）**：
+  `read_file`（带行号、offset / limit 分段）/ `edit_file`（精确替换、必须唯一或 `replace_all`，返回改完前后几行）/ `write_file` / `search_files`（正则，跳过 node_modules、.git、二进制、>5MB）/ `list_files`（通配，新改的在前）。
+  **改已有文件前必须在这个会话里 read_file 读过、且读完没被改过**（按 mtime + 大小记在内存里，重启就清空；她自己 edit / write 后会更新）。
+  权限同 exec：只给可信会话、`tools.exec.enabled` 关了这些也关，`LOCKED_NAMES` 里锁着永远不给群聊。全用异步 fs（别卡住给设备流式播音频的事件循环）。
+  守则（`toolGuide`）让她看 / 改文件用这些、别用 exec 拼命令，改完看回显确认。agent 自己设了工具白名单（不是 `*`）的要手动加上。
 - **扩展 / MCP（`server/src/agent/extensions.ts`、`mcp.ts`）**：扩展是 pi 格式（`export default (pi) => pi.registerTool(...)`），
   运行时 sucrase 转译 + `vm.compileFunction`，`@earendil-works/pi-ai`/`typebox` 走内置 shim（打包后没有 node_modules）。
   扩展工具、MCP 工具、`extension_*` 自写工具**都按 `exec` 同一条可信度规则**——它们本质上就是任意代码执行；
