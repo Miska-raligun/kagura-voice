@@ -390,6 +390,7 @@ function CompactPop({ events }: { events: any[] }) {
           <div>原因：{TRIGGER[d.trigger] ?? d.trigger}{d.size ? `（历史约 ${k(d.size)} token，阈值 ${k(d.limit ?? 0)}）` : ""}</div>
           <div>压掉 {d.messages} 条（约 {k(d.oldTokens ?? 0)} token）→ 摘要 {d.summary} 字；留下最近 {d.kept} 条（约 {k(d.keptTokens ?? 0)} token）</div>
           <div>摘要模型 {d.model}，分 {d.chunks} 段{d.failed ? `，${d.failed} 段没总结成（只留了用户说过的话）` : ""}，用时 {(d.ms / 1000).toFixed(1)} 秒</div>
+          {d.refs !== undefined && <div>{d.refs ? `摘要里注了 ${d.refs} 处原话出处（她能按编号翻回原文）` : "摘要没注原话出处（摘要模型没照做；她还能按关键词搜原文）"}</div>}
           {d.remembered?.map((r: any) => <div class="hit">· 记进 {TARGET[r.target] ?? r.target}：{r.text}</div>)}
         </>;
       })}

@@ -588,6 +588,9 @@ CoreS3 (MicroPython) ──HTTP──▶ server/（TypeScript 单文件可执行
   压缩时每条对话标 `[#m<id>]`、让摘要在要点后注「（#m123）」，兜底的要点也带编号（读的时候连带前后两条，`m100-m130` 读一段）；
   `Runtime.note(…, ref)` 把 `task:` / `job:` 记进接收方会话，子任务结果带 `a2a:` 和 `session:`；`Runtime.refs` 登记前缀解析函数（system.ts），新加记进会话的系统事件就登记一个。
   编号只进会话、**别写进发给主人的话**。另有 `query` 在当前会话全部记录（含已压缩的）里搜关键词。
+  **看它有没有在起作用**（LRN 2026-11-10，以前只能一个个会话翻）：每次 `read_ref` 打一行 `[recall] 📎` 并记 health `recall`（ok = 找到了，`detail.type` = tool / msg / range / session / query / task…）；
+  压缩的 health / 会话事件带 `refs`（摘要里注了几处 `#m`，0 = 摘要模型没照做，打一行 `ℹ️`）。`health.summary` 每天一份 `recall`（reads / miss / types / compacts / cited），
+  总览「运行状况」卡片显示「翻原文：今天 N 次…，压缩 X 次里 Y 次摘要带了出处」；找到了的不进异常列表。顺利的压缩不再计进「压缩有段没总结成」。
 - **用户消息发出去前合成一段**（`runtime.flattenUser`，Agent 的 `convertToLlm`，LRN 2026-11-07，症状「她说正文消息是空的，然后从记忆里找到了我发的话」）：
   一轮的用户消息是几段拼的（`[时间…]`、自动回忆、系统备注、主人的话），按多段格式发出去，有的兼容 OpenAI 的服务商只认第一段（只看到时间）、有的首尾直接粘起来（主人的话贴在记忆最后一条后面）。
   现在发之前合成一段、空行隔开，有回忆 / 备注时在主人的话前面加 `MSG_DIVIDER`；库里照旧分段（`stripRecall` 靠分段去掉回忆 / 备注）。**新加附在用户消息里的系统块也放在主人的话前面**。

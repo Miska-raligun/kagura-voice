@@ -1341,14 +1341,17 @@ export class Runtime {
       try { this.remember?.(agent, target, text); } catch (e: any) { console.log(`[agent] ⚠️  ${agent.id} 记忆写入失败: ${e.message}`); }
     }
     console.log(`[agent] 🗜️  ${agent.id} ${key} 压缩 ${old.length} 条（${chunks.length} 段${failed ? `，${failed} 段没总结成` : ""}）→ 摘要 ${Array.from(summary).length} 字${remembered.length ? `，记下 ${remembered.length} 条` : ""}`);
-    health.record({ kind: "compact", ok: !failed, agent: agent.id, session: key, ms: Date.now() - t0, detail: { trigger, chunks: chunks.length, failed, messages: old.length } });
+    // 摘要里带了几处出处编号（#m123）：没带的话她以后只能靠关键词搜原文（运行状况里看得到比例）
+    const refs = new Set(summary.match(/#m\d+/g) ?? []).size;
+    if (!refs) console.log(`[agent] ℹ️  ${agent.id} ${key} 这次的摘要没带出处编号（摘要模型没照做）`);
+    health.record({ kind: "compact", ok: !failed, agent: agent.id, session: key, ms: Date.now() - t0, detail: { trigger, chunks: chunks.length, failed, messages: old.length, refs } });
     // 会话页「系统事件」：什么时候、为什么压的，压了多少、剩多少，顺手记进了哪些记忆
     try {
       const sum = (a: Message[]) => a.reduce((n, m) => n + msgTokens(m), 0);
       store.addEvent(key, "compact", {
         trigger, size: why?.size, limit: why?.limit, ms: Date.now() - t0, model: `${model.provider}/${model.id}`,
         messages: old.length, oldTokens: sum(eff.slice(0, cut)), kept: hist.length - cut, keptTokens: sum(eff.slice(cut)),
-        chunks: chunks.length, failed, summary: Array.from(summary).length, remembered: wrote,
+        chunks: chunks.length, failed, summary: Array.from(summary).length, refs, remembered: wrote,
       });
     } catch { /* 记不下就算了 */ }
     return true;

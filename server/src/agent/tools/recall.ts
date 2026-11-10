@@ -13,6 +13,18 @@ import { messageText, TOOL_REF } from "../runtime.ts";
 import type { RunScope } from "../scope.ts";
 import type { AgentInfo, AgentRegistry } from "../registry.ts";
 import { ok, fail } from "./device.ts";
+import { health } from "../health.ts";
+
+/** 这次读的是哪种编号（运行状况里按种类统计） */
+export function refType(p: any): string {
+  if (String(p?.query ?? "").trim()) return "query";
+  const ref = String(p?.ref ?? "").trim().replace(/^#/, "");
+  if (ref.startsWith(TOOL_REF)) return "tool";
+  if (/^m\d+\s*-/.test(ref)) return "range";
+  if (/^m\d+$/.test(ref)) return "msg";
+  const i = ref.indexOf(":");
+  return i > 0 ? ref.slice(0, i) : "unknown";
+}
 
 /** 一次最多返回多少字（长的用 offset 接着读） */
 export const READ_MAX = 12_000;
@@ -48,14 +60,26 @@ export function recallTools(rt: Runtime, agents: AgentRegistry) {
         query: Type.Optional(Type.String({ description: "关键词（空格分开，都要出现），在当前会话的全部记录里找" })),
         offset: Type.Optional(Type.Number({ description: "长原文从第几个字接着读" })),
       }),
+      // 每次都记一条（LRN 2026-11-10：以前看不出链式召回有没有在起作用，只能一个个会话翻）：日志一行 + 运行状况里按天统计读了几次、几次没找到
       async execute(_id, p: any) {
+        const t0 = Date.now();
+        const r: any = await lookup(p);
+        const found = !r.isError && r.details?.found !== false;
+        const type = refType(p);
+        const what = type === "query" ? `搜「${String(p.query).trim().slice(0, 40)}」` : String(p?.ref ?? "").slice(0, 60);
+        console.log(`[recall] 📎 ${agent.id} ${scope.sessionKey} ${what} → ${found ? `找到了（${Array.from(String(r.content?.[0]?.text ?? "")).length} 字）` : "没找到"}`);
+        health.record({ kind: "recall", ok: found, agent: agent.id, session: scope.sessionKey, purpose: scope.purpose, ms: Date.now() - t0, detail: { type, ref: what } });
+        return r;
+      },
+    }];
+    async function lookup(p: any) {
         const store = rt.store(agent.id);
         const offset = Math.max(0, Number(p.offset) || 0);
         const q = String(p.query ?? "").trim();
         if (q) {
           const words = q.split(/\s+/).filter(Boolean).slice(0, 5);
           const hits = store.search(scope.sessionKey, words);
-          return ok(hits.length ? hits.reverse().map((h) => line(h, 300) + (h.compacted ? "（已压缩）" : "")).join("\n") + "\n要前后文就读 ref=m<编号>" : `这个会话里没找到同时含「${words.join("」「")}」的记录`);
+          return ok(hits.length ? hits.reverse().map((h) => line(h, 300) + (h.compacted ? "（已压缩）" : "")).join("\n") + "\n要前后文就读 ref=m<编号>" : `这个会话里没找到同时含「${words.join("」「")}」的记录`, { found: hits.length > 0 });
         }
         const ref = String(p.ref ?? "").trim().replace(/^#/, "");
         if (!ref) return fail("要给 ref（编号）或 query（关键词）");
@@ -89,14 +113,13 @@ export function recallTools(rt: Runtime, agents: AgentRegistry) {
           const who = owner(key);
           if (!who) return fail(`没有权限看会话 ${key}`);
           const rows = rt.store(who).transcript(key, 12).filter((r) => r.role !== "toolResult");
-          return ok(rows.length ? page(rows.map((r) => line(r as any, 500)).join("\n"), offset) : `会话 ${key} 是空的`);
+          return ok(rows.length ? page(rows.map((r) => line(r as any, 500)).join("\n"), offset) : `会话 ${key} 是空的`, { found: rows.length > 0 });
         }
         const i = ref.indexOf(":");
         const fn = i > 0 ? rt.refs.get(ref.slice(0, i)) : undefined;
         if (!fn) return fail(`不认识的编号 ${ref}（认得 tool: / m数字 / session: / ${[...rt.refs.keys()].map((k) => k + ":").join(" / ")}）`);
         const out = fn(agent, ref.slice(i + 1), scope);
         return out === null ? fail(`没有 ${ref}（或者不是你的）`) : ok(page(out, offset));
-      },
-    }];
+    }
   };
 }

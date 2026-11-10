@@ -19,6 +19,7 @@ export const KIND_LABEL: Record<string, string> = {
   watchdog: "监工叫停（兜圈子）",
   im_merged: "连发消息合成一轮",
   memory_tidy: "记忆整理",
+  recall: "翻原文没找到",
   unclean_exit: "上次没有正常退出",
 };
 const VOICE_LABEL: Record<string, string> = { first: "她写了朗读版", short: "短回复直接念", summary: "事后压成口语", cut: "失败、截断着念" };
@@ -32,6 +33,10 @@ export function HealthCard() {
   if (!d) return null;
   const today = d.days[0] ?? { turns: 0, ok: 0, errors: {}, events: {} };
   const errs = Object.entries(today.errors ?? {}) as [string, number][];
+  // 链式召回用得怎么样：她按编号读原文的次数、没找到的次数；压缩里有几次摘要带了出处编号
+  const zero = { reads: 0, miss: 0, compacts: 0, cited: 0 };
+  const rc = { ...zero, ...(today.recall ?? {}) };
+  const wk = (d.days as any[]).reduce((a, x) => ({ reads: a.reads + (x.recall?.reads ?? 0), miss: a.miss + (x.recall?.miss ?? 0), compacts: a.compacts + (x.recall?.compacts ?? 0), cited: a.cited + (x.recall?.cited ?? 0) }), zero);
   const evs = Object.entries(KIND_LABEL).map(([k, l]) => [l, today.events?.[k] ?? 0] as [string, number]).filter(([, n]) => n);
   return (
     <Card title="运行状况" actions={<a href="#/logs">异常记录与日志 →</a>}>
@@ -41,6 +46,8 @@ export function HealthCard() {
       </div>
       {errs.length ? <p>失败：{errs.map(([k, n]) => <Badge s="error" text={`${k} ${n}`} />)}</p> : null}
       {evs.length ? <p class="muted">兜底：{evs.map(([k, n]) => <span class="chip">{k} {n}</span>)}</p> : <p class="muted">今天没有触发兜底</p>}
+      {(wk.reads || wk.compacts) ? <p class="muted">翻原文：今天 {rc.reads} 次{rc.miss ? `（${rc.miss} 次没找到）` : ""}，近 7 天 {wk.reads} 次{wk.miss ? `（${wk.miss} 次没找到）` : ""}
+        {wk.compacts ? ` · 近 7 天压缩 ${wk.compacts} 次，${wk.cited} 次摘要带了出处` : ""}</p> : null}
       {d.days.length > 1 && (
         <table><thead><tr><th>日期</th><th>轮数</th><th>成功</th><th>失败</th><th>兜底</th></tr></thead>
           <tbody>{d.days.map((x: any) => {
@@ -59,6 +66,7 @@ function detailText(e: any): string {
   if (e.kind === "turn") return `${d.error ?? ""}：${d.message ?? ""}`;
   if (e.kind === "voice") return `${VOICE_LABEL[d.via] ?? d.via}${d.model ? `（${d.model}）` : ""}${d.why ? `：${d.why}` : ""}`;
   if (e.kind === "guard") return d.why ?? "";
+  if (e.kind === "recall") return d.ref ?? "";
   if (e.kind === "compact") return `${d.failed}/${d.chunks} 段没总结成（${d.trigger}）`;
   if (e.kind === "compact_failed") return `${d.trigger}：${d.error ?? ""}`;
   if (e.kind === "unclean_exit") return `pid ${d.pid}，日志最后写入 ${d.lastLog}`;
@@ -76,7 +84,7 @@ function Events() {
   return (
     <>
       <Err msg={err} />
-      <div class="chips">{[["", "全部"], ["turn", "失败的轮次"], ["nudge", "催说话"], ["empty_retry", "空回复"], ["overflow", "超长"], ["guard", "单轮叫停"], ["compact", "压缩"], ["voice", "朗读"], ["tts_failed", "合成失败"], ["unclean_exit", "异常退出"]]
+      <div class="chips">{[["", "全部"], ["turn", "失败的轮次"], ["nudge", "催说话"], ["empty_retry", "空回复"], ["overflow", "超长"], ["guard", "单轮叫停"], ["compact", "压缩"], ["recall", "翻原文没找到"], ["voice", "朗读"], ["tts_failed", "合成失败"], ["unclean_exit", "异常退出"]]
         .map(([k, l]) => <a class={k === kind ? "on" : ""} onClick={() => setKind(k)}>{l}</a>)}</div>
       {list.length ? <>
         <table><thead><tr><th>时间</th><th>Agent / 会话</th><th>发生了什么</th><th>详情</th></tr></thead>

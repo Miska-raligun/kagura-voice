@@ -16,6 +16,7 @@ export type HealthKind =
   | "tts_failed"      // 对话 / 切角色时语音合成失败（回了静音，文字照常）
   | "sub_cancelled"   // 子任务随发起方一起停了
   | "watchdog"        // 监工判定在兜圈子，叫停（detail.why）
+  | "recall"          // 链式召回：她按编号读原文 / 按关键词搜（ok = 找到了；detail.type = tool / msg / range / session / query / task…）
   | "memory_tidy"     // 记忆整理（detail.status = done / nochange / skipped / failed）
   | "im_merged"       // 她忙的时候 IM 连发的几条合成一轮（detail.n）
   | "unclean_exit";   // 上次运行没有正常退出
@@ -71,20 +72,33 @@ class Health {
     for (const r of rows) {
       const d = new Date(r.ts * 1000);
       const day = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-      const x = byDay.get(day) ?? { day, turns: 0, ok: 0, errors: {} as Record<string, number>, events: {} as Record<string, number>, ms: [] as number[] };
+      const x = byDay.get(day) ?? { day, turns: 0, ok: 0, errors: {} as Record<string, number>, events: {} as Record<string, number>, ms: [] as number[],
+        // 链式召回用得怎么样：读了几次、几次没找到、按哪种编号读的；压缩了几次、其中几次摘要带了出处
+        recall: { reads: 0, miss: 0, types: {} as Record<string, number>, compacts: 0, cited: 0, refs: 0 } };
       byDay.set(day, x);
       if (r.kind === "turn") {
         x.turns++;
         if (r.ok) { x.ok++; if (r.ms) x.ms.push(r.ms); }
         else { const c = (r.detail && JSON.parse(r.detail).error) || "其它"; x.errors[c] = (x.errors[c] ?? 0) + 1; }
+      } else if (r.kind === "recall") {
+        const t = (r.detail && JSON.parse(r.detail).type) || "?";
+        x.recall.reads++;
+        if (!r.ok) x.recall.miss++;
+        x.recall.types[t] = (x.recall.types[t] ?? 0) + 1;
       } else {
+        if (r.kind === "compact") {
+          const refs = Number((r.detail && JSON.parse(r.detail).refs) ?? 0);
+          x.recall.compacts++;
+          if (refs > 0) { x.recall.cited++; x.recall.refs += refs; }
+          if (r.ok) continue;          // 顺利的压缩不算兜底（以前也计进「压缩有段没总结成」，首页数字虚高）
+        }
         const k = r.kind === "voice" ? `voice:${(r.detail && JSON.parse(r.detail).via) || "?"}` : r.ok || r.kind !== "nudge" ? r.kind : "nudge_fail";
         x.events[k] = (x.events[k] ?? 0) + 1;
       }
     }
     return [...byDay.values()].sort((a, b) => (a.day < b.day ? 1 : -1)).map((x) => {
       const ms = x.ms.sort((a: number, b: number) => a - b);
-      return { day: x.day, turns: x.turns, ok: x.ok, errors: x.errors, events: x.events,
+      return { day: x.day, turns: x.turns, ok: x.ok, errors: x.errors, events: x.events, recall: x.recall,
         avg_ms: ms.length ? Math.round(ms.reduce((s: number, v: number) => s + v, 0) / ms.length) : null,
         p90_ms: ms.length ? ms[Math.min(ms.length - 1, Math.floor(ms.length * 0.9))] : null };
     });
@@ -93,7 +107,7 @@ class Health {
   /** 最近的异常（失败的轮次 + 所有兜底动作），新的在前 */
   recent(limit = 100, kind = "") {
     if (!this.db) return [];
-    const rows = this.db.prepare(`SELECT * FROM health_events WHERE (ok = 0 OR kind != 'turn') ${kind ? "AND kind = ?" : ""} AND NOT (kind IN ('voice', 'compact') AND ok = 1) ORDER BY id DESC LIMIT ?`)
+    const rows = this.db.prepare(`SELECT * FROM health_events WHERE (ok = 0 OR kind != 'turn') ${kind ? "AND kind = ?" : ""} AND NOT (kind IN ('voice', 'compact', 'recall') AND ok = 1) ORDER BY id DESC LIMIT ?`)
       .all(...(kind ? [kind, limit] : [limit])) as any[];
     return rows.map((r) => ({ ...r, ok: !!r.ok, detail: r.detail ? JSON.parse(r.detail) : null }));
   }
