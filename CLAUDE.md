@@ -436,6 +436,11 @@ CoreS3 (MicroPython) ──HTTP──▶ server/（TypeScript 单文件可执行
   其它渠道可信；嵌套调用（a2a）沿用上层，后台派出的经 `lineage.trusted` 带过去；**不可信会话里 cron_add / cron_update
   的任务标 `untrusted`，跑起来也不可信**（管理界面改过才清掉）——新加任何「替别人跑一轮」的入口都要把可信度带上，
   漏一处就是让陌生人借道执行命令。联网走 `util/proxy.ts`：配了代理就换全局 dispatcher（含调模型），本机地址直连。
+- **记忆整理（`server/src/agent/tidy.ts`，LRN 2026-11-10，症状「USER.md 自动记录满了、MEMORY.md 过时 / 重复 / 流水越积越多，旧信息被当成现在的事实」）**：
+  每 `memory_tidy.every_days`（默认 7，0 = 不自动）天、在待办的静默时段、她没在跑的时候，用这个 agent 自己的主模型（`quick(…, {think})`）读 USER.md 自动记录 + MEMORY.md，输出 JSON（user / memory_md / removed / summary）。
+  别改坏的点：① USER.md `USER_AUTO_HEAD` 之前的手写部分一字不动；② 写之前备份（`.persona-backup-<时间>/`），删掉的追加进 `MEMORY.archive.md`（不注入、不检索）；
+  ③ 整理后条目总字数不到原来 `MIN_KEEP`（40%）、输出不是 JSON、被截断（`length`）一律不写；USER 里超过 `USER_ITEM_MAX` 或总量超 `USER_AUTO_MAX` 的放回 MEMORY；MEMORY.md 超 `TIDY_MAX_CHARS` 不整理。
+  自动整理的结果按 heartbeat 投递目标告诉主人（同待办汇报），没做成的第二天再试；状态 `memory_tidy.json`。入口：她的 `memory_tidy` 工具（可信、非子任务）、管理界面人设文件 MEMORY / USER 页「整理记忆」（`POST /api/admin/agents/<id>/memory-tidy`）。日志 `🧹`，health `memory_tidy`。
 - **文件工具（`server/src/agent/tools/files.ts`，LRN 2026-11-10，症状「她改文件全靠 exec 拼 cat / sed / grep，容易改错也难自查」）**：
   `read_file`（带行号、offset / limit 分段）/ `edit_file`（精确替换、必须唯一或 `replace_all`，返回改完前后几行）/ `write_file` / `search_files`（正则，跳过 node_modules、.git、二进制、>5MB）/ `list_files`（通配，新改的在前）。
   **改已有文件前必须在这个会话里 read_file 读过、且读完没被改过**（按 mtime + 大小记在内存里，重启就清空；她自己 edit / write 后会更新）。

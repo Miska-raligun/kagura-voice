@@ -28,6 +28,8 @@ export interface Config {
   deviceTrust: "approve" | "all";
   /** 定时查 GitHub 上有没有新版本（只提示，不自动安装） */
   updateCheck: boolean;
+  /** 记忆定期整理（agent/tidy.ts）：every_days = 0 关掉自动整理 */
+  memoryTidy: { everyDays: number };
   /** 在线更新下载失败时依次试的 GitHub 加速镜像（前缀式）；不写用内置的，[] = 只直连 */
   updateMirrors?: string[];
   /** agent 说给主人听的话（IM / 网页回复、定时任务、heartbeat、子任务结果、提醒）播不播：presence = 在家才播 / always / never。管理界面改了就地生效 */
@@ -192,6 +194,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     apiToken: String(file.api_token ?? ""),
     deviceTrust: file.device_trust === "all" ? "all" : "approve",
     updateCheck: file.update_check !== false && !fake,
+    memoryTidy: { everyDays: Math.max(0, Number(file.memory_tidy?.every_days ?? 7)) },
     updateMirrors: Array.isArray(file.update_mirrors) ? file.update_mirrors.map(String) : undefined,
     voicePush: parseVoicePush(file.voice_push),
     rolePush: file.role_push === "switch" ? "switch" : "hold",

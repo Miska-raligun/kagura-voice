@@ -18,6 +18,7 @@ export const KIND_LABEL: Record<string, string> = {
   sub_cancelled: "子任务随叫停一起停",
   watchdog: "监工叫停（兜圈子）",
   im_merged: "连发消息合成一轮",
+  memory_tidy: "记忆整理",
   unclean_exit: "上次没有正常退出",
 };
 const VOICE_LABEL: Record<string, string> = { first: "她写了朗读版", short: "短回复直接念", summary: "事后压成口语", cut: "失败、截断着念" };

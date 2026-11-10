@@ -19,6 +19,7 @@ import { Skills } from "./skills.ts";
 import { BgJobs, execTools } from "./tools/exec.ts";
 import { recallTools } from "./tools/recall.ts";
 import { fileTools } from "./tools/files.ts";
+import { MemoryTidy, tidyTools } from "./tidy.ts";
 import { Watchdog } from "./watchdog.ts";
 import { webTools } from "./tools/web.ts";
 import { McpManager } from "./mcp.ts";
@@ -42,6 +43,8 @@ export interface AgentSystem {
   memories: Memories;
   scheduler: Scheduler | null;
   tasks: TaskQueue | null;
+  /** 记忆整理（attachAgentSystem 里建） */
+  tidy?: MemoryTidy;
   a2a: A2A;
   skills: Skills;
   channels: ChannelManager;
@@ -245,6 +248,16 @@ export function attachAgentSystem(sys: AgentSystem, ctx: Ctx) {
   };
   const tasks = new TaskQueue(ctx.dirs.systemDb, registry, { run: (req) => runtime.run(req), report, reset: (a, k) => runtime.store(a).reset(k) });
   sys.tasks = tasks;
+  // 记忆整理：每 N 天在待办的静默时段、她空闲时做一次；结果按 heartbeat 的投递方式告诉主人
+  const tidy = new MemoryTidy(registry, sys.models, {
+    everyDays: () => (ctx.cfg.fakeProviders ? 0 : ctx.cfg.memoryTidy?.everyDays ?? 7),
+    window: () => tasks.settings().window,
+    busy: (id) => runtime.activeRuns().some((r) => r.agent === id),
+    report: async (id, text) => { await report(id, "", text); },
+  }, path.join(ctx.cfg.dataDir, "memory_tidy.json"));
+  tidy.start();
+  sys.tidy = tidy;
+  runtime.addTools(tidyTools(tidy));
   runtime.refs.set("task", (agent, id) => {
     const t = tasks.get(id);
     if (!t || t.agent !== agent.id) return null;

@@ -227,6 +227,15 @@ export function registerAdmin(r: Router, ctx: Ctx, sys: AgentSystem) {
     fs.writeFileSync(p, content);
     return json({ status: "ok", path: rel, chars: Array.from(content).length });
   });
+  // 记忆整理（agent/tidy.ts）：看上次结果、立即整理一次
+  get("/api/admin/memory-tidy", () => json({ every_days: ctx.cfg.memoryTidy?.everyDays ?? 7, last: sys.tidy?.all() ?? {} }));
+  post("/api/admin/agents/<id>/memory-tidy", async (req) => {
+    const a = agentOr404(req.params.id);
+    if (!sys.tidy) return json({ error: "记忆整理只在内置 agent 模式下可用" }, 400);
+    const { describe } = await import("../agent/tidy.ts");
+    const r = await sys.tidy.run(a.id, "manual");
+    return json({ ...r, text: describe(r) });
+  });
   /** 改之前先把原文件留一份：<目录>/.persona-backup-<时间>/<文件> */
   const backupFile = (dir: string, rel: string) => {
     const p = path.join(dir, rel);
