@@ -17,6 +17,7 @@ import { BUDGETS, buildSystemPrompt, loadMode, sceneOf, turnContext, type Prompt
 import { toolAllowed, guestLocked } from "./toolpolicy.ts";
 import { runScope, withScope, type RunScope } from "./scope.ts";
 import { health, errorClass } from "./health.ts";
+import { LazyTools, LOADED_TTL_MS, groupOf } from "./toolgroups.ts";
 
 /** IM 渠道：消息可能来自陌生人，默认不可信（主人私聊由渠道层显式标 trusted） */
 export const IM_CHANNELS = new Set(["feishu", "qq", "onebot"]);
@@ -99,6 +100,9 @@ export function estimateTokens(text: string): number {
   for (const ch of text) (/[　-鿿豈-﫿＀-￯]/.test(ch) ? cjk++ : other++);
   return cjk + Math.ceil(other / 4);
 }
+
+/** 一个工具的定义占多少 token（估算）：每次调模型都要带上 */
+export const toolTokens = (t: { name: string; description: string; parameters: unknown }) => estimateTokens(JSON.stringify([t.name, t.description, t.parameters]));
 
 const SILENT = /^\s*(HEARTBEAT_OK|NO_REPLY)\s*[。.!！]?\s*$/i;
 /** 系统替主人发起的那些「用户消息」（heartbeat、定时任务、系统事件、别的 agent 传话）：不是主人说的，近况里不算 */
@@ -535,13 +539,23 @@ export class Runtime {
   /** 压缩前的记忆冲刷（memory 模块注入） */
   beforeCompact: ((agent: AgentInfo, sessionKey: string) => Promise<void>) | null = null;
   /** 压缩时顺手挑出来的要记住的事（长期 → MEMORY.md，今天 → 当天笔记）。以前压缩前要用整段上下文另跑一轮「记忆冲刷」，很费 */
-  remember: ((agent: AgentInfo, target: "long" | "daily" | "user", text: string) => void) | null = null;
+  remember: ((agent: AgentInfo, target: "long" | "daily" | "user", text: string, tag?: string) => void) | null = null;
   /** 自动回忆（memory 模块注入）：按这句话检索长期记忆，返回要附上的几条（「路径：内容」）。skip = 已整篇在提示里的文件 */
   recall: ((agent: AgentInfo, text: string) => Promise<{ line: string; why: string }[]>) | null = null;
   /** 每个会话上一轮算出来的压缩阈值（回复后在后台压缩时用） */
   private compactLimit = new Map<string, number>();
   /** 回复后在后台预先压缩（测试里关掉，免得和假模型的回复队列抢） */
   backgroundCompact = true;
+  /** 工具按需加载（toolgroups.ts）：用得少的几组工具先不摆出来。false = 像以前一样全给 */
+  lazyTools = true;
+  /** 每个会话已经加载过的工具组（闲置 LOADED_TTL_MS 后收回） */
+  private loadedGroups = new Map<string, { groups: Set<string>; at: number }>();
+  private loadedFor(key: string): Set<string> {
+    const e = this.loadedGroups.get(key);
+    if (!e || Date.now() - e.at > LOADED_TTL_MS) { this.loadedGroups.delete(key); return new Set(); }
+    e.at = Date.now();
+    return new Set(e.groups);
+  }
   /** 系统提示里的技能目录（skills 模块注入） */
   skillCatalog: (agent: AgentInfo) => { name: string; description: string }[] = () => [];
   /** 当前在家状态（presence 路由更新） */
@@ -811,14 +825,25 @@ export class Runtime {
       `${agent.id} ${req.sessionKey}`,
     );
     info.guard = guard;
-    const tools = this.toolsFor(scope, agent, req).map((t) => guard.wrap(t));
+    const allTools = this.toolsFor(scope, agent, req).map((t) => guard.wrap(t));
+    // 工具按需加载：聊天等场景里用得少的几组先收着（系统提示里留目录），她调 tools_load 才摆出来。干活的场景（待办、子任务）全给
+    const lazy = this.lazyTools && scope.purpose !== "task" && scope.purpose !== "flush" && req.kind !== "sub"
+      ? new LazyTools(allTools, this.loadedFor(lockKey), (t) => guard.wrap(t), (ids) => {
+        const e = this.loadedGroups.get(lockKey) ?? { groups: new Set<string>(), at: 0 };
+        for (const id of ids) e.groups.add(id);
+        e.at = Date.now();
+        this.loadedGroups.set(lockKey, e);
+        if (this.loadedGroups.size > 500) this.loadedGroups.delete(this.loadedGroups.keys().next().value!);
+        console.log(`[agent] 🧰 ${agent.id} ${req.sessionKey} 加载工具组 ${ids.join("、")}`);
+      }) : null;
+    const tools = lazy ? lazy.visible() : allTools;
     const peers = this.agents.list().filter((p) => this.agents.canContact(agent.id, p.id)).map((p) => ({ id: p.id, name: p.name }));
     if (persist && scope.trusted) store.markOwner(req.sessionKey);
     // 近况：这个会话看不到的、最近在别处跟主人说过的话。只给可信的会话（主人本人），陌生人 / 群聊不给
     const recent = scope.trusted && req.kind !== "sub" && req.purpose !== "flush" ? this.recentActivity(agent, req.sessionKey, tools.some((t) => t.name === "read_ref")) : "";
     const promptOf = (summary?: string, trace?: PromptTrace) => buildSystemPrompt({
       agent, scene: sceneOf(scope), channel: req.channel, summary, trace,
-      extra: [...(req.extraSystem ?? []), recent, req.onVoice ? voicePrompt(agent.voice_max_chars || 80) : ""], skills: this.skillCatalog(agent), voiceDelivery: req.voiceDelivery,
+      extra: [...(req.extraSystem ?? []), lazy?.catalog() ?? "", recent, req.onVoice ? voicePrompt(agent.voice_max_chars || 80) : ""], skills: this.skillCatalog(agent), voiceDelivery: req.voiceDelivery,
       peers: tools.some((t) => t.name.startsWith("sessions_")) ? peers : [], tools: tools.map((t) => t.name),
     });
     // 上下文预算：窗口减去系统提示、工具定义、输出预留，剩下的才是历史（含摘要）能用的
@@ -871,6 +896,20 @@ export class Runtime {
       convertToLlm: (msgs) => flattenUser((msgs as any[]).filter((m) => ["system", "user", "assistant", "toolResult"].includes(m.role))) as any,
       transformContext: async (msgs) => { try { return pruneToolResults(msgs as any[], histBudget, readable) as any; } catch { return msgs; } },
     });
+    // 工具组刚加载（或者她没加载就直接调了收着的工具）：下一次调模型前换上新的工具集，库会把多出来的工具告诉模型
+    if (lazy) pi.prepareNextTurnWithContext = (turn) => {
+      const missed = (turn.message.content ?? []).filter((c: any) => c.type === "toolCall" && groupOf(c.name) && !lazy.loaded.has(groupOf(c.name))).map((c: any) => String(c.name));
+      const auto = missed.length ? lazy.load([...new Set(missed.map(groupOf))]) : [];
+      if (!lazy.dirty) return undefined;
+      lazy.dirty = false;
+      const next = lazy.visible();
+      pi.state.tools = next;                      // 同一轮里后面再 prompt（催她说话）也用新的工具集
+      return {
+        context: { messages: turn.context.messages, tools: next },
+        // 没加载就直接调（多半是照着以前的对话调的）：替她加载好，让她重调一次。这句不进历史
+        messages: auto.length ? [{ role: "user", content: [{ type: "text", text: `[系统] ${missed.join("、")} 刚才还没加载所以没找到，现在加载好了，重新调用一次。` }], timestamp: Date.now(), knote: true } as any] : undefined,
+      };
+    };
     const start = pi.state.messages.length;
     // 插话（Runtime.steer）：排进 pi 的插话队列，下一次调模型前带上。收尾之后就不收了（见下面 waitForIdle 之后）
     if (!nestedRun) info.steer = (t: string) => pi.steer({ role: "user", content: [{ type: "text", text: t }], timestamp: Date.now() } as any);
@@ -991,7 +1030,7 @@ export class Runtime {
       await Promise.race([work, gaveUp]);
     } finally { clearTimeout(hardTimer); if (idleTimer) clearTimeout(idleTimer); idleTimer = null; signal.removeEventListener("abort", onCancel); }
 
-    let fresh = pi.state.messages.slice(start).filter((m: any) => ["user", "assistant", "toolResult"].includes(m.role)) as Message[];
+    let fresh = pi.state.messages.slice(start).filter((m: any) => ["user", "assistant", "toolResult"].includes(m.role) && !m.knote) as Message[];
     // 催她说话的那句和前面那条只有思考的空回复不进历史（连着两条助手消息、或者一句「[系统] 你刚才没说话」留在历史里都怪）
     if (nudged) {
       const i = fresh.findIndex((m: any) => m.knudge);
@@ -1049,7 +1088,9 @@ export class Runtime {
       const ui = out.findIndex((m) => m.role === "user");
       if (ui >= 0) out[ui] = { ...out[ui], ksrc: { channel: req.channel, purpose: scope.purpose, ...(req.deviceId ? { device: req.deviceId } : {}) } } as any;
       if (li >= 0) out[li] = { ...out[li], kctx: {
-        sys: fixedSys, tools: fixedTools, hist: histSize, win: ctxWin, calls: assistants.length, limit, toolCount: tools.length, a2a: toolCalls.some((n) => n === "sessions_send" || n === "sessions_spawn") ? scope.trace : undefined,
+        sys: fixedSys, tools: fixedTools, hist: histSize, win: ctxWin, calls: assistants.length, limit, toolCount: lazy ? lazy.visible().length : tools.length,
+        // 还收着没摆出来的工具组（按需加载）
+        deferred: lazy ? [...lazy.hidden().keys()] : undefined, a2a: toolCalls.some((n) => n === "sessions_send" || n === "sessions_spawn") ? scope.trace : undefined,
         // 系统层对上下文做了什么：加载了哪些文件、近况、摘要、自动回忆、截短了几条旧工具结果、单轮上限有没有叫停
         trace, recent: { chars: Array.from(recent).length, items: recent.split("\n").filter((l) => /^\s*-\s/.test(l)).length },
         recall: { hits: recalled.hits, ms: recalled.ms, why: recalled.why }, pruned, guard: guard.reason || undefined,
@@ -1152,14 +1193,16 @@ export class Runtime {
   }
 
   /** 某个 agent 在普通会话里能看到的全部内置工具（管理界面白名单用，不过滤白名单本身） */
-  allToolNames(agent: AgentInfo): { name: string; label: string; description: string; plugin: boolean; guest_source: boolean; guest_locked: boolean }[] {
+  allToolNames(agent: AgentInfo): { name: string; label: string; description: string; plugin: boolean; guest_source: boolean; guest_locked: boolean; tokens: number }[] {
     const scope: RunScope = { agentId: agent.id, sessionKey: `${agent.id}:main`, kind: "main", channel: "webchat", purpose: "list", hop: 0, chain: [], meta: {}, trusted: true };
     const seen = new Set<string>();
     const plugin = new Set(this.pluginProviders.flatMap((p) => p(scope, agent)).map((t) => t.name));
     // 扩展 / MCP 里哪些是标了「陌生人也能用」的：拿不可信的上下文问一遍提供者
     const guestSource = new Set(this.pluginProviders.flatMap((p) => p({ ...scope, trusted: false }, agent)).map((t) => t.name));
     return this.allProviders().flatMap((p) => p(scope, agent)).filter((t) => (seen.has(t.name) ? false : (seen.add(t.name), true)))
-      .map((t) => ({ name: t.name, label: t.label, description: t.description, plugin: plugin.has(t.name), guest_source: guestSource.has(t.name), guest_locked: !plugin.has(t.name) && guestLocked(t.name) }));
+      .map((t) => ({ name: t.name, label: t.label, description: t.description, plugin: plugin.has(t.name), guest_source: guestSource.has(t.name), guest_locked: !plugin.has(t.name) && guestLocked(t.name),
+        // 这个工具的定义每次调模型占多少（名字 + 说明 + 参数，估算）
+        tokens: toolTokens(t) }));
   }
 
   private toolsFor(scope: RunScope, agent: AgentInfo, req: RunRequest): AgentTool<any>[] {
@@ -1338,7 +1381,9 @@ export class Runtime {
       const [t, text] = r.split("\n");
       const target = t === "主人" ? "user" : t === "长期" ? "long" : "daily";
       wrote.push({ target, text });
-      try { this.remember?.(agent, target, text); } catch (e: any) { console.log(`[agent] ⚠️  ${agent.id} 记忆写入失败: ${e.message}`); }
+      // 后台会话（heartbeat / 定时任务 / 待办）压缩时记下的「今天：」带上标记，聊天时不进系统提示
+      const tag = key.endsWith(":heartbeat") ? "heartbeat" : key.includes(":cron:") ? "定时任务" : key.includes(":task:") ? "待办" : "";
+      try { this.remember?.(agent, target, text, tag); } catch (e: any) { console.log(`[agent] ⚠️  ${agent.id} 记忆写入失败: ${e.message}`); }
     }
     console.log(`[agent] 🗜️  ${agent.id} ${key} 压缩 ${old.length} 条（${chunks.length} 段${failed ? `，${failed} 段没总结成` : ""}）→ 摘要 ${Array.from(summary).length} 字${remembered.length ? `，记下 ${remembered.length} 条` : ""}`);
     // 摘要里带了几处出处编号（#m123）：没带的话她以后只能靠关键词搜原文（运行状况里看得到比例）

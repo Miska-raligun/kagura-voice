@@ -73,10 +73,11 @@ export function createAgentSystem(cfg: Config, dirs: Dirs, fake: FakeLlm | null)
     for (const a of registry.list()) if (a.model) registry.update(a.id, { model: "" });
   }
   const runtime = new Runtime(registry, models, cfg.runtime);
+  runtime.lazyTools = cfg.runtime.lazyTools !== false;
   const memories = new Memories(runtime, cfg.embedding && !fake ? new OpenAIEmbedder(cfg.embedding) : null);
   runtime.addTools(memories.tools());
   // 压缩时摘要模型顺手挑出要记住的事直接写进记忆。以前是压缩前用整段上下文另跑一轮「记忆冲刷」（一次就是几万 token）
-  runtime.remember = (agent, target, text) => { memories.of(agent.id).write(target, text); };
+  runtime.remember = (agent, target, text, tag) => { memories.of(agent.id).write(target, text, new Date(), tag ?? ""); };
   // 长期记忆不整篇放进提示：每轮按主人这句话检索，相关的几条附在消息上（见 Runtime.recallFor）
   runtime.recall = async (agent, text) => (await memories.of(agent.id).recall(text))
     .map((h) => ({ line: `${h.text.replace(/\s*\n\s*/g, " ")}`, why: h.terms?.length ? h.terms.join("、") : h.via === "keyword" ? "" : "意思相近" }));

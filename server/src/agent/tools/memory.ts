@@ -11,6 +11,7 @@ import { MemoryIndex, type Embedder } from "../memory.ts";
 import { resolveInside } from "../paths.ts";
 import { ok, fail } from "./device.ts";
 import { SOUL_FILES } from "../registry.ts";
+import { BG_NOTE_TAGS } from "../soul.ts";
 
 export const FLUSH_PROMPT = "[系统] 这段对话马上要被压缩成摘要，较早的细节会丢失。"
   + "把其中值得长期记住、而记忆里还没有的事用 memory_write 记下来（主人的偏好、约定、待办、重要的日子与事实）："
@@ -84,7 +85,7 @@ export class Memories {
         parameters: Type.Object({ target: Type.Union([Type.Literal("daily"), Type.Literal("long"), Type.Literal("user")]), text: Type.String() }),
         execute: async (_id, p: any) => {
           if (scope.kind === "sub") return fail("子任务不能写记忆，把要记的事写进结果里交给发起方");
-          try { return ok(`已记到 ${this.of(agent.id).write(p.target, String(p.text))}`); }
+          try { return ok(`已记到 ${this.of(agent.id).write(p.target, String(p.text), new Date(), BG_NOTE_TAGS[scope.purpose] ?? "")}`); }
           catch (e: any) { return fail(e.message); }
         },
       },

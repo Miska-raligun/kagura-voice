@@ -347,12 +347,12 @@ function turnInfo(msgs: any[], end: number) {
       <h5>上下文（{SCENE[t.scene] ?? t.scene}）</h5>
       <div>人设：{t.files.map((f: any) => `${fileLabel(f.name)}（${f.mode === "toc" ? "目录" : `${f.chars} 字${f.clipped ? "，超上限已截断" : ""}`}）`).join("、") || "无"}</div>
       {t.notLoaded?.length > 0 && <div>没加载：{t.notLoaded.map(fileLabel).join("、")}（需要时她自己读）</div>}
-      {t.daily > 0 && <div>今昨笔记：{t.daily} 字</div>}
+      {t.daily > 0 && <div>今昨笔记：{t.daily} 字{t.dailyTotal > t.daily ? `（两天共 ${t.dailyTotal} 字，只带最近的、不带后台流水）` : ""}</div>}
       <div>近况：{c.recent?.items ? `${c.recent.items} 条，${c.recent.chars} 字` : "无"}</div>
       <div>较早对话摘要：{t.summary ? `${t.summary} 字` : "无"}</div>
       <div>自动回忆：{c.recall?.hits?.length ? `${c.recall.hits.length} 条（${c.recall.ms}ms）` : c.recall?.why || "没检索"}</div>
       {c.recall?.hits?.map((h: string) => <div class="hit">· {h}</div>)}
-      <div>工具 {c.toolCount ?? "?"} 个 · 技能 {t.skills} 个 · 可联系的 agent {t.peers} 个</div>
+      <div>工具 {c.toolCount ?? "?"} 个{c.deferred?.length ? `（还有 ${c.deferred.length} 组没摆出来：${c.deferred.join("、")}，她要用时自己加载）` : ""} · 技能 {t.skills} 个 · 可联系的 agent {t.peers} 个</div>
       {c.pruned > 0 && <div>之前几轮的工具结果有 {c.pruned} 条截短后放进上下文（库里存全文）</div>}
       {c.limit && <div>压缩阈值：历史超过 {k(c.limit)} token 时压缩</div>}
       {c.guard && <div class="over">单轮上限：{c.guard}</div>}

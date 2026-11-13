@@ -274,21 +274,21 @@ export class MemoryIndex {
    * 追加一条记忆。target = daily（今天的笔记）| long（MEMORY.md）| user（USER.md 末尾的「自动记录」一节：关于主人本人的稳定信息，
    * 每轮常驻）。自动记录有上限 USER_AUTO_MAX，满了改记进 MEMORY.md 并提示去整理——不碰主人手写的部分。
    */
-  write(target: string, text: string, now = new Date()): string {
+  write(target: string, text: string, now = new Date(), tag = ""): string {
     const ws = this.agent.workspace;
     // 多行压成一行（清单一项一块）用「；」接，别挤成一串；开头自带的「- 」去掉（不然写出来是「- - …」）
     const t = text.trim().split(/\n+/).map((l) => l.trim().replace(/^([-*•]\s+)+/, "")).filter(Boolean).join("；");
     if (!t) throw new Error("内容为空");
     // 长期记忆只放以后还成立的事：带时刻 / 日期开头、「今天…」「刚才…」这种当天的流水，改记进今天的笔记（LRN 2026-11-01）
     if (target === "long" && looksLikeLog(t)) {
-      const where = this.write("daily", t, now);
+      const where = this.write("daily", t, now, tag);
       console.log(`[memory] ↪️  ${this.agent.id} 这条像当天的流水，没记进 MEMORY.md、改记 ${where}：${t.slice(0, 60)}`);
       return `${where}（这条像当天发生的事，记进了今天的笔记；长期记忆只放以后还成立的事实、约定、偏好、结论）`;
     }
     if (target === "user") {
       // 关于主人的一条稳定信息是一句短话；长的多半是事情经过 / 进展，改记长期记忆（USER.md 每轮常驻，要少而精）
       // 改记别处时把原因说清楚（LRN 2026-11-07，症状「她说 memory_write 说要写 USER.md、结果落到了 MEMORY.md，工具说一套做一套」：以前只回「已记到 MEMORY.md」）
-      if (Array.from(t).length > USER_ITEM_MAX) return `${this.write("long", t, now)}（没记进 USER.md：超过 ${USER_ITEM_MAX} 字，不像一句关于主人的稳定信息，记进了长期记忆）`;
+      if (Array.from(t).length > USER_ITEM_MAX) return `${this.write("long", t, now, tag)}（没记进 USER.md：超过 ${USER_ITEM_MAX} 字，不像一句关于主人的稳定信息，记进了长期记忆）`;
       // 有共享人设就记进共享的 USER.md：谁记的全家 agent 都知道
       const p = sharedPath("USER.md") || path.join(ws, "USER.md");
       const cur = fs.existsSync(p) ? fs.readFileSync(p, "utf8") : "";
@@ -297,7 +297,7 @@ export class MemoryIndex {
       if (auto.includes(t) || personaText(ws, "USER.md").includes(t)) return "USER.md";
       if (Array.from(auto).length + Array.from(t).length > USER_AUTO_MAX) {
         console.log(`[memory] ⚠️  ${this.agent.id} USER.md 的「自动记录」满了（${USER_AUTO_MAX} 字），这条改记进 MEMORY.md——到管理界面整理一下 USER.md`);
-        return `${this.write("long", t, now)}（没记进 USER.md：USER.md 的「自动记录」已满 ${USER_AUTO_MAX} 字，先记进了长期记忆；告诉主人到管理界面整理一下 USER.md，别自己去改文件）`;
+        return `${this.write("long", t, now, tag)}（没记进 USER.md：USER.md 的「自动记录」已满 ${USER_AUTO_MAX} 字，先记进了长期记忆；告诉主人到管理界面整理一下 USER.md，别自己去改文件）`;
       }
       const base = at >= 0 ? cur.replace(/\n*$/, "\n") : cur.replace(/\n*$/, cur.trim() ? "\n\n" : "") + USER_AUTO_HEAD + "\n";
       fs.writeFileSync(p, base + `- ${t}\n`);
@@ -311,7 +311,8 @@ export class MemoryIndex {
     }
     const p = dailyNotePath(ws, now);
     const head = fs.existsSync(p) ? "" : `# ${strftime("%Y-%m-%d", now)}\n\n`;
-    fs.appendFileSync(p, `${head}- ${strftime("%H:%M", now)} ${t}\n`);
+    // tag：后台场景（heartbeat / 定时任务 / 待办）写的带个标记，聊天时不把这些流水带进系统提示（soul.recentNotes）
+    fs.appendFileSync(p, `${head}- ${strftime("%H:%M", now)} ${tag && !t.startsWith(`[${tag}]`) ? `[${tag}] ` : ""}${t}\n`);
     return path.relative(ws, p).split(path.sep).join("/");
   }
 }

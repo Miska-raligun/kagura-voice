@@ -11,9 +11,10 @@ import { personaText } from "./persona.ts";
 // config.json 里 "prompt_budgets": { "SOUL.md": 30000, "daily": 10000 } 可以单独调。
 export const DEFAULT_BUDGETS: Record<string, number> = {
   "SOUL.md": 20000, "IDENTITY.md": 20000, "USER.md": 20000, "AGENTS.md": 20000, "TOOLS.md": 20000,
-  "MEMORY.md": 20000, "HEARTBEAT.md": 20000, daily: 8000,
+  // 今昨笔记只带最近的一小段（LRN 2026-11-13，以前 8000 字、两天的笔记整段带上，heartbeat / 定时任务的流水也在里面，是系统提示里最容易膨胀的一块）
+  "MEMORY.md": 20000, "HEARTBEAT.md": 20000, daily: 1500,
   // 近况：别的会话 / 别的 agent 最近跟主人说过的话（字数上限；0 = 不注入）
-  recent: 4000,
+  recent: 2000,
 };
 export const BUDGETS: Record<string, number> = { ...DEFAULT_BUDGETS };
 
@@ -125,6 +126,49 @@ export function clip(text: string, max: number): string {
 
 const readSafe = (p: string) => { try { return fs.readFileSync(p, "utf8"); } catch { return ""; } };
 
+/** 后台场景写每日笔记时带的标记（memory_write 按这一轮的用途加）：聊天时不把这些流水带进系统提示 */
+export const BG_NOTE_TAGS: Record<string, string> = { heartbeat: "heartbeat", cron: "定时任务", task: "待办" };
+/** 后台写的笔记行：带标记的，或者（加标记之前的老笔记）时刻后面紧跟 heartbeat 字样的 */
+const BG_NOTE_RE = /^[-*•]?\s*(\d{1,2}:\d{2}\s+)?(\[(heartbeat|定时任务|待办)\]|heartbeat)/i;
+
+/**
+ * 系统提示里的今昨笔记（LRN 2026-11-13，症状「系统提示上万 token」）：只带最近的几条，从最新的往回数到字数上限为止；
+ * 聊天等场景不带后台（heartbeat / 定时任务 / 待办）写的流水——那是她自己的工作记录，主人聊天用不上，heartbeat 场景照带（它要看自己刚做过什么）。
+ * 以前是两天全文、超了从**末尾**截（clip 留开头），越新的反而越看不到。更早的她用 memory_get / memory_search 查。
+ */
+export function recentNotes(ws: string, scene: Scene, budget: number, now = new Date()): { text: string; chars: number; total: number; left: number } {
+  const days = [new Date(now.getTime() - 86400_000), now];
+  const all: { day: string; line: string }[] = [];
+  let total = 0, bg = 0;
+  for (const d of days) {
+    const day = strftime("%Y-%m-%d", d);
+    for (const raw of readSafe(dailyNotePath(ws, d)).split("\n")) {
+      const line = raw.trimEnd();
+      if (!line.trim() || /^#\s/.test(line)) continue;
+      total += Array.from(line).length;
+      if (scene !== "heartbeat" && BG_NOTE_RE.test(line.trim())) { bg++; continue; }
+      all.push({ day, line });
+    }
+  }
+  if (!all.length) return { text: "", chars: 0, total, left: bg };
+  const picked: { day: string; line: string }[] = [];
+  let used = 0;
+  for (let i = all.length - 1; i >= 0; i--) {
+    const n = Array.from(all[i].line).length + 1;
+    if (picked.length && used + n > budget) break;
+    // 单条就超了上限：截到上限，至少带上最新的这一条
+    picked.unshift(n > budget ? { day: all[i].day, line: Array.from(all[i].line).slice(0, budget).join("") + "…" } : all[i]);
+    used += Math.min(n, budget);
+  }
+  const left = all.length - picked.length + bg;
+  const out: string[] = [];
+  let cur = "";
+  for (const p of picked) { if (p.day !== cur) { cur = p.day; out.push(`${out.length ? "\n" : ""}## ${p.day}`); } out.push(p.line); }
+  if (left) out.push(`\n（只带了最近的 ${picked.length} 条，还有 ${left} 条更早的 / 后台记录没带；要看用 memory_get 读 memory/<日期>.md）`);
+  const text = out.join("\n");
+  return { text, chars: Array.from(text).length, total, left };
+}
+
 export function dailyNotePath(ws: string, d = new Date()) {
   return path.join(ws, "memory", `${strftime("%Y-%m-%d", d)}.md`);
 }
@@ -147,6 +191,8 @@ export interface PromptTrace {
   files: { name: string; mode: "full" | "toc"; chars: number; clipped: boolean }[];
   notLoaded: string[];
   daily: number;
+  /** 今昨两天的笔记一共多少字（带进提示的只是最近的一部分） */
+  dailyTotal?: number;
   skills: number;
   peers: number;
   summary: number;
@@ -219,14 +265,9 @@ export function buildSystemPrompt(o: SoulOpts): string {
   }
   // 今天和昨天的笔记：新会话也能接上最近发生的事
   if (want.has("daily")) {
-    const today = new Date();
-    const yest = new Date(today.getTime() - 86400_000);
-    const notes = [yest, today].map((d) => {
-      const t = readSafe(dailyNotePath(ws, d)).trim();
-      return t ? `## ${strftime("%Y-%m-%d", d)}\n${t}` : "";
-    }).filter(Boolean).join("\n\n");
-    if (notes) parts.push(`<recent_notes>\n${clip(notes, BUDGETS.daily)}\n</recent_notes>`);
-    if (o.trace) o.trace.daily = Math.min(Array.from(notes).length, BUDGETS.daily);
+    const notes = recentNotes(ws, o.scene, BUDGETS.daily);
+    if (notes.text) parts.push(`<recent_notes>\n${notes.text}\n</recent_notes>`);
+    if (o.trace) { o.trace.daily = notes.chars; o.trace.dailyTotal = notes.total; }
   }
   if (o.skills?.length) {
     parts.push("<skills>\n可用技能（需要时用 skill_read 读全文再照做；要跑的脚本用 exec 执行）：\n"

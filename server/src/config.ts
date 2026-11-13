@@ -59,7 +59,8 @@ export interface Config {
   /** 可选：嵌入接口（OpenAI 兼容 /embeddings），没配就只用关键词检索 */
   embedding: { baseUrl: string; apiKey: string; model: string } | null;
   /** timeoutSecs：多少秒没有任何进展（出字、工具执行）就中断；maxSecs：一轮总时长上限 */
-  runtime: { maxConcurrency: number; timeoutSecs: number; maxSecs: number; maxToolCalls: number; maxTurnTokens: number; /** 监工（agent/watchdog.ts），false = 关 */ watchdog?: boolean };
+  runtime: { maxConcurrency: number; timeoutSecs: number; maxSecs: number; maxToolCalls: number; maxTurnTokens: number; /** 监工（agent/watchdog.ts），false = 关 */ watchdog?: boolean;
+    /** 工具按需加载（agent/toolgroups.ts），false = 像以前一样每轮全给 */ lazyTools?: boolean };
   a2a: { enabled: boolean; maxHops: number; perPairPerMin: number };
   /** 调度器 tick 间隔（秒）。测试里调小 */
   schedulerTick: number;
@@ -218,7 +219,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     models,
     embedding: emb && emb.base_url && emb.model ? { baseUrl: String(emb.base_url), apiKey: String(emb.api_key ?? ""), model: String(emb.model) } : null,
     runtime: { maxConcurrency: Number(rt.max_concurrency ?? 4), timeoutSecs: Number(rt.timeout_secs ?? 120), maxSecs: Number(rt.max_secs ?? 1800),
-      maxToolCalls: Number(rt.max_tool_calls ?? 40), maxTurnTokens: Number(rt.max_turn_tokens ?? 2_000_000), watchdog: rt.watchdog !== false },
+      maxToolCalls: Number(rt.max_tool_calls ?? 40), maxTurnTokens: Number(rt.max_turn_tokens ?? 2_000_000), watchdog: rt.watchdog !== false,
+      // 假服务商模式（契约测试的脚本直接调管理类工具）默认关，显式写 true 才开
+      lazyTools: rt.lazy_tools === undefined ? !fake : rt.lazy_tools !== false },
     a2a: { enabled: a2a.enabled ?? true, maxHops: Number(a2a.max_hops ?? 3), perPairPerMin: Number(a2a.per_pair_per_min ?? 10) },
     tools: parseToolsConfig(file.tools),
     promptBudgets: file.prompt_budgets && typeof file.prompt_budgets === "object" ? file.prompt_budgets : {},

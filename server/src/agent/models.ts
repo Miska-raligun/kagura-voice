@@ -143,7 +143,8 @@ export class ModelRegistry {
     const image = Array.isArray(content) && content.some((c: any) => c.type === "image");
     const scope = runScope();
     // 只记「回应用户消息」的那一次调用；工具结果之后的续写不算新的 LLM 请求
-    const afterTool = msgs.at(-1)?.role === "toolResult";
+    // 工具集中途变了（按需加载）时库会在工具结果后面插一条声明用的系统消息：跳过它再看
+    const afterTool = [...msgs].reverse().find((x) => x.role !== "system")?.role === "toolResult";
     if (!afterTool) {
       this.fake!.logCall({
         message: text, session: scope?.sessionKey ?? "", agent: scope?.agentId ?? "", image,

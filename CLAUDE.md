@@ -396,7 +396,7 @@ CoreS3 (MicroPython) ──HTTP──▶ server/（TypeScript 单文件可执行
 - **近况（`Runtime.recentActivity`，LRN 2026-10-26，症状「heartbeat / 主动聊天老问已经说过的事；换个 agent 又问一遍」）**：
   每个会话只看得见自己的历史——飞书私聊（没开 owner_main 时）、网页聊天、独立定时任务、别的 agent 各说各的，跨会话以前只能靠 agent 自己写记忆文件。
   现在每轮（只给可信会话、不给子任务 / 记忆冲刷）从库里摘最近 `RECENT_HOURS`（48）小时、**别处**跟主人的往来：本 agent 的其它会话 + 其他 agent 的，
-  按时间排、每条截 160 字、总量 `BUDGETS.recent`（4000 字，`prompt_budgets.recent` 可调，0 = 关），作为 `<recent_activity>` 放进系统提示，明说「说过的别再问、别再重复」。
+  按时间排、每条截 160 字、总量 `BUDGETS.recent`（2000 字，`prompt_budgets.recent` 可调，0 = 关），作为 `<recent_activity>` 放进系统提示，明说「说过的别再问、别再重复」。
   只摘「主人参与的会话」：`sessions.owner`（可信的一轮跑过就标上）或主会话 / 设备 / 网页；**陌生人、群聊的对话不混进来，不可信会话也拿不到近况**——别放宽，
   否则就是把主人的事讲给路人听。heartbeat 们的「用户消息」（`[heartbeat]` / `[定时任务` 等）不算主人说的话。零额外模型调用。
 - **设备文件同步（`ota.py`，管理界面「设备 → 图片与代码」）**：服务端 `server/src/devicefiles.ts` 存
@@ -595,6 +595,17 @@ CoreS3 (MicroPython) ──HTTP──▶ server/（TypeScript 单文件可执行
   一轮的用户消息是几段拼的（`[时间…]`、自动回忆、系统备注、主人的话），按多段格式发出去，有的兼容 OpenAI 的服务商只认第一段（只看到时间）、有的首尾直接粘起来（主人的话贴在记忆最后一条后面）。
   现在发之前合成一段、空行隔开，有回忆 / 备注时在主人的话前面加 `MSG_DIVIDER`；库里照旧分段（`stripRecall` 靠分段去掉回忆 / 备注）。**新加附在用户消息里的系统块也放在主人的话前面**。
   `test/wire.test.ts` 用本地假服务商看真实请求体；假模型（`models.ts` 的 fakeStream）按分隔句 / 时间行认出主人的话。
+- **系统提示瘦身（LRN 2026-11-13，症状「系统提示上万 token」）**：
+  ① **今昨笔记只带最近的**（`soul.recentNotes`）：从最新一条往回数到 `BUDGETS.daily`（默认 8000 → 1500 字）为止——以前两天全文、超了从末尾截（`clip` 留开头），越新的越看不到。
+  聊天等场景不带后台流水：`memory_write` 在 heartbeat / 定时任务 / 待办里写每日笔记时带标记（`BG_NOTE_TAGS`，`- 09:30 [heartbeat] …`；后台会话压缩记下的「今天：」也带），老笔记按「时刻后紧跟 heartbeat」认；heartbeat 场景照带（它要看自己刚做过什么）。
+  没带的在末尾说明还有几条、用 memory_get 读。ⓘ 里显示带了多少 / 两天共多少（`trace.dailyTotal`）。
+  ② **近况上限** 4000 → 2000 字（`prompt_budgets` 里显式设过的照旧）。
+  ③ **工具按需加载**（`agent/toolgroups.ts`，`runtime.lazy_tools: false` 关；假服务商模式默认关——契约测试的脚本直接调管理类工具）：45 个工具的定义约 5300 token，
+  用得少的分五组收着（`TOOL_GROUPS`：cron 管理 / 定时拍照 / 其他 agent 与子任务 / 扩展 / 待办与记忆管理），系统提示里只留 `<more_tools>` 目录，她调 `tools_load` 才摆出来，实测工具定义 5263 → 3397、目录 +200。
+  **常用的不收**：cron_add（建提醒）、sessions_send、task_add、exec、文件工具、记忆、read_ref、联网、take_photo / set_volume——设备语音对话多一次往返比多几百 token 贵。待办 / 子任务（干活的场景）全给。
+  加载在同一轮生效：`pi.prepareNextTurnWithContext` 换 `context.tools`（同时写回 `pi.state.tools`），库自己把新增的工具告诉模型（OpenAI / Anthropic 格式都验过，`test/slim.test.ts` 看真实请求体）；
+  加载过的组记在 `Runtime.loadedGroups`（按会话，闲置 6 小时收回，只在内存）。**没加载就直接调**（照着历史里以前的调用）会先得到 not found，系统替她加载好并插一句让她重调（`knote`，不进历史）。
+  新加内置工具时想一下它属于哪一类：聊天里随口会用到的留在外面，管理类的进某个组；被系统按名字认的（响应头、a2a 实时面板）别收。`allToolNames` 带每个工具的 `tokens`。
 - **运行状况（`agent/health.ts`，管理界面总览「运行状况」卡片 +「日志」页，LRN 2026-10-31，症状「出了问题只能翻一个大日志文件，也说不清最常出的是哪种」）**：
   每一轮（`Runtime.run` 外层）记成功 / 失败（`errorClass` 归类：限流 429、服务商出错、网络、超时、空回复、上下文超长、单轮上限、Key / 额度、被取消、其它）和用时，
   兜底动作各记一条（`empty_retry` / `nudge` / `overflow` / `guard` / `compact` / `compact_failed` / `voice` / `push_failed` / `sub_cancelled` / `unclean_exit`），存 system.sqlite 的 `health_events`，留 30 天。

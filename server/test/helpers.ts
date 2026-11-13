@@ -27,6 +27,7 @@ export function makeRuntime(opts: { roles?: any[]; cheap?: string } = {}) {
   const fake = new FakeCtl();
   models.enableFake(fake);
   const rt = new Runtime(reg, models, { maxConcurrency: 4, timeoutSecs: 10 });
+  rt.lazyTools = false;                    // 工具按需加载默认关：老测试的脚本直接调管理类工具；专门的测试自己打开
   rt.backgroundCompact = false;            // 后台预压缩会抢假模型的回复队列；需要的测试自己打开
   return { root, reg, models, fake, rt };
 }
