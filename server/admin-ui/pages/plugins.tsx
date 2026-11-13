@@ -142,12 +142,12 @@ function Mcp() {
               <td><Badge s={s.state === "connected" ? "ok" : s.state === "connecting" ? "connecting" : s.state === "disabled" ? "stopped" : "error"}
                 text={{ connected: "已连接", connecting: "连接中", disabled: "已停用", error: "出错" }[s.state as string] ?? s.state} />
                 {s.error ? <details><summary class="muted">错误</summary><pre>{s.error}{s.stderr ? `\n\n${s.stderr}` : ""}</pre></details> : null}</td>
-              <td>{s.tools.length ? <details><summary>{s.tools.length} 个</summary><ul>{s.tools.map((t: any) => (
+              <td>{s.tools.length ? <details><summary>{s.tools.length} 个{s.tokens ? <small class="muted"> · 约 {s.tokens} token · {s.lazy ? "按需加载" : "一直带着"}</small> : null}</summary><ul>{s.tools.map((t: any) => (
                 <li><code>{t.tool}</code>{t.exposure === "hidden" ? <small class="muted">（已隐藏）</small> : null}<br /><small class="muted">{t.description.slice(0, 160)}</small></li>))}</ul></details> : "—"}</td>
               <td>{s.state !== "disabled" && s.transport ? <Btn small onClick={async () => { await api(`/mcp/${enc(s.name)}/reconnect`, { body: {} }); toast("已重连"); reload(); }}>重连</Btn> : null}</td>
             </tr>))}
         </tbody></table> : <Empty>暂无 MCP 服务器</Empty>}
-        <p class="muted">工具名为 <code>mcp__服务器__工具</code>，仅可信会话可用；服务器配置 <code>"allowUntrusted": true</code> 后开放。</p>
+        <p class="muted">工具名为 <code>mcp__服务器__工具</code>，仅可信会话可用；服务器配置 <code>"allowUntrusted": true</code> 后开放。工具多的服务器平时收着、她要用时才调出来，<code>"lazy": true / false</code> 可指定。</p>
       </Card>
       <Card title="mcp.json" actions={<>
         {d.import_sources.map((s: any) => (

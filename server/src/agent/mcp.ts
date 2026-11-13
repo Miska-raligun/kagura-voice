@@ -6,7 +6,8 @@
 //       "docs":       { "url": "https://example.com/mcp", "headers": { "Authorization": "Bearer ${DOCS_TOKEN}" } } } }
 // 本地进程用 command/args/env/cwd，远程用 url/headers（streamable HTTP）。env / headers 里可以写 ${环境变量}。
 // 每个工具注册成 mcp__<服务器>__<工具>。exposure / toolExposure 只认 direct（默认）和 hidden——这里没有 pi 的 codemode，
-// 从 pi 抄来的 codemode / deferred 一律当 direct。
+// 从 pi 抄来的 codemode 当 direct；deferred = 按需加载（同 "lazy": true，见 toolgroups.ts：系统提示里只留一行，她要用时才调出来）。
+// 不写的话工具定义多的服务器（浏览器那种二十多个工具的）自动按需加载，小的照常摆着；"lazy": false 强制一直摆着。
 // 和执行命令一样，MCP 工具默认只在可信会话（主人）里出现；某个服务器确实无害（查天气之类）可以加 "allowUntrusted": true。
 import fs from "node:fs";
 import path from "node:path";
@@ -16,6 +17,8 @@ import { Type } from "@earendil-works/pi-ai";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import type { RunScope } from "./scope.ts";
 import type { AgentInfo } from "./registry.ts";
+import { toolTokens } from "./runtime.ts";
+import { isLazy, type LazyGroupMeta } from "./toolgroups.ts";
 
 export interface McpServerConfig {
   type?: string;
@@ -28,6 +31,8 @@ export interface McpServerConfig {
   toolExposure?: Record<string, string>;
   /** Kagura 扩展：IM 陌生人的会话里也能用（默认只给主人） */
   allowUntrusted?: boolean;
+  /** Kagura 扩展：按需加载（toolgroups.ts）。true = 平时收着、她要用时才调出来；false = 一直摆着；不写 = 工具定义多（超过 AUTO_LAZY_TOKENS）才收 */
+  lazy?: boolean;
 }
 
 export type ServerState = "disabled" | "connecting" | "connected" | "error";
@@ -51,6 +56,24 @@ const NAME_RE = /^[A-Za-z0-9_-]{1,40}$/;
 /** mcp__<server>__<tool>，只留字母数字下划线，最长 64（模型服务商的限制） */
 export function toolName(server: string, tool: string): string {
   return `mcp__${server}__${tool}`.replace(/[^A-Za-z0-9_]/g, "_").slice(0, 64);
+}
+
+/** 交给模型的工具定义（名字、说明、参数） */
+function defOf(server: string, t: McpTool) {
+  const schema: any = t.inputSchema && typeof t.inputSchema === "object" ? t.inputSchema : {};
+  return {
+    name: toolName(server, t.name),
+    label: t.title ?? t.name,
+    description: `[MCP ${server}] ${t.description ?? t.name}`.slice(0, 1500),
+    parameters: Type.Unsafe({ ...schema, type: "object", properties: schema.properties ?? {} }),
+  };
+}
+const describe = (s: Server) => s.cfg.description || s.instructions.split("\n")[0] || "";
+/** 配置里指定的按需加载（没指定 = undefined，按大小定）；pi 配置里的 exposure: "deferred" 也算 */
+const lazyOf = (cfg: McpServerConfig): boolean | undefined => (typeof cfg.lazy === "boolean" ? cfg.lazy : cfg.exposure === "deferred" ? true : undefined);
+function sizeOf(s: Server) {
+  const tokens = s.tools.filter((t) => exposureOf(s.cfg, t.name) !== "hidden").reduce((n, t) => n + toolTokens(defOf(s.name, t)), 0);
+  return { tokens, lazy: isLazy(lazyOf(s.cfg), tokens) };
 }
 
 /** ${VAR} 换成环境变量；整个值是 !命令 时取命令输出（与 pi 一致） */
@@ -207,10 +230,12 @@ export class McpManager {
     return [...this.servers.values()].map((s) => ({
       name: s.name, source: s.source, state: s.state, error: s.error, stderr: s.stderr.slice(-1500),
       transport: s.cfg.command ? "stdio" : "http", target: s.cfg.command ? [s.cfg.command, ...(s.cfg.args ?? [])].join(" ") : s.cfg.url,
-      description: s.cfg.description || s.instructions.split("\n")[0] || "",
+      description: describe(s),
       allowUntrusted: !!s.cfg.allowUntrusted,
+      // 工具定义每轮占多少（估算）、是不是按需加载
+      ...sizeOf(s),
       tools: s.tools.map((t) => ({ name: t.name, tool: toolName(s.name, t.name), description: t.description ?? "", exposure: exposureOf(s.cfg, t.name) })),
-    })).concat(this.configErrors.map((e) => ({ name: e.name, source: "mcp.json", state: "error" as ServerState, error: e.error, stderr: "", transport: "", target: "", description: "", allowUntrusted: false, tools: [] })));
+    })).concat(this.configErrors.map((e) => ({ name: e.name, source: "mcp.json", state: "error" as ServerState, error: e.error, stderr: "", transport: "", target: "", description: "", allowUntrusted: false, tokens: 0, lazy: false, tools: [] })));
   }
 
   /** 给运行时的工具提供者 */
@@ -222,12 +247,10 @@ export class McpManager {
         if (!scope.trusted && !s.cfg.allowUntrusted) continue;
         for (const t of s.tools) {
           if (exposureOf(s.cfg, t.name) === "hidden") continue;
-          const schema: any = t.inputSchema && typeof t.inputSchema === "object" ? t.inputSchema : {};
           out.push({
-            name: toolName(s.name, t.name),
-            label: t.title ?? t.name,
-            description: `[MCP ${s.name}] ${t.description ?? t.name}`.slice(0, 1500),
-            parameters: Type.Unsafe({ ...schema, type: "object", properties: schema.properties ?? {} }),
+            ...defOf(s.name, t),
+            // 按需加载：一个服务器一组（Runtime 的 LazyTools 认这个）
+            lazyGroup: { id: `mcp_${s.name}`, label: `MCP 服务器 ${s.name}`, hint: describe(s), lazy: lazyOf(s.cfg) } satisfies LazyGroupMeta,
             execute: async (_id: string, params: any, signal?: AbortSignal) => {
               if (!s.client) { await this.connect(s); if (!s.client) throw new Error(`MCP 服务器 ${s.name} 连不上：${s.error.split("\n")[0]}`); }
               const r = await s.client.callTool(t.name, (params ?? {}) as Record<string, unknown>, { signal, timeoutMs: Math.max(5, Number(s.cfg.timeout) || 60) * 1000 });

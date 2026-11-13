@@ -10,7 +10,8 @@ import { Memories } from "../src/agent/tools/memory.ts";
 import { AgentRegistry } from "../src/agent/registry.ts";
 import { ModelRegistry } from "../src/agent/models.ts";
 import { Runtime } from "../src/agent/runtime.ts";
-import { LOAD_TOOL } from "../src/agent/toolgroups.ts";
+import { LOAD_TOOL, LazyTools, AUTO_LAZY_TOKENS } from "../src/agent/toolgroups.ts";
+import { McpManager } from "../src/agent/mcp.ts";
 
 const day = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 
@@ -114,6 +115,86 @@ describe("工具按需加载", () => {
     fake.queue.push({ tool_calls: [{ name: "sessions_spawn" }], then: "派出去了" });
     await rt.run({ ...chat, text: "派个子任务" });
     expect(log).toEqual(["cron_update", "sessions_spawn"]);
+  });
+});
+
+describe("MCP 服务器按需加载", () => {
+  const FIXTURE = path.join(import.meta.dirname, "fixtures", "mcp-echo.mjs");
+  const mcpTool = (server: string, name: string, log: string[], o: { lazy?: boolean; hint?: string; pad?: number } = {}) => ({
+    ...fakeTool(`mcp__${server}__${name}`, log), description: `[MCP ${server}] ${name} ${"说明".repeat(o.pad ?? 5)}`,
+    lazyGroup: { id: `mcp_${server}`, label: `MCP 服务器 ${server}`, hint: o.hint ?? "", lazy: o.lazy },
+  });
+  const lazyOf = (tools: any[], loaded = new Set<string>()) => new LazyTools(tools, loaded, (t) => t, () => {});
+
+  it("一个服务器一组：工具定义多的默认收着，小的照常摆着；lazy: true / false 说了算", () => {
+    const log: string[] = [];
+    const big = Array.from({ length: 20 }, (_, i) => mcpTool("browser", `browser_op${i}`, log, { pad: 60, hint: "操作浏览器：打开网页、点击、填表、截图" }));
+    const small = ["get", "set"].map((n) => mcpTool("weather", n, log));
+    const forced = ["a"].map((n) => mcpTool("tiny", n, log, { lazy: true }));
+    const pinned = Array.from({ length: 20 }, (_, i) => mcpTool("always", `op${i}`, log, { pad: 60, lazy: false }));
+    const lz = lazyOf([fakeTool("exec", log), fakeTool("cron_list", log), ...big, ...small, ...forced, ...pinned]);
+    expect([...lz.hidden().keys()]).toEqual(["cron", "mcp_browser", "mcp_tiny"]);           // 内置的组在前
+    const names = lz.visible().map((t) => t.name);
+    expect(names).toContain("mcp__weather__get");
+    expect(names).toContain("mcp__always__op0");
+    expect(names).not.toContain("mcp__browser__browser_op0");
+    expect(names.at(-1)).toBe(LOAD_TOOL);
+    expect(lz.groupOf("mcp__browser__browser_op3")).toBe("mcp_browser");
+    expect(lz.groupOf("mcp__weather__get")).toBe("");
+    // 目录：一行说明 + 一共几个 + 前几个名字（去掉共同前缀），不把二十个定义都摆出来
+    const cat = lz.catalog();
+    expect(cat).toContain("- mcp_browser（MCP 服务器 browser）：操作浏览器：打开网页、点击、填表、截图——共 20 个工具（名字以 mcp__browser__ 开头）：browser_op0、browser_op1");
+    expect(cat).toContain("browser_op11 等");
+    expect(cat).not.toContain("browser_op12");
+    expect(cat).toContain("- mcp_tiny（MCP 服务器 tiny）：共 1 个工具（名字以 mcp__tiny__ 开头）：a");
+    expect(cat.length).toBeLessThan(900);
+    expect(AUTO_LAZY_TOKENS).toBe(800);
+  });
+
+  it("tools_load 认组名，也认只写服务器名 / 写了里面某个工具名", async () => {
+    const log: string[] = [];
+    const mk = () => lazyOf([...["a", "b"].map((n) => mcpTool("browser", n, log, { lazy: true })), ...["x"].map((n) => mcpTool("notes", n, log, { lazy: true }))]);
+    const load = async (lz: LazyTools, groups: string[]) => (await lz.visible().at(-1)!.execute("1", { groups } as any) as any);
+    let lz = mk();
+    expect((await load(lz, ["browser"])).details.loaded).toEqual(["mcp_browser"]);
+    expect(lz.visible().map((t) => t.name)).toEqual(["mcp__browser__a", "mcp__browser__b", LOAD_TOOL]);
+    expect((await load(lz, ["mcp__notes__x"])).details.loaded).toEqual(["mcp_notes"]);
+    expect(lz.visible().map((t) => t.name)).not.toContain(LOAD_TOOL);            // 都加载了，tools_load 也不用摆了
+    lz = mk();
+    expect((await load(lz, ["nope"])).content[0].text).toContain("还没加载的有：mcp_browser、mcp_notes");
+  });
+
+  it("真起一个 MCP 服务器：收着时模型看不到它的工具，tools_load 之后同一轮就能调；没加载就直接调也会自动补上", async () => {
+    const env = makeRuntime();
+    env.rt.lazyTools = true;
+    const dir = tmpdir("mcp-lazy");
+    const mgr = new McpManager(path.join(dir, "mcp.json"), { cwd: dir });
+    try {
+      await mgr.writeConfigText(JSON.stringify({ mcpServers: { echo: { command: process.execPath, args: [FIXTURE], lazy: true, description: "回声和加法" }, plain: { command: process.execPath, args: [FIXTURE] } } }));
+      // 管理界面：每个服务器的工具定义占多少、是不是按需加载（小服务器默认一直带着）
+      const st = Object.fromEntries(mgr.status().map((s: any) => [s.name, s]));
+      expect(st.echo.lazy).toBe(true);
+      expect(st.plain.lazy).toBe(false);
+      expect(st.plain.tokens).toBeGreaterThan(20);
+      expect(st.plain.tokens).toBeLessThan(AUTO_LAZY_TOKENS);
+      env.rt.addTools(mgr.tools(), { plugin: true });
+      const results = () => env.rt.store("main").history("main:main").map((h) => h.msg as any).filter((m) => m.role === "toolResult").map((m) => [m.toolName ?? "", !!m.isError, m.content[0].text]);
+      env.fake.queue.push({ tool_calls: [{ name: LOAD_TOOL, args: { groups: ["mcp_echo"] } }], then: { tool_calls: [{ name: "mcp__echo__add", args: { a: 2, b: 3 } }, { name: "mcp__plain__echo", args: { text: "嗨" } }], then: "是 5" } });
+      expect((await env.rt.run({ ...chat, text: "二加三" })).text).toBe("是 5");
+      expect(results().map((r) => [r[0], r[1]])).toEqual([[LOAD_TOOL, false], ["mcp__echo__add", false], ["mcp__plain__echo", false]]);
+      expect(results()[1][2]).toBe("5");
+      // 另一个会话里没加载过：照着以前的对话直接调 → 先报没找到，系统替她加载、让她重调
+      const other = { ...chat, sessionKey: "main:webchat:2", kind: "isolated" as const };
+      env.fake.queue.push({ tool_calls: [{ name: "mcp__echo__echo", args: { text: "在吗" } }], then: "不该用到" }, { tool_calls: [{ name: "mcp__echo__echo", args: { text: "在吗" } }], then: "在" });
+      expect((await env.rt.run({ ...other, text: "喊一声" })).text).toBe("在");
+      const k = (env.rt.store("main").history(other.sessionKey).at(-1)!.msg as any).kctx;
+      expect(k.deferred).toEqual([]);
+      // 待办这类干活的场景不收
+      env.fake.queue.push({ tool_calls: [{ name: "mcp__echo__add", args: { a: 1, b: 1 } }], then: "做完了\n状态：完成" });
+      const r = await env.rt.run({ agentId: "main", sessionKey: "main:task:9", kind: "isolated", channel: "system", purpose: "task", text: "算一下" });
+      expect(r.text).toContain("做完了");
+      expect((env.rt.store("main").history("main:task:9").find((h) => (h.msg as any).role === "toolResult")!.msg as any).isError).toBeFalsy();
+    } finally { await mgr.closeAll(); }
   });
 });
 

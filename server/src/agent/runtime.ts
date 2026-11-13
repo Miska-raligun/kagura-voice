@@ -17,7 +17,7 @@ import { BUDGETS, buildSystemPrompt, loadMode, sceneOf, turnContext, type Prompt
 import { toolAllowed, guestLocked } from "./toolpolicy.ts";
 import { runScope, withScope, type RunScope } from "./scope.ts";
 import { health, errorClass } from "./health.ts";
-import { LazyTools, LOADED_TTL_MS, groupOf } from "./toolgroups.ts";
+import { LazyTools, LOADED_TTL_MS } from "./toolgroups.ts";
 
 /** IM 渠道：消息可能来自陌生人，默认不可信（主人私聊由渠道层显式标 trusted） */
 export const IM_CHANNELS = new Set(["feishu", "qq", "onebot"]);
@@ -835,7 +835,7 @@ export class Runtime {
         this.loadedGroups.set(lockKey, e);
         if (this.loadedGroups.size > 500) this.loadedGroups.delete(this.loadedGroups.keys().next().value!);
         console.log(`[agent] 🧰 ${agent.id} ${req.sessionKey} 加载工具组 ${ids.join("、")}`);
-      }) : null;
+      }, toolTokens) : null;
     const tools = lazy ? lazy.visible() : allTools;
     const peers = this.agents.list().filter((p) => this.agents.canContact(agent.id, p.id)).map((p) => ({ id: p.id, name: p.name }));
     if (persist && scope.trusted) store.markOwner(req.sessionKey);
@@ -898,8 +898,8 @@ export class Runtime {
     });
     // 工具组刚加载（或者她没加载就直接调了收着的工具）：下一次调模型前换上新的工具集，库会把多出来的工具告诉模型
     if (lazy) pi.prepareNextTurnWithContext = (turn) => {
-      const missed = (turn.message.content ?? []).filter((c: any) => c.type === "toolCall" && groupOf(c.name) && !lazy.loaded.has(groupOf(c.name))).map((c: any) => String(c.name));
-      const auto = missed.length ? lazy.load([...new Set(missed.map(groupOf))]) : [];
+      const missed = (turn.message.content ?? []).filter((c: any) => c.type === "toolCall" && lazy.groupOf(c.name) && !lazy.loaded.has(lazy.groupOf(c.name))).map((c: any) => String(c.name));
+      const auto = missed.length ? lazy.load([...new Set(missed.map((n: string) => lazy.groupOf(n)))]) : [];
       if (!lazy.dirty) return undefined;
       lazy.dirty = false;
       const next = lazy.visible();

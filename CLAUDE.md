@@ -606,6 +606,10 @@ CoreS3 (MicroPython) ──HTTP──▶ server/（TypeScript 单文件可执行
   加载在同一轮生效：`pi.prepareNextTurnWithContext` 换 `context.tools`（同时写回 `pi.state.tools`），库自己把新增的工具告诉模型（OpenAI / Anthropic 格式都验过，`test/slim.test.ts` 看真实请求体）；
   加载过的组记在 `Runtime.loadedGroups`（按会话，闲置 6 小时收回，只在内存）。**没加载就直接调**（照着历史里以前的调用）会先得到 not found，系统替她加载好并插一句让她重调（`knote`，不进历史）。
   新加内置工具时想一下它属于哪一类：聊天里随口会用到的留在外面，管理类的进某个组；被系统按名字认的（响应头、a2a 实时面板）别收。`allToolNames` 带每个工具的 `tokens`。
+  **MCP 服务器也按需加载**（2026-11，接浏览器这类二十多个工具的服务器时）：一个服务器一组 `mcp_<名字>`，组信息由工具自己带着（`lazyGroup`：id / label / hint / lazy，`mcp.ts` 的 `tools()` 加；`guard.wrap` 复制自有属性所以带得过去）。
+  默认按大小定：这组定义加起来超过 `AUTO_LAZY_TOKENS`（800）才收，三五个小工具的照常摆着；服务器配置 `"lazy": true / false` 指定，pi 配置的 `exposure: "deferred"` 等同 true。
+  目录里自带组只写一行（`description` / 服务器 instructions 首行 + 共几个 + 前 12 个名字去前缀），**别把定义摊进目录**。组的归属一轮一算，**问 `LazyTools.groupOf`（实例方法），别用模块里那个只认内置组的 `groupOf`**；
+  `tools_load` 认组名、也认只写服务器名 / 里面某个工具名。别的来源（扩展）想整组收着，给工具加同样的 `lazyGroup` 就行。管理界面 MCP 表显示每个服务器的 `tokens` / `lazy`。
 - **运行状况（`agent/health.ts`，管理界面总览「运行状况」卡片 +「日志」页，LRN 2026-10-31，症状「出了问题只能翻一个大日志文件，也说不清最常出的是哪种」）**：
   每一轮（`Runtime.run` 外层）记成功 / 失败（`errorClass` 归类：限流 429、服务商出错、网络、超时、空回复、上下文超长、单轮上限、Key / 额度、被取消、其它）和用时，
   兜底动作各记一条（`empty_retry` / `nudge` / `overflow` / `guard` / `compact` / `compact_failed` / `voice` / `push_failed` / `sub_cancelled` / `unclean_exit`），存 system.sqlite 的 `health_events`，留 30 天。

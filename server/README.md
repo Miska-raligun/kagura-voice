@@ -152,6 +152,20 @@ agent 在可信会话里有 `extension_write` 等工具：写完立即加载并�
 值里可写 `${环境变量}`；可从 pi / Claude Desktop / Cursor 的配置一键导入。工具名 `mcp__<服务器>__<工具>`，`toolExposure: {"工具": "hidden"}` 隐藏。
 基于 `@earendil-works/pi-mcp`（stdio + Streamable HTTP；OAuth 登录的远程服务器暂不支持，可用 headers 带 token）。
 
+工具多的服务器（定义加起来超过约 800 token）**按需加载**：平时不摆出来，系统提示里只留一行说明，她要用时自己调出来，这个对话里之后一直在；
+小的照常每轮带着。`"lazy": true / false` 可以指定（pi 配置里的 `"exposure": "deferred"` 等同 `"lazy": true`）。`description` 写一句这个服务器是干什么的，她靠它判断什么时候该调出来。
+管理界面的服务器表里能看到每个服务器的定义占多少、是不是按需加载。
+
+**让她能操作浏览器**：接 Playwright 的 MCP 服务器（要本机装了 Node.js；第一次用会下载浏览器）：
+
+```json
+{ "mcpServers": { "browser": {
+    "command": "npx", "args": ["-y", "@playwright/mcp@latest"],
+    "description": "操作浏览器：打开网页、点击、填表、截图", "timeout": 120 } } }
+```
+
+二十多个工具、几千 token，默认就是按需加载的。只在你本人的对话里有；网页上的文字她会当成指令的来源之一，别让她登着重要账号去逛不可信的网站。
+
 **pi 扩展包**（管理界面「扩展 / MCP → 扩展包（pi 商店）」）：直接搜 pi 的扩展商店（[pi.dev/packages](https://pi.dev/packages)，即 npm 上带
 `pi-package` 关键字的包）一键安装；也能填 `pi install` 的来源写法（`npm:包名[@版本]`、`git:github.com/作者/仓库[@ref]`、GitHub 网址、
 本机路径）、上传 .tgz / .zip / 单个 .ts，或「从 pi 导入」（读 `~/.pi/agent/settings.json` 的 packages 和 `~/.pi/agent/extensions/`）。
