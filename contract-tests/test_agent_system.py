@@ -892,7 +892,7 @@ def test_bundled_blender_mcp(a):
         cfg = {"mcpServers": {"blender": {"command": "kagura", "args": ["mcp", "blender"], "env": {"BLENDER": "/nope/blender"}, "ownerOnly": ["model_build"]}}}
         srv = a.request("PUT", "/api/admin/mcp", json={"config": json.dumps(cfg)}).json()["servers"][0]
         assert srv["state"] == "connected", srv
-        assert [t["name"] for t in srv["tools"]] == ["model_build", "model_preview"]
+        assert [t["name"] for t in srv["tools"]] == ["model_build", "model_guide", "model_preview"]
         a.fake_llm(tool("mcp__blender__model_build", "Blender 没装", name="盒子", code="bpy.ops.mesh.primitive_cube_add()"))
         assert a.post("/api/admin/chat", json={"agent": "main", "text": "做个盒子"}).json()["reply"] == "Blender 没装"
         assert "没找到 Blender" in _transcript_text(a)

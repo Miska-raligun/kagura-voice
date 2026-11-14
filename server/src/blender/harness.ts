@@ -36,10 +36,15 @@ try:
     if args["mode"] == "build":
         code = open(args["code_file"], encoding="utf-8").read()
         g = {"__name__": "__kagura__", "bpy": bpy, "bmesh": bmesh, "mathutils": mathutils, "math": math, "Vector": mathutils.Vector}
+        # 预置的小函数（helpers.ts）：box / cylinder / cut / union / text3d …
+        if args.get("helpers_file"):
+            exec(compile(open(args["helpers_file"], encoding="utf-8").read(), "kagura_helpers.py", "exec"), g)
         try:
             exec(compile(code, "model.py", "exec"), g)
         except Exception:
-            res["error"] = "建模代码出错：\n" + traceback.format_exc(limit=5).split("exec(compile")[-1].strip()
+            tb = traceback.format_exc(limit=8)
+            i = tb.find('File "model.py"')
+            res["error"] = "建模代码出错：\n" + (tb[i:] if i >= 0 else tb).strip()
             raise SystemExit
         # 她的代码可能把物体转成了别的类型（文字、曲线）：转成网格
         for o in list(sc.objects):
@@ -126,7 +131,9 @@ try:
                 sh.curvature_ridge_factor = 1.5; sh.curvature_valley_factor = 1.5
             except Exception: pass
             sc.display.light_direction = (0.45, -0.35, 0.82)
-            if hasattr(sh, "background_color"): sh.background_color = (0.93, 0.93, 0.95)
+            # 浅灰背景（用世界颜色：存成 RGB 时视口背景会变黑）
+            w = bpy.data.worlds.new("kworld"); w.color = (0.92, 0.92, 0.94); sc.world = w
+            sh.background_type = "WORLD"
         def use_cycles():
             r.engine = "CYCLES"; sc.cycles.device = "CPU"; sc.cycles.samples = 16
             try: sc.cycles.use_denoising = False

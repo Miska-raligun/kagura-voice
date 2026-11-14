@@ -13,6 +13,8 @@ import readline from "node:readline";
 import { spawn } from "node:child_process";
 import type { Readable, Writable } from "node:stream";
 import { HARNESS } from "./harness.ts";
+import { HELPERS } from "./helpers.ts";
+import { guide, GUIDE_TOPICS } from "./guide.ts";
 
 export interface BuildReport {
   ok: boolean; error?: string; version?: string;
@@ -48,9 +50,10 @@ const NAME_RE = /^[\p{L}\p{N}_-]{1,60}$/u;
 export async function runBlender(blender: string, job: Record<string, unknown>, timeoutMs: number): Promise<BuildReport> {
   const work = fs.mkdtempSync(path.join(os.tmpdir(), "kagura-blender-"));
   try {
-    const script = path.join(work, "harness.py"), argFile = path.join(work, "args.json"), result = path.join(work, "result.json");
+    const script = path.join(work, "harness.py"), argFile = path.join(work, "args.json"), result = path.join(work, "result.json"), helpers = path.join(work, "kagura_helpers.py");
     fs.writeFileSync(script, HARNESS);
-    fs.writeFileSync(argFile, JSON.stringify({ ...job, result }));
+    fs.writeFileSync(helpers, HELPERS);
+    fs.writeFileSync(argFile, JSON.stringify({ ...job, result, helpers_file: helpers }));
     const out = await new Promise<{ code: number | null; log: string; timedOut: boolean }>((resolve) => {
       let log = "", timedOut = false;
       const child = spawn(blender, ["-b", "--factory-startup", "--python-exit-code", "1", "--python", script, "--", argFile], { cwd: work, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
@@ -90,10 +93,9 @@ export function describeReport(r: BuildReport, bed: number[]): string {
 const TOOLS = [
   {
     name: "model_build", title: "用 Blender 建模",
-    description: "写一段 Blender Python（bpy）建模代码，在后台的 Blender 里跑（不用开着 Blender），检查后导出 STL，并给你四个角度的预览图（左上：前面斜上方，右上：正面，左下：右侧，右下：背面斜上方）。"
-      + "规则：单位是毫米（1 = 1 mm），z 轴朝上，底面放在 z=0；每次都从空场景开始，所以每次给完整代码；场景里所有可见的网格（修改器生效后）会合成一个 STL。"
-      + "可以用 bpy.ops.mesh.primitive_*、bmesh、修改器（Boolean、Solidify、Bevel、Array）、文字（bpy.ops.object.text_add 后会自动转成网格）。"
-      + "要打印的东西必须是封闭的实体：别用单面平面；壁厚至少 1.2 mm；悬空超过 45° 要支撑。看预览图和检查结果确认对了再交给 printer_slice。代码会存成 <name>.py，下次改的时候可以 read_file 拿回来。",
+    description: "写一段 Blender Python 建模代码，在后台的 Blender 里跑（不用开着 Blender），检查后导出 STL，并给你四个角度的预览图（左上：前面斜上方，右上：正面，左下：右侧，右下：背面斜上方）。"
+      + "**第一次建模前先调 model_guide 看约定和预置的小函数**（box / cylinder / cone / sphere / text3d / cut / union / round_edges …，比直接写 bpy 可靠）。"
+      + "单位毫米，z 朝上，底面在 z=0；每次从空场景开始，给完整代码；所有可见网格合成一个 STL。看预览图和检查结果确认对了再交给 printer_slice。代码存成 <name>.py，改的时候可以 read_file 拿回来。",
     inputSchema: {
       type: "object", required: ["name", "code"],
       properties: {
@@ -101,6 +103,11 @@ const TOOLS = [
         code: { type: "string", description: "Blender Python 代码（bpy、bmesh、math、mathutils、Vector 已经导入）" },
       },
     },
+  },
+  {
+    name: "model_guide", title: "建模指导",
+    description: "用 Blender 建 3D 打印模型的指导：约定和流程、预置的小函数、打印规矩（壁厚 / 悬空 / 字）、配合间隙和螺丝孔尺寸、示例代码（带盖盒子、L 形支架、铭牌）、出问题怎么办。不填 topic 给约定 + 小函数 + 目录。",
+    inputSchema: { type: "object", properties: { topic: { type: "string", enum: [...GUIDE_TOPICS, "all"], description: "basics / helpers / printing / fits / examples / problems / all" } } },
   },
   {
     name: "model_preview", title: "看一个模型",
@@ -182,6 +189,7 @@ export function startBlenderMcp(o: BlenderMcpOpts): { close(): void } {
       case "tools/list": return ok({ tools: TOOLS });
       case "tools/call": {
         const name = m.params?.name, args = m.params?.arguments ?? {};
+        if (name === "model_guide") return ok({ content: [{ type: "text", text: guide(String(args?.topic ?? "")) }] });
         const run = name === "model_build" ? build(args) : name === "model_preview" ? preview(args) : null;
         if (!run) return ok({ content: [{ type: "text", text: `没有工具 ${name}` }], isError: true });
         run.then(ok).catch((e) => ok({ content: [{ type: "text", text: `出错了：${e?.message ?? e}` }], isError: true }));

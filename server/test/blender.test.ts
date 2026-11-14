@@ -5,7 +5,8 @@ import { execFileSync } from "node:child_process";
 import { PassThrough } from "node:stream";
 import { describe, it, expect, afterEach } from "vitest";
 import { tmpdir } from "./helpers.ts";
-import { findBlender, parseBed, describeReport, startBlenderMcp } from "../src/blender/mcp-server.ts";
+import { findBlender, parseBed, describeReport, startBlenderMcp, runBlender } from "../src/blender/mcp-server.ts";
+import { guide, GUIDE_TOPICS, EXAMPLES, HELPER_NAMES } from "../src/blender/guide.ts";
 
 function serve(env: Record<string, string>) {
   const input = new PassThrough(), output = new PassThrough();
@@ -49,7 +50,12 @@ describe("Blender 服务器", () => {
   it("参数不对、没装 Blender 都说清楚", async () => {
     const s = serve({ BLENDER: "/nope/blender", MODEL_DIR: tmpdir("models") });
     closers.push(s.close);
-    expect((await s.rpc("tools/list")).result.tools.map((t: any) => t.name)).toEqual(["model_build", "model_preview"]);
+    expect((await s.rpc("tools/list")).result.tools.map((t: any) => t.name)).toEqual(["model_build", "model_guide", "model_preview"]);
+    const g = (await s.call("model_guide", {})).content[0].text;
+    expect(g).toContain("## 基本约定");
+    expect(g).toContain("box(sx, sy, sz");
+    expect(g).toMatch(/- fits：配合间隙/);
+    expect((await s.call("model_guide", { topic: "fits" })).content[0].text).toContain("M3 3.4");
     expect((await s.call("model_build", { name: "a", code: "x" })).content[0].text).toContain("没找到 Blender");
     const s2 = serve({ BLENDER: process.execPath, MODEL_DIR: tmpdir("models") });
     closers.push(s2.close);
@@ -95,4 +101,23 @@ inner.hide_render = True; inner.hide_set(True)
       expect(p.content.some((c: any) => c.type === "image")).toBe(true);
     } finally { s.close(); }
   }, 240_000);
+
+  it("指南里的每个示例都能建出来：封闭、放得下", async () => {
+    const dir = tmpdir("examples");
+    for (const [name, [, code]] of Object.entries(EXAMPLES)) {
+      const f = path.join(dir, `${name}.py`);
+      fs.writeFileSync(f, code);
+      const r = await runBlender(blender, { mode: "build", code_file: f, out_stl: path.join(dir, `${name}.stl`), bed: [256, 256, 256] }, 120_000);
+      expect({ name, ok: r.ok, error: r.error, boundary: r.boundary, fits: r.fits, minZ: r.min?.[2] }).toEqual({ name, ok: true, error: undefined, boundary: 0, fits: true, minZ: expect.closeTo(0, 1) });
+    }
+  }, 300_000);
+
+  it("小函数：尺寸和位置对（底面中心在 at）；挖 / 合并之后工具物体没了；中文找不到字体会提示", async () => {
+    const dir = tmpdir("helpers");
+    const f = path.join(dir, "h.py");
+    fs.writeFileSync(f, "b = box(30, 20, 10, at=(5, 0, 0))\ncut(b, cylinder(3, 20, at=(5, 0, -1)))\nassert len(bpy.data.objects) == 1, [o.name for o in bpy.data.objects]");
+    const r = await runBlender(blender, { mode: "build", code_file: f, bed: [256, 256, 256] }, 120_000);
+    expect(r).toMatchObject({ ok: true, dims: [30, 20, 10], min: [-10, -10, 0], boundary: 0 });
+    expect(r.volume_mm3).toBeCloseTo(30 * 20 * 10 - Math.PI * 9 * 10, -1);
+  }, 120_000);
 });

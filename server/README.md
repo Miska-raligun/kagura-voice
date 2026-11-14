@@ -229,6 +229,7 @@ MCP 工具本来只能她去问。服务器配置里加 `"notify": true` 之后�
 
 「扩展 / MCP」里点「＋ Blender 建模」加上。**不用开着 Blender**：每次建模在后台起一个 Blender，跑完就退。她写 Blender 的 Python 建模代码（单位毫米），
 服务器跑完会检查尺寸、有没有破洞、放不放得进打印机，导出 STL，再给她四个角度的预览图——她看图确认对了，交给 `printer_slice` 切片、你确认后打印。
+`model_guide` 是给她的建模指导（约定、预置的小函数 box / cylinder / cut / union / text3d…、打印规矩、配合间隙和螺丝孔尺寸、示例代码），她用到哪节读哪节；
 `model_preview` 能看现成的 STL / OBJ（比如从 MakerWorld 下的）。代码和 STL、预览图在 `<数据目录>/models/<名字>/` 下。
 Blender 不在默认位置（Windows 的 `C:\Program Files\Blender Foundation\` 下）时在 env 里填 `BLENDER`；`MODEL_BED` 是打印范围（默认 256×256×256，P2S）。
 适合有明确尺寸的功能件（盒子、挂钩、支架、铭牌）；造型复杂的（手办、动物）还是去 MakerWorld 找。和打印机那个一样是独立进程，别的 MCP 客户端也能用。

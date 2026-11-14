@@ -662,7 +662,10 @@ CoreS3 (MicroPython) ──HTTP──▶ server/（TypeScript 单文件可执行
   非流形边、孤立点、放不放得下 `MODEL_BED`）→ 导出 STL → 四个角度 Workbench 渲染拼一张图（图片作为 MCP image 交给她看）。别改坏的点：
   ① `bpy.ops` 的 `hasattr` **永远是真**，新旧接口（4.1 起 `wm.stl_export` / 之前 `export_mesh.stl` 插件）用 `call_first` 挨个试；② 有的发行版的 Blender 没带 numpy，拼图用纯 Python；
   ③ 没显卡时 Workbench 靠 Mesa 软渲染（要 libEGL），失败退 Cycles CPU 并关降噪（有的没编进降噪库）；④ 文字 / 曲线转网格后**合并重合点**，不然整圈算破洞；只有 `boundary`（破洞）算问题，物体贴在一起的非流形边只提一句；
-  ⑤ 一次只跑一个 Blender，临时目录每次删。测试：`test/blender.test.ts` 在装了 Blender 的机器上真跑（CI 没装就跳过），契约测试只验能拉起和参数报错。
+  ⑤ 一次只跑一个 Blender，临时目录每次删。
+  **预置小函数 + 建模指导**（`helpers.ts` / `guide.ts`，`model_guide`）：她的代码之前先 exec 一段小函数（box / cylinder / cone / sphere / text3d / cut / union / intersect / move / rotate / round_edges / drop：
+  at 是底面中心、布尔一律 EXACT 且做完就应用并删掉工具物体、缩放已应用、文字转网格合并点）——比让她从 bpy 底层拼可靠得多。`_activate` 要跳过空引用（删过物体后 `view_layer.objects` 里会挂着 None）。
+  指导分节（basics / helpers / printing / fits / examples / problems），用到才读、不占每轮额度；**示例代码在 `test/blender.test.ts` 里用真的 Blender 逐个建一遍**（封闭、放得下），改示例 / 小函数要重跑，看一眼渲染图（形状对不对测试看不出来）。测试：`test/blender.test.ts` 在装了 Blender 的机器上真跑（CI 没装就跳过），契约测试只验能拉起和参数报错。
 - **运行状况（`agent/health.ts`，管理界面总览「运行状况」卡片 +「日志」页，LRN 2026-10-31，症状「出了问题只能翻一个大日志文件，也说不清最常出的是哪种」）**：
   每一轮（`Runtime.run` 外层）记成功 / 失败（`errorClass` 归类：限流 429、服务商出错、网络、超时、空回复、上下文超长、单轮上限、Key / 额度、被取消、其它）和用时，
   兜底动作各记一条（`empty_retry` / `nudge` / `overflow` / `guard` / `compact` / `compact_failed` / `voice` / `push_failed` / `sub_cancelled` / `unclean_exit`），存 system.sqlite 的 `health_events`，留 30 天。
