@@ -11,6 +11,22 @@ import { MqttLite } from "./mqttlite.ts";
 export type PrintState = "idle" | "preparing" | "printing" | "paused" | "finished" | "failed" | "unknown";
 export interface Temp { now: number; target: number }
 export interface Tray { slot: number; type: string; color: string; remain: number | null }
+/** 一个料盒（AMS）：编号从 1 起（打印机里 0 起；AMS HT 是 128 起）；型号从 get_version 里认，认不出是空 */
+export interface AmsUnit { id: number; no: number; model: string; humidity: number | null; temp: number | null; dryingMin: number | null; dryTemp: number | null }
+/** 能烘干的料盒型号（ha-bambulab 整理的） */
+export const DRYING_MODELS = ["AMS 2 Pro", "AMS HT"];
+/** get_version 里模块名的前缀 → 料盒型号（ha-bambulab 整理的） */
+const AMS_MODULES: [RegExp, string][] = [[/^n3f\//, "AMS 2 Pro"], [/^n3s\//, "AMS HT"], [/^ams_f1\//, "AMS Lite"], [/^n10a/, "AMS 3H"], [/^ams\//, "AMS"]];
+export function amsModelsOf(modules: any[]): Map<number, string> {
+  const m = new Map<number, string>();
+  for (const x of Array.isArray(modules) ? modules : []) {
+    const name = String(x?.name ?? "");
+    const hit = AMS_MODULES.find(([re]) => re.test(name));
+    const id = Number(name.split("/")[1]);
+    if (hit && Number.isFinite(id)) m.set(id, hit[1]);
+  }
+  return m;
+}
 export interface PrinterStatus {
   state: PrintState;
   /** 打印机报的原始状态（IDLE / PREPARE / RUNNING / PAUSE / FINISH / FAILED…） */
@@ -35,6 +51,8 @@ export interface PrinterStatus {
   /** 正在用的料槽（1 起）；外挂料盘 = 0；没在用 = null */
   activeSlot: number | null;
   amsHumidity: number | null;
+  /** 每个料盒的温湿度、烘干剩余 */
+  ams: AmsUnit[];
   wifi: string;
   /** 能不能控制：true = 开了开发者模式（第三方指令不用签名）；false = 没开，只能看；null = 打印机没报 */
   devMode: boolean | null;
@@ -115,7 +133,7 @@ export function merge(base: any, delta: any): any {
 }
 
 /** 原始状态（report 里 print 那一段并出来的）→ 整理好的状态 */
-export function parseStatus(p: any): PrinterStatus {
+export function parseStatus(p: any, amsModels: Map<number, string> = new Map()): PrinterStatus {
   p = p && typeof p === "object" ? p : {};
   const rawState = String(p.gcode_state ?? "").toUpperCase();
   const stageId = num(p.stg_cur);
@@ -128,10 +146,14 @@ export function parseStatus(p: any): PrinterStatus {
   let devMode: boolean | null = null;
   if (typeof p.fun === "string" && /^[0-9a-f]+$/i.test(p.fun)) { try { devMode = (BigInt(`0x${p.fun}`) & 0x20000000n) === 0n; } catch { /* 不认识就当不知道 */ } }
   const trays: Tray[] = [];
+  const ams: AmsUnit[] = [];
   let humidity: number | null = null;
   for (const unit of Array.isArray(p.ams?.ams) ? p.ams.ams : []) {
     const u = num(unit?.id) ?? 0;
     humidity ??= num(unit?.humidity_raw);
+    const dryMin = num(unit?.dry_time);
+    ams.push({ id: u, no: u >= 128 ? u - 127 : u + 1, model: amsModels.get(u) ?? "", humidity: num(unit?.humidity_raw), temp: num(unit?.temp),
+      dryingMin: dryMin, dryTemp: num(unit?.dry_setting?.dry_temperature) });
     for (const t of Array.isArray(unit?.tray) ? unit.tray : []) {
       const type = String(t?.tray_sub_brands || t?.tray_type || "").trim();
       if (!type) continue;                       // 空槽
@@ -159,6 +181,7 @@ export function parseStatus(p: any): PrinterStatus {
     trays,
     activeSlot: now === null || now === 255 ? null : now === 254 ? 0 : now + 1,
     amsHumidity: humidity,
+    ams,
     wifi: String(p.wifi_signal ?? ""),
     devMode,
   };
@@ -199,7 +222,13 @@ export function describeStatus(s: PrinterStatus, now = new Date()): string {
     parts.push(`料：${s.trays.map((x) => `${x.slot} 号 ${[x.color, x.type].filter(Boolean).join(" ")}${x.remain !== null ? `（剩 ${x.remain}%）` : ""}`).join("、")}`
       + (s.activeSlot ? `；正在用 ${s.activeSlot} 号` : s.activeSlot === 0 ? "；正在用外挂料盘" : "") + "。");
   }
-  if (s.amsHumidity !== null) parts.push(`料盒湿度 ${s.amsHumidity}%。`);
+  if (s.ams.length) {
+    parts.push(`料盒：${s.ams.map((a) => {
+      const bits = [a.humidity !== null ? `湿度 ${a.humidity}%` : "", a.temp !== null ? `${Math.round(a.temp)}℃` : "",
+        a.dryingMin ? `正在烘干（还剩 ${fmtDuration(a.dryingMin)}${a.dryTemp ? `，${a.dryTemp}℃` : ""}）` : ""].filter(Boolean);
+      return `${a.no} 号${a.model ? `（${a.model}）` : " "}${bits.join("，")}`;
+    }).join("；")}。`);
+  }
   return parts.join("");
 }
 
@@ -222,6 +251,7 @@ export type ConnState = "off" | "connecting" | "online" | "error";
 export type PrinterEvent =
   | { kind: "finish" | "failed" | "paused"; status: PrinterStatus; elapsedMin: number | null }
   | { kind: "warning"; status: PrinterStatus; codes: string[] }
+  | { kind: "dried"; status: PrinterStatus; unit: AmsUnit }
   | { kind: "cert" };
 
 export interface BambuOpts {
@@ -269,7 +299,11 @@ export class BambuPrinter {
 
   constructor(private o: BambuOpts) {}
 
-  get status(): PrinterStatus { return parseStatus(this.raw); }
+  /** 料盒型号（get_version 回来的），打印机固件版本 */
+  amsModels = new Map<number, string>();
+  firmware = "";
+  private drying = new Map<number, number>();
+  get status(): PrinterStatus { return parseStatus(this.raw, this.amsModels); }
   /** 收到过带状态的数据（没收到之前别拿空状态说「空闲」） */
   get ready() { return typeof this.raw?.gcode_state === "string"; }
 
@@ -332,6 +366,8 @@ export class BambuPrinter {
         this.log(`🔌 已连接 ${this.o.host}`);
         mq.subscribe(`${topic}/report`);
         this.pushall();
+        // 版本信息（只读）：认料盒型号（能不能烘干）、固件版本
+        mq.publish(`${topic}/request`, JSON.stringify({ info: { sequence_id: String(++this.seq), command: "get_version" } }));
         if (this.poll) clearInterval(this.poll);
         // 增量偶尔会漏、空闲时打印机也不怎么推：隔一阵要一份完整的（别太勤，老机型处理不过来）
         this.poll = setInterval(() => { if (Date.now() - this.lastSeen > PUSHALL_EVERY_MS) this.pushall(); }, 60_000);
@@ -384,6 +420,10 @@ export class BambuPrinter {
   }
 
   private onReport(msg: any) {
+    if (msg?.info?.command === "get_version" && Array.isArray(msg.info.module)) {
+      this.amsModels = amsModelsOf(msg.info.module);
+      this.firmware = String(msg.info.module.find((m: any) => m?.name === "ota")?.sw_ver ?? this.firmware);
+    }
     // 指令的回执：按 sequence_id 对上（print / system 两种外壳）
     for (const k of ["print", "system"]) {
       const r = msg?.[k];
@@ -407,6 +447,13 @@ export class BambuPrinter {
       const from = this.prev;
       this.prev = s.state;
       if (from !== undefined) this.later(() => this.transition(from, s.state));
+    }
+    // 料盒烘干完了（剩余时间从有变成 0）；刚连上时看到的不算
+    for (const a of s.ams) {
+      const before = this.drying.get(a.id);
+      if (a.dryingMin === null) continue;
+      this.drying.set(a.id, a.dryingMin);
+      if (before !== undefined && before > 0 && a.dryingMin === 0) this.o.onEvent?.({ kind: "dried", status: s, unit: a });
     }
     // 新冒出来的严重告警（刚连上时已经在的不算新的）
     const codes = s.hms.filter((h) => h.severity > 0 && h.severity <= 2).map((h) => h.code);

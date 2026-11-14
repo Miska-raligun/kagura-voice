@@ -8,6 +8,7 @@ import path from "node:path";
 import type { BambuPrinter, PrinterStatus } from "./bambu.ts";
 import { Ftps, type FtpDial, type FtpEntry } from "./ftps.ts";
 import { zipNames, platesOf, projectInfo, sliceInfo, modelMatches, fmtSeconds } from "./threemf.ts";
+import { DRYING_MODELS } from "./bambu.ts";
 import { slice, type SliceEnv } from "./slice.ts";
 
 export { zipNames, platesOf };
@@ -45,6 +46,21 @@ export const CONTROL_TOOLS = [
         bed_leveling: { type: "boolean", description: "打印前调平，默认 true" },
         timelapse: { type: "boolean", description: "拍延时摄影，默认 false" },
         confirm: { type: "string", description: "第一次调返回的确认码；主人同意后才带" },
+      },
+    },
+  },
+  {
+    name: "printer_ams_dry", title: "料盒烘干",
+    description: "让 AMS 料盒烘干耗材（AMS 2 Pro / AMS HT 才能烘干）或停止烘干。状态里看得到每个料盒的湿度和烘干剩余时间；烘干完会自动通知主人。"
+      + "温度按料选（不填就按料盒里的料自动选常用值）：PLA 不要超过 55℃（会软化粘在一起），PETG / TPU 约 65℃，ABS / ASA / PA / PC 料盒能给多高给多高。AMS 2 Pro 最高 65℃，AMS HT 最高 85℃；时长 1~24 小时。",
+    inputSchema: {
+      type: "object", required: ["action"],
+      properties: {
+        action: { type: "string", enum: ["start", "stop"] },
+        ams: { type: "number", description: "第几号料盒（1 起，和状态里的编号一样），默认 1" },
+        temp: { type: "number", description: "烘干温度 ℃（45~65，AMS HT 到 85）；不填按料自动选" },
+        hours: { type: "number", description: "烘干几小时（1~24），不填按料自动选" },
+        rotate: { type: "boolean", description: "烘干时转动料卷（烘得更均匀），默认 false" },
       },
     },
   },
@@ -149,6 +165,41 @@ export class PrinterControl {
       if (!all.length) return { text: "打印机上没有切好的打印文件（.3mf）。" };
       return { text: `打印机上的打印文件（文件名可以直接给 printer_print）：\n${all.map((f) => `- ${f.name}（${mb(f.size)}，${f.date}）`).join("\n")}` };
     } catch (e: any) { return { text: `列文件出错：${e.message}`, isError: true }; } finally { ftp.close(); }
+  }
+
+  /** 料盒烘干 / 停止烘干 */
+  async dry(args: any): Promise<{ text: string; isError?: boolean }> {
+    const r = this.ready();
+    if (typeof r === "string") return { text: r, isError: true };
+    const { p, s } = r;
+    if (!s.ams.length) return { text: `${this.o.name} 上没看到料盒（AMS）。`, isError: true };
+    const no = Math.round(Number(args?.ams ?? 1));
+    const unit = s.ams.find((a) => a.no === no && a.id < 128) ?? s.ams.find((a) => a.no === no);
+    if (!unit) return { text: `没有 ${no} 号料盒（有：${s.ams.map((a) => `${a.no} 号${a.model ? `（${a.model}）` : ""}`).join("、")}）。`, isError: true };
+    if (unit.model && !DRYING_MODELS.includes(unit.model)) return { text: `${unit.no} 号料盒是 ${unit.model}，不能烘干（AMS 2 Pro / AMS HT 才行）。`, isError: true };
+    const action = String(args?.action ?? "");
+    if (action === "stop") {
+      const res = await p.command("print", { command: "ams_filament_drying", ams_id: unit.id, temp: 0, cooling_temp: 45, duration: 0, humidity: 0, mode: 0, rotate_tray: false, filament: "", close_power_conflict: false });
+      this.o.log(`[${this.o.name}] 🔥 停止烘干 ${unit.no} 号 → ${res.ok ? "成功" : res.reason}`);
+      return res.ok ? { text: `${unit.no} 号料盒停止烘干了。` } : { text: res.reason, isError: !res.sent };
+    }
+    if (action !== "start") return { text: "action 是 start 或 stop", isError: true };
+    const ht = unit.model === "AMS HT" || unit.id >= 128;
+    const max = ht ? 85 : 65;
+    // 按料盒里的料选常用值（取里面最怕热的那种）：PLA 类 50℃，其它 65℃（AMS HT 上 ABS / PA / PC 这类再高些）
+    const types = s.trays.filter((t) => Math.ceil(t.slot / 4) === unit.id + 1).map((t) => t.type.toUpperCase());
+    const soft = types.some((t) => /^PLA|^PVA|^TPU/.test(t));
+    const hot = types.length > 0 && types.every((t) => /^(ABS|ASA|PA|PC|PET-CF|PAHT)/.test(t));
+    const temp = args?.temp !== undefined ? Number(args.temp) : soft ? 50 : hot && ht ? 80 : 65;
+    const hours = args?.hours !== undefined ? Number(args.hours) : soft ? 8 : 12;
+    if (!(temp >= 45 && temp <= max)) return { text: `温度要在 45~${max}℃ 之间（${unit.model || (ht ? "AMS HT" : "这个料盒")}最高 ${max}℃）。`, isError: true };
+    if (!(hours >= 1 && hours <= 24)) return { text: "时长要在 1~24 小时之间。", isError: true };
+    const warn = soft && temp > 55 ? `（注意：料盒里有 ${types.filter((t) => /^PLA|^PVA|^TPU/.test(t)).join("、")}，超过 55℃ 可能软化粘在一起）` : "";
+    const res = await p.command("print", { command: "ams_filament_drying", ams_id: unit.id, temp, cooling_temp: 45, duration: Math.round(hours), humidity: 0, mode: 1, rotate_tray: args?.rotate === true, filament: "", close_power_conflict: false });
+    this.o.log(`[${this.o.name}] 🔥 烘干 ${unit.no} 号 ${temp}℃ ${hours} 小时 → ${res.ok ? "成功" : res.reason}`);
+    if (res.ok) return { text: `${unit.no} 号料盒开始烘干：${temp}℃，${Math.round(hours)} 小时${types.length ? `（里面是 ${[...new Set(types)].join("、")}）` : ""}${warn}。烘干完会通知主人；过一会儿用 printer_status 看剩余时间。` };
+    const fw = p.firmware && this.o.model && /P2S/i.test(this.o.model) && p.firmware < "01.01.50.40" ? `（打印机固件 ${p.firmware}，烘干可能要 01.01.50.40 以上，先升级）` : "";
+    return { text: `${res.reason}${fw}。用 printer_status 看看料盒是不是开始烘干了。`, isError: !res.sent };
   }
 
   private slicing: Promise<unknown> = Promise.resolve();

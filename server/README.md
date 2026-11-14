@@ -220,9 +220,18 @@ MCP 工具本来只能她去问。服务器配置里加 `"notify": true` 之后�
   可以指定层高、填充密度、墙层数、支撑（不加 / 普通 / 树状）、裙边；不指定就用文件里的。MakerWorld 上同一个模型常有好几份打印配置，**下载给你这台机型做的那份最稳**（用它自带的配置切）；
   给别的机型的、STL 会换成这台的系统配置重切（实验性，原作者调过的参数带不过来；不行就在 Bambu Studio 里把打印机换成你这台、保存，再给她切）。
   Bambu Studio 不在默认位置时在 env 里填 `BAMBU_STUDIO`（`bambu-studio.exe` 的完整路径）；系统配置目录找不到时填 `BAMBU_PROFILES`；喷嘴不是 0.4 的填 `BAMBU_NOZZLE`。切好的文件在 `<数据目录>/bambu_printer/sliced/`
+- **料盒烘干**（`printer_ams_dry`，AMS 2 Pro / AMS HT 才行）：开始 / 停止，温度不填就按料盒里的料选（有 PLA 50℃ 8 小时，其它 65℃）；状态里看得到每个料盒的湿度、温度、烘干剩余时间，烘干完会通知你。P2S 固件要 01.01.50.40 以上
 - 发去打印前会核对：文件是给别的机型切的不让打（会撞板）；用了几种料就要说清用 AMS 的几号槽；文件按 PETG 切、槽里是 PLA 这种会提醒你
 - 从 MakerWorld 下载模型：接浏览器 MCP（见上面「让她能操作浏览器」），她能搜、能点下载，下载下来的文件给 `printer_slice` 切
 - `"ownerOnly"` 那一行让「开始打印」「控制」「切片」只在你本人的对话里有——待办、定时任务、heartbeat 这些没人看着的场景里她碰不到
+
+### 用 Blender 建模（自带的 MCP 服务器）
+
+「扩展 / MCP」里点「＋ Blender 建模」加上。**不用开着 Blender**：每次建模在后台起一个 Blender，跑完就退。她写 Blender 的 Python 建模代码（单位毫米），
+服务器跑完会检查尺寸、有没有破洞、放不放得进打印机，导出 STL，再给她四个角度的预览图——她看图确认对了，交给 `printer_slice` 切片、你确认后打印。
+`model_preview` 能看现成的 STL / OBJ（比如从 MakerWorld 下的）。代码和 STL、预览图在 `<数据目录>/models/<名字>/` 下。
+Blender 不在默认位置（Windows 的 `C:\Program Files\Blender Foundation\` 下）时在 env 里填 `BLENDER`；`MODEL_BED` 是打印范围（默认 256×256×256，P2S）。
+适合有明确尺寸的功能件（盒子、挂钩、支架、铭牌）；造型复杂的（手办、动物）还是去 MakerWorld 找。和打印机那个一样是独立进程，别的 MCP 客户端也能用。
 
 **型号**：`BAMBU_MODEL` 写 Bambu Studio 里打印机名去掉「Bambu Lab」和喷嘴的那段（`P2S`、`P1S`、`X1 Carbon`、`A1 mini`…），不填默认 `P2S`。切片按它选配置，发打印前按它核对文件。
 

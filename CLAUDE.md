@@ -650,10 +650,19 @@ CoreS3 (MicroPython) ──HTTP──▶ server/（TypeScript 单文件可执行
   （`from: "User"`、`inherits` = 自己的名字、`*_settings_id`；工艺 / 耗材里和机器重复的键去掉——社区的经验，命令行不认 inherits），`--load-settings 机器;工艺` + `--load-filaments` 每种料一份（同名换机型后缀 → 同材质 Generic）。实验性。
   别改坏的点：ⓐ **切完一律核对输出的机型**，不是这台就不交出去（别的机型的 G-code 会撞板）；`printer_print` 发之前也核对一遍；ⓑ 临时目录每次删掉（一次切片几百 MB）；一次只切一个；ⓒ 统计从 `Metadata/slice_info.config` 读（prediction 秒、weight 克、每种料 used_g），读不到就不说；
   ⓓ 多种料的文件发打印时必须给齐 `slots`，材质和槽里的对不上要提醒。命令行参数照官方 wiki + 社区整理，**没在真机上跑过**；测试用一个假的 `bambu-studio` 脚本（`test/slice.test.ts`）。
+  **料盒烘干（`printer_ams_dry`，2026-11）**：`{"print": {"command": "ams_filament_drying", ams_id, temp, cooling_temp: 45, duration（小时）, mode: 1 开 / 0 停, rotate_tray, …}}`（ha-bambulab 的格式；`cooling_temp` 低于 45 会被忽略）。
+  料盒型号靠连上时发的只读 `get_version`（`info.module` 的名字前缀：`n3f/` = AMS 2 Pro、`n3s/` = AMS HT…，`amsModelsOf`），认出不能烘干的就不发；温度上限 AMS 2 Pro 65℃、HT 85℃，1~24 小时；
+  状态 `ams[].dry_time`（分钟）从有变 0 = 烘干完，发 `dried` 通知（刚连上时看到的不算）。P2S 固件 01.01.50.40 以上才有烘干设置。
   Kagura 这边配 **`"ownerOnly": [工具名]`**（`mcp.ts`，通用）：这些工具只在主人本人的对话里有（`sceneOf(scope) === "owner"`），待办 / 定时任务 / heartbeat / 子任务 / agent 间都没有——模板里给 `printer_print` / `printer_control` 配上了。
   **字段含义全部来自社区逆向（ha-bambulab 等），写的时候没有真机（P2S）**：解析一律「有就用、没有就空着」，新机型的温度可能在 `device.*.info.temp`（目标 << 16 | 当前）；
   哪项不对让主人叫她调 `printer_status raw=true` 把原始数据发过来，照着改 `parseStatus`，测试里的 `FULL` 同步改。测试用 aedes 当假打印机、管道当标准输入输出（`test/printer.test.ts`），
   契约测试用打包好的程序真的自己拉起自己（`test_bundled_printer_mcp_and_notify`）。
+- **Blender 建模 = 自带的 MCP 服务器（`server/src/blender/`，`kagura mcp blender`，2026-11）**：主人要「不用一直开着 Blender」的版本（现成的 blender-mcp 要开着 Blender、点 Start Server），所以每次调用后台起一个
+  `blender -b --factory-startup --python <harness> -- <参数.json>`，跑完就退。`harness.ts` 是在 Blender 里跑的 Python：空场景（单位毫米）→ 跑她的代码 / 导入 STL·OBJ → 合起所有可见网格（修改器生效）检查（尺寸、体积、破洞边 `boundary`、
+  非流形边、孤立点、放不放得下 `MODEL_BED`）→ 导出 STL → 四个角度 Workbench 渲染拼一张图（图片作为 MCP image 交给她看）。别改坏的点：
+  ① `bpy.ops` 的 `hasattr` **永远是真**，新旧接口（4.1 起 `wm.stl_export` / 之前 `export_mesh.stl` 插件）用 `call_first` 挨个试；② 有的发行版的 Blender 没带 numpy，拼图用纯 Python；
+  ③ 没显卡时 Workbench 靠 Mesa 软渲染（要 libEGL），失败退 Cycles CPU 并关降噪（有的没编进降噪库）；④ 文字 / 曲线转网格后**合并重合点**，不然整圈算破洞；只有 `boundary`（破洞）算问题，物体贴在一起的非流形边只提一句；
+  ⑤ 一次只跑一个 Blender，临时目录每次删。测试：`test/blender.test.ts` 在装了 Blender 的机器上真跑（CI 没装就跳过），契约测试只验能拉起和参数报错。
 - **运行状况（`agent/health.ts`，管理界面总览「运行状况」卡片 +「日志」页，LRN 2026-10-31，症状「出了问题只能翻一个大日志文件，也说不清最常出的是哪种」）**：
   每一轮（`Runtime.run` 外层）记成功 / 失败（`errorClass` 归类：限流 429、服务商出错、网络、超时、空回复、上下文超长、单轮上限、Key / 额度、被取消、其它）和用时，
   兜底动作各记一条（`empty_retry` / `nudge` / `overflow` / `guard` / `compact` / `compact_failed` / `voice` / `push_failed` / `sub_cancelled` / `unclean_exit`），存 system.sqlite 的 `health_events`，留 30 天。

@@ -39,7 +39,7 @@ describe("状态解析", () => {
     expect(text).toContain("正在打印「Benchy」，63%，第 120/190 层，还要 42 分钟（预计 14:42 打完）。");
     expect(text).toContain("喷嘴 220℃（目标 220℃），热床 55℃（目标 55℃），仓内 38℃。");
     expect(text).toContain("料：1 号 白色 PLA Basic（剩 80%）、2 号 蓝色 PETG（剩 35%）、4 号 黑色 PLA；正在用 2 号。");
-    expect(text).toContain("料盒湿度 23%");
+    expect(text).toContain("料盒：1 号 湿度 23%。");
   });
 
   it("增量并进上一份：标量直接换，料槽按 id 并，告警整份换", () => {
@@ -100,7 +100,10 @@ async function fakePrinter(secure?: { key: Buffer; cert: Buffer }) {
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
   const port = (server.address() as net.AddressInfo).port;
   return {
-    port, requests, ctl, connects: () => connects, subscribed: () => new Promise<void>((r) => broker.once("subscribe", () => r())),
+    port, requests, ctl, connects: () => connects,
+    /** 原样发一条（不包 print），比如 get_version 的回执 */
+    raw: (msg: any) => new Promise<void>((r) => broker.publish({ cmd: "publish", topic: `device/${SERIAL}/report`, payload: Buffer.from(JSON.stringify(msg)), qos: 0, dup: false, retain: false }, () => r())),
+    subscribed: () => new Promise<void>((r) => broker.once("subscribe", () => r())),
     push: (print: any) => new Promise<void>((r) => broker.publish({ cmd: "publish", topic: `device/${SERIAL}/report`, payload: Buffer.from(JSON.stringify({ print })), qos: 0, dup: false, retain: false }, () => r())),
     close: async () => { await new Promise<void>((r) => broker.close(() => r())); server.close(); },
   };
@@ -449,7 +452,8 @@ describe("控制（BAMBU_CONTROL=1）", () => {
     const input = new PassThrough(), output = new PassThrough();
     const waiting = new Map<number, (r: any) => void>();
     let buf = "", id = 0;
-    output.on("data", (d) => { buf += d.toString(); for (let i; (i = buf.indexOf("\n")) >= 0;) { const m = JSON.parse(buf.slice(0, i)); buf = buf.slice(i + 1); if (m.id !== undefined) waiting.get(m.id)?.(m); } });
+    const notes: any[] = [];
+    output.on("data", (d) => { buf += d.toString(); for (let i; (i = buf.indexOf("\n")) >= 0;) { const m = JSON.parse(buf.slice(0, i)); buf = buf.slice(i + 1); if (m.id !== undefined) waiting.get(m.id)?.(m); else notes.push(m); } });
     const srv = startBambuMcp({ input, output, stateDir: tmpdir("bambu-state"), dial: plainDial(), ftpDial: plainFtp(), settleMs: 10, ackMs: 1200, log: () => {},
       env: { BAMBU_NAME: "P2S", BAMBU_STUDIO: studioBin ?? "", BAMBU_HOST: "127.0.0.1", BAMBU_PORT: String(fp.port), BAMBU_FTP_PORT: String(ftp.port), BAMBU_SERIAL: SERIAL, BAMBU_ACCESS_CODE: CODE, BAMBU_CONTROL: "1" } });
     closers.push(() => { srv.close(); input.end(); }, fp.close, ftp.close);
@@ -458,13 +462,13 @@ describe("控制（BAMBU_CONTROL=1）", () => {
     await until(() => srv.printer?.conn === "online");
     await fp.push(first);
     await until(() => !!srv.printer?.ready);
-    const sent = () => fp.requests.filter((r) => !r.pushing);
-    return { fp, ftp, srv, rpc, call, sent };
+    const sent = () => fp.requests.filter((r) => !r.pushing && !r.info);
+    return { fp, ftp, srv, rpc, call, sent, notes };
   }
 
   it("多出三个控制工具；没开开发者模式时不发指令、说清楚怎么开", async () => {
     const s = await setup({ ...FULL, fun: NODEV });
-    expect((await s.rpc("tools/list")).result.tools.map((t: any) => t.name)).toEqual(["printer_status", "printer_retrust", "printer_control", "printer_files", "printer_print", "printer_slice"]);
+    expect((await s.rpc("tools/list")).result.tools.map((t: any) => t.name)).toEqual(["printer_status", "printer_retrust", "printer_control", "printer_files", "printer_print", "printer_ams_dry", "printer_slice"]);
     expect((await s.call("printer_status")).text).toContain("打印机没开开发者模式：现在只能看");
     const r = await s.call("printer_control", { action: "pause" });
     expect(r).toMatchObject({ isError: true });
@@ -598,5 +602,32 @@ fs.copyFileSync(process.env.FAKE_OUT, at("--outputdir") + at("--export-3mf"));
     // 切好的直接拿去打：第一步就带上预计时间
     expect((await s.call("printer_print", { file: out })).text).toContain("预计：25 分钟，用料约 9 克");
     delete process.env.FAKE_OUT;
+  });
+
+  it("料盒烘干：认得出型号（get_version）；不填温度按料选；超温、不能烘干的型号挡掉；停止；烘干完通知", async () => {
+    const amsFull = { ...FULL, gcode_state: "IDLE", fun: DEV, ams: { ...FULL.ams, ams: [{ ...FULL.ams.ams[0], temp: "31.5", dry_time: 0 }, { id: "1", humidity_raw: "40", tray: [{ id: "0", tray_type: "PETG", tray_color: "000000FF" }] }] } };
+    const s = await setup(amsFull);
+    expect((await s.call("printer_status")).text).toContain("料盒：1 号 湿度 23%，32℃；2 号 湿度 40%。");
+    await s.fp.raw({ info: { command: "get_version", module: [{ name: "ota", sw_ver: "01.02.00.00" }, { name: "n3f/0", sw_ver: "00.00.06.40" }, { name: "ams/1", sw_ver: "1" }] } });
+    await until(() => s.srv.printer!.amsModels.size === 2);
+    expect(s.srv.printer!.firmware).toBe("01.02.00.00");
+    expect((await s.call("printer_status")).text).toContain("1 号（AMS 2 Pro）湿度 23%");
+    // 1 号里有 PLA：自动选 50℃ 8 小时
+    const go = await s.call("printer_ams_dry", { action: "start" });
+    expect(go.text).toMatch(/^1 号料盒开始烘干：50℃，8 小时（里面是 PLA BASIC、PETG、PLA）/);
+    expect(s.sent().at(-1).print).toMatchObject({ command: "ams_filament_drying", ams_id: 0, temp: 50, duration: 8, mode: 1, cooling_temp: 45, rotate_tray: false });
+    expect((await s.call("printer_ams_dry", { action: "start", temp: 70 })).text).toContain("45~65℃");
+    expect((await s.call("printer_ams_dry", { action: "start", temp: 60, hours: 4 })).text).toContain("超过 55℃ 可能软化");
+    expect((await s.call("printer_ams_dry", { action: "start", ams: 2 })).text).toContain("2 号料盒是 AMS，不能烘干");
+    expect((await s.call("printer_ams_dry", { action: "start", ams: 5 })).text).toContain("没有 5 号料盒");
+    expect((await s.call("printer_ams_dry", { action: "stop" })).text).toBe("1 号料盒停止烘干了。");
+    expect(s.sent().at(-1).print).toMatchObject({ command: "ams_filament_drying", ams_id: 0, mode: 0 });
+    // 烘干进行中 → 剩余时间归零：通知一次
+    await s.fp.push({ command: "push_status", ams: { ams: [{ id: "0", dry_time: 95, dry_setting: { dry_temperature: 50 } }] } });
+    await until(() => s.srv.printer!.status.ams[0].dryingMin === 95);
+    expect((await s.call("printer_status")).text).toContain("正在烘干（还剩 1 小时 35 分，50℃）");
+    await s.fp.push({ command: "push_status", ams: { ams: [{ id: "0", dry_time: 0, humidity_raw: "12" }] } });
+    await until(() => s.notes.some((n: any) => /烘干好了/.test(n.params?.data)));
+    expect(s.notes.find((n: any) => /烘干好了/.test(n.params.data)).params).toMatchObject({ level: "notice", data: "P2S 的 1 号料盒烘干好了，现在湿度 12%。" });
   });
 });

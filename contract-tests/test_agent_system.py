@@ -855,7 +855,7 @@ def test_bundled_printer_mcp_and_notify(a):
         cfg["mcpServers"]["printer"]["env"]["BAMBU_CONTROL"] = "1"
         cfg["mcpServers"]["printer"]["ownerOnly"] = ["printer_print", "printer_control"]
         srv = a.request("PUT", "/api/admin/mcp", json={"config": json.dumps(cfg)}).json()["servers"][0]
-        assert [t["name"] for t in srv["tools"]] == ["printer_status", "printer_retrust", "printer_control", "printer_files", "printer_print", "printer_slice"]
+        assert [t["name"] for t in srv["tools"]] == ["printer_status", "printer_retrust", "printer_control", "printer_files", "printer_print", "printer_ams_dry", "printer_slice"]
         a.fake_llm(tool("mcp__printer__printer_control", "连不上，停不了", action="stop"))
         assert a.post("/api/admin/chat", json={"agent": "main", "text": "把打印停了"}).json()["reply"] == "连不上，停不了"
         assert "P2S 现在连不上" in _transcript_text(a)
@@ -884,3 +884,17 @@ def test_webchat_send_file_shows_in_history(a, tmp_path):
     assert "attachment" in a.get(f"/api/admin/agents/main/uploads?path={requests_quote(rel)}&download=1").headers.get("Content-Disposition", "")
     assert a.get("/api/admin/agents/main/uploads?path=agent.json").status_code == 400
     assert a.get("/api/admin/agents/main/uploads?path=sent/../../agent.json").status_code in (400, 404)
+
+
+def test_bundled_blender_mcp(a):
+    """自带的 Blender 建模服务器：这个程序自己拉起自己（kagura mcp blender），两个工具；参数不对照实说"""
+    try:
+        cfg = {"mcpServers": {"blender": {"command": "kagura", "args": ["mcp", "blender"], "env": {"BLENDER": "/nope/blender"}, "ownerOnly": ["model_build"]}}}
+        srv = a.request("PUT", "/api/admin/mcp", json={"config": json.dumps(cfg)}).json()["servers"][0]
+        assert srv["state"] == "connected", srv
+        assert [t["name"] for t in srv["tools"]] == ["model_build", "model_preview"]
+        a.fake_llm(tool("mcp__blender__model_build", "Blender 没装", name="盒子", code="bpy.ops.mesh.primitive_cube_add()"))
+        assert a.post("/api/admin/chat", json={"agent": "main", "text": "做个盒子"}).json()["reply"] == "Blender 没装"
+        assert "没找到 Blender" in _transcript_text(a)
+    finally:
+        a.request("PUT", "/api/admin/mcp", json={"config": json.dumps({"mcpServers": {}})})
