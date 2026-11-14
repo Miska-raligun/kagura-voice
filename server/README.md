@@ -123,8 +123,14 @@ kagura migrate <旧仓库目录>     # config.py → config.json，并复制提�
 
 `take_photo` `set_volume` `get_presence` `photo_schedule_*` · `memory_search` `memory_get` `memory_write` ·
 `cron_list` `cron_add` `cron_update` `cron_remove` `cron_run` · `sessions_list` `sessions_history` `sessions_send` `sessions_spawn` · `skill_read` ·
-`exec` · `web_search` `web_fetch` · `extension_list` `extension_read` `extension_write` `extension_remove`（自己写工具）·
+`exec` · `read_file` `edit_file` `write_file` `search_files` `list_files` · `send_file` · `web_search` `web_fetch` · `extension_list` `extension_read` `extension_write` `extension_remove`（自己写工具）·
 `package_search` `package_install` `package_list` `package_remove`（pi 扩展包）· `mcp__<服务器>__<工具>`
+
+**发文件给你（`send_file`）**：她把这台电脑上的文件（图片、文档、表格、压缩包…，单个 30MB 以内，一轮最多 10 个）跟回复一起发过来：
+网页会话里显示在对话中（图片直接显示，其它可下载，PDF 可以直接打开），飞书里发成图片 / 文件消息（飞书应用要有 `im:resource` 权限），QQ 个人号（OneBot）只能发图片。
+发出去的那份会复制到她工作目录的 `sent/<日期>/` 下，历史记录里一直看得到。只在你本人的对话里有。
+
+**文件工具的路径**：相对路径按她的工作目录算；绝对路径和 `~/…` 照样能用，所以工作目录外的文件也能读写——范围就是运行 Kagura 的那个系统用户能访问的所有文件（和 `exec` 一样）。
 
 **执行命令（`exec`）的权限**：只有可信会话里才有这个工具——设备、网页聊天、定时任务 / heartbeat、渠道白名单里标了 owner 的私聊。
 IM 陌生人和群聊里没有；经 a2a 转手、或在不可信会话里建 / 改的定时任务，都沿用发起方的可信度（`RunScope.trusted`、`Job.untrusted`）。

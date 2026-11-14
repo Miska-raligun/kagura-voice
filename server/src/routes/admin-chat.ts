@@ -5,7 +5,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { bytes, json, type Req, type Res, type Router } from "../http/router.ts";
-import { resolveInside } from "../agent/paths.ts";
+import { resolveInside, safeName } from "../agent/paths.ts";
 import type { AgentSystem } from "../agent/system.ts";
 import { isLocal } from "./admin.ts";
 
@@ -18,11 +18,7 @@ const TEXT_EXT = /\.(txt|md|markdown|csv|tsv|json|jsonl|ya?ml|toml|ini|cfg|conf|
 
 export interface Upload { name: string; b64: string }
 
-/** 文件名只留安全的部分（保留中文），防目录穿越 */
-export function safeName(name: string): string {
-  const base = path.basename(String(name).replace(/\\/g, "/")).replace(/[\x00-\x1f<>:"|?*]/g, "_").replace(/^\.+/, "").trim();
-  return base.slice(-120) || "file";
-}
+export { safeName };
 
 /** 存上传的文件，返回附在消息后面的说明 */
 export function saveUploads(workspace: string, files: Upload[], now = new Date()): string {
@@ -43,7 +39,7 @@ export function saveUploads(workspace: string, files: Upload[], now = new Date()
     if (isText && data.length <= INLINE_TEXT_BYTES) {
       parts.push(`<file name="${name}" path="${rel}">\n${data.toString("utf8")}\n</file>`);
     } else {
-      parts.push(`[附件 ${name}（${(data.length / 1024).toFixed(1)}KB）已保存到你工作目录下的 ${rel}（完整路径 ${abs}）。需要看内容就用 exec 处理它。]`);
+      parts.push(`[附件 ${name}（${(data.length / 1024).toFixed(1)}KB）已保存到你工作目录下的 ${rel}（完整路径 ${abs}）。需要看内容就用 read_file / exec 处理它。]`);
     }
   }
   return "\n\n" + parts.join("\n\n");
@@ -128,17 +124,19 @@ export function registerAdminChat(r: Router, sys: AgentSystem) {
     };
   }));
 
-  /** 会话里引用的图片 / 上传的文件（只认工作目录 uploads/ 下的） */
+  /** 会话里引用的图片 / 上传的文件 / 她发给主人的文件（只认工作目录 uploads/、sent/ 下的） */
   r.add("GET", "/api/admin/agents/<id>/uploads", guard((req) => {
     const a = registry.get(req.params.id);
     if (!a) return json({ error: `没有 agent ${req.params.id}` }, 404);
     const rel = String(req.query.get("path") ?? "");
-    if (!rel.startsWith("uploads/")) return json({ error: "只能取 uploads/ 下的文件" }, 400);
+    if (!rel.startsWith("uploads/") && !rel.startsWith("sent/")) return json({ error: "只能取 uploads/ 或 sent/ 下的文件" }, 400);
     const f = resolveInside(a.workspace, rel);
     if (!fs.existsSync(f) || !fs.statSync(f).isFile()) return json({ error: "没有这个文件" }, 404);
     const ext = path.extname(f).toLowerCase();
-    const mime = { ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp", ".gif": "image/gif" }[ext] ?? "application/octet-stream";
-    return bytes(fs.readFileSync(f), mime, { "Cache-Control": "max-age=86400", ...(mime === "application/octet-stream" ? { "Content-Disposition": `attachment; filename*=UTF-8''${encodeURIComponent(path.basename(f))}` } : {}) });
+    const mime = { ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp", ".gif": "image/gif", ".bmp": "image/bmp", ".pdf": "application/pdf" }[ext] ?? "application/octet-stream";
+    // ?download=1 一律下载；图片和 PDF 默认在浏览器里打开，其它下载
+    const dl = mime === "application/octet-stream" || req.query.get("download") === "1";
+    return bytes(fs.readFileSync(f), mime, { "Cache-Control": "max-age=86400", "X-Content-Type-Options": "nosniff", ...(dl ? { "Content-Disposition": `attachment; filename*=UTF-8''${encodeURIComponent(path.basename(f))}` } : {}) });
   }));
 
   r.add("DELETE", "/api/admin/agents/<id>/sessions/<key>", guard((req) => {

@@ -446,6 +446,13 @@ CoreS3 (MicroPython) ──HTTP──▶ server/（TypeScript 单文件可执行
   整理后不到原来 `DOC_MIN_KEEP`（50%，按真正多出来的部分算）不写；删掉的进同目录 `PERSONA.archive.md`。结果在 `TidyResult.docs`，`memStatus` 是记忆那部分，`status` 是整趟的。
   自动整理的结果按 heartbeat 投递目标告诉主人（同待办汇报），没做成的第二天再试；状态 `memory_tidy.json`（`{agents, docs}`）。入口：她的 `memory_tidy` 工具（`scope` = all / memory / docs，可信、非子任务）、
   管理界面人设文件页 MEMORY / USER 的「整理记忆」、AGENTS / TOOLS / HEARTBEAT 的「整理守则」（`POST /api/admin/agents/<id>/memory-tidy {scope}`）。日志 `🧹`，health `memory_tidy`。
+- **发文件给主人（`send_file`，`agent/tools/send.ts`，2026-11，症状「网页会话里她发不了图片 / 文件，飞书只能带 take_photo 拍的那张」）**：
+  只在回复会直接送到人眼前的可信会话里有（`channel` ∈ webchat / feishu / onebot，非子任务）——设备语音、待办、定时任务、heartbeat 里发了没人收，不给；`LOCKED_NAMES` 锁着（能读这台电脑的任意文件，给陌生人就是往外拿文件）。
+  执行时把文件**复制**到工作目录 `sent/<日期>/`（重名加序号）、记进 `scope.meta.files`、工具结果里带一行 `[文件 sent/…]`（`SENT_RE`）。别改坏的点：
+  ① 网页会话**靠工具结果里那一行**显示附件（`common.Message` 对 `toolName === "send_file"` 的结果不折叠，画成「📎 发来的文件」：图片内嵌、PDF 可打开、其它下载），不另存元数据、也不用在发给模型前剥掉；
+  `GET /api/admin/agents/<id>/uploads?path=` 认 `uploads/` 和 `sent/`（`resolveInside` 防穿越，`?download=1` 强制下载）；② IM：`ChannelManager` 把 `r.meta.files` 经 `SendOpts.files` 交给渠道，
+  飞书图片（≤10MB）发图片消息、其它 `im.file.create`（`feishuFileType`，视频 / 语音也当普通文件发，免得要时长和封面）+ `file` 消息；一个失败不影响别的，`send` 返回没发出去的，管理器补一句「…没发出去」；
+  OneBot 只发图片（工具里就挡掉了别的），QQ 官方机器人没有这个工具（图片要公网地址）；③ 单个 `SEND_MAX_BYTES`（30MB，飞书文件上限）、一轮 `SEND_MAX_FILES`（10）。手机网页客户端（`/app`）还没接。
 - **文件工具（`server/src/agent/tools/files.ts`，LRN 2026-11-10，症状「她改文件全靠 exec 拼 cat / sed / grep，容易改错也难自查」）**：
   `read_file`（带行号、offset / limit 分段）/ `edit_file`（精确替换、必须唯一或 `replace_all`，返回改完前后几行）/ `write_file` / `search_files`（正则，跳过 node_modules、.git、二进制、>5MB）/ `list_files`（通配，新改的在前）。
   **改已有文件前必须在这个会话里 read_file 读过、且读完没被改过**（按 mtime + 大小记在内存里，重启就清空；她自己 edit / write 后会更新）。

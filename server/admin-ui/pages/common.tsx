@@ -64,6 +64,19 @@ export function Message({ m, agent = "" }: { m: any; agent?: string }) {
   const time = m.ts && <small> {new Date(m.ts * 1000).toLocaleString("zh-CN", { hour12: false })}</small>;
   if (cls === "t") {
     const text = parts.filter((c: any) => c.type === "text").map((c: any) => c.text).join("\n");
+    // 她发给主人的文件（send_file）：画成附件，不折叠在工具结果里
+    const sent = msg.toolName === "send_file" && !msg.isError && agent ? [...text.matchAll(/^\[文件 (sent\/[^\]\n]+)\]$/gm)].map((x) => x[1]) : [];
+    if (sent.length) return (
+      <div class={`msg a att ${m.compacted ? "old" : ""}`}>
+        <div class="who">📎 发来的文件{time}</div>
+        {sent.map((rel) => {
+          const name = rel.split("/").pop()!;
+          return /\.(jpe?g|png|webp|gif|bmp)$/i.test(name)
+            ? <a href={upl(rel)} target="_blank"><img class="chatimg" src={upl(rel)} alt={name} /></a>
+            : <div class="file"><a href={`${upl(rel)}&download=1`} download={name}>⬇ {name}</a>{/\.pdf$/i.test(name) ? <> · <a href={upl(rel)} target="_blank">打开</a></> : null}</div>;
+        })}
+      </div>
+    );
     return (
       <details class={`msg t ${m.compacted ? "old" : ""}`}>
         <summary class="who">🔧 工具结果 {msg.toolName ?? ""}{msg.isError && <small class="over"> 出错</small>}{time}</summary>

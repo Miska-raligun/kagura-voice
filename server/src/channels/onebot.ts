@@ -1,5 +1,6 @@
 // QQ（OneBot v11，可选）：连本机 NapCat / LLOneBot 等 OneBot 实现的正向 WebSocket。
 // ⚠️ 非官方协议，有封号风险——只作为可选项、默认关闭，管理界面里写明风险。
+import fs from "node:fs";
 import WebSocket from "ws";
 import type { ChannelAdapter, ChannelStatus, InboundMessage, SendOpts } from "./types.ts";
 import { STATUS_INIT } from "./types.ts";
@@ -111,6 +112,8 @@ export class OneBotAdapter implements ChannelAdapter {
     if (opts.replyTo) msg.push({ type: "reply", data: { id: opts.replyTo } });
     msg.push({ type: "text", data: { text: stripMarkdown(text) || text } });
     if (opts.image) msg.push({ type: "image", data: { file: `base64://${opts.image.toString("base64")}` } });
+    // send_file 只会给这里图片（工具里就挡掉了别的）
+    for (const f of opts.files ?? []) if (f.image) msg.push({ type: "image", data: { file: `base64://${(await fs.promises.readFile(f.path)).toString("base64")}` } });
     if (type === "group") await this.call("send_group_msg", { group_id: Number(id), message: msg });
     else await this.call("send_private_msg", { user_id: Number(id), message: msg });
   }

@@ -2,6 +2,12 @@
 import fs from "node:fs";
 import path from "node:path";
 
+/** 文件名只留安全的部分（保留中文），防目录穿越 */
+export function safeName(name: string): string {
+  const base = path.basename(String(name).replace(/\\/g, "/")).replace(/[\x00-\x1f<>:"|?*]/g, "_").replace(/^\.+/, "").trim();
+  return base.slice(-120) || "file";
+}
+
 /** 把相对路径解析到 root 里面；绝对路径、.. 逃逸、符号链接逃逸一律抛错 */
 export function resolveInside(root: string, rel: string): string {
   if (!rel || path.isAbsolute(rel) || /^[a-zA-Z]:/.test(rel) || rel.includes("\0")) throw new Error(`路径不合法: ${rel}`);

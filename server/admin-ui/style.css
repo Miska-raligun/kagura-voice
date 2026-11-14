@@ -203,6 +203,7 @@ iframe.monitor { width:100%; height:calc(100vh - 170px); border:1px solid var(--
 .msg .md table { border-collapse:collapse; margin:.4em 0; display:block; overflow-x:auto; } .msg .md th, .msg .md td { border:1px solid var(--line); padding:4px 8px; text-transform:none; letter-spacing:0; }
 .msg .md blockquote { margin:.4em 0; padding-left:10px; border-left:3px solid var(--line2); color:var(--muted); } .msg .md img { max-width:100%; border-radius:8px; }
 .chatimg { max-width:min(320px, 100%); max-height:260px; border-radius:8px; display:block; margin:4px 0; }
+.msg.att .file { margin:4px 0; padding:6px 10px; border:1px solid var(--line); border-radius:8px; display:inline-block; max-width:100%; word-break:break-all; }
 .msg.t > summary { list-style:none; } .msg.t .toolout { white-space:pre-wrap; word-break:break-word; max-height:300px; overflow:auto; font-size:12px; margin:6px 0 0; }
 .msg details.file, .msg div.file { margin:4px 0; font-size:13px; } .msg details.file pre { max-height:200px; overflow:auto; font-size:12px; white-space:pre-wrap; }
 .composer2 { border:1px solid var(--line2); margin-top:12px; padding:8px; border-radius:12px; background:var(--panel2); } .composer2.drag { outline:2px dashed var(--accent); }

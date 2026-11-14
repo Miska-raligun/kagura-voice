@@ -225,6 +225,7 @@ export function toolGuide(tools: string[]): string {
   const has = (n: string) => tools.includes(n);
   const g: string[] = [];
   if (has("take_photo")) g.push("要看东西（「这是什么」「帮我看看」）就 take_photo，别凭空猜。");
+  if (has("send_file")) g.push("主人要文件、或者你做出来的东西本身就是文件（表格、图、文档、压缩包）时，用 send_file 把文件发过去，别只报一个路径让主人自己去找；回复里说一句发的是什么。");
   if (has("set_volume")) g.push("主人嫌声音大 / 小就 set_volume。");
   if (has("memory_write")) g.push("记事用 memory_write，按「过几天再读到它还成立吗」选：当天发生的、做了什么、heartbeat / 定时任务的记录记 daily；以后还成立的事实、约定、偏好、结论记 long；只有主人本人的稳定信息（称呼、家人、作息、口味习惯）才记 user。");
   if (has("memory_search")) g.push("涉及以前的事、约定、主人的偏好，拿不准先 memory_search 再答。");

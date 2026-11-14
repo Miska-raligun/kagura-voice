@@ -19,6 +19,7 @@ import { Skills } from "./skills.ts";
 import { BgJobs, execTools } from "./tools/exec.ts";
 import { recallTools } from "./tools/recall.ts";
 import { fileTools } from "./tools/files.ts";
+import { sendTools } from "./tools/send.ts";
 import { MemoryTidy, tidyTools } from "./tidy.ts";
 import { Watchdog } from "./watchdog.ts";
 import { webTools } from "./tools/web.ts";
@@ -103,6 +104,8 @@ export function createAgentSystem(cfg: Config, dirs: Dirs, fake: FakeLlm | null)
   runtime.addTools(webTools(cfg.tools));
   // 读 / 改 / 搜文件（权限同 exec），比拼命令行稳、改完能顺手确认
   runtime.addTools(fileTools(cfg.tools));
+  // 发文件给主人（网页聊天、飞书等 IM 的回复里）
+  runtime.addTools(sendTools());
   // 扩展（pi 格式，agent 也能自己写）与 MCP 服务器；启动后由 main 在后台加载 / 连接（startPlugins）
   const mcp = new McpManager(path.join(cfg.dataDir, "mcp.json"), { fetch: proxiedFetch, cwd: cfg.dataDir, version: VERSION });
   const extensions = new Extensions(dirs.extensions, registry);

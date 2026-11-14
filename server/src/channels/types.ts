@@ -27,7 +27,11 @@ export interface SendOpts {
   replyTo?: string;
   /** 附一张图（JPEG） */
   image?: Buffer;
+  /** 附件（send_file 发的）：图片发成图片消息，其它发成文件；渠道不支持的跳过并在 failed 里说 */
+  files?: OutFile[];
 }
+
+export interface OutFile { name: string; path: string; image: boolean; size: number }
 
 export interface ChannelStatus {
   state: "stopped" | "connecting" | "online" | "error";
@@ -40,7 +44,8 @@ export interface ChannelAdapter {
   readonly accountId: string;
   start(onMessage: (m: InboundMessage) => void): Promise<void>;
   stop(): Promise<void>;
-  send(chatId: string, text: string, opts?: SendOpts): Promise<void>;
+  /** 返回没发出去的附件（名字 + 原因）；没有附件或都发出去了返回空 */
+  send(chatId: string, text: string, opts?: SendOpts): Promise<void | { name: string; why: string }[]>;
   /**
    * 给收到的消息贴一个「正在处理」的表情（飞书的消息表情回复），返回撤掉它的函数。
    * 渠道不支持就不实现；贴失败（没开权限等）返回 null，不影响回复。

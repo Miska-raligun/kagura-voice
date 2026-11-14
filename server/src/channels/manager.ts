@@ -8,7 +8,7 @@ import type { Runtime } from "../agent/runtime.ts";
 import type { AgentRegistry } from "../agent/registry.ts";
 import { SILENT_RE } from "../agent/scheduler.ts";
 import type { ChannelStore } from "./store.ts";
-import type { AccountConfig, ChannelAdapter, ChannelKind, InboundMessage } from "./types.ts";
+import type { AccountConfig, ChannelAdapter, ChannelKind, InboundMessage, OutFile } from "./types.ts";
 import { FeishuAdapter } from "./feishu.ts";
 import { QQAdapter } from "./qq.ts";
 import { OneBotAdapter } from "./onebot.ts";
@@ -133,9 +133,13 @@ export class ChannelManager {
     });
   }
 
-  private reply(m: InboundMessage, text: string, image?: Buffer) {
+  private reply(m: InboundMessage, text: string, image?: Buffer, files?: OutFile[]) {
     const ad = this.adapters.get(m.account);
-    return ad ? ad.send(m.chatId, text, { replyTo: m.messageId, image }).catch((e) => console.log(`[channel] ⚠️  ${m.account} 回复失败: ${e.message}`)) : Promise.resolve();
+    if (!ad) return Promise.resolve();
+    return ad.send(m.chatId, text, { replyTo: m.messageId, image, files }).then(async (failed) => {
+      // 有附件没发出去：补一句，别让主人以为发了
+      if (failed && failed.length) await ad.send(m.chatId, `（${failed.map((f) => `${f.name}：${f.why}`).join("；")}——没发出去）`).catch(() => {});
+    }).catch((e) => console.log(`[channel] ⚠️  ${m.account} 回复失败: ${e.message}`));
   }
 
   /** 每日回复上限。返回 false = 超了 */
@@ -234,7 +238,7 @@ export class ChannelManager {
       if (!r.text || SILENT_RE.test(r.text)) return;
       // take_photo 在 IM 里触发时，照片直接发回聊天
       const photo = r.meta.photos?.[0];
-      await this.reply(lastMsg, r.text, photo && fs.existsSync(photo) ? fs.readFileSync(photo) : undefined);
+      await this.reply(lastMsg, r.text, photo && fs.existsSync(photo) ? fs.readFileSync(photo) : undefined, r.meta.files);
       release();
       // 跑完才判断：主人这条消息里说了「我到家了」（set_presence）也算
       if (ownerDm) await this.voice?.say(agentId, r.text, r.meta);

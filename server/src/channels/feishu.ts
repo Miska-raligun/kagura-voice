@@ -1,5 +1,6 @@
 // 飞书 / Lark：官方 SDK 的长连接（WebSocket）收 im.message.receive_v1，不需要公网地址。
 // 回复用富文本 post + md 标签（飞书会渲染 markdown）；图片先上传拿 image_key 再发。
+import fs from "node:fs";
 import * as Lark from "@larksuiteoapi/node-sdk";
 import type { ChannelAdapter, ChannelStatus, InboundMessage, SendOpts } from "./types.ts";
 import { STATUS_INIT } from "./types.ts";
@@ -136,10 +137,35 @@ export class FeishuAdapter implements ChannelAdapter {
     const post = { msg_type: "post", content: JSON.stringify({ zh_cn: { content: [[{ tag: "md", text }]] } }) };
     if (opts.replyTo) await c.im.message.reply({ path: { message_id: opts.replyTo }, data: post });
     else await c.im.message.create({ params: { receive_id_type: "chat_id" }, data: { receive_id: chatId, ...post } });
-    if (opts.image) {
-      const up: any = await c.im.image.create({ data: { image_type: "message", image: opts.image } });
+    const msg = (msg_type: string, content: object) => c.im.message.create({ params: { receive_id_type: "chat_id" }, data: { receive_id: chatId, msg_type, content: JSON.stringify(content) } });
+    const sendImage = async (image: Buffer) => {
+      const up: any = await c.im.image.create({ data: { image_type: "message", image } });
       const key = up?.image_key ?? up?.data?.image_key;
-      if (key) await c.im.message.create({ params: { receive_id_type: "chat_id" }, data: { receive_id: chatId, msg_type: "image", content: JSON.stringify({ image_key: key }) } });
+      if (!key) throw new Error(`上传图片失败${up?.code ? `（${up.code} ${up.msg ?? ""}）` : ""}`);
+      await msg("image", { image_key: key });
+    };
+    if (opts.image) await sendImage(opts.image).catch((e) => console.log(`[feishu] ⚠️  发图片失败: ${e.message}`));
+    // send_file 的附件：图片（10MB 以内）发成图片，其它发成文件消息（30MB 以内）；一个失败不影响别的
+    const failed: { name: string; why: string }[] = [];
+    for (const f of opts.files ?? []) {
+      try {
+        const data = await fs.promises.readFile(f.path);
+        if (f.image && data.length <= 10 * 1024 * 1024) { await sendImage(data); continue; }
+        const up: any = await c.im.file.create({ data: { file_type: feishuFileType(f.name), file_name: f.name, file: data } });
+        const key = up?.file_key ?? up?.data?.file_key;
+        if (!key) throw new Error(`上传失败${up?.code ? `（${up.code} ${up.msg ?? ""}）` : ""}`);
+        await msg("file", { file_key: key });
+      } catch (e: any) {
+        console.log(`[feishu] ⚠️  发文件 ${f.name} 失败（检查应用权限 im:resource）: ${e.message}`);
+        failed.push({ name: f.name, why: String(e.message ?? e).slice(0, 80) });
+      }
     }
+    return failed;
   }
+}
+
+/** 飞书的文件类型（发视频 / 语音消息要时长和封面，这里一律当普通文件发） */
+export function feishuFileType(name: string): "pdf" | "doc" | "xls" | "ppt" | "stream" {
+  const ext = name.toLowerCase().split(".").pop() ?? "";
+  return ext === "pdf" ? "pdf" : ["doc", "docx"].includes(ext) ? "doc" : ["xls", "xlsx", "csv"].includes(ext) ? "xls" : ["ppt", "pptx"].includes(ext) ? "ppt" : "stream";
 }

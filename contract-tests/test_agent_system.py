@@ -866,3 +866,21 @@ def test_bundled_printer_mcp_and_notify(a):
     finally:
         a.request("PUT", "/api/admin/mcp", json={"config": json.dumps({"mcpServers": {}})})
         d.close()
+
+
+def test_webchat_send_file_shows_in_history(a, tmp_path):
+    """网页聊天：她调 send_file 把工作目录外的文件发给主人 → 复制进 sent/、会话记录里有附件那一行、管理界面取得到；sent/ 之外的取不到"""
+    src = tmp_path / "报告.pdf"
+    src.write_bytes(b"%PDF-1.4 hello")
+    a.fake_llm(tool("send_file", "报告发你了", path=str(src)))
+    r = a.post("/api/admin/chat", json={"agent": "main", "session": "main:webchat:sendfile", "text": "把报告发我"}).json()
+    assert r["reply"] == "报告发你了"
+    msgs = a.get("/api/admin/agents/main/sessions/main:webchat:sendfile").json()["messages"]
+    res = next(m["msg"] for m in msgs if m["msg"].get("toolName") == "send_file")
+    rel = res["content"][0]["text"].split("[文件 ")[1].rstrip("]")
+    assert rel.startswith("sent/") and rel.endswith("/报告.pdf")
+    got = a.get(f"/api/admin/agents/main/uploads?path={requests_quote(rel)}")
+    assert got.status_code == 200 and got.content == b"%PDF-1.4 hello" and got.headers["Content-Type"].startswith("application/pdf")
+    assert "attachment" in a.get(f"/api/admin/agents/main/uploads?path={requests_quote(rel)}&download=1").headers.get("Content-Disposition", "")
+    assert a.get("/api/admin/agents/main/uploads?path=agent.json").status_code == 400
+    assert a.get("/api/admin/agents/main/uploads?path=sent/../../agent.json").status_code in (400, 404)
