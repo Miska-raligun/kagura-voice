@@ -827,3 +827,29 @@ def test_job_runs_history_endpoint(a):
     """定时任务的运行记录在 /api/admin/job-runs（/api/admin/runs 是「正在运行」）"""
     assert isinstance(a.get("/api/admin/job-runs?limit=5").json(), list)
     assert isinstance(a.get("/api/admin/runs").json(), list)
+
+
+def test_printer_config_and_test_notify(a):
+    """3D 打印机：配置进出（访问码不回显）、测试通知走出口推到设备。假服务商模式不去连真机（conn 一直是 off）"""
+    d = Device(a, "pr1")
+    try:
+        r = a.post("/api/admin/printers", json={"name": "P2S", "host": "192.168.50.9", "serial": "22e8aj5c1234567",
+                                                "access_code": "87654321", "delivery": "device:pr1"})
+        assert r.status_code == 200, r.text
+        p = r.json()["printers"][0]
+        assert p["has_code"] and "87654321" not in r.text and p["conn"] == "off" and p["serial"] == "22E8AJ5C1234567"
+        assert a.post(f"/api/admin/printers/{p['id']}/test-notify", json={}).json()["delivered"] == "device:pr1"
+        assert d.wait("push", timeout=8)["type"] == "push"
+        # 说出去的话记进了那台设备的会话：主人接话时她知道自己说过
+        time.sleep(0.3)
+        keys = [x["key"] for x in a.get("/api/admin/agents/main/sessions").json()]
+        hist = "".join(json.dumps(a.get(f"/api/admin/agents/main/sessions/{k}").json(), ensure_ascii=False) for k in keys)
+        assert "[打印机]" in hist and "测试通知" in hist
+        # 访问码留空 = 不改；填错了说清楚
+        r = a.request("PUT", f"/api/admin/printers/{p['id']}", json={"name": "书房的 P2S", "access_code": ""})
+        assert r.json()["printers"][0]["name"] == "书房的 P2S" and r.json()["printers"][0]["has_code"]
+        bad = a.post("/api/admin/printers", json={"name": "x", "host": "", "serial": "1", "access_code": "1"})
+        assert bad.status_code == 400 and "IP" in bad.json()["error"]
+        assert a.request("DELETE", f"/api/admin/printers/{p['id']}").json()["printers"] == []
+    finally:
+        d.close()

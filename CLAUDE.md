@@ -610,6 +610,18 @@ CoreS3 (MicroPython) ──HTTP──▶ server/（TypeScript 单文件可执行
   默认按大小定：这组定义加起来超过 `AUTO_LAZY_TOKENS`（800）才收，三五个小工具的照常摆着；服务器配置 `"lazy": true / false` 指定，pi 配置的 `exposure: "deferred"` 等同 true。
   目录里自带组只写一行（`description` / 服务器 instructions 首行 + 共几个 + 前 12 个名字去前缀），**别把定义摊进目录**。组的归属一轮一算，**问 `LazyTools.groupOf`（实例方法），别用模块里那个只认内置组的 `groupOf`**；
   `tools_load` 认组名、也认只写服务器名 / 里面某个工具名。别的来源（扩展）想整组收着，给工具加同样的 `lazyGroup` 就行。管理界面 MCP 表显示每个服务器的 `tokens` / `lazy`。
+- **3D 打印机（`server/src/printer/`，管理界面「打印机」页，2026-11）**：拓竹的局域网接口 = TLS 上的 MQTT（8883，用户名 `bblp`、密码 = 访问码，
+  订阅 `device/<序列号>/report`）。**只读**：不开「开发者模式」第三方发不了控制指令（拓竹的授权限制），这里只发一条 `pushall`（要完整状态）；
+  要加控制（暂停 / 停止 / 发任务）得主人先开开发者模式（会断开拓竹云和手机 App），别悄悄往 request 主题发别的。
+  `mqttlite.ts` 是一百多行的最小客户端（不引 mqtt.js）；`bambu.ts` 管连接 + 解析，`hub.ts` 管配置（`printers.json`）和通知文案，工具 `printer_status`（只在配了打印机时有、只给可信会话、`LOCKED_NAMES` 锁着）。
+  别改坏的点：① 打印机推的是**增量**，`merge` 并进上一份（带 id 的数组按 id 并——AMS 料槽；`hms` 整份换）；`command` 不是 `push_status` 的是别的回执，不并；
+  ② 状态变了**等 `settleMs` 再判断**（状态和原因常分两条来），判断时状态又变了就不发；刚连上时的状态、已有的告警不通知（`prev === undefined` / `hmsSeen === null`）；
+  ③ 不通知的：取消（`FAILED` + `0300-400C`）、在打印机上手动暂停（`stg_cur` 16）；告警只在打印中发、同一个 30 分钟内不重复；
+  ④ 证书是打印机自签的，没法按 CA 验：**第一次记指纹，以后不一样就不连、连 CONNECT 都不发**（别把访问码交给冒充的机器），提醒一次，管理界面「重新信任」；换了 IP / 序列号自动忘掉旧指纹；
+  ⑤ 访问码只进不出（`view()` 只有 `has_code`，留空 = 不改），导出时清空、导入时空着保留本机的；⑥ 访问码错（CONNACK 4 / 5）隔 5 分钟才重试，别猛连。
+  通知是系统写的固定句式（`eventText`，不调模型），经 `sys.printerNotify` 走待办汇报那条路（`report(…, tag = "打印机")`：投递目标 → heartbeat 目标 → 出口），说出去的话 `Runtime.note` 记进接收方会话；`[打印机` 进了 `NOT_OWNER`。
+  **字段含义全部来自社区逆向（ha-bambulab 等），写的时候没有真机（P2S）**：解析一律「有就用、没有就空着」，新机型的温度可能在 `device.*.info.temp`（目标 << 16 | 当前）；
+  哪项不对让主人在管理界面展开「原始数据」发过来，照着改 `parseStatus`，测试里的 `FULL` 同步改。假服务商模式不连真机（`main.ts`）；测试用 aedes 当假打印机（`test/printer.test.ts`）。
 - **运行状况（`agent/health.ts`，管理界面总览「运行状况」卡片 +「日志」页，LRN 2026-10-31，症状「出了问题只能翻一个大日志文件，也说不清最常出的是哪种」）**：
   每一轮（`Runtime.run` 外层）记成功 / 失败（`errorClass` 归类：限流 429、服务商出错、网络、超时、空回复、上下文超长、单轮上限、Key / 额度、被取消、其它）和用时，
   兜底动作各记一条（`empty_retry` / `nudge` / `overflow` / `guard` / `compact` / `compact_failed` / `voice` / `push_failed` / `sub_cancelled` / `unclean_exit`），存 system.sqlite 的 `health_events`，留 30 天。

@@ -35,6 +35,8 @@ import { TaskQueue } from "./tasks.ts";
 import { taskTools } from "./tools/tasks.ts";
 import { setSharedDir } from "./persona.ts";
 import { health } from "./health.ts";
+import { PrinterHub } from "../printer/hub.ts";
+import { printerTools } from "./tools/printer.ts";
 
 export interface AgentSystem {
   registry: AgentRegistry;
@@ -45,6 +47,10 @@ export interface AgentSystem {
   tasks: TaskQueue | null;
   /** 记忆整理（attachAgentSystem 里建） */
   tidy?: MemoryTidy;
+  /** 3D 打印机（attachAgentSystem 里建，main 里 start） */
+  printers?: PrinterHub;
+  /** 打印机通知走的那条路（管理界面「发一条测试通知」也用它），返回送到了哪 */
+  printerNotify?: (printerId: string, text: string) => Promise<string>;
   a2a: A2A;
   skills: Skills;
   channels: ChannelManager;
@@ -226,27 +232,45 @@ export function attachAgentSystem(sys: AgentSystem, ctx: Ctx) {
     return `定时任务「${j.name}」（${j.enabled ? "启用" : "暂停"}，投递到 ${j.delivery}）\n执行会话：session:${key}\n内容：${j.message}\n最近几次：\n${runs.join("\n") || "（还没跑过）"}`;
   });
   // 待办：夜间静默时段一件件做，早上按来源汇报
-  const report = async (agentId: string, origin: string, text: string, refs: string[] = []): Promise<string> => {
+  const report = async (agentId: string, origin: string, text: string, refs: string[] = [], tag = "待办汇报"): Promise<string> => {
     const ref = refs.join(" ");
     if (origin.startsWith("device:")) {
       const said = await runtime.spoken(agentId, text).catch(() => text);
       const r = await outbox.say({ text: said || text, agentId, device: origin.slice("device:".length), source: "task" });
-      if (r.played || r.held) void runtime.note(agentId, runtime.sessionKey(agentId, "device", r.device || origin.slice("device:".length)), "待办汇报", text, ref);
+      if (r.played || r.held) void runtime.note(agentId, runtime.sessionKey(agentId, "device", r.device || origin.slice("device:".length)), tag, text, ref);
       return r.played ? origin : r.held ? `held:${r.device}` : r.reason ? `muted:${r.reason}` : "";
     }
     if (/^(feishu|qq|onebot):/.test(origin)) {
       const ok = await sys.channels.deliver(origin, text);
       if (ok) {
         const key = sys.channels.sessionFor(origin, agentId);
-        if (key) void runtime.note(agentId, key, "待办汇报", text, ref);
+        if (key) void runtime.note(agentId, key, tag, text, ref);
         await mirror(agentId, text, "task");
       }
       return ok ? origin : "";
     }
     // 网页聊天 / 管理界面记的：送到 agent 的 heartbeat 投递目标（没设就只在管理界面看）
     const d = registry.get(agentId)?.heartbeat.delivery ?? "";
-    return d && d !== "none" && d !== "webchat" && d !== origin ? report(agentId, d, text, refs) : "";
+    return d && d !== "none" && d !== "webchat" && d !== origin ? report(agentId, d, text, refs, tag) : "";
   };
+  // 3D 打印机：打完 / 失败 / 暂停 / 告警时告诉主人。句子是系统写的（不调模型），送法同待办汇报：打印机自己设的投递目标 →
+  // 这个 agent 的 heartbeat 投递目标 → 都没有就在家里的设备（或开着的手机）上说一声。说出去的话记进接收方会话，主人接话时她知道自己说过
+  const printerNotify = async (printerId: string, text: string): Promise<string> => {
+    const p = sys.printers?.configs().find((x) => x.id === printerId);
+    const agentId = registry.get(p?.agent ?? "")?.id ?? registry.default().id;
+    let to = await report(agentId, p?.delivery ?? "", text, [], "打印机").catch((e) => { console.log(`[printer] ⚠️  通知没送出去: ${e.message}`); return ""; });
+    if (!to) {
+      const r = await outbox.say({ text, agentId, source: "printer" });
+      if ((r.played || r.held) && r.device) void runtime.note(agentId, runtime.sessionKey(agentId, "device", r.device), "打印机", text);
+      to = r.played ? `device:${r.device}` : r.held ? `held:${r.device}` : r.reason ? `muted:${r.reason}` : "";
+    }
+    console.log(`[printer] 📣 通知 → ${to || "没送出去（没有投递目标，也没有在线的设备）"}`);
+    return to;
+  };
+  const printers = new PrinterHub(path.join(ctx.cfg.dataDir, "printers.json"), { notify: (p, text) => { void printerNotify(p.id, text); } });
+  sys.printers = printers;
+  sys.printerNotify = printerNotify;
+  runtime.addTools(printerTools(printers));
   const tasks = new TaskQueue(ctx.dirs.systemDb, registry, { run: (req) => runtime.run(req), report, reset: (a, k) => runtime.store(a).reset(k) });
   sys.tasks = tasks;
   // 记忆整理：每 N 天在待办的静默时段、她空闲时做一次；结果按 heartbeat 的投递方式告诉主人

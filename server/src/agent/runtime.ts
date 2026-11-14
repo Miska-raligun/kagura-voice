@@ -106,7 +106,7 @@ export const toolTokens = (t: { name: string; description: string; parameters: u
 
 const SILENT = /^\s*(HEARTBEAT_OK|NO_REPLY)\s*[。.!！]?\s*$/i;
 /** 系统替主人发起的那些「用户消息」（heartbeat、定时任务、系统事件、别的 agent 传话）：不是主人说的，近况里不算 */
-const NOT_OWNER = /^\s*\[(heartbeat|定时任务|系统事件|来自 |子任务|这条消息是|待办|后台命令|主人补充)/;
+const NOT_OWNER = /^\s*\[(heartbeat|定时任务|系统事件|来自 |子任务|这条消息是|待办|后台命令|主人补充|打印机)/;
 const CHANNEL_NAME: Record<string, string> = { device: "设备", webchat: "网页", feishu: "飞书", qq: "QQ", onebot: "QQ", system: "定时", a2a: "agent 间" };
 /** 近况看多久以内的 */
 export const RECENT_HOURS = 48;

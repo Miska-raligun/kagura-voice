@@ -26,6 +26,7 @@ import { ClonedVoices } from "../voice/minimax-voices.ts";
 import { GLOBAL_OWNER } from "../agent/skills.ts";
 import { registerAdminChat } from "./admin-chat.ts";
 import { registerAdminPlugins } from "./admin-plugins.ts";
+import { registerAdminPrinters } from "./admin-printers.ts";
 import { restartSelf } from "../util/restart.ts";
 import { unzip } from "../util/zip.ts";
 import { resolveInside } from "../agent/paths.ts";
@@ -775,4 +776,5 @@ export function registerAdmin(r: Router, ctx: Ctx, sys: AgentSystem) {
   // 聊天（新建 / 接着聊 / 流式 / 图片文件）与删除会话在 admin-chat.ts
   registerAdminChat(r, sys);
   registerAdminPlugins(r, sys);
+  registerAdminPrinters(r, sys);
 }
