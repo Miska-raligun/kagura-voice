@@ -12,7 +12,7 @@ export interface RestartNotice { account: string; chatId: string; at: number; fr
 
 const noticeFile = (dataDir: string) => path.join(dataDir, "restart-notice.json");
 
-function isSea(): boolean {
+export function isSea(): boolean {
   try { return !!require("node:sea").isSea(); } catch { return false; }
 }
 

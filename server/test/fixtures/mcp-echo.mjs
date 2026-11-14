@@ -17,6 +17,9 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
     case "tools/list": return ok({ tools: TOOLS });
     case "tools/call": {
       const { name, arguments: a = {} } = m.params;
+      // text 以 notify: / log: 开头时顺带发一条日志通知（notice / info 级），测「服务器主动通知」
+      const n = /^(notify|log):(.*)$/s.exec(String(a.text ?? ""));
+      if (name === "echo" && n) send({ jsonrpc: "2.0", method: "notifications/message", params: { level: n[1] === "notify" ? "notice" : "info", logger: "echo", data: n[2] } });
       if (name === "echo") return ok({ content: [{ type: "text", text: `${process.env.ECHO_PREFIX ?? ""}${a.text}` }] });
       if (name === "add") return ok({ content: [{ type: "text", text: String(a.a + a.b) }], structuredContent: { sum: a.a + a.b } });
       return ok({ content: [{ type: "text", text: "boom" }], isError: true });

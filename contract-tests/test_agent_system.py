@@ -829,27 +829,32 @@ def test_job_runs_history_endpoint(a):
     assert isinstance(a.get("/api/admin/runs").json(), list)
 
 
-def test_printer_config_and_test_notify(a):
-    """3D 打印机：配置进出（访问码不回显）、测试通知走出口推到设备。假服务商模式不去连真机（conn 一直是 off）"""
+def test_bundled_printer_mcp_and_notify(a):
+    """自带的拓竹打印机 MCP 服务器：command 写 kagura = 这个程序自己拉起自己（kagura mcp bambu-printer）；
+    开了 notify 的服务器的通知走出口推到设备、记进会话。这里没有打印机：服务器照样起来，工具说连不上"""
     d = Device(a, "pr1")
     try:
-        r = a.post("/api/admin/printers", json={"name": "P2S", "host": "192.168.50.9", "serial": "22e8aj5c1234567",
-                                                "access_code": "87654321", "delivery": "device:pr1"})
+        cfg = {"mcpServers": {"printer": {
+            "command": "kagura", "args": ["mcp", "bambu-printer"], "notify": {"delivery": "device:pr1"},
+            "env": {"BAMBU_NAME": "P2S", "BAMBU_HOST": "127.0.0.1", "BAMBU_PORT": "9", "BAMBU_SERIAL": "22E8AJ5C1234567", "BAMBU_ACCESS_CODE": "87654321"}}}}
+        r = a.request("PUT", "/api/admin/mcp", json={"config": json.dumps(cfg)})
         assert r.status_code == 200, r.text
-        p = r.json()["printers"][0]
-        assert p["has_code"] and "87654321" not in r.text and p["conn"] == "off" and p["serial"] == "22E8AJ5C1234567"
-        assert a.post(f"/api/admin/printers/{p['id']}/test-notify", json={}).json()["delivered"] == "device:pr1"
+        srv = r.json()["servers"][0]
+        assert srv["state"] == "connected" and srv["notify"] is True, srv
+        assert [t["name"] for t in srv["tools"]] == ["printer_status", "printer_retrust"]
+        a.fake_llm(tool("mcp__printer__printer_status", "打印机现在连不上"))
+        assert a.post("/api/admin/chat", json={"agent": "main", "text": "打印到哪了"}).json()["reply"] == "打印机现在连不上"
+        assert "P2S：连不上" in _transcript_text(a)
+        # 测试通知：走出口推到设备，说出去的话记进会话
+        assert a.post("/api/admin/mcp/printer/test-notify", json={}).json()["delivered"] == "device:pr1"
         assert d.wait("push", timeout=8)["type"] == "push"
-        # 说出去的话记进了那台设备的会话：主人接话时她知道自己说过
         time.sleep(0.3)
-        keys = [x["key"] for x in a.get("/api/admin/agents/main/sessions").json()]
-        hist = "".join(json.dumps(a.get(f"/api/admin/agents/main/sessions/{k}").json(), ensure_ascii=False) for k in keys)
-        assert "[打印机]" in hist and "测试通知" in hist
-        # 访问码留空 = 不改；填错了说清楚
-        r = a.request("PUT", f"/api/admin/printers/{p['id']}", json={"name": "书房的 P2S", "access_code": ""})
-        assert r.json()["printers"][0]["name"] == "书房的 P2S" and r.json()["printers"][0]["has_code"]
-        bad = a.post("/api/admin/printers", json={"name": "x", "host": "", "serial": "1", "access_code": "1"})
-        assert bad.status_code == 400 and "IP" in bad.json()["error"]
-        assert a.request("DELETE", f"/api/admin/printers/{p['id']}").json()["printers"] == []
+        hist = _transcript_text(a)
+        assert "[通知：printer]" in hist and "测试通知" in hist
+        # 没开通知的服务器不给发
+        cfg["mcpServers"]["printer"].pop("notify")
+        a.request("PUT", "/api/admin/mcp", json={"config": json.dumps(cfg)})
+        assert a.post("/api/admin/mcp/printer/test-notify", json={}).status_code == 400
     finally:
+        a.request("PUT", "/api/admin/mcp", json={"config": json.dumps({"mcpServers": {}})})
         d.close()

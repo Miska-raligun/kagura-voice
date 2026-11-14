@@ -153,9 +153,6 @@ async function main() {
   ctx.reminders.start(async (text, dev) => (ctx.outbox ? (await ctx.outbox.say({ text, agentId: null, device: dev, source: "reminder" })).played : ctx.sendPush(text, dev)));
   sys.scheduler?.start(cfg.schedulerTick);
   sys.tasks?.start(Math.min(30, cfg.schedulerTick));
-  // 3D 打印机：后台连着收状态，打完 / 出错时通知。假服务商模式（契约测试）不去连真机
-  if (!fake) sys.printers?.start();
-  onShutdown("断开打印机", async () => { sys.printers?.stop(); });
   // 扩展加载完会顺带（重新）连接 MCP 服务器；都在后台，不拖慢启动
   sys.extensions.reloadAll().catch((e) => console.log(`[ext] ⚠️  ${e.message}`))
     .then(() => reinstallImportedPackages(cfg.dataDir, sys.packages));

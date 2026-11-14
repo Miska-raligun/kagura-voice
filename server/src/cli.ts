@@ -14,6 +14,7 @@ const HELP = `Kagura 语音服务端 ${VERSION}
   kagura --no-browser            启动但首次运行不自动打开浏览器
   kagura migrate <旧版目录>       从 Python 版（voice_server.py 所在目录）迁移配置、提醒、定时拍照、快照、TTS 缓存
   kagura import-openclaw [目录]   从 OpenClaw 导入人设、记忆与定时任务（默认 ~/.openclaw；任务导入后默认暂停）
+  kagura mcp bambu-printer       自带的 MCP 服务器（拓竹打印机，只读）。不用手动运行：在「扩展 / MCP」的配置里写 "command": "kagura" 即可
   kagura --version               显示版本
   加 --force 覆盖已存在的文件。数据目录可用环境变量 KAGURA_DATA_DIR 指定。
 `;
@@ -30,6 +31,11 @@ export async function runCli(argv: string[]): Promise<boolean> {
     for (const l of migratePython(path.resolve(rest[0]), cfg.dataDir, force)) console.log("  " + l);
     console.log(`完成。数据目录：${cfg.dataDir}\n启动前先停掉旧的 voice_server.py 和 mosquitto（1883 端口由新服务端内置 broker 占用）。`);
     return true;
+  }
+  if (cmd === "mcp") {
+    // 自带的 MCP 服务器：标准输入输出上跑协议，别往标准输出打别的
+    if (rest[0] === "bambu-printer") { (await import("./printer/mcp-server.ts")).runBambuMcp(VERSION); return true; }
+    throw new Error(`不认识的 MCP 服务器 ${rest[0] ?? ""}（自带的有：bambu-printer）`);
   }
   if (cmd === "import-openclaw") {
     const cfg = loadConfig();

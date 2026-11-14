@@ -62,6 +62,12 @@ export function registerAdminPlugins(r: Router, sys: AgentSystem) {
     return json({ servers: mcp.status() });
   }));
   r.add("POST", "/api/admin/mcp/<name>/reconnect", guard(async (req) => { await mcp.reconnect(req.params.name); return json({ servers: mcp.status() }); }));
+  // 发一条测试通知：确认开了 "notify" 的服务器的通知会送到哪（不用等它真的有事）
+  r.add("POST", "/api/admin/mcp/<name>/test-notify", guard(async (req) => {
+    if (!mcp.notifyConfig(req.params.name)) return json({ error: "这个服务器没开主动通知（配置里加 \"notify\": true）" }, 400);
+    if (!sys.notifyOwner) return json({ error: "还没准备好" }, 503);
+    return json({ delivered: await sys.notifyOwner(req.params.name, `这是 ${req.params.name} 的测试通知：它有事要告诉你的时候，我会这样说。`) });
+  }));
   /** 从 pi / Claude Desktop / Cursor 的配置里把 mcpServers 合并过来（同名的不覆盖） */
   r.add("POST", "/api/admin/mcp/import", guard(async (req) => {
     const src = mcpImportSources().find((s) => s.id === String((req.json() ?? {}).from));

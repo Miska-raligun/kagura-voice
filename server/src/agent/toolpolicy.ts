@@ -10,7 +10,7 @@
 import type { Scene } from "./soul.ts";
 
 export const DEFAULT_GUEST_TOOLS = ["web_search", "web_fetch", "skill_read", "set_volume"];
-const LOCKED_NAMES = new Set(["exec", "take_photo", "get_presence", "set_presence", "announce", "read_file", "edit_file", "write_file", "search_files", "list_files", "read_ref", "printer_status"]);
+const LOCKED_NAMES = new Set(["exec", "take_photo", "get_presence", "set_presence", "announce", "read_file", "edit_file", "write_file", "search_files", "list_files", "read_ref"]);
 const LOCKED_PREFIX = ["sessions_", "memory_", "task_", "cron_", "photo_schedule_", "extension_", "package_"];
 
 /** 永远不给群聊 / 陌生人的内置工具 */

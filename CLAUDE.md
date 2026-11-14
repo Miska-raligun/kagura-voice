@@ -610,18 +610,29 @@ CoreS3 (MicroPython) ──HTTP──▶ server/（TypeScript 单文件可执行
   默认按大小定：这组定义加起来超过 `AUTO_LAZY_TOKENS`（800）才收，三五个小工具的照常摆着；服务器配置 `"lazy": true / false` 指定，pi 配置的 `exposure: "deferred"` 等同 true。
   目录里自带组只写一行（`description` / 服务器 instructions 首行 + 共几个 + 前 12 个名字去前缀），**别把定义摊进目录**。组的归属一轮一算，**问 `LazyTools.groupOf`（实例方法），别用模块里那个只认内置组的 `groupOf`**；
   `tools_load` 认组名、也认只写服务器名 / 里面某个工具名。别的来源（扩展）想整组收着，给工具加同样的 `lazyGroup` 就行。管理界面 MCP 表显示每个服务器的 `tokens` / `lazy`。
-- **3D 打印机（`server/src/printer/`，管理界面「打印机」页，2026-11）**：拓竹的局域网接口 = TLS 上的 MQTT（8883，用户名 `bblp`、密码 = 访问码，
-  订阅 `device/<序列号>/report`）。**只读**：不开「开发者模式」第三方发不了控制指令（拓竹的授权限制），这里只发一条 `pushall`（要完整状态）；
-  要加控制（暂停 / 停止 / 发任务）得主人先开开发者模式（会断开拓竹云和手机 App），别悄悄往 request 主题发别的。
-  `mqttlite.ts` 是一百多行的最小客户端（不引 mqtt.js）；`bambu.ts` 管连接 + 解析，`hub.ts` 管配置（`printers.json`）和通知文案，工具 `printer_status`（只在配了打印机时有、只给可信会话、`LOCKED_NAMES` 锁着）。
+- **MCP 服务器主动通知（`mcp.ts` 的 `onMessage` / `notify`，2026-11）**：MCP 工具只能她去问，「打印机打完了」这种事没法告诉主人。服务器配置 `"notify": true`（或 `{ agent, delivery }`）后，
+  它发来的日志通知（`notifications/message`，级别 notice 及以上、`data` 是一句话）**原话送给主人，不过模型**：`mcp.onNotify` → `sys.notifyOwner` 走待办汇报那条路
+  （`report(…, tag)`：配置的投递目标 → 那个 agent 的 heartbeat 目标 → 出口），说出去的话 `Runtime.note` 记进接收方会话（tag `通知：<服务器>`，`[通知：` 进了 `NOT_OWNER`）。
+  别改坏的点：① 只认开了 `notify` 的服务器——别的服务器的日志（常有 error 级）不能变成打扰；② 每个服务器 10 分钟最多 `NOTIFY_MAX`（6）条、单条 500 字；
+  ③ 开了 notify 的服务器要一直连着：连不上 / 断了 `retryLater`（10 秒起翻倍到 5 分钟），`disconnect` 里清定时器；别的服务器照旧「下次调用时重连」；
+  ④ 管理界面服务器表的「测试通知」= `POST /api/admin/mcp/<名>/test-notify`，走的是同一条路。**以后想让某个外部东西主动说话，优先做成 MCP 服务器 + notify，别往核心里加模块。**
+- **自带的 MCP 服务器（`"command": "kagura"`，`cli.ts` 的 `mcp` 子命令）**：单文件可执行里没有 npx，自带的服务器由这个程序自己再起一份（`selfArgv`：SEA 是 exe 本身，node 跑脚本是 node + 脚本），
+  对 McpManager 来说就是普通的 stdio 服务器，核心不 import 它（`cli.ts` 里动态 import）。**标准输出只能走协议**：子命令里别 `console.log`，日志写标准错误（管理界面看得到）。
+  没在 Windows 托盘版（图形界面子系统的 exe 带管道当子进程）上验证过。
+- **拓竹打印机 = 自带的 MCP 服务器（`server/src/printer/`，`kagura mcp bambu-printer`，2026-11）**：先是做成了核心模块（管理页 + 内置工具），主人说不该放进核心，改成这样——**别再搬回去**。
+  拓竹的局域网接口 = TLS 上的 MQTT（8883，用户名 `bblp`、密码 = 访问码，订阅 `device/<序列号>/report`）。**只读**：不开「开发者模式」第三方发不了控制指令（拓竹的授权限制），只发一条 `pushall`（要完整状态）；
+  要加控制得主人先开开发者模式（会断开拓竹云和手机 App），别悄悄往 request 主题发别的。
+  `mqttlite.ts` 最小 MQTT 客户端（不引 mqtt.js）；`bambu.ts` 连接 + 解析 + 事件；`mcp-server.ts` 是 MCP 这一层（一行一个 JSON-RPC，手写、零依赖）：配置走 env
+  （`BAMBU_HOST` / `BAMBU_SERIAL` / `BAMBU_ACCESS_CODE` / `BAMBU_NAME` / `BAMBU_WARNINGS`；没填或还是模板的中文占位时服务器照样起来、工具说缺什么），
+  工具 `printer_status`（`raw=true` 给原始数据）、`printer_retrust`，事件用 `notifications/message` 发出去（打完 notice，其余 warning），句子是 `eventText` 写的固定句式。
   别改坏的点：① 打印机推的是**增量**，`merge` 并进上一份（带 id 的数组按 id 并——AMS 料槽；`hms` 整份换）；`command` 不是 `push_status` 的是别的回执，不并；
-  ② 状态变了**等 `settleMs` 再判断**（状态和原因常分两条来），判断时状态又变了就不发；刚连上时的状态、已有的告警不通知（`prev === undefined` / `hmsSeen === null`）；
+  ② 状态变了**等 `settleMs` 再判断**（状态和原因常分两条来），判断时又变了就不发；刚连上时的状态、已有的告警不通知（`prev === undefined` / `hmsSeen === null`）；
   ③ 不通知的：取消（`FAILED` + `0300-400C`）、在打印机上手动暂停（`stg_cur` 16）；告警只在打印中发、同一个 30 分钟内不重复；
-  ④ 证书是打印机自签的，没法按 CA 验：**第一次记指纹，以后不一样就不连、连 CONNECT 都不发**（别把访问码交给冒充的机器），提醒一次，管理界面「重新信任」；换了 IP / 序列号自动忘掉旧指纹；
-  ⑤ 访问码只进不出（`view()` 只有 `has_code`，留空 = 不改），导出时清空、导入时空着保留本机的；⑥ 访问码错（CONNACK 4 / 5）隔 5 分钟才重试，别猛连。
-  通知是系统写的固定句式（`eventText`，不调模型），经 `sys.printerNotify` 走待办汇报那条路（`report(…, tag = "打印机")`：投递目标 → heartbeat 目标 → 出口），说出去的话 `Runtime.note` 记进接收方会话；`[打印机` 进了 `NOT_OWNER`。
+  ④ 证书是打印机自签的，没法按 CA 验：**第一次记指纹（`<数据目录>/bambu_printer/<序列号>.json`），以后不一样就不连、连 CONNECT 都不发**（别把访问码交给冒充的机器），发一条警告通知；
+  主人确认后 `printer_retrust` 忘掉重记；换了 IP 当成换了机器；⑤ 访问码错（CONNACK 4 / 5）隔 5 分钟才重试，别猛连。
   **字段含义全部来自社区逆向（ha-bambulab 等），写的时候没有真机（P2S）**：解析一律「有就用、没有就空着」，新机型的温度可能在 `device.*.info.temp`（目标 << 16 | 当前）；
-  哪项不对让主人在管理界面展开「原始数据」发过来，照着改 `parseStatus`，测试里的 `FULL` 同步改。假服务商模式不连真机（`main.ts`）；测试用 aedes 当假打印机（`test/printer.test.ts`）。
+  哪项不对让主人叫她调 `printer_status raw=true` 把原始数据发过来，照着改 `parseStatus`，测试里的 `FULL` 同步改。测试用 aedes 当假打印机、管道当标准输入输出（`test/printer.test.ts`），
+  契约测试用打包好的程序真的自己拉起自己（`test_bundled_printer_mcp_and_notify`）。
 - **运行状况（`agent/health.ts`，管理界面总览「运行状况」卡片 +「日志」页，LRN 2026-10-31，症状「出了问题只能翻一个大日志文件，也说不清最常出的是哪种」）**：
   每一轮（`Runtime.run` 外层）记成功 / 失败（`errorClass` 归类：限流 429、服务商出错、网络、超时、空回复、上下文超长、单轮上限、Key / 额度、被取消、其它）和用时，
   兜底动作各记一条（`empty_retry` / `nudge` / `overflow` / `guard` / `compact` / `compact_failed` / `voice` / `push_failed` / `sub_cancelled` / `unclean_exit`），存 system.sqlite 的 `health_events`，留 30 天。

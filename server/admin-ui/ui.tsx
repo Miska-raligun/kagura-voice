@@ -193,7 +193,6 @@ const ICONS = {
   monitor: "M4 3h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2zM8 21h8M12 17v4",
   menu: "M4 6h16M4 12h16M4 18h16",
   list: "M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01",
-  printer: "M4 4h16v13H4zM2 20h20M9 4v5l3 3 3-3V4M12 12v3",
 } as const;
 export type IconName = keyof typeof ICONS;
 export function Icon({ name }: { name: IconName }) {

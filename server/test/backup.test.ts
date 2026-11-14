@@ -25,7 +25,6 @@ function source() {
   w(d, "skills/g1/SKILL.md", "---\nname: g1\n---\n");
   w(d, "channels.json", JSON.stringify({ accounts: [{ id: "fs", kind: "feishu", credentials: { app_id: "cli_x", app_secret: "SEC" } }] }));
   w(d, "mcp.json", JSON.stringify({ mcpServers: { a: { command: "x", env: { TOKEN: "T", REF: "${HOME}" } } } }));
-  w(d, "printers.json", JSON.stringify({ printers: [{ id: "printer", name: "P2S", host: "192.168.1.5", serial: "22E8AJ5C1234567", access_code: "CODE1234" }] }));
   w(d, "packages.json", JSON.stringify([{ id: "p1", kind: "npm", source: "npm:p1", dir: "/old/p1" }, { id: "up", kind: "upload", source: "upload:u.ts", dir: "/old/up" }]));
   w(d, "packages/up/extensions/u.ts", "export default () => {}");
   w(d, "packages/p1/node_modules/huge/index.js", "x".repeat(1000));
@@ -68,8 +67,6 @@ describe("导出 / 导入", () => {
     expect(cfgOut.baidu.asr_secret).toBe("");
     const mcpOut = JSON.parse(unzip(buf).find((e) => e.name === "data/mcp.json")!.data.toString());
     expect(mcpOut.mcpServers.a.env).toEqual({ TOKEN: "", REF: "${HOME}" });
-    // 打印机的访问码也不带走
-    expect(JSON.parse(unzip(buf).find((e) => e.name === "data/printers.json")!.data.toString()).printers[0]).toMatchObject({ host: "192.168.1.5", access_code: "" });
     expect(inspectBackup(buf).items.length).toBe(manifest.items.length);
 
     // 另一台：已有自己的设置和密钥、自己的 SOUL.md
@@ -78,7 +75,6 @@ describe("导出 / 导入", () => {
     w(t, "agents/main/agent.json", JSON.stringify({ name: "旧" }));
     w(t, "agents/main/workspace/SOUL.md", "旧人设");
     w(t, "channels.json", JSON.stringify({ accounts: [{ id: "fs", credentials: { app_id: "old", app_secret: "LOCALSEC" } }] }));
-    w(t, "printers.json", JSON.stringify({ printers: [{ id: "printer", host: "192.168.1.9", serial: "22E8AJ5C1234567", access_code: "LOCALCODE" }] }));
     const r = stageImport(t, buf, ["settings", "agent:main:profile", "agent:main:memory", "agent:main:sessions", "agent:mio:memory", "channels", "jobs", "packages"]);
     expect(r.items).toContain("agent:mio:profile");                             // 本机没有 mio：自动带上人设
     expect(fs.readFileSync(path.join(t, "agents/main/workspace/SOUL.md"), "utf8")).toBe("旧人设");   // 重启前不动
@@ -96,7 +92,6 @@ describe("导出 / 导入", () => {
     expect(conn.prepare("SELECT count(*) n FROM t").get()).toEqual({ n: 2 });
     conn.close();
     expect(JSON.parse(fs.readFileSync(path.join(t, "channels.json"), "utf8")).accounts[0].credentials).toEqual({ app_id: "old", app_secret: "LOCALSEC" });
-    expect(JSON.parse(fs.readFileSync(path.join(t, "printers.json"), "utf8")).printers[0]).toMatchObject({ host: "192.168.1.5", access_code: "LOCALCODE" });   // 配置用导入的，访问码留本机的
     expect(JSON.parse(fs.readFileSync(path.join(t, "packages-reinstall.json"), "utf8"))).toEqual(["npm:p1"]);
     const pk = JSON.parse(fs.readFileSync(path.join(t, "packages.json"), "utf8"));
     expect(pk.map((x: any) => x.id)).toEqual(["up"]);

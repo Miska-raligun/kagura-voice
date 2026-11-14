@@ -125,6 +125,16 @@ const MCP_EXAMPLE = `{
   }
 }`;
 
+/** 自带的拓竹打印机 MCP 服务器（command 写 kagura = 用这个程序自己） */
+const PRINTER_TEMPLATE = {
+  command: "kagura", args: ["mcp", "bambu-printer"], notify: true,
+  description: "家里的拓竹 3D 打印机：看进度、温度、料（只读）",
+  env: { BAMBU_NAME: "P2S", BAMBU_HOST: "打印机的 IP", BAMBU_SERIAL: "序列号", BAMBU_ACCESS_CODE: "访问码" },
+};
+const delivered = (to: string) => !to ? "没送出去：没有设投递目标，也没有在线的设备"
+  : to.startsWith("muted:") ? `按语音推送的设置没有播（${to.slice(6) === "away" ? "你不在家" : "已关闭语音推送"}）`
+  : to.startsWith("held:") ? `设备 ${to.slice(5)} 现在是别的角色，留言了，切过来时播` : `已送到 ${to}`;
+
 function Mcp() {
   const [d, reload, err] = useLoad(() => api("/mcp"));
   const [text, setText] = useState<string | null>(null);
@@ -137,17 +147,18 @@ function Mcp() {
         {d.servers.length ? <table><thead><tr><th>名字</th><th>状态</th><th>工具</th><th /></tr></thead><tbody>
           {d.servers.map((s: any) => (
             <tr>
-              <td><b>{s.name}</b>{s.allowUntrusted ? <small class="muted">（对不可信会话开放）</small> : null}<br /><small class="muted">{s.transport} · {s.target}{s.source !== "mcp.json" ? ` · 来自${s.source}` : ""}</small>
+              <td><b>{s.name}</b>{s.allowUntrusted ? <small class="muted">（对不可信会话开放）</small> : null}{s.notify ? <small class="muted">（会主动通知）</small> : null}<br /><small class="muted">{s.transport} · {s.target}{s.source !== "mcp.json" ? ` · 来自${s.source}` : ""}</small>
                 {s.description ? <><br /><small class="muted">{s.description}</small></> : null}</td>
               <td><Badge s={s.state === "connected" ? "ok" : s.state === "connecting" ? "connecting" : s.state === "disabled" ? "stopped" : "error"}
                 text={{ connected: "已连接", connecting: "连接中", disabled: "已停用", error: "出错" }[s.state as string] ?? s.state} />
                 {s.error ? <details><summary class="muted">错误</summary><pre>{s.error}{s.stderr ? `\n\n${s.stderr}` : ""}</pre></details> : null}</td>
               <td>{s.tools.length ? <details><summary>{s.tools.length} 个{s.tokens ? <small class="muted"> · 约 {s.tokens} token · {s.lazy ? "按需加载" : "一直带着"}</small> : null}</summary><ul>{s.tools.map((t: any) => (
                 <li><code>{t.tool}</code>{t.exposure === "hidden" ? <small class="muted">（已隐藏）</small> : null}<br /><small class="muted">{t.description.slice(0, 160)}</small></li>))}</ul></details> : "—"}</td>
-              <td>{s.state !== "disabled" && s.transport ? <Btn small onClick={async () => { await api(`/mcp/${enc(s.name)}/reconnect`, { body: {} }); toast("已重连"); reload(); }}>重连</Btn> : null}</td>
+              <td>{s.state !== "disabled" && s.transport ? <Btn small onClick={async () => { await api(`/mcp/${enc(s.name)}/reconnect`, { body: {} }); toast("已重连"); reload(); }}>重连</Btn> : null}
+                {s.notify ? <>{" "}<Btn small onClick={async () => { try { toast(delivered((await api(`/mcp/${enc(s.name)}/test-notify`, { body: {} })).delivered)); } catch (e) { toastErr(e); } }}>测试通知</Btn></> : null}</td>
             </tr>))}
         </tbody></table> : <Empty>暂无 MCP 服务器</Empty>}
-        <p class="muted">工具名为 <code>mcp__服务器__工具</code>，仅可信会话可用；服务器配置 <code>"allowUntrusted": true</code> 后开放。工具多的服务器平时收着、她要用时才调出来，<code>"lazy": true / false</code> 可指定。</p>
+        <p class="muted">工具名为 <code>mcp__服务器__工具</code>，仅可信会话可用；服务器配置 <code>"allowUntrusted": true</code> 后开放。工具多的服务器平时收着、她要用时才调出来，<code>"lazy": true / false</code> 可指定。<code>"notify": true</code> = 这个服务器有事时主动告诉你。</p>
       </Card>
       <Card title="mcp.json" actions={<>
         {d.import_sources.map((s: any) => (
@@ -164,6 +175,16 @@ function Mcp() {
         {text === null ? <div class="muted">加载中…</div> : <TextArea value={text} onInput={setText} rows={18} mono placeholder={MCP_EXAMPLE} />}
         <div class="row">
           {!text && <Btn small kind="ghost" onClick={() => setText(MCP_EXAMPLE)}>填入示例</Btn>}
+          <Btn small kind="ghost" title="自带的：看打印进度，打完 / 出错主动告诉你（只读，不用开开发者模式）" onClick={() => {
+            try {
+              const j = JSON.parse(text?.trim() || "{}");
+              j.mcpServers ??= {};
+              if (j.mcpServers.printer) return toast("已经有一个叫 printer 的了", "err");
+              j.mcpServers.printer = PRINTER_TEMPLATE;
+              setText(JSON.stringify(j, null, 2));
+              toast("填好 IP、序列号、访问码后点「保存并连接」");
+            } catch { toast("现在的内容不是合法的 JSON，先改对再加", "err"); }
+          }}>＋ 拓竹打印机</Btn>
           <span class="grow" />{dirty && <span class="muted">未保存</span>}
           <Btn kind="primary" disabled={!dirty} onClick={async () => {
             try { await api("/mcp", { method: "PUT", body: { config: text } }); toast("已保存"); reload(); } catch (e) { toastErr(e); }

@@ -92,7 +92,7 @@ function filesOf(dataDir: string, id: string): { files: string[]; sqlite: string
     }
   }
   switch (id) {
-    case "settings": return { files: [...file("config.json"), ...file("roles_state.json"), ...file("minimax_voices.json"), ...file("printers.json")], sqlite: [] };
+    case "settings": return { files: [...file("config.json"), ...file("roles_state.json"), ...file("minimax_voices.json")], sqlite: [] };
     case "skills": return { files: dir("skills"), sqlite: [] };
     case "extensions": return { files: [...dir("extensions"), ...file("mcp.json")], sqlite: [] };
     case "packages": {
@@ -156,10 +156,6 @@ function stripFile(rel: string, data: Buffer): Buffer {
       for (const a of j.accounts ?? []) a.credentials = Object.fromEntries(Object.keys(a.credentials ?? {}).map((k) => [k, ""]));
       return Buffer.from(JSON.stringify(j, null, 2));
     }
-    if (rel === "printers.json") {
-      for (const p of j.printers ?? []) p.access_code = "";
-      return Buffer.from(JSON.stringify(j, null, 2));
-    }
     if (rel === "mcp.json") {
       for (const s of Object.values<any>(j.mcpServers ?? {})) {
         for (const f of ["env", "headers"]) if (s?.[f]) s[f] = Object.fromEntries(Object.entries(s[f]).map(([k, x]) => [k, /^\$\{.+\}$/.test(String(x)) ? x : ""]));
@@ -189,7 +185,7 @@ export function exportBackup(dataDir: string, ids: string[], opts: { secrets: bo
     let bytes = 0;
     for (const f of files) {
       let data: Buffer = fs.readFileSync(realPath(dataDir, f));
-      if (!opts.secrets && ["config.json", "channels.json", "mcp.json", "printers.json"].includes(f)) data = stripFile(f, data);
+      if (!opts.secrets && ["config.json", "channels.json", "mcp.json"].includes(f)) data = stripFile(f, data);
       entries.push({ name: `data/${f}`, data });
       bytes += data.length;
     }
@@ -231,7 +227,7 @@ export function itemOf(rel: string): string | null {
   }
   const top = rel.split("/")[0];
   const map: Record<string, string> = {
-    "config.json": "settings", "roles_state.json": "settings", "minimax_voices.json": "settings", "printers.json": "settings", skills: "skills", extensions: "extensions", "mcp.json": "extensions",
+    "config.json": "settings", "roles_state.json": "settings", "minimax_voices.json": "settings", skills: "skills", extensions: "extensions", "mcp.json": "extensions",
     "packages.json": "packages", packages: "packages", "channels.json": "channels", "clients.json": "channels", "system.sqlite": "jobs", "reminders.json": "jobs",
     "photo_schedules.json": "jobs", device_files: "device", app_images: "device", snapshots: "snapshots", shared_persona: "shared",
   };
@@ -327,17 +323,11 @@ export function applyPending(dataDir: string, log: (s: string) => void = console
         fs.writeFileSync(path.join(dataDir, f), JSON.stringify(merged, null, 2));
         continue;
       }
-      if (f === "channels.json" || f === "mcp.json" || f === "printers.json") {
+      if (f === "channels.json" || f === "mcp.json") {
         let local: any = {};
         try { local = JSON.parse(fs.readFileSync(path.join(dataDir, f), "utf8")); } catch { /* 本机没有 */ }
         const inc = JSON.parse(fs.readFileSync(path.join(src, f), "utf8"));
-        if (f === "printers.json") {
-          // 访问码导出时清空了：空着就保留本机的
-          for (const p of inc.printers ?? []) {
-            const lp = (local.printers ?? []).find((x: any) => x.id === p.id);
-            if (!p.access_code && lp?.access_code) p.access_code = lp.access_code;
-          }
-        } else if (f === "channels.json") {
+        if (f === "channels.json") {
           for (const a of inc.accounts ?? []) {
             const la = (local.accounts ?? []).find((x: any) => x.id === a.id);
             for (const [k, v] of Object.entries(a.credentials ?? {})) if (v === "" && la?.credentials?.[k]) a.credentials[k] = la.credentials[k];

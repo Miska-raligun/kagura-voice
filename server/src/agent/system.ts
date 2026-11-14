@@ -35,8 +35,6 @@ import { TaskQueue } from "./tasks.ts";
 import { taskTools } from "./tools/tasks.ts";
 import { setSharedDir } from "./persona.ts";
 import { health } from "./health.ts";
-import { PrinterHub } from "../printer/hub.ts";
-import { printerTools } from "./tools/printer.ts";
 
 export interface AgentSystem {
   registry: AgentRegistry;
@@ -47,10 +45,8 @@ export interface AgentSystem {
   tasks: TaskQueue | null;
   /** 记忆整理（attachAgentSystem 里建） */
   tidy?: MemoryTidy;
-  /** 3D 打印机（attachAgentSystem 里建，main 里 start） */
-  printers?: PrinterHub;
-  /** 打印机通知走的那条路（管理界面「发一条测试通知」也用它），返回送到了哪 */
-  printerNotify?: (printerId: string, text: string) => Promise<string>;
+  /** MCP 服务器主动发来的通知送给主人（管理界面「发一条测试通知」也用它），返回送到了哪 */
+  notifyOwner?: (server: string, text: string) => Promise<string>;
   a2a: A2A;
   skills: Skills;
   channels: ChannelManager;
@@ -253,24 +249,24 @@ export function attachAgentSystem(sys: AgentSystem, ctx: Ctx) {
     const d = registry.get(agentId)?.heartbeat.delivery ?? "";
     return d && d !== "none" && d !== "webchat" && d !== origin ? report(agentId, d, text, refs, tag) : "";
   };
-  // 3D 打印机：打完 / 失败 / 暂停 / 告警时告诉主人。句子是系统写的（不调模型），送法同待办汇报：打印机自己设的投递目标 →
-  // 这个 agent 的 heartbeat 投递目标 → 都没有就在家里的设备（或开着的手机）上说一声。说出去的话记进接收方会话，主人接话时她知道自己说过
-  const printerNotify = async (printerId: string, text: string): Promise<string> => {
-    const p = sys.printers?.configs().find((x) => x.id === printerId);
-    const agentId = registry.get(p?.agent ?? "")?.id ?? registry.default().id;
-    let to = await report(agentId, p?.delivery ?? "", text, [], "打印机").catch((e) => { console.log(`[printer] ⚠️  通知没送出去: ${e.message}`); return ""; });
+  // MCP 服务器主动发来的通知（服务器配置 "notify": true，见 mcp.ts）：原话送给主人，不调模型。送法同待办汇报：
+  // 服务器配置里指定的投递目标 → 那个 agent 的 heartbeat 投递目标 → 都没有就在家里的设备（或开着的手机）上说一声。
+  // 说出去的话记进接收方会话（主人接话时她知道自己说过）
+  const notifyOwner = async (server: string, text: string): Promise<string> => {
+    const n = sys.mcp.notifyConfig(server);
+    const agentId = registry.get(n?.agent ?? "")?.id ?? registry.default().id;
+    const tag = `通知：${server}`;
+    let to = await report(agentId, n?.delivery ?? "", text, [], tag).catch((e) => { console.log(`[mcp] ⚠️  ${server} 的通知没送出去: ${e.message}`); return ""; });
     if (!to) {
-      const r = await outbox.say({ text, agentId, source: "printer" });
-      if ((r.played || r.held) && r.device) void runtime.note(agentId, runtime.sessionKey(agentId, "device", r.device), "打印机", text);
+      const r = await outbox.say({ text, agentId, source: "mcp" });
+      if ((r.played || r.held) && r.device) void runtime.note(agentId, runtime.sessionKey(agentId, "device", r.device), tag, text);
       to = r.played ? `device:${r.device}` : r.held ? `held:${r.device}` : r.reason ? `muted:${r.reason}` : "";
     }
-    console.log(`[printer] 📣 通知 → ${to || "没送出去（没有投递目标，也没有在线的设备）"}`);
+    console.log(`[mcp] 📣 ${server} 的通知 → ${to || "没送出去（没有投递目标，也没有在线的设备）"}：${text.slice(0, 60)}`);
     return to;
   };
-  const printers = new PrinterHub(path.join(ctx.cfg.dataDir, "printers.json"), { notify: (p, text) => { void printerNotify(p.id, text); } });
-  sys.printers = printers;
-  sys.printerNotify = printerNotify;
-  runtime.addTools(printerTools(printers));
+  sys.notifyOwner = notifyOwner;
+  sys.mcp.onNotify = (server, text) => { void notifyOwner(server, text); };
   const tasks = new TaskQueue(ctx.dirs.systemDb, registry, { run: (req) => runtime.run(req), report, reset: (a, k) => runtime.store(a).reset(k) });
   sys.tasks = tasks;
   // 记忆整理：每 N 天在待办的静默时段、她空闲时做一次；结果按 heartbeat 的投递方式告诉主人

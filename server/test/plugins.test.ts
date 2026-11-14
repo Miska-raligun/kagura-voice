@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
 import { tmpdir, makeRuntime } from "./helpers.ts";
-import { McpManager, expandValue, exposureOf, toolName, validateServer } from "../src/agent/mcp.ts";
+import { McpManager, NOTIFY_MAX, expandValue, exposureOf, toolName, validateServer } from "../src/agent/mcp.ts";
 import { Extensions, extensionTools, GLOBAL, loadExtension } from "../src/agent/extensions.ts";
 import { mcpImportSources } from "../src/routes/admin-plugins.ts";
 
@@ -64,6 +64,35 @@ describe("MCP 管理（真起一个 stdio 服务器）", () => {
     expect((mgr as any).servers.get("e").client).toBe(before);
     await mgr.writeConfigText(JSON.stringify({ mcpServers: {} }));
     expect(mgr.status()).toEqual([]);
+  });
+
+  it("主动通知：开了 notify 的服务器发来的通知（notice 及以上）原话交出去；没开的、级别低的不管；太密就不送", async () => {
+    const dir = tmpdir("mcp");
+    mgr = new McpManager(path.join(dir, "mcp.json"), { cwd: dir });
+    const got: [string, string][] = [];
+    mgr.onNotify = (server, text) => got.push([server, text]);
+    const base = { command: process.execPath, args: [FIXTURE] };
+    await mgr.writeConfigText(JSON.stringify({ mcpServers: { loud: { ...base, notify: true }, picky: { ...base, notify: { agent: "mio", delivery: "feishu:a:b" } }, quiet: base } }));
+    expect(mgr.notifyConfig("loud")).toEqual({});
+    expect(mgr.notifyConfig("picky")).toEqual({ agent: "mio", delivery: "feishu:a:b" });
+    expect(mgr.notifyConfig("quiet")).toBe(null);
+    expect(Object.fromEntries(mgr.status().map((s: any) => [s.name, s.notify]))).toEqual({ loud: true, picky: true, quiet: false });
+    const echo = (server: string, text: string) => mgr!.tools()(scopeOf(true), {} as any).find((t) => t.name === `mcp__${server}__echo`)!.execute("1", { text });
+    await echo("loud", "notify:打印完成了");
+    await echo("loud", "log:只是日志");
+    await echo("quiet", "notify:没开通知");
+    await new Promise((r) => setTimeout(r, 50));
+    expect(got).toEqual([["loud", "打印完成了"]]);
+    for (let i = 0; i < NOTIFY_MAX + 3; i++) await echo("picky", `notify:第 ${i} 条`);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(got.filter((g) => g[0] === "picky")).toHaveLength(NOTIFY_MAX);
+  });
+
+  it("自带的服务器：command 写 kagura = 用这个程序自己起（参数接在后面）", async () => {
+    const dir = tmpdir("mcp");
+    mgr = new McpManager(path.join(dir, "mcp.json"), { cwd: dir, self: [process.execPath, FIXTURE] });
+    await mgr.writeConfigText(JSON.stringify({ mcpServers: { own: { command: "kagura", args: ["mcp", "whatever"] } } }));
+    expect(mgr.status()[0]).toMatchObject({ name: "own", state: "connected", target: "kagura mcp whatever" });
   });
 
   it("起不来的服务器标成出错并带上原因；格式错的配置单独列出", async () => {

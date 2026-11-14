@@ -1,4 +1,4 @@
-// 3D 打印机（拓竹，只读）：状态解析、增量合并、通知文案；用 aedes 当一台假打印机验连接、鉴权、事件；证书指纹；配置与工具
+// 拓竹打印机的 MCP 服务器（只读）：状态解析、增量合并、通知文案；用 aedes 当一台假打印机验连接、鉴权、事件；证书指纹；MCP 协议上的工具和通知
 import fs from "node:fs";
 import net from "node:net";
 import tls from "node:tls";
@@ -8,10 +8,8 @@ import { describe, it, expect, afterEach } from "vitest";
 import { Aedes } from "aedes";
 import { tmpdir } from "./helpers.ts";
 import { BambuPrinter, parseStatus, describeStatus, merge, errCode, colorName, tlsDial, type Dial, type PrinterEvent } from "../src/printer/bambu.ts";
-import { PrinterHub, eventText, validatePrinter } from "../src/printer/hub.ts";
-import { printerTools } from "../src/agent/tools/printer.ts";
-import { guestLocked } from "../src/agent/toolpolicy.ts";
-import { toolGuide } from "../src/agent/soul.ts";
+import { PassThrough } from "node:stream";
+import { eventText, startBambuMcp } from "../src/printer/mcp-server.ts";
 
 const SERIAL = "22E8AJ5C1234567", CODE = "12345678";
 const until = async (fn: () => boolean, ms = 3000) => { const t = Date.now(); while (!fn()) { if (Date.now() - t > ms) throw new Error("等不到"); await new Promise((r) => setTimeout(r, 10)); } };
@@ -250,62 +248,84 @@ describe.skipIf(!hasOpenssl)("真的走 TLS（自签证书）", () => {
   });
 });
 
-describe("配置与工具", () => {
-  it("填错了说清楚缺什么；访问码留空 = 不改；换了机器就忘掉旧证书；访问码不回显", async () => {
-    expect(() => validatePrinter({ id: "p", host: "", serial: SERIAL, access_code: CODE })).toThrow(/IP 地址/);
-    expect(() => validatePrinter({ id: "p", host: "192.168.1.5", serial: "x", access_code: CODE })).toThrow(/序列号/);
-    expect(() => validatePrinter({ id: "p", host: "192.168.1.5", serial: SERIAL })).toThrow(/访问码/);
-    const dir = tmpdir("printers");
-    const file = path.join(dir, "printers.json");
-    const hub = new PrinterHub(file);
-    const c = hub.upsert({ name: "P2S", host: "192.168.1.5", serial: SERIAL.toLowerCase(), access_code: CODE });
-    expect(c).toMatchObject({ id: "printer", serial: SERIAL, enabled: true, warnings: true });
-    const saved = JSON.parse(fs.readFileSync(file, "utf8"));
-    saved.printers[0].fingerprint = "FP1";
-    fs.writeFileSync(file, JSON.stringify(saved));
-    const hub2 = new PrinterHub(file);
-    expect(hub2.upsert({ id: "printer", name: "书房的 P2S", access_code: "" })).toMatchObject({ name: "书房的 P2S", access_code: CODE, host: "192.168.1.5", fingerprint: "FP1" });
-    expect(hub2.upsert({ id: "printer", host: "192.168.1.9" }).fingerprint).toBe("");
-    expect(JSON.stringify(hub2.view())).not.toContain(CODE);
-    expect(hub2.view()[0]).toMatchObject({ has_code: true, conn: "off", status: null });
-    expect(hub2.upsert({ name: "A1", host: "192.168.1.6", serial: "0309AB1234567", access_code: "x" }).id).toBe("printer2");
-    hub2.remove("printer2");
-    expect(hub2.configs().map((x) => x.id)).toEqual(["printer"]);
+describe("MCP 服务器", () => {
+  /** 在进程里起服务器，用一对管道当标准输入输出 */
+  function serve(env: Record<string, string>, dial: Dial = plainDial(), stateDir = tmpdir("bambu-state")) {
+    const input = new PassThrough(), output = new PassThrough();
+    const logs: string[] = [], notes: any[] = [];
+    const waiting = new Map<number, (r: any) => void>();
+    let buf = "", id = 0;
+    output.on("data", (d) => {
+      buf += d.toString();
+      for (let i; (i = buf.indexOf("\n")) >= 0;) {
+        const m = JSON.parse(buf.slice(0, i)); buf = buf.slice(i + 1);
+        if (m.id !== undefined) waiting.get(m.id)?.(m); else notes.push(m);
+      }
+    });
+    const srv = startBambuMcp({ input, output, env, stateDir, dial, settleMs: 10, log: (l) => logs.push(l), version: "t" });
+    const rpc = (method: string, params: any = {}) => new Promise<any>((r) => { const n = ++id; waiting.set(n, r); input.write(JSON.stringify({ jsonrpc: "2.0", id: n, method, params }) + "\n"); });
+    const call = async (name: string, args: any = {}) => (await rpc("tools/call", { name, arguments: args })).result;
+    return { srv, rpc, call, notes, logs, stateDir, close: () => { srv.close(); input.end(); } };
+  }
+  const closers: (() => any)[] = [];
+  afterEach(async () => { for (const c of closers.splice(0)) await c(); });
+
+  it("握手、列工具、看状态、要原始数据；打完发一条通知（notice 级，原话）", async () => {
+    const fp = await fakePrinter();
+    const s = serve({ BAMBU_NAME: "P2S", BAMBU_HOST: "127.0.0.1", BAMBU_PORT: String(fp.port), BAMBU_SERIAL: SERIAL.toLowerCase(), BAMBU_ACCESS_CODE: CODE });
+    closers.push(s.close, fp.close);
+    const init = (await s.rpc("initialize", { protocolVersion: "2025-06-18" })).result;
+    expect(init).toMatchObject({ protocolVersion: "2025-06-18", capabilities: { tools: {}, logging: {} }, serverInfo: { name: "kagura-bambu-printer" } });
+    expect((await s.rpc("tools/list")).result.tools.map((t: any) => t.name)).toEqual(["printer_status", "printer_retrust"]);
+    expect((await s.rpc("nope")).error.code).toBe(-32601);
+    await until(() => s.srv.printer?.conn === "online");
+    expect((await s.call("printer_status")).content[0].text).toBe("P2S：刚连上，还没收到状态，过几秒再问。");
+    await fp.push(FULL);
+    await until(() => !!s.srv.printer?.ready);
+    expect((await s.call("printer_status")).content[0].text).toMatch(/^P2S：正在打印「Benchy」，63%/);
+    expect(JSON.parse((await s.call("printer_status", { raw: true })).content[0].text)).toMatchObject({ gcode_state: "RUNNING", subtask_name: "Benchy" });
+    expect((await s.call("printer_retrust")).content[0].text).toContain("现在不是证书的问题");
+    await fp.push({ command: "push_status", gcode_state: "FINISH", mc_percent: 100 });
+    await until(() => s.notes.length === 1);
+    expect(s.notes[0]).toMatchObject({ method: "notifications/message", params: { level: "notice", logger: "bambu-printer" } });
+    expect(s.notes[0].params.data).toMatch(/^P2S 上的「Benchy」打印完成了/);
+    // 第一次连上记下了证书指纹
+    expect(JSON.parse(fs.readFileSync(path.join(s.stateDir, `${SERIAL}.json`), "utf8"))).toEqual({ fingerprint: "FP1", host: "127.0.0.1" });
+    // 断了之后说得出原因和最后看到的情况
+    await fp.close();
+    await until(() => s.srv.printer?.conn === "error");
+    expect((await s.call("printer_status")).content[0].text).toMatch(/^P2S：连不上（连接断了.*最后一次看到是 0 分钟前：打完了「Benchy」/);
   });
 
-  it("printer_status：没配打印机时没有这个工具；陌生人没有；说得出状态，连不上时说原因和最后看到的情况", async () => {
+  it("证书变了：不连、发一条警告通知；主人确认后 printer_retrust 重新记", async () => {
     const fp = await fakePrinter();
-    const dir = tmpdir("printers");
-    const said: string[] = [];
-    const hub = new PrinterHub(path.join(dir, "printers.json"), { dial: plainDial(), settleMs: 10, notify: (_p, text) => said.push(text) });
-    const scope: any = { agentId: "main", sessionKey: "main:main", trusted: true };
-    try {
-      expect(printerTools(hub)(scope)).toEqual([]);
-      hub.start();
-      hub.upsert({ name: "P2S", host: "127.0.0.1", serial: SERIAL, access_code: CODE });
-      // 假打印机不在 8883 上：直接换成它的端口再连
-      (hub as any).live.get("printer").stop();
-      const p = new BambuPrinter({ host: "127.0.0.1", port: fp.port, serial: SERIAL, accessCode: CODE, dial: plainDial(), settleMs: 10,
-        onEvent: (e) => said.push(eventText("P2S", e)), log: () => {} });
-      (hub as any).live.set("printer", p);
-      const sub = fp.subscribed();
-      p.start();
-      await sub;
-      const [tool] = printerTools(hub)(scope);
-      expect(tool.name).toBe("printer_status");
-      expect(printerTools(hub)({ ...scope, trusted: false })).toEqual([]);
-      expect(((await tool.execute("1", {})) as any).content[0].text).toBe("P2S：刚连上，还没收到状态，过几秒再问。");
-      await fp.push(FULL);
-      await until(() => p.ready);
-      expect(((await tool.execute("1", { printer: "p2s" })) as any).content[0].text).toMatch(/^P2S：正在打印「Benchy」，63%/);
-      await fp.push({ command: "push_status", gcode_state: "FINISH", mc_percent: 100 });
-      await until(() => said.length === 1);
-      expect(said[0]).toMatch(/^P2S 上的「Benchy」打印完成了/);
-      await fp.close();
-      await until(() => p.conn === "error");
-      expect(hub.describe()).toMatch(/^P2S：连不上（连接断了.*最后一次看到是 0 分钟前：打完了「Benchy」/);
-    } finally { hub.stop(); await fp.close().catch(() => {}); }
-    expect(guestLocked("printer_status")).toBe(true);
-    expect(toolGuide(["printer_status"])).toContain("printer_status");
+    const env = { BAMBU_NAME: "P2S", BAMBU_HOST: "127.0.0.1", BAMBU_PORT: String(fp.port), BAMBU_SERIAL: SERIAL, BAMBU_ACCESS_CODE: CODE };
+    const dir = tmpdir("bambu-state");
+    fs.writeFileSync(path.join(dir, `${SERIAL}.json`), JSON.stringify({ fingerprint: "OLD", host: "127.0.0.1" }));
+    const s = serve(env, plainDial("NEW"), dir);
+    closers.push(s.close, fp.close);
+    await until(() => s.notes.length === 1);
+    expect(s.notes[0].params).toMatchObject({ level: "warning" });
+    expect(s.notes[0].params.data).toContain("证书和上次连接时不一样");
+    expect(fp.connects()).toBe(0);
+    expect((await s.call("printer_status")).content[0].text).toContain("连不上（证书和上次连接时不一样");
+    expect((await s.call("printer_retrust")).content[0].text).toContain("正在重新连接");
+    await until(() => s.srv.printer?.conn === "online");
+    expect(JSON.parse(fs.readFileSync(path.join(dir, `${SERIAL}.json`), "utf8")).fingerprint).toBe("NEW");
+    // 换了 IP 当成换了机器：旧指纹不作数，直接连
+    const s2 = serve({ ...env, BAMBU_HOST: "localhost" }, plainDial("THIRD"), dir);
+    closers.push(s2.close);
+    await until(() => s2.srv.printer?.conn === "online");
+  });
+
+  it("没配好（缺项 / 还是模板里的占位）：服务器照样起来，工具说清楚缺什么", async () => {
+    const s = serve({ BAMBU_HOST: "打印机的 IP", BAMBU_SERIAL: SERIAL });
+    closers.push(s.close);
+    expect(s.srv.printer).toBe(null);
+    const r = await s.call("printer_status");
+    expect(r.content[0].text).toContain("BAMBU_HOST（打印机 IP）、BAMBU_ACCESS_CODE（访问码）");
+    expect(r.content[0].text).not.toContain("BAMBU_SERIAL");
+    expect((await s.call("printer_retrust")).isError).toBe(true);
+    expect(s.logs.join()).toContain("还没配置好");
   });
 });
