@@ -3,6 +3,7 @@
 //   "printer": { "command": "kagura", "args": ["mcp", "bambu-printer"], "notify": true,
 //                "env": { "BAMBU_HOST": "192.168.1.50", "BAMBU_SERIAL": "…", "BAMBU_ACCESS_CODE": "…", "BAMBU_NAME": "P2S" } }
 // 工具：printer_status（看状态；raw=true 给原始数据）、printer_retrust（证书变了之后主人确认过再调）。
+// env 里 BAMBU_CONTROL=1 时多三个控制工具（control.ts：printer_control / printer_files / printer_print），要打印机开了开发者模式才发得出去。
 // 打完 / 失败 / 暂停 / 严重告警时发 MCP 的日志通知（notifications/message），服务器配置里 "notify": true 时 Kagura 把它送给主人（mcp.ts）。
 // 协议是一行一个 JSON-RPC 消息；标准输出只走协议，日志一律写标准错误（管理界面的 MCP 表里看得到）。
 import fs from "node:fs";
@@ -10,6 +11,8 @@ import path from "node:path";
 import readline from "node:readline";
 import type { Readable, Writable } from "node:stream";
 import { BambuPrinter, describeStatus, fmtDuration, type Dial, type PrinterEvent, type PrinterStatus } from "./bambu.ts";
+import { CONTROL_TOOLS, PrinterControl } from "./control.ts";
+import type { FtpDial } from "./ftps.ts";
 
 /** 通知的句子（系统直接写，不过模型） */
 export function eventText(name: string, e: PrinterEvent): string {
@@ -32,7 +35,9 @@ export interface BambuMcpOpts {
   stateDir?: string;
   log?(line: string): void;
   dial?: Dial;
+  ftpDial?: FtpDial;
   settleMs?: number;
+  ackMs?: number;
   version?: string;
 }
 
@@ -40,7 +45,7 @@ const TOOLS = [
   {
     name: "printer_status", title: "看 3D 打印机",
     description: "看家里 3D 打印机现在的情况：在不在打印、打的是什么、进度、还要多久、温度、料还剩多少、有没有报错。问到打印机的事先看一眼再答，别凭之前的印象说。"
-      + "只能看，不能控制（暂停 / 停止 / 开始打印要主人自己在打印机或官方软件上操作）。打完、失败、暂停时会自动通知主人，不用你盯着。",
+      + "打完、失败、暂停时会自动通知主人，不用你盯着。",
     inputSchema: { type: "object", properties: { raw: { type: "boolean", description: "true = 返回打印机发来的原始数据（排查显示不对时用，平时不要）" } } },
   },
   {
@@ -72,7 +77,7 @@ export function startBambuMcp(o: BambuMcpOpts): { close(): void; printer: BambuP
       host, serial, accessCode: code, port: Number(env("BAMBU_PORT")) || undefined,
       // 换了 IP 就当换了机器：以前记的证书不作数
       fingerprint: st.host === host ? st.fingerprint : "",
-      dial: o.dial, settleMs: o.settleMs, log: (l) => log(`[${name}] ${l}`),
+      dial: o.dial, settleMs: o.settleMs, ackMs: o.ackMs, log: (l) => log(`[${name}] ${l}`),
       onFingerprint: (fp) => writeState({ fingerprint: fp, host }),
       onEvent: (e) => {
         if (e.kind === "warning" && env("BAMBU_WARNINGS") === "0") return;
@@ -85,6 +90,14 @@ export function startBambuMcp(o: BambuMcpOpts): { close(): void; printer: BambuP
   };
   if (missing.length) log(`还没配置好：缺 ${missing.join("、")}`);
   else open();
+  // 控制（BAMBU_CONTROL=1 才有）：没开的话这个服务器只读，工具列表里也没有控制类的
+  const controlOn = env("BAMBU_CONTROL") === "1";
+  const control = new PrinterControl({
+    name, printer: () => printer, fingerprint: () => readState().fingerprint ?? "", log,
+    ftpPort: Number(env("BAMBU_FTP_PORT")) || undefined, ftpDial: o.ftpDial, fileUrl: env("BAMBU_FILE_URL"),
+  });
+  const tools = controlOn ? [...TOOLS, ...CONTROL_TOOLS]
+    : TOOLS.map((t) => (t.name === "printer_status" ? { ...t, description: t.description + "只能看，不能控制（暂停 / 停止 / 开始打印要主人自己在打印机或官方软件上操作）。" } : t));
 
   const statusText = (raw: boolean): string => {
     if (missing.length) return `打印机还没配置好：在 MCP 配置的 env 里填 ${missing.join("、")}（都在打印机屏幕的设置里看）。`;
@@ -94,7 +107,9 @@ export function startBambuMcp(o: BambuMcpOpts): { close(): void; printer: BambuP
       const last = p.ready && p.lastSeen ? `最后一次看到是 ${fmtDuration((Date.now() - p.lastSeen) / 60_000)}前：${describeStatus(p.status)}` : "";
       return `${name}：连不上（${p.error || "还在连接"}）。${last}`;
     }
-    return p.ready ? `${name}：${describeStatus(p.status)}` : `${name}：刚连上，还没收到状态，过几秒再问。`;
+    if (!p.ready) return `${name}：刚连上，还没收到状态，过几秒再问。`;
+    const s = p.status;
+    return `${name}：${describeStatus(s)}${controlOn && s.devMode === false ? "（打印机没开开发者模式：现在只能看，暂停 / 停止 / 开始打印发不出去）" : ""}`;
   };
 
   const rl = readline.createInterface({ input: o.input });
@@ -108,10 +123,11 @@ export function startBambuMcp(o: BambuMcpOpts): { close(): void; printer: BambuP
       case "initialize": return ok({
         protocolVersion: m.params?.protocolVersion ?? "2025-03-26", capabilities: { tools: {}, logging: {} },
         serverInfo: { name: "kagura-bambu-printer", version: o.version ?? "0" },
-        instructions: `看拓竹 3D 打印机（${name}）的状态：进度、剩余时间、温度、料、报错（只读）`,
+        instructions: controlOn ? `拓竹 3D 打印机（${name}）：看进度 / 温度 / 料 / 报错，暂停、继续、停止，把切好的文件发去打印`
+          : `看拓竹 3D 打印机（${name}）的状态：进度、剩余时间、温度、料、报错（只读）`,
       });
       case "ping": case "logging/setLevel": return ok({});
-      case "tools/list": return ok({ tools: TOOLS });
+      case "tools/list": return ok({ tools });
       case "tools/call": {
         const tool = m.params?.name, args = m.params?.arguments ?? {};
         if (tool === "printer_status") return text(statusText(args.raw === true));
@@ -121,6 +137,12 @@ export function startBambuMcp(o: BambuMcpOpts): { close(): void; printer: BambuP
           writeState({});
           open();
           return text(`已经忘掉 ${name} 以前的证书，正在重新连接，这次连上的会被记成新的。过几秒用 printer_status 看看连上没有。`);
+        }
+        if (controlOn && (tool === "printer_control" || tool === "printer_files" || tool === "printer_print")) {
+          if (missing.length) return text(statusText(false), true);
+          const run = tool === "printer_control" ? control.control(args) : tool === "printer_files" ? control.files() : control.print(args);
+          run.then((r) => text(r.text, r.isError === true)).catch((e) => text(`出错了：${e?.message ?? e}`, true));
+          return;
         }
         return text(`没有工具 ${tool}`, true);
       }

@@ -36,6 +36,8 @@ export interface PrinterStatus {
   activeSlot: number | null;
   amsHumidity: number | null;
   wifi: string;
+  /** 能不能控制：true = 开了开发者模式（第三方指令不用签名）；false = 没开，只能看；null = 打印机没报 */
+  devMode: boolean | null;
 }
 
 const STATES: Record<string, PrintState> = { IDLE: "idle", PREPARE: "preparing", SLICING: "preparing", RUNNING: "printing", PAUSE: "paused", FINISH: "finished", FAILED: "failed" };
@@ -46,6 +48,11 @@ const STAGES: Record<number, string> = {
   18: "校准激光雷达", 19: "流量校准", 20: "暂停：喷嘴温度异常", 21: "暂停：热床温度异常", 22: "退料", 23: "暂停：电机丢步", 24: "进料", 25: "电机噪音校准",
   26: "暂停：AMS 断开了", 27: "暂停：散热风扇转速太低", 28: "暂停：仓温控制异常", 29: "仓内降温", 30: "暂停（G-code 里的暂停点）", 32: "暂停：喷嘴裹料了",
   33: "暂停：切刀卡住了", 34: "暂停：首层有问题", 35: "暂停：喷嘴堵了",
+  // 新一代机型（H2 / P2）多出来的
+  36: "精度校准前检查", 37: "精度校准", 38: "精度校准后检查", 39: "喷嘴偏移校准", 40: "高温调平", 41: "检查快拆", 42: "检查门和上盖", 43: "激光校准", 44: "检查平台",
+  47: "调平", 48: "调平", 49: "仓内加热", 50: "热床降温", 51: "打印校准线", 52: "检查耗材", 54: "等热床到温度", 55: "检查耗材位置", 58: "预热保温",
+  63: "等仓温稳定", 64: "准备热端", 65: "喷嘴结块检测校准", 66: "净化仓内空气", 68: "移到废料口上方", 69: "喷嘴降温", 72: "识别热端类型", 73: "检查打印板有没有放正",
+  74: "检查热床上有没有异物", 75: "检查热床下面有没有异物", 76: "打印前预挤出", 77: "准备 AMS", 82: "等热床温度稳定",
 };
 /** 人自己按的暂停（不用通知） */
 export const STAGE_USER_PAUSE = 16;
@@ -114,7 +121,12 @@ export function parseStatus(p: any): PrinterStatus {
   const stageId = num(p.stg_cur);
   const err = num(p.print_error) ?? 0;
   const dev = p.device && typeof p.device === "object" ? p.device : {};
-  const ext = Array.isArray(dev.extruder?.info) ? dev.extruder.info[0] : undefined;
+  // 单喷嘴的机器是 id 0 那一项
+  const exts: any[] = Array.isArray(dev.extruder?.info) ? dev.extruder.info : [];
+  const ext = exts.find((e) => Number(e?.id) === 0) ?? exts[0];
+  // fun 是一串十六进制的功能位；0x20000000 = 指令要签名（没开开发者模式）
+  let devMode: boolean | null = null;
+  if (typeof p.fun === "string" && /^[0-9a-f]+$/i.test(p.fun)) { try { devMode = (BigInt(`0x${p.fun}`) & 0x20000000n) === 0n; } catch { /* 不认识就当不知道 */ } }
   const trays: Tray[] = [];
   let humidity: number | null = null;
   for (const unit of Array.isArray(p.ams?.ams) ? p.ams.ams : []) {
@@ -148,6 +160,7 @@ export function parseStatus(p: any): PrinterStatus {
     activeSlot: now === null || now === 255 ? null : now === 254 ? 0 : now + 1,
     amsHumidity: humidity,
     wifi: String(p.wifi_signal ?? ""),
+    devMode,
   };
 }
 
@@ -196,8 +209,10 @@ export interface Dialed { sock: Duplex; fingerprint: string }
 export type Dial = (host: string, port: number) => Promise<Dialed>;
 
 /** 打印机的证书是它自己签的（没有公共 CA），没法按常规验证：改成「第一次见到记下指纹，以后必须一样」（见 BambuPrinter.connect） */
+/** 最高只用 TLS 1.2：P2S 的固件（01.02）对 TLS 1.3 的握手不回应，会一直挂到超时；1.2 立刻就回（ha-bambulab 里踩出来的） */
+export const TLS_MAX = "TLSv1.2" as const;
 export const tlsDial: Dial = (host, port) => new Promise((resolve, reject) => {
-  const s = tls.connect({ host, port, rejectUnauthorized: false, timeout: 10_000 });
+  const s = tls.connect({ host, port, rejectUnauthorized: false, timeout: 10_000, maxVersion: TLS_MAX });
   s.once("secureConnect", () => { s.setTimeout(0); resolve({ sock: s, fingerprint: s.getPeerCertificate()?.fingerprint256 ?? "" }); });
   s.once("timeout", () => s.destroy(new Error("连接超时")));
   s.once("error", reject);
@@ -219,6 +234,8 @@ export interface BambuOpts {
   dial?: Dial;
   /** 状态变了之后等多久再判断（增量是一条条来的，状态和原因可能不在同一条里） */
   settleMs?: number;
+  /** 控制指令等回执等多久（默认 6 秒） */
+  ackMs?: number;
   log?(line: string): void;
 }
 
@@ -247,6 +264,8 @@ export class BambuPrinter {
   private warned = new Map<string, number>();
   private hmsSeen: Set<string> | null = null;
   private seq = 0;
+  /** 等回执的指令：sequence_id → 收到回执时调 */
+  private acks = new Map<string, (r: any) => void>();
 
   constructor(private o: BambuOpts) {}
 
@@ -334,12 +353,43 @@ export class BambuPrinter {
     this.mq = mq;
   }
 
+  get options() { return this.o; }
+
+  /**
+   * 发一条控制指令（要开发者模式；没开时打印机会拒绝）。等它的回执：ok = 打印机说成功；回执里说失败就带原因；
+   * 几秒没回执 = 发出去了但不知道结果（让调用方看状态确认）。
+   */
+  command(kind: "print" | "system", body: Record<string, unknown>, timeoutMs = this.o.ackMs ?? 6000): Promise<{ ok: boolean; sent: boolean; reason: string }> {
+    if (!this.mq || this.conn !== "online") return Promise.resolve({ ok: false, sent: false, reason: `没连上打印机（${this.error || "还在连接"}）` });
+    const id = String(++this.seq + 1000);
+    return new Promise((resolve) => {
+      const t = setTimeout(() => { this.acks.delete(id); resolve({ ok: false, sent: true, reason: "指令发出去了，但打印机没有回应" }); }, timeoutMs);
+      t.unref?.();
+      this.acks.set(id, (r) => {
+        clearTimeout(t);
+        this.acks.delete(id);
+        const res = String(r?.result ?? "").toLowerCase();
+        const bad = (res && res !== "success") || (num(r?.err_code) ?? 0) !== 0;
+        // 没开开发者模式时打印机回的是「校验失败」之类：换成人话
+        const why = String(r?.reason ?? "") + (r?.err_code ? `（${r.err_code}）` : "");
+        resolve(bad ? { ok: false, sent: true, reason: /verif|sign|auth/i.test(why) || r?.err_code === 84033543 ? `打印机拒绝了（${why}）：多半是没开开发者模式` : `打印机说失败了：${why || res}` } : { ok: true, sent: true, reason: "" });
+      });
+      this.mq!.publish(`device/${this.o.serial}/request`, JSON.stringify({ [kind]: { sequence_id: id, ...body } }), 1);
+    });
+  }
+
   /** 要一份完整状态（只读请求，不是控制指令） */
   private pushall() {
     this.mq?.publish(`device/${this.o.serial}/request`, JSON.stringify({ pushing: { sequence_id: String(++this.seq), command: "pushall", version: 1, push_target: 1 } }));
   }
 
   private onReport(msg: any) {
+    // 指令的回执：按 sequence_id 对上（print / system 两种外壳）
+    for (const k of ["print", "system"]) {
+      const r = msg?.[k];
+      const ack = r && typeof r === "object" && r.command !== "push_status" ? this.acks.get(String(r.sequence_id ?? "")) : undefined;
+      if (ack) ack(r);
+    }
     const p = msg?.print;
     if (!p || typeof p !== "object") return;
     if (p.command !== undefined && p.command !== "push_status") return;      // 别的指令的回执，不是状态

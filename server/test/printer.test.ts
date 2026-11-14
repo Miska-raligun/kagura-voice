@@ -10,6 +10,9 @@ import { tmpdir } from "./helpers.ts";
 import { BambuPrinter, parseStatus, describeStatus, merge, errCode, colorName, tlsDial, type Dial, type PrinterEvent } from "../src/printer/bambu.ts";
 import { PassThrough } from "node:stream";
 import { eventText, startBambuMcp } from "../src/printer/mcp-server.ts";
+import { Ftps, parseList, type FtpDial } from "../src/printer/ftps.ts";
+import { zipNames, platesOf } from "../src/printer/control.ts";
+import { zip } from "../src/util/zip.ts";
 
 const SERIAL = "22E8AJ5C1234567", CODE = "12345678";
 const until = async (fn: () => boolean, ms = 3000) => { const t = Date.now(); while (!fn()) { if (Date.now() - t > ms) throw new Error("等不到"); await new Promise((r) => setTimeout(r, 10)); } };
@@ -82,12 +85,22 @@ async function fakePrinter(secure?: { key: Buffer; cert: Buffer }) {
   let connects = 0;
   broker.authenticate = (_c: any, user: string, pass: Buffer, cb: any) => { connects++; cb(null, user === "bblp" && pass?.toString() === CODE); };
   broker.authorizeSubscribe = (c: any, sub: any, cb: any) => { if (sub.topic === `device/${SERIAL}/report`) cb(null, sub); else { c.close(); cb(new Error("no")); } };
-  broker.on("publish", (pk: any, c: any) => { if (c && pk.topic === `device/${SERIAL}/request`) requests.push(JSON.parse(pk.payload.toString())); });
+  /** 怎么回执控制指令：默认说成功；设成 null 就不回；设成函数自己定 */
+  const ctl: { ack: null | ((kind: string, body: any) => any) } = { ack: (_k, b) => ({ command: b.command, sequence_id: b.sequence_id, result: "success", reason: "" }) };
+  broker.on("publish", (pk: any, c: any) => {
+    if (!c || pk.topic !== `device/${SERIAL}/request`) return;
+    const req = JSON.parse(pk.payload.toString());
+    requests.push({ ...req, _qos: pk.qos });
+    const kind = Object.keys(req)[0];
+    if (kind === "pushing" || !ctl.ack) return;
+    const r = ctl.ack(kind, req[kind]);
+    if (r) broker.publish({ cmd: "publish", topic: `device/${SERIAL}/report`, payload: Buffer.from(JSON.stringify({ [kind]: r })), qos: 0, dup: false, retain: false }, () => {});
+  });
   const server = secure ? tls.createServer(secure, broker.handle) : net.createServer(broker.handle);
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
   const port = (server.address() as net.AddressInfo).port;
   return {
-    port, requests, connects: () => connects, subscribed: () => new Promise<void>((r) => broker.once("subscribe", () => r())),
+    port, requests, ctl, connects: () => connects, subscribed: () => new Promise<void>((r) => broker.once("subscribe", () => r())),
     push: (print: any) => new Promise<void>((r) => broker.publish({ cmd: "publish", topic: `device/${SERIAL}/report`, payload: Buffer.from(JSON.stringify({ print })), qos: 0, dup: false, retain: false }, () => r())),
     close: async () => { await new Promise<void>((r) => broker.close(() => r())); server.close(); },
   };
@@ -107,6 +120,14 @@ describe("连接假打印机", () => {
     open.push(p);
     return { fp, p, events, logs };
   }
+
+  it("新固件的几处：是不是开了开发者模式（fun 里的签名位）、单喷嘴取 id 0 那项、新阶段号", () => {
+    expect(parseStatus({ gcode_state: "IDLE", fun: "3EC1AFFF9CFF" }).devMode).toBe(false);
+    expect(parseStatus({ gcode_state: "IDLE", fun: "3EC18FFF9CFF" }).devMode).toBe(true);
+    expect(parseStatus({ gcode_state: "IDLE" }).devMode).toBe(null);
+    const s = parseStatus({ gcode_state: "PREPARE", stg_cur: 77, device: { extruder: { info: [{ id: 1, temp: 5 }, { id: 0, temp: (220 << 16) | 180 }] } } });
+    expect(s).toMatchObject({ stage: "准备 AMS", nozzle: { now: 180, target: 220 } });
+  });
 
   it("连上后订阅、要一份完整状态；收到增量并进去；刚连上时的状态不通知", async () => {
     const { fp, p, events } = await setup();
@@ -327,5 +348,202 @@ describe("MCP 服务器", () => {
     expect(r.content[0].text).not.toContain("BAMBU_SERIAL");
     expect((await s.call("printer_retrust")).isError).toBe(true);
     expect(s.logs.join()).toContain("还没配置好");
+  });
+});
+
+/** 假的打印机文件服务：明文（测试里不走 TLS），够 Ftps 用的那几条命令 */
+async function fakeFtp(files: Record<string, Buffer> = {}) {
+  const stored: Record<string, Buffer> = { ...files };
+  const log: string[] = [];
+  const servers: net.Server[] = [];
+  const ctl = net.createServer((c) => {
+    let data: Promise<net.Socket> | null = null;
+    let buf = "";
+    c.write("220 hi\r\n");
+    c.on("data", async (d) => {
+      buf += d.toString();
+      for (let i; (i = buf.indexOf("\r\n")) >= 0;) {
+        const line = buf.slice(0, i); buf = buf.slice(i + 2);
+        const [cmd, ...rest] = line.split(" "); const arg = rest.join(" ");
+        log.push(cmd === "PASS" ? "PASS ***" : line);
+        if (cmd === "USER") c.write("331 pass?\r\n");
+        else if (cmd === "PASS") c.write(arg === CODE ? "230 ok\r\n" : "530 no\r\n");
+        else if (cmd === "PBSZ" || cmd === "PROT" || cmd === "TYPE") c.write("200 ok\r\n");
+        else if (cmd === "PASV") {
+          const ds = net.createServer(); servers.push(ds);
+          data = new Promise((r) => ds.once("connection", (s) => { s.pause(); r(s); }));
+          await new Promise<void>((r) => ds.listen(0, "127.0.0.1", () => r()));
+          const p = (ds.address() as net.AddressInfo).port;
+          c.write(`227 Entering Passive Mode (10,0,0,9,${p >> 8},${p & 255})\r\n`);
+        } else if (cmd === "LIST") {
+          const dir = arg.replace(/\/$/, "");
+          const names = Object.keys(stored).filter((n) => path.posix.dirname(n) === (dir || "/"));
+          if (dir === "/cache" && !names.length) { c.write("550 no such dir\r\n"); (await data!).destroy(); continue; }
+          c.write("150 here\r\n");
+          const s = await data!;
+          s.end(names.map((n) => `-rw-rw-rw- 1 root root ${String(stored[n].length).padStart(8)} Nov 14 09:30 ${path.posix.basename(n)}`).join("\r\n") + "\r\ndrwxr-xr-x 2 root root 0 Nov 01 00:00 cache\r\n");
+          c.write("226 done\r\n");
+        } else if (cmd === "STOR") {
+          c.write("150 go\r\n");
+          const s = await data!; const chunks: Buffer[] = [];
+          s.on("data", (x) => chunks.push(x)); s.resume();
+          s.once("close", () => { stored[arg] = Buffer.concat(chunks); c.write("226 stored\r\n"); });
+        } else if (cmd === "QUIT") c.end("221 bye\r\n");
+        else c.write("502 ?\r\n");
+      }
+    });
+    c.on("error", () => {});
+  });
+  await new Promise<void>((r) => ctl.listen(0, "127.0.0.1", () => r()));
+  return { port: (ctl.address() as net.AddressInfo).port, stored, log, close: () => { ctl.close(); for (const d of servers) d.close(); } };
+}
+const plainFtp = (fp = "FP1"): FtpDial => (host, port) => new Promise((resolve, reject) => { const s = net.connect(port, host, () => resolve({ sock: s, fingerprint: fp })); s.once("error", reject); });
+
+describe("文件服务（FTPS）与切片文件", () => {
+  it("列表解析：名字里有空格、目录、大小", () => {
+    expect(parseList("-rw-rw-rw- 1 root root   123456 Nov 14 09:30 小船 final.gcode.3mf\r\ndrwxr-xr-x 2 root root 0 Nov 01 00:00 cache\r\ntotal 3\r\n")).toEqual([
+      { name: "小船 final.gcode.3mf", size: 123456, dir: false, date: "Nov 14 09:30" }, { name: "cache", size: 0, dir: true, date: "Nov 01 00:00" }]);
+  });
+
+  it("登录、列文件、上传（数据通道连的是控制通道那个地址，不信回复里的 IP）；访问码不对、证书不对都说清楚", async () => {
+    const srv = await fakeFtp({ "/a.gcode.3mf": Buffer.from("AAAA"), "/notes.txt": Buffer.from("x"), "/cache/b.3mf": Buffer.from("BB") });
+    try {
+      const f = await Ftps.open({ host: "127.0.0.1", port: srv.port, password: CODE, dial: plainFtp(), fingerprint: "FP1" });
+      expect((await f.list("/")).map((x) => x.name)).toEqual(["a.gcode.3mf", "notes.txt", "cache"]);
+      expect((await f.list("/cache")).map((x) => [x.name, x.size])).toEqual([["b.3mf", 2], ["cache", 0]]);
+      const body = Buffer.alloc(300_000, 7);
+      const { Readable } = await import("node:stream");
+      await f.upload("/大文件.gcode.3mf", Readable.from([body.subarray(0, 100_000), body.subarray(100_000)]));
+      f.close();
+      await until(() => !!srv.stored["/大文件.gcode.3mf"]);
+      expect(srv.stored["/大文件.gcode.3mf"].equals(body)).toBe(true);
+      expect(srv.log.slice(0, 5)).toEqual(["USER bblp", "PASS ***", "PBSZ 0", "PROT P", "TYPE I"]);
+      await expect(Ftps.open({ host: "127.0.0.1", port: srv.port, password: "bad", dial: plainFtp() })).rejects.toThrow(/访问码不对/);
+      await sleep(50);
+      const before = srv.log.length;
+      await expect(Ftps.open({ host: "127.0.0.1", port: srv.port, password: CODE, dial: plainFtp("OTHER"), fingerprint: "FP1" })).rejects.toThrow(/证书和记下的不一样/);
+      await sleep(50);
+      expect(srv.log.length).toBe(before);           // 没登录
+    } finally { srv.close(); }
+  });
+
+  it("3mf 切没切片：看里面有没有 Metadata/plate_N.gcode", () => {
+    const dir = tmpdir("3mf");
+    const sliced = path.join(dir, "s.gcode.3mf"), raw = path.join(dir, "r.3mf");
+    fs.writeFileSync(sliced, zip([{ name: "3D/3dmodel.model", data: Buffer.from("<m/>") }, { name: "Metadata/plate_2.gcode", data: Buffer.from("G1") }, { name: "Metadata/plate_1.gcode", data: Buffer.from("G1 X1".repeat(500)) }, { name: "Metadata/plate_1.png", data: Buffer.alloc(10) }]));
+    fs.writeFileSync(raw, zip([{ name: "3D/3dmodel.model", data: Buffer.from("<m/>") }]));
+    expect(platesOf(zipNames(sliced))).toEqual([1, 2]);
+    expect(platesOf(zipNames(raw))).toEqual([]);
+    fs.writeFileSync(path.join(dir, "bad.3mf"), "不是 zip");
+    expect(() => zipNames(path.join(dir, "bad.3mf"))).toThrow(/不是 zip/);
+  });
+});
+
+describe("控制（BAMBU_CONTROL=1）", () => {
+  const DEV = "3EC18FFF9CFF", NODEV = "3EC1AFFF9CFF";
+  const closers: (() => any)[] = [];
+  afterEach(async () => { for (const c of closers.splice(0)) await c(); });
+  async function setup(first: any, files: Record<string, Buffer> = {}) {
+    const fp = await fakePrinter();
+    const ftp = await fakeFtp(files);
+    const input = new PassThrough(), output = new PassThrough();
+    const waiting = new Map<number, (r: any) => void>();
+    let buf = "", id = 0;
+    output.on("data", (d) => { buf += d.toString(); for (let i; (i = buf.indexOf("\n")) >= 0;) { const m = JSON.parse(buf.slice(0, i)); buf = buf.slice(i + 1); if (m.id !== undefined) waiting.get(m.id)?.(m); } });
+    const srv = startBambuMcp({ input, output, stateDir: tmpdir("bambu-state"), dial: plainDial(), ftpDial: plainFtp(), settleMs: 10, ackMs: 1200, log: () => {},
+      env: { BAMBU_NAME: "P2S", BAMBU_HOST: "127.0.0.1", BAMBU_PORT: String(fp.port), BAMBU_FTP_PORT: String(ftp.port), BAMBU_SERIAL: SERIAL, BAMBU_ACCESS_CODE: CODE, BAMBU_CONTROL: "1" } });
+    closers.push(() => { srv.close(); input.end(); }, fp.close, ftp.close);
+    const rpc = (method: string, params: any = {}) => new Promise<any>((r) => { const n = ++id; waiting.set(n, r); input.write(JSON.stringify({ jsonrpc: "2.0", id: n, method, params }) + "\n"); });
+    const call = async (name: string, args: any = {}) => { const r = (await rpc("tools/call", { name, arguments: args })).result; return { text: r.content[0].text as string, isError: !!r.isError }; };
+    await until(() => srv.printer?.conn === "online");
+    await fp.push(first);
+    await until(() => !!srv.printer?.ready);
+    const sent = () => fp.requests.filter((r) => !r.pushing);
+    return { fp, ftp, srv, rpc, call, sent };
+  }
+
+  it("多出三个控制工具；没开开发者模式时不发指令、说清楚怎么开", async () => {
+    const s = await setup({ ...FULL, fun: NODEV });
+    expect((await s.rpc("tools/list")).result.tools.map((t: any) => t.name)).toEqual(["printer_status", "printer_retrust", "printer_control", "printer_files", "printer_print"]);
+    expect((await s.call("printer_status")).text).toContain("打印机没开开发者模式：现在只能看");
+    const r = await s.call("printer_control", { action: "pause" });
+    expect(r).toMatchObject({ isError: true });
+    expect(r.text).toContain("开发者模式");
+    expect((await s.call("printer_print", { file: "x.gcode.3mf" })).text).toContain("开发者模式");
+    expect(s.sent()).toEqual([]);
+  });
+
+  it("暂停 / 继续 / 停止 / 灯 / 速度：状态不对不发；发的是带回执的指令；被拒绝、没回应都照实说", async () => {
+    const s = await setup({ ...FULL, fun: DEV });
+    expect((await s.call("printer_control", { action: "resume" })).text).toContain("现在不是暂停状态");
+    expect(s.sent()).toEqual([]);
+    expect((await s.call("printer_control", { action: "pause" })).text).toContain("已经让它暂停了");
+    expect(s.sent()[0]).toMatchObject({ print: { command: "pause" }, _qos: 1 });
+    expect((await s.call("printer_control", { action: "light_off" })).text).toContain("灯关了");
+    expect(s.sent()[1]).toMatchObject({ system: { command: "ledctrl", led_node: "chamber_light", led_mode: "off" } });
+    expect((await s.call("printer_control", { action: "speed", speed: "silent" })).text).toContain("速度档换成静音了");
+    expect(s.sent()[2].print).toMatchObject({ command: "print_speed", param: "1" });
+    expect((await s.call("printer_control", { action: "speed", speed: "warp" })).isError).toBe(true);
+    // 打印机拒绝（没开开发者模式时的校验失败）
+    s.fp.ctl.ack = (_k, b) => ({ command: b.command, sequence_id: b.sequence_id, result: "failed", reason: "mqtt message verify failed", err_code: 84033543 });
+    const no = await s.call("printer_control", { action: "stop" });
+    expect(no.text).toContain("多半是没开开发者模式");
+    // 没回应
+    s.fp.ctl.ack = null;
+    expect((await s.call("printer_control", { action: "stop" })).text).toContain("指令发出去了，但打印机没有回应");
+    // 空闲时没什么可停的
+    await s.fp.push({ command: "push_status", gcode_state: "FINISH" });
+    await until(() => s.srv.printer!.status.state === "finished");
+    expect((await s.call("printer_control", { action: "stop" })).text).toContain("现在没有在进行的打印");
+  });
+
+  it("列打印机上的文件（根目录和 cache 里的 .3mf）", async () => {
+    const s = await setup({ ...FULL, gcode_state: "IDLE", fun: DEV }, { "/小船.gcode.3mf": Buffer.alloc(2_500_000), "/readme.txt": Buffer.from("x"), "/cache/old.3mf": Buffer.from("zz") });
+    const r = await s.call("printer_files");
+    expect(r.text).toContain("- 小船.gcode.3mf（2.4 MB，Nov 14 09:30）");
+    expect(r.text).toContain("- cache/old.3mf（1 KB");
+    expect(r.text).not.toContain("readme");
+  });
+
+  it("开始打印分两步：先给确认码，主人同意后带码再调才上传并开打；没切片的、正在打的、参数变了的都不开始", async () => {
+    const dir = tmpdir("3mf");
+    const sliced = path.join(dir, "小船.gcode.3mf"), raw = path.join(dir, "模型.3mf");
+    fs.writeFileSync(sliced, zip([{ name: "Metadata/plate_1.gcode", data: Buffer.from("G1 X1\n".repeat(2000)) }]));
+    fs.writeFileSync(raw, zip([{ name: "3D/3dmodel.model", data: Buffer.from("<m/>") }]));
+    const s = await setup({ ...FULL, gcode_state: "IDLE", fun: DEV });
+    expect((await s.call("printer_print", { file: raw })).text).toContain("还没切片");
+    expect((await s.call("printer_print", { file: path.join(dir, "没有.gcode.3mf") })).text).toContain("这台电脑上没有");
+    expect((await s.call("printer_print", { file: "model.stl" })).text).toContain("只能打切好片的 .3mf");
+    expect((await s.call("printer_print", { file: sliced, plate: 3 })).text).toContain("没有第 3 盘");
+    const ask = await s.call("printer_print", { file: sliced });
+    expect(ask.isError).toBe(false);
+    expect(ask.text).toMatch(/还没开始打印。\n要打的是：「小船」第 1 盘（这台电脑上的文件/);
+    expect(ask.text).toContain("用料：2 号槽（蓝色 PETG，剩 35%）");       // 没说用哪个槽 = 现在在用的那个
+    expect(ask.text).toContain("热床上是空的");
+    const code = /confirm="(\d{4})"/.exec(ask.text)![1];
+    expect(s.sent()).toEqual([]);
+    expect(Object.keys(s.ftp.stored)).toEqual([]);
+    // 带着码但参数变了（换了料槽）：不算确认，重新给码
+    const again = await s.call("printer_print", { file: sliced, slots: [1], confirm: code });
+    expect(again.text).toContain("确认码不对或者参数变了");
+    expect(s.sent()).toEqual([]);
+    const code2 = /confirm="(\d{4})"/.exec(again.text)![1];
+    const go = await s.call("printer_print", { file: sliced, slots: [1], confirm: code2 });
+    expect(go.text).toContain("「小船」开始打印了（文件已经传到打印机）");
+    expect(s.ftp.stored["/小船.gcode.3mf"].equals(fs.readFileSync(sliced))).toBe(true);
+    expect(s.sent()).toHaveLength(1);
+    expect(s.sent()[0].print).toMatchObject({ command: "project_file", param: "Metadata/plate_1.gcode", url: "ftp:///小船.gcode.3mf", subtask_name: "小船", use_ams: true, ams_mapping: [0], bed_leveling: true, timelapse: false });
+    // 码只能用一次
+    expect((await s.call("printer_print", { file: sliced, slots: [1], confirm: code2 })).text).toContain("还没开始打印");
+    // 打印机上已有的文件：不上传，直接开；外挂料盘
+    const ask2 = await s.call("printer_print", { file: "cache/old.3mf", use_ams: false });
+    expect(ask2.text).toContain("（打印机上的文件）");
+    expect(ask2.text).toContain("用料：外挂料盘");
+    await s.call("printer_print", { file: "cache/old.3mf", use_ams: false, confirm: /confirm="(\d{4})"/.exec(ask2.text)![1] });
+    expect(s.sent()[1].print).toMatchObject({ url: "ftp:///cache/old.3mf", use_ams: false, ams_mapping: [] });
+    // 正在打的时候不让开新的
+    await s.fp.push({ command: "push_status", gcode_state: "RUNNING" });
+    await until(() => s.srv.printer!.status.state === "printing");
+    expect((await s.call("printer_print", { file: sliced })).text).toContain("正在打印");
   });
 });

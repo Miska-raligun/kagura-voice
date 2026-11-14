@@ -101,8 +101,12 @@ export class MqttLite {
     this.send(packet(0x82, id, str(topic), Buffer.from([0])));
   }
 
-  publish(topic: string, payload: string | Buffer) {
-    this.send(packet(0x30, str(topic), typeof payload === "string" ? Buffer.from(payload, "utf8") : payload));
+  /** qos 1 = 对方要回执（暂停 / 停止这类指令用；回执收到就算，不重发） */
+  publish(topic: string, payload: string | Buffer, qos: 0 | 1 = 0) {
+    const body = typeof payload === "string" ? Buffer.from(payload, "utf8") : payload;
+    if (qos === 0) return this.send(packet(0x30, str(topic), body));
+    const id = Buffer.alloc(2); id.writeUInt16BE((this.pid = (this.pid % 65535) + 1));
+    this.send(packet(0x32, str(topic), id, body));
   }
 
   /** 主动断开（不再回调 onClose） */

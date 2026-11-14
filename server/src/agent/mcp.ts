@@ -23,6 +23,7 @@ import type { AgentInfo } from "./registry.ts";
 import { toolTokens } from "./runtime.ts";
 import { isLazy, type LazyGroupMeta } from "./toolgroups.ts";
 import { isSea } from "../util/restart.ts";
+import { sceneOf } from "./soul.ts";
 
 export interface McpServerConfig {
   type?: string;
@@ -37,6 +38,8 @@ export interface McpServerConfig {
   allowUntrusted?: boolean;
   /** Kagura 扩展：这个服务器主动发来的通知原话送给主人。true，或 { agent: 谁来说, delivery: 送到哪（device:… / feishu:…）}；不写 = 跟默认 agent 的 heartbeat 投递目标 */
   notify?: boolean | { agent?: string; delivery?: string };
+  /** Kagura 扩展：这些工具（名字，可带 *）只在主人本人的对话里有；后台场景（heartbeat / 定时任务 / 待办 / 子任务 / agent 间）不给——开始打印这类没人看着不该做的事 */
+  ownerOnly?: string[];
   /** Kagura 扩展：按需加载（toolgroups.ts）。true = 平时收着、她要用时才调出来；false = 一直摆着；不写 = 工具定义多（超过 AUTO_LAZY_TOKENS）才收 */
   lazy?: boolean;
 }
@@ -90,6 +93,9 @@ function defOf(server: string, t: McpTool) {
   };
 }
 const describe = (s: Server) => s.cfg.description || s.instructions.split("\n")[0] || "";
+const wild = (pat: string, name: string) => new RegExp("^" + pat.split("*").map((x) => x.replace(/[.+?^${}()|[\]\\]/g, "\\$&")).join(".*") + "$").test(name);
+/** 这个工具是不是只给主人本人的对话 */
+export const ownerOnly = (cfg: McpServerConfig, tool: string) => Array.isArray(cfg.ownerOnly) && cfg.ownerOnly.some((p) => wild(String(p), tool));
 /** 配置里指定的按需加载（没指定 = undefined，按大小定）；pi 配置里的 exposure: "deferred" 也算 */
 const lazyOf = (cfg: McpServerConfig): boolean | undefined => (typeof cfg.lazy === "boolean" ? cfg.lazy : cfg.exposure === "deferred" ? true : undefined);
 function sizeOf(s: Server) {
@@ -311,6 +317,7 @@ export class McpManager {
         if (!scope.trusted && !s.cfg.allowUntrusted) continue;
         for (const t of s.tools) {
           if (exposureOf(s.cfg, t.name) === "hidden") continue;
+          if (ownerOnly(s.cfg, t.name) && sceneOf(scope) !== "owner") continue;
           out.push({
             ...defOf(s.name, t),
             // 按需加载：一个服务器一组（Runtime 的 LazyTools 认这个）

@@ -88,6 +88,15 @@ describe("MCP 管理（真起一个 stdio 服务器）", () => {
     expect(got.filter((g) => g[0] === "picky")).toHaveLength(NOTIFY_MAX);
   });
 
+  it("ownerOnly：这些工具只在主人本人的对话里有，待办 / 定时任务 / heartbeat / 子任务里没有", async () => {
+    const dir = tmpdir("mcp");
+    mgr = new McpManager(path.join(dir, "mcp.json"), { cwd: dir });
+    await mgr.writeConfigText(JSON.stringify({ mcpServers: { p: { command: process.execPath, args: [FIXTURE], ownerOnly: ["ad*"] } } }));
+    const names = (o: any) => mgr!.tools()({ ...scopeOf(true), ...o }, {} as any).map((t) => t.name);
+    expect(names({})).toEqual(["mcp__p__echo", "mcp__p__add", "mcp__p__secret"]);
+    for (const o of [{ purpose: "task" }, { purpose: "cron" }, { purpose: "heartbeat" }, { kind: "sub" }, { channel: "a2a" }]) expect(names(o)).toEqual(["mcp__p__echo", "mcp__p__secret"]);
+  });
+
   it("自带的服务器：command 写 kagura = 用这个程序自己起（参数接在后面）", async () => {
     const dir = tmpdir("mcp");
     mgr = new McpManager(path.join(dir, "mcp.json"), { cwd: dir, self: [process.execPath, FIXTURE] });

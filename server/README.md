@@ -185,25 +185,36 @@ MCP 工具本来只能她去问。服务器配置里加 `"notify": true` 之后�
 没指定就跟默认 agent 的 heartbeat 投递目标，再没有就在家里的设备上说。这类服务器会一直连着（断了自动重连），10 分钟内最多送 6 条。
 服务器表里有「测试通知」按钮，可以先确认送到哪。
 
-### 拓竹 3D 打印机（自带的 MCP 服务器，只读）
+### 拓竹 3D 打印机（自带的 MCP 服务器）
 
 随 Kagura 一起发、不用另装东西，也不是核心的一部分——在「扩展 / MCP」的配置里加一段才启用（页面上「＋ 拓竹打印机」会填好模板）：
 
 ```json
 { "mcpServers": { "printer": {
-    "command": "kagura", "args": ["mcp", "bambu-printer"], "notify": true,
-    "env": { "BAMBU_NAME": "P2S", "BAMBU_HOST": "192.168.1.50", "BAMBU_SERIAL": "序列号", "BAMBU_ACCESS_CODE": "访问码" } } } }
+    "command": "kagura", "args": ["mcp", "bambu-printer"], "notify": true, "timeout": 300,
+    "ownerOnly": ["printer_print", "printer_control"],
+    "env": { "BAMBU_NAME": "P2S", "BAMBU_HOST": "192.168.1.50", "BAMBU_SERIAL": "序列号", "BAMBU_ACCESS_CODE": "访问码", "BAMBU_CONTROL": "0" } } } }
 ```
 
-`"command": "kagura"` = 用这个程序自己。IP、序列号、访问码都在打印机屏幕的设置里；和这台电脑在同一个局域网即可，**不用开「开发者模式」**，
-手机上的 Bambu Handy 照常用。之后：
+`"command": "kagura"` = 用这个程序自己。IP、序列号、访问码都在打印机屏幕的设置里，和这台电脑在同一个局域网即可。
+
+**只看（`BAMBU_CONTROL` 是 0）**：
 
 - 问她「打印到哪了」「还要多久」「料够不够」——她调 `printer_status` 看了再答（进度、层数、预计完成时间、温度、各料槽余量、错误码）
 - **打完、失败、暂停（缺料、堵头…）、打印中出现严重告警时主动告诉你**（上面的 `notify`）。在打印机上手动暂停 / 取消的不通知；`"BAMBU_WARNINGS": "0"` 关掉告警通知
-- 只能看、不能控制：拓竹的授权限制，不开开发者模式第三方发不了控制指令
+
+**还要控制（`BAMBU_CONTROL` 改成 1）**：打印机屏幕上要先开「仅局域网模式」，再开它下面的「开发者模式」——这是拓竹的限制，不开的话第三方发不了控制指令；
+开了之后拓竹云和手机上的 Bambu Handy 用不了，Bambu Studio 走局域网照常用。然后她能：
+
+- 暂停 / 继续 / 停止、开关仓内灯、换速度档（`printer_control`）
+- 列打印机上切好的文件（`printer_files`）
+- **把切好的文件发去打印**（`printer_print`）：这台电脑上的 `.gcode.3mf`（Bambu Studio 切片后「导出切片文件」）会先传到打印机，或者直接重打打印机上已有的文件。
+  **不会切片**——只有模型时先在 Bambu Studio 里切。开始前她会先告诉你要打什么、用哪个槽的料，等你确认「热床上是空的」才真的开始
+- `"ownerOnly"` 那一行让「开始打印」和「控制」只在你本人的对话里有——待办、定时任务、heartbeat 这些没人看着的场景里她碰不到
 
 打印机的证书是自签的：第一次连上记下指纹（`<数据目录>/bambu_printer/`），以后不一样就不连并提醒你；恢复出厂后跟她说「重新信任打印机」。
-字段解析来自社区整理的协议；哪项不对，让她「调 printer_status 带 raw=true，把结果原样发我」核对。多台打印机就加多段，名字不同即可。
+协议（状态字段、控制指令、传文件）来自社区整理，没有官方文档；哪项不对，让她「调 printer_status 带 raw=true，把结果原样发我」核对。
+老机型（X1 / P1 / A1）发打印任务时文件地址的写法不同：env 里加 `"BAMBU_FILE_URL": "file:///sdcard/"`。多台打印机就加多段，名字不同即可。
 
 ### 安全
 

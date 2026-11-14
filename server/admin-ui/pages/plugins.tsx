@@ -127,9 +127,11 @@ const MCP_EXAMPLE = `{
 
 /** 自带的拓竹打印机 MCP 服务器（command 写 kagura = 用这个程序自己） */
 const PRINTER_TEMPLATE = {
-  command: "kagura", args: ["mcp", "bambu-printer"], notify: true,
-  description: "家里的拓竹 3D 打印机：看进度、温度、料（只读）",
-  env: { BAMBU_NAME: "P2S", BAMBU_HOST: "打印机的 IP", BAMBU_SERIAL: "序列号", BAMBU_ACCESS_CODE: "访问码" },
+  command: "kagura", args: ["mcp", "bambu-printer"], notify: true, timeout: 300,
+  description: "家里的拓竹 3D 打印机",
+  // BAMBU_CONTROL：0 = 只看；1 = 还能暂停 / 停止 / 发文件去打印（打印机要开「仅局域网模式」+「开发者模式」）
+  env: { BAMBU_NAME: "P2S", BAMBU_HOST: "打印机的 IP", BAMBU_SERIAL: "序列号", BAMBU_ACCESS_CODE: "访问码", BAMBU_CONTROL: "0" },
+  ownerOnly: ["printer_print", "printer_control"],
 };
 const delivered = (to: string) => !to ? "没送出去：没有设投递目标，也没有在线的设备"
   : to.startsWith("muted:") ? `按语音推送的设置没有播（${to.slice(6) === "away" ? "你不在家" : "已关闭语音推送"}）`
@@ -175,7 +177,7 @@ function Mcp() {
         {text === null ? <div class="muted">加载中…</div> : <TextArea value={text} onInput={setText} rows={18} mono placeholder={MCP_EXAMPLE} />}
         <div class="row">
           {!text && <Btn small kind="ghost" onClick={() => setText(MCP_EXAMPLE)}>填入示例</Btn>}
-          <Btn small kind="ghost" title="自带的：看打印进度，打完 / 出错主动告诉你（只读，不用开开发者模式）" onClick={() => {
+          <Btn small kind="ghost" title="自带的：看打印进度，打完 / 出错主动告诉你；BAMBU_CONTROL 改成 1 还能暂停 / 停止 / 发文件去打印（要开开发者模式）" onClick={() => {
             try {
               const j = JSON.parse(text?.trim() || "{}");
               j.mcpServers ??= {};

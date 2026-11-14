@@ -620,8 +620,8 @@ CoreS3 (MicroPython) ──HTTP──▶ server/（TypeScript 单文件可执行
   对 McpManager 来说就是普通的 stdio 服务器，核心不 import 它（`cli.ts` 里动态 import）。**标准输出只能走协议**：子命令里别 `console.log`，日志写标准错误（管理界面看得到）。
   没在 Windows 托盘版（图形界面子系统的 exe 带管道当子进程）上验证过。
 - **拓竹打印机 = 自带的 MCP 服务器（`server/src/printer/`，`kagura mcp bambu-printer`，2026-11）**：先是做成了核心模块（管理页 + 内置工具），主人说不该放进核心，改成这样——**别再搬回去**。
-  拓竹的局域网接口 = TLS 上的 MQTT（8883，用户名 `bblp`、密码 = 访问码，订阅 `device/<序列号>/report`）。**只读**：不开「开发者模式」第三方发不了控制指令（拓竹的授权限制），只发一条 `pushall`（要完整状态）；
-  要加控制得主人先开开发者模式（会断开拓竹云和手机 App），别悄悄往 request 主题发别的。
+  拓竹的局域网接口 = TLS 上的 MQTT（8883，用户名 `bblp`、密码 = 访问码，订阅 `device/<序列号>/report`）。默认**只读**：只发一条 `pushall`（要完整状态）；
+  不开「开发者模式」第三方发不了控制指令（拓竹的授权限制），控制类的见下面 `BAMBU_CONTROL`。
   `mqttlite.ts` 最小 MQTT 客户端（不引 mqtt.js）；`bambu.ts` 连接 + 解析 + 事件；`mcp-server.ts` 是 MCP 这一层（一行一个 JSON-RPC，手写、零依赖）：配置走 env
   （`BAMBU_HOST` / `BAMBU_SERIAL` / `BAMBU_ACCESS_CODE` / `BAMBU_NAME` / `BAMBU_WARNINGS`；没填或还是模板的中文占位时服务器照样起来、工具说缺什么），
   工具 `printer_status`（`raw=true` 给原始数据）、`printer_retrust`，事件用 `notifications/message` 发出去（打完 notice，其余 warning），句子是 `eventText` 写的固定句式。
@@ -630,6 +630,13 @@ CoreS3 (MicroPython) ──HTTP──▶ server/（TypeScript 单文件可执行
   ③ 不通知的：取消（`FAILED` + `0300-400C`）、在打印机上手动暂停（`stg_cur` 16）；告警只在打印中发、同一个 30 分钟内不重复；
   ④ 证书是打印机自签的，没法按 CA 验：**第一次记指纹（`<数据目录>/bambu_printer/<序列号>.json`），以后不一样就不连、连 CONNECT 都不发**（别把访问码交给冒充的机器），发一条警告通知；
   主人确认后 `printer_retrust` 忘掉重记；换了 IP 当成换了机器；⑤ 访问码错（CONNACK 4 / 5）隔 5 分钟才重试，别猛连。
+  ⑥ **连接最高只用 TLS 1.2**（`TLS_MAX`，MQTT 和 FTPS 都是；LRN 2026-11-14）：P2S 固件对 TLS 1.3 的握手不回应，一直挂到超时——rc.45 没限制，在 P2S 上根本连不上（ha-bambulab 里踩出来的，别去掉）。
+  **控制（`control.ts`，env `BAMBU_CONTROL=1` 才有那三个工具）**：主人愿意开「仅局域网 + 开发者模式」之后加的。`printer_control`（pause / resume / stop / 灯 / 速度）、`printer_files`、`printer_print`。
+  别改坏的点：ⓐ 发之前看状态里的 `devMode`（`fun` 的 0x20000000 位 = 指令要签名 = 没开开发者模式）——没开就不发、告诉主人怎么开；ⓑ 指令用 QoS 1 发、按 `sequence_id` 等回执（`BambuPrinter.command`），
+  回执说失败 / 几秒没回执都照实说「不知道成没成，看状态」，**别说成功**；ⓒ `printer_print` 是两步：第一次只返回摘要 + 一次性确认码（绑着参数、10 分钟有效），带码同参数再调才上传并发 `project_file`——
+  热床上有没有东西只有人看得到；正在打的时候不让开新的；ⓓ 只收**切好片**的 3mf（`zipNames` 看里面有没有 `Metadata/plate_N.gcode`），不做切片；ⓔ 文件走 FTPS（`ftps.ts`：990 端口隐式 TLS、数据通道复用控制通道的 TLS 会话、
+  PASV 回复里的 IP 不用、上传完不等对方 TLS 收尾；登录前也验证书指纹）；ⓕ P2 / H2 这代文件地址是 `ftp:///<名字>`，老机型是 `file:///sdcard/`（env `BAMBU_FILE_URL`）。
+  Kagura 这边配 **`"ownerOnly": [工具名]`**（`mcp.ts`，通用）：这些工具只在主人本人的对话里有（`sceneOf(scope) === "owner"`），待办 / 定时任务 / heartbeat / 子任务 / agent 间都没有——模板里给 `printer_print` / `printer_control` 配上了。
   **字段含义全部来自社区逆向（ha-bambulab 等），写的时候没有真机（P2S）**：解析一律「有就用、没有就空着」，新机型的温度可能在 `device.*.info.temp`（目标 << 16 | 当前）；
   哪项不对让主人叫她调 `printer_status raw=true` 把原始数据发过来，照着改 `parseStatus`，测试里的 `FULL` 同步改。测试用 aedes 当假打印机、管道当标准输入输出（`test/printer.test.ts`），
   契约测试用打包好的程序真的自己拉起自己（`test_bundled_printer_mcp_and_notify`）。
