@@ -52,7 +52,10 @@ describe("Blender 服务器", () => {
     closers.push(s.close);
     expect((await s.rpc("tools/list")).result.tools.map((t: any) => t.name)).toEqual(["model_build", "model_guide", "model_preview"]);
     const g = (await s.call("model_guide", {})).content[0].text;
-    expect(g).toContain("## 基本约定");
+    expect(g).toContain("## 约定");
+    expect(g).toContain("## 分三步做");
+    expect(g).toMatch(/- review：建完自己检查[\s\S]*- look：做得好看/);
+    expect((await s.call("model_guide", { topic: "review" })).content[0].text).toContain("眯着眼看");
     expect(g).toContain("box(sx, sy, sz");
     expect(g).toMatch(/- fits：配合间隙/);
     expect((await s.call("model_guide", { topic: "fits" })).content[0].text).toContain("M3 3.4");

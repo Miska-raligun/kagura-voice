@@ -94,7 +94,7 @@ const TOOLS = [
   {
     name: "model_build", title: "用 Blender 建模",
     description: "写一段 Blender Python 建模代码，在后台的 Blender 里跑（不用开着 Blender），检查后导出 STL，并给你四个角度的预览图（左上：前面斜上方，右上：正面，左下：右侧，右下：背面斜上方）。"
-      + "**第一次建模前先调 model_guide 看约定和预置的小函数**（box / cylinder / cone / sphere / text3d / cut / union / round_edges …，比直接写 bpy 可靠）。"
+      + "**第一次建模前先调 model_guide 看约定和预置的小函数**（box / cylinder / cone / sphere / text3d / cut / union / round_edges …，比直接写 bpy 可靠）；有配合的读 topic=fits，建完按 topic=review 自查。"
       + "单位毫米，z 朝上，底面在 z=0；每次从空场景开始，给完整代码；所有可见网格合成一个 STL。看预览图和检查结果确认对了再交给 printer_slice。代码存成 <name>.py，改的时候可以 read_file 拿回来。",
     inputSchema: {
       type: "object", required: ["name", "code"],
@@ -106,8 +106,9 @@ const TOOLS = [
   },
   {
     name: "model_guide", title: "建模指导",
-    description: "用 Blender 建 3D 打印模型的指导：约定和流程、预置的小函数、打印规矩（壁厚 / 悬空 / 字）、配合间隙和螺丝孔尺寸、示例代码（带盖盒子、L 形支架、铭牌）、出问题怎么办。不填 topic 给约定 + 小函数 + 目录。",
-    inputSchema: { type: "object", properties: { topic: { type: "string", enum: [...GUIDE_TOPICS, "all"], description: "basics / helpers / printing / fits / examples / problems / all" } } },
+    description: "用 Blender 建 3D 打印模型的指导：约定和流程（先问清楚、分三步做）、预置的小函数、打印规矩（壁厚 / 悬空 / 字 / 摆放）、配合间隙和螺丝孔 / 热熔螺母 / 磁铁尺寸、建完自查清单、做得好看的方法、示例代码、出问题怎么办。"
+      + "不填 topic 给约定 + 小函数 + 目录；做配合件前读 fits，建完读 review，要好看读 look。",
+    inputSchema: { type: "object", properties: { topic: { type: "string", enum: [...GUIDE_TOPICS, "all"], description: "basics / helpers / printing / fits / review / look / examples / problems / all" } } },
   },
   {
     name: "model_preview", title: "看一个模型",
