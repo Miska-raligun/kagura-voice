@@ -898,3 +898,17 @@ def test_bundled_blender_mcp(a):
         assert "没找到 Blender" in _transcript_text(a)
     finally:
         a.request("PUT", "/api/admin/mcp", json={"config": json.dumps({"mcpServers": {}})})
+
+
+def test_bundled_build123d_mcp(a):
+    """自带的 build123d 建模服务器：自己拉起自己（kagura mcp build123d），三个工具；没装 Python 照实说"""
+    try:
+        cfg = {"mcpServers": {"build123d": {"command": "kagura", "args": ["mcp", "build123d"], "env": {"PYTHON": "/nope/python"}, "ownerOnly": ["cad_build"]}}}
+        srv = a.request("PUT", "/api/admin/mcp", json={"config": json.dumps(cfg)}).json()["servers"][0]
+        assert srv["state"] == "connected", srv
+        assert [t["name"] for t in srv["tools"]] == ["cad_build", "cad_guide", "cad_preview"]
+        a.fake_llm(tool("mcp__build123d__cad_build", "没装 Python", name="盒子", code="result = Box(10, 10, 10)"))
+        assert a.post("/api/admin/chat", json={"agent": "main", "text": "做个盒子"}).json()["reply"] == "没装 Python"
+        assert "没找到 Python" in _transcript_text(a)
+    finally:
+        a.request("PUT", "/api/admin/mcp", json={"config": json.dumps({"mcpServers": {}})})

@@ -667,6 +667,12 @@ CoreS3 (MicroPython) ──HTTP──▶ server/（TypeScript 单文件可执行
   at 是底面中心、布尔一律 EXACT 且做完就应用并删掉工具物体、缩放已应用、文字转网格合并点）——比让她从 bpy 底层拼可靠得多。`_activate` 要跳过空引用（删过物体后 `view_layer.objects` 里会挂着 None）。
   指导分节（basics / helpers / printing / fits / review / look / examples / problems），用到才读、不占每轮额度。规则和数字是读了几个开源 agent 技能（flowful-ai/cad-skill、parhamdb/3d-print-skill、
   m-esm/3d-print-modeling、swh/openscad-skill、TrillyD13/3d-printing-skill、roble3/cc-blender-skill）后用自己的话重写的——**别整段照抄它们的原文**（有的是非商用许可）；间隙一律注明单边 / 直径；**示例代码在 `test/blender.test.ts` 里用真的 Blender 逐个建一遍**（封闭、放得下），改示例 / 小函数要重跑，看一眼渲染图（形状对不对测试看不出来）。测试：`test/blender.test.ts` 在装了 Blender 的机器上真跑（CI 没装就跳过），契约测试只验能拉起和参数报错。
+- **build123d 建模 = 自带的 MCP 服务器（`server/src/cad/`，`kagura mcp build123d`，2026-11）**：和 Blender 那个并列（主人「顺便做一个 build123d 的吧」）。build123d = Python 参数化 CAD（OpenCascade，Apache 2.0），精确实体、不出破洞、能导出 STEP。
+  每次调用起一个 Python（`harness.ts`：`from build123d import *` → 跑她的代码 → 取 `result`（没写就取最后一个有体积的变量、并提醒）→ 有效性 / 实体数 / 体积 / 包围盒 → STL + STEP；她 print 的收进 `output`）。
+  **网格检查和预览图在 Node 里按 STL 做**（`raster.ts`：读二进制 / 文本 STL、焊点数破洞边、软件光栅化四个角度 + 深度二阶差分描边、手写 PNG 编码），不依赖 Blender / numpy；`cad_preview` 看现成 STL 不需要 Python。
+  别改坏的点：① 找 Python（`findPython`）：env `PYTHON`（可带参数，如 `py -3.12`；**相对路径要转绝对**——建模在临时目录里跑）→ Windows `py -3` / `python` → `python3` / `python`，探测 `import build123d`，找不到说清楚怎么装；
+  ② 跑的时候 `-I`（不读当前目录 / 用户 site 的同名模块）+ `PYTHONIOENCODING=utf-8`；③ 检查结果的话术复用 Blender 的 `describeReport`，指导的 printing / fits / review / look 四节用 `sharedSection`（两边同一份），build123d 自己只写 basics / api / examples / problems；
+  ④ Box / Cylinder 默认**居中**，指导里反复强调 `align=(…, …, Align.MIN)`；⑤ 示例在 `test/cad.test.ts` 里真跑（`PYTHON=<装了 build123d 的 python>`，CI 没装就跳过），改示例要重跑、看渲染图。
 - **运行状况（`agent/health.ts`，管理界面总览「运行状况」卡片 +「日志」页，LRN 2026-10-31，症状「出了问题只能翻一个大日志文件，也说不清最常出的是哪种」）**：
   每一轮（`Runtime.run` 外层）记成功 / 失败（`errorClass` 归类：限流 429、服务商出错、网络、超时、空回复、上下文超长、单轮上限、Key / 额度、被取消、其它）和用时，
   兜底动作各记一条（`empty_retry` / `nudge` / `overflow` / `guard` / `compact` / `compact_failed` / `voice` / `push_failed` / `sub_cancelled` / `unclean_exit`），存 system.sqlite 的 `health_events`，留 30 天。

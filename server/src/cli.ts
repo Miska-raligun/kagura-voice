@@ -16,6 +16,7 @@ const HELP = `Kagura 语音服务端 ${VERSION}
   kagura import-openclaw [目录]   从 OpenClaw 导入人设、记忆与定时任务（默认 ~/.openclaw；任务导入后默认暂停）
   kagura mcp bambu-printer       自带的 MCP 服务器：拓竹打印机。不用手动运行：在「扩展 / MCP」的配置里写 "command": "kagura" 即可
   kagura mcp blender             自带的 MCP 服务器：用 Blender 建模（后台运行，不用开着 Blender）
+  kagura mcp build123d           自带的 MCP 服务器：用 build123d（Python 参数化 CAD）建模，要先 pip install build123d
   kagura --version               显示版本
   加 --force 覆盖已存在的文件。数据目录可用环境变量 KAGURA_DATA_DIR 指定。
 `;
@@ -37,7 +38,8 @@ export async function runCli(argv: string[]): Promise<boolean> {
     // 自带的 MCP 服务器：标准输入输出上跑协议，别往标准输出打别的
     if (rest[0] === "bambu-printer") { (await import("./printer/mcp-server.ts")).runBambuMcp(VERSION); return true; }
     if (rest[0] === "blender") { (await import("./blender/mcp-server.ts")).runBlenderMcp(VERSION); return true; }
-    throw new Error(`不认识的 MCP 服务器 ${rest[0] ?? ""}（自带的有：bambu-printer、blender）`);
+    if (rest[0] === "build123d") { (await import("./cad/mcp-server.ts")).runCadMcp(VERSION); return true; }
+    throw new Error(`不认识的 MCP 服务器 ${rest[0] ?? ""}（自带的有：bambu-printer、blender、build123d）`);
   }
   if (cmd === "import-openclaw") {
     const cfg = loadConfig();

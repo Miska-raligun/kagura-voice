@@ -234,6 +234,16 @@ MCP 工具本来只能她去问。服务器配置里加 `"notify": true` 之后�
 Blender 不在默认位置（Windows 的 `C:\Program Files\Blender Foundation\` 下）时在 env 里填 `BLENDER`；`MODEL_BED` 是打印范围（默认 256×256×256，P2S）。
 适合有明确尺寸的功能件（盒子、挂钩、支架、铭牌）；造型复杂的（手办、动物）还是去 MakerWorld 找。和打印机那个一样是独立进程，别的 MCP 客户端也能用。
 
+### 用 build123d 建模（自带的 MCP 服务器）
+
+「扩展 / MCP」里点「＋ build123d 建模」加上。[build123d](https://github.com/gumyr/build123d) 是 Python 的参数化 CAD 库（OpenCascade 内核，Apache 2.0，免费开源）：
+建的是精确的实体，倒圆角、挖孔、布尔都不会出破洞，尺寸写成变量、改一个数整个模型跟着变，适合有尺寸要求的功能件；还能导出 STEP（别的 CAD 软件能打开接着改）。
+和 Blender 那个可以都装，她按需要挑（要配合、要精确的用 build123d，要造型的用 Blender）。
+**先在这台电脑上装好**：Python 3.10~3.13（推荐 3.12，python.org 下载，勾上「Add to PATH」），然后命令行运行 `py -3 -m pip install build123d`（macOS / Linux：`python3 -m pip install build123d`）。
+自动找 Python（Windows 先试 `py -3`）；装在别处就在 env 里填 `PYTHON`（python.exe 的完整路径）。工具：`cad_build`（写代码 → 检查 → STL + STEP + 预览图）、
+`cad_guide`（约定、常用写法、打印规矩、配合尺寸、自查清单、示例；后面几节和 Blender 那个是同一份）、`cad_preview`（看现成的 STL，不需要 Python）。
+预览图在服务器里自己画（不需要 Blender）。文件在 `<数据目录>/models/<名字>/`。
+
 **型号**：`BAMBU_MODEL` 写 Bambu Studio 里打印机名去掉「Bambu Lab」和喷嘴的那段（`P2S`、`P1S`、`X1 Carbon`、`A1 mini`…），不填默认 `P2S`。切片按它选配置，发打印前按它核对文件。
 
 **脱离 Kagura 单独用**：它是一个独立进程（Kagura 用 `kagura mcp bambu-printer` 拉起，走标准输入输出的 MCP 协议），任何支持 MCP 的客户端（Claude Desktop、Cursor、pi…）都能用，

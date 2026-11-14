@@ -125,7 +125,7 @@ const SECTIONS: Record<string, [string, () => string]> = {
 - 铝型材 T 型螺母槽：2020 槽宽 6（M5）、3030 槽宽 8（M6）
 
 ## 记住
-- cylinder 填的是半径，孔的数字是直径：半径 = 直径 / 2。
+- cylinder（Blender）/ Cylinder（build123d）填的都是半径，孔的数字是直径：半径 = 直径 / 2。
 - 尺寸以主人量的为准；拿不准的配合先打一个只有那一小块的测试件试试（几分钟就打完）。`],
   review: ["建完自己检查", () => `## 每次看预览图都过一遍
 1. 是不是主人要的那个东西？要的功能（孔、槽、开口、字）都在吗？
@@ -175,6 +175,8 @@ const SECTIONS: Record<string, [string, () => string]> = {
 - 三五次还不行就停下来，告诉主人哪里卡住了、可能的原因，问要不要换个做法。`],
 };
 export const GUIDE_TOPICS = Object.keys(SECTIONS);
+/** 和建模工具无关的几节（打印规矩、配合尺寸、自查、好看），build123d 那个服务器也用 */
+export const sharedSection = (k: "printing" | "fits" | "review" | "look"): [string, () => string] => SECTIONS[k];
 
 export function guide(topic = ""): string {
   const t = topic.trim().toLowerCase();
