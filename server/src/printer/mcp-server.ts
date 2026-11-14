@@ -16,6 +16,7 @@ import type { FtpDial } from "./ftps.ts";
 
 /** 通知的句子（系统直接写，不过模型） */
 export function eventText(name: string, e: PrinterEvent): string {
+  if (e.kind === "dried") return `${name} 的 ${e.unit.no} 号料盒烘干好了${e.unit.humidity !== null ? `，现在湿度 ${e.unit.humidity}%` : ""}。`;
   if (e.kind === "cert") return `${name} 的证书和上次连接时不一样，我先断开了。打印机恢复过出厂设置的话，跟我说一声「重新信任打印机」。`;
   const s: PrinterStatus = e.status;
   const job = s.job ? `「${s.job}」` : "这个任务";
@@ -88,7 +89,7 @@ export function startBambuMcp(o: BambuMcpOpts): { close(): void; printer: BambuP
         if (e.kind === "warning" && env("BAMBU_WARNINGS") === "0") return;
         const text = eventText(name, e);
         log(`[${name}] 📣 ${text}`);
-        send({ jsonrpc: "2.0", method: "notifications/message", params: { level: e.kind === "finish" ? "notice" : "warning", logger: "bambu-printer", data: text } });
+        send({ jsonrpc: "2.0", method: "notifications/message", params: { level: e.kind === "finish" || e.kind === "dried" ? "notice" : "warning", logger: "bambu-printer", data: text } });
       },
     });
     printer.start();
@@ -152,9 +153,9 @@ export function startBambuMcp(o: BambuMcpOpts): { close(): void; printer: BambuP
         }
         // 切片不用连着打印机（只用这台电脑上的 Bambu Studio）
         if (controlOn && tool === "printer_slice") { control.slice(args).then((r) => text(r.text, r.isError === true)).catch((e) => text(`出错了：${e?.message ?? e}`, true)); return; }
-        if (controlOn && (tool === "printer_control" || tool === "printer_files" || tool === "printer_print")) {
+        if (controlOn && (tool === "printer_control" || tool === "printer_files" || tool === "printer_print" || tool === "printer_ams_dry")) {
           if (missing.length) return text(statusText(false), true);
-          const run = tool === "printer_control" ? control.control(args) : tool === "printer_files" ? control.files() : control.print(args);
+          const run = tool === "printer_control" ? control.control(args) : tool === "printer_files" ? control.files() : tool === "printer_ams_dry" ? control.dry(args) : control.print(args);
           run.then((r) => text(r.text, r.isError === true)).catch((e) => text(`出错了：${e?.message ?? e}`, true));
           return;
         }

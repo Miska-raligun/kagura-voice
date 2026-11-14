@@ -133,6 +133,22 @@ const PRINTER_TEMPLATE = {
   env: { BAMBU_NAME: "P2S", BAMBU_MODEL: "P2S", BAMBU_HOST: "打印机的 IP", BAMBU_SERIAL: "序列号", BAMBU_ACCESS_CODE: "访问码", BAMBU_CONTROL: "0" },
   ownerOnly: ["printer_print", "printer_control", "printer_slice"],
 };
+/** 自带的 Blender 建模 MCP 服务器（后台运行，不用开着 Blender） */
+const BLENDER_TEMPLATE = {
+  command: "kagura", args: ["mcp", "blender"], timeout: 300,
+  description: "用 Blender 建 3D 打印模型：写建模代码、检查、导出 STL、看预览图",
+  // BLENDER 留空 = 自动找默认装的位置；MODEL_BED 是打印机的打印范围（P2S 256×256×256）
+  env: { BLENDER: "", MODEL_BED: "256x256x256" },
+  ownerOnly: ["model_build"],
+};
+/** 自带的 build123d 建模 MCP 服务器（Python 参数化 CAD；这台电脑要有 Python 和 pip install build123d） */
+const CAD_TEMPLATE = {
+  command: "kagura", args: ["mcp", "build123d"], timeout: 300,
+  description: "用 build123d（参数化 CAD）建 3D 打印模型：写代码、检查、导出 STL / STEP、看预览图",
+  // PYTHON 留空 = 自动找（Windows 先试 py -3）；装在别处就填 python.exe 的完整路径
+  env: { PYTHON: "", MODEL_BED: "256x256x256" },
+  ownerOnly: ["cad_build"],
+};
 const delivered = (to: string) => !to ? "没送出去：没有设投递目标，也没有在线的设备"
   : to.startsWith("muted:") ? `按语音推送的设置没有播（${to.slice(6) === "away" ? "你不在家" : "已关闭语音推送"}）`
   : to.startsWith("held:") ? `设备 ${to.slice(5)} 现在是别的角色，留言了，切过来时播` : `已送到 ${to}`;
@@ -187,6 +203,26 @@ function Mcp() {
               toast("填好 IP、序列号、访问码后点「保存并连接」");
             } catch { toast("现在的内容不是合法的 JSON，先改对再加", "err"); }
           }}>＋ 拓竹打印机</Btn>
+          <Btn small kind="ghost" title="自带的：用 Blender 建模（后台运行，不用开着 Blender），导出 STL 给打印机切片" onClick={() => {
+            try {
+              const j = JSON.parse(text?.trim() || "{}");
+              j.mcpServers ??= {};
+              if (j.mcpServers.blender) return toast("已经有一个叫 blender 的了", "err");
+              j.mcpServers.blender = BLENDER_TEMPLATE;
+              setText(JSON.stringify(j, null, 2));
+              toast("Blender 不在默认位置的话填上 BLENDER，再点「保存并连接」");
+            } catch { toast("现在的内容不是合法的 JSON，先改对再加", "err"); }
+          }}>＋ Blender 建模</Btn>
+          <Btn small kind="ghost" title="自带的：用 build123d（Python 参数化 CAD）建模，尺寸精确、好改，导出 STL / STEP。要先在这台电脑上 pip install build123d" onClick={() => {
+            try {
+              const j = JSON.parse(text?.trim() || "{}");
+              j.mcpServers ??= {};
+              if (j.mcpServers.build123d) return toast("已经有一个叫 build123d 的了", "err");
+              j.mcpServers.build123d = CAD_TEMPLATE;
+              setText(JSON.stringify(j, null, 2));
+              toast("先在命令行运行 pip install build123d（Python 3.10~3.13），再点「保存并连接」");
+            } catch { toast("现在的内容不是合法的 JSON，先改对再加", "err"); }
+          }}>＋ build123d 建模</Btn>
           <span class="grow" />{dirty && <span class="muted">未保存</span>}
           <Btn kind="primary" disabled={!dirty} onClick={async () => {
             try { await api("/mcp", { method: "PUT", body: { config: text } }); toast("已保存"); reload(); } catch (e) { toastErr(e); }

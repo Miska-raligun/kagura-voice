@@ -220,9 +220,29 @@ MCP 工具本来只能她去问。服务器配置里加 `"notify": true` 之后�
   可以指定层高、填充密度、墙层数、支撑（不加 / 普通 / 树状）、裙边；不指定就用文件里的。MakerWorld 上同一个模型常有好几份打印配置，**下载给你这台机型做的那份最稳**（用它自带的配置切）；
   给别的机型的、STL 会换成这台的系统配置重切（实验性，原作者调过的参数带不过来；不行就在 Bambu Studio 里把打印机换成你这台、保存，再给她切）。
   Bambu Studio 不在默认位置时在 env 里填 `BAMBU_STUDIO`（`bambu-studio.exe` 的完整路径）；系统配置目录找不到时填 `BAMBU_PROFILES`；喷嘴不是 0.4 的填 `BAMBU_NOZZLE`。切好的文件在 `<数据目录>/bambu_printer/sliced/`
+- **料盒烘干**（`printer_ams_dry`，AMS 2 Pro / AMS HT 才行）：开始 / 停止，温度不填就按料盒里的料选（有 PLA 50℃ 8 小时，其它 65℃）；状态里看得到每个料盒的湿度、温度、烘干剩余时间，烘干完会通知你。P2S 固件要 01.01.50.40 以上
 - 发去打印前会核对：文件是给别的机型切的不让打（会撞板）；用了几种料就要说清用 AMS 的几号槽；文件按 PETG 切、槽里是 PLA 这种会提醒你
 - 从 MakerWorld 下载模型：接浏览器 MCP（见上面「让她能操作浏览器」），她能搜、能点下载，下载下来的文件给 `printer_slice` 切
 - `"ownerOnly"` 那一行让「开始打印」「控制」「切片」只在你本人的对话里有——待办、定时任务、heartbeat 这些没人看着的场景里她碰不到
+
+### 用 Blender 建模（自带的 MCP 服务器）
+
+「扩展 / MCP」里点「＋ Blender 建模」加上。**不用开着 Blender**：每次建模在后台起一个 Blender，跑完就退。她写 Blender 的 Python 建模代码（单位毫米），
+服务器跑完会检查尺寸、有没有破洞、放不放得进打印机，导出 STL，再给她四个角度的预览图——她看图确认对了，交给 `printer_slice` 切片、你确认后打印。
+`model_guide` 是给她的建模指导（约定、预置的小函数 box / cylinder / cut / union / text3d…、打印规矩、配合间隙和螺丝孔尺寸、示例代码），她用到哪节读哪节；
+`model_preview` 能看现成的 STL / OBJ（比如从 MakerWorld 下的）。代码和 STL、预览图在 `<数据目录>/models/<名字>/` 下。
+Blender 不在默认位置（Windows 的 `C:\Program Files\Blender Foundation\` 下）时在 env 里填 `BLENDER`；`MODEL_BED` 是打印范围（默认 256×256×256，P2S）。
+适合有明确尺寸的功能件（盒子、挂钩、支架、铭牌）；造型复杂的（手办、动物）还是去 MakerWorld 找。和打印机那个一样是独立进程，别的 MCP 客户端也能用。
+
+### 用 build123d 建模（自带的 MCP 服务器）
+
+「扩展 / MCP」里点「＋ build123d 建模」加上。[build123d](https://github.com/gumyr/build123d) 是 Python 的参数化 CAD 库（OpenCascade 内核，Apache 2.0，免费开源）：
+建的是精确的实体，倒圆角、挖孔、布尔都不会出破洞，尺寸写成变量、改一个数整个模型跟着变，适合有尺寸要求的功能件；还能导出 STEP（别的 CAD 软件能打开接着改）。
+和 Blender 那个可以都装，她按需要挑（要配合、要精确的用 build123d，要造型的用 Blender）。
+**先在这台电脑上装好**：Python 3.10~3.13（推荐 3.12，python.org 下载，勾上「Add to PATH」），然后命令行运行 `py -3 -m pip install build123d`（macOS / Linux：`python3 -m pip install build123d`）。
+自动找 Python（Windows 先试 `py -3`）；装在别处就在 env 里填 `PYTHON`（python.exe 的完整路径）。工具：`cad_build`（写代码 → 检查 → STL + STEP + 预览图）、
+`cad_guide`（约定、常用写法、打印规矩、配合尺寸、自查清单、示例；后面几节和 Blender 那个是同一份）、`cad_preview`（看现成的 STL，不需要 Python）。
+预览图在服务器里自己画（不需要 Blender）。文件在 `<数据目录>/models/<名字>/`。
 
 **型号**：`BAMBU_MODEL` 写 Bambu Studio 里打印机名去掉「Bambu Lab」和喷嘴的那段（`P2S`、`P1S`、`X1 Carbon`、`A1 mini`…），不填默认 `P2S`。切片按它选配置，发打印前按它核对文件。
 
