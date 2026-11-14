@@ -451,7 +451,7 @@ describe("控制（BAMBU_CONTROL=1）", () => {
     let buf = "", id = 0;
     output.on("data", (d) => { buf += d.toString(); for (let i; (i = buf.indexOf("\n")) >= 0;) { const m = JSON.parse(buf.slice(0, i)); buf = buf.slice(i + 1); if (m.id !== undefined) waiting.get(m.id)?.(m); } });
     const srv = startBambuMcp({ input, output, stateDir: tmpdir("bambu-state"), dial: plainDial(), ftpDial: plainFtp(), settleMs: 10, ackMs: 1200, log: () => {},
-      env: { BAMBU_NAME: "P2S", BAMBU_MODEL: "P2S", BAMBU_STUDIO: studioBin ?? "", BAMBU_HOST: "127.0.0.1", BAMBU_PORT: String(fp.port), BAMBU_FTP_PORT: String(ftp.port), BAMBU_SERIAL: SERIAL, BAMBU_ACCESS_CODE: CODE, BAMBU_CONTROL: "1" } });
+      env: { BAMBU_NAME: "P2S", BAMBU_STUDIO: studioBin ?? "", BAMBU_HOST: "127.0.0.1", BAMBU_PORT: String(fp.port), BAMBU_FTP_PORT: String(ftp.port), BAMBU_SERIAL: SERIAL, BAMBU_ACCESS_CODE: CODE, BAMBU_CONTROL: "1" } });
     closers.push(() => { srv.close(); input.end(); }, fp.close, ftp.close);
     const rpc = (method: string, params: any = {}) => new Promise<any>((r) => { const n = ++id; waiting.set(n, r); input.write(JSON.stringify({ jsonrpc: "2.0", id: n, method, params }) + "\n"); });
     const call = async (name: string, args: any = {}) => { const r = (await rpc("tools/call", { name, arguments: args })).result; return { text: r.content[0].text as string, isError: !!r.isError }; };

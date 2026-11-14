@@ -155,7 +155,7 @@ export class PrinterControl {
 
   /** 切片：不用连着打印机（只用这台电脑上的 Bambu Studio）；一次只切一个 */
   async slice(args: any): Promise<{ text: string; isError?: boolean }> {
-    if (!this.o.model) return { text: "MCP 配置的 env 里没填 BAMBU_MODEL（打印机型号，比如 P2S），不知道按哪台打印机切。", isError: true };
+    if (!this.o.model) return { text: "不知道打印机型号（env 里的 BAMBU_MODEL，比如 P2S / P1S / X1 Carbon / A1），不知道按哪台打印机切。", isError: true };
     const file = String(args?.file ?? "").trim();
     if (!path.isAbsolute(file)) return { text: "file 要给这台电脑上的完整路径（比如浏览器下载文件夹里的那个 .3mf）。", isError: true };
     if (!/\.(3mf|stl)$/i.test(file)) return { text: "只能切 .3mf 和 .stl。别的格式（.step / .obj）让主人在 Bambu Studio 里打开、另存成 3mf。", isError: true };

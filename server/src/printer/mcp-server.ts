@@ -41,6 +41,9 @@ export interface BambuMcpOpts {
   version?: string;
 }
 
+/** 没填 BAMBU_MODEL 时按这个型号（Bambu Studio 系统配置里的写法，「Bambu Lab P2S 0.4 nozzle」里的那段） */
+export const DEFAULT_MODEL = "P2S";
+
 const TOOLS = [
   {
     name: "printer_status", title: "看 3D 打印机",
@@ -65,7 +68,9 @@ export function startBambuMcp(o: BambuMcpOpts): { close(): void; printer: BambuP
   // 没填，或者还是模板里的中文占位
   const unset = (v: string) => !v || /[^\x21-\x7e]/.test(v);
   const missing = [unset(host) && "BAMBU_HOST（打印机 IP）", unset(serial) && "BAMBU_SERIAL（序列号）", unset(code) && "BAMBU_ACCESS_CODE（访问码）"].filter(Boolean);
-  const stateFile = path.join(o.stateDir ?? path.join(process.cwd(), "bambu_printer"), `${serial || "unknown"}.json`);
+  // 记证书指纹、放切好的文件的目录：Kagura 拉起时当前目录是数据目录；单独给别的 MCP 客户端用时可以 BAMBU_STATE_DIR 指定
+  const stateDir = o.stateDir ?? (env("BAMBU_STATE_DIR") || path.join(process.cwd(), "bambu_printer"));
+  const stateFile = path.join(stateDir, `${serial || "unknown"}.json`);
   const readState = (): { fingerprint?: string; host?: string } => { try { return JSON.parse(fs.readFileSync(stateFile, "utf8")); } catch { return {}; } };
   const writeState = (s: object) => { try { fs.mkdirSync(path.dirname(stateFile), { recursive: true }); fs.writeFileSync(stateFile, JSON.stringify(s)); } catch (e: any) { log(`记不下证书指纹：${e.message}`); } };
 
@@ -95,10 +100,11 @@ export function startBambuMcp(o: BambuMcpOpts): { close(): void; printer: BambuP
   const control = new PrinterControl({
     name, printer: () => printer, fingerprint: () => readState().fingerprint ?? "", log,
     ftpPort: Number(env("BAMBU_FTP_PORT")) || undefined, ftpDial: o.ftpDial, fileUrl: env("BAMBU_FILE_URL"),
-    model: env("BAMBU_MODEL"),
+    // 型号：切片按它选配置、发打印前按它核对文件；不填默认 P2S
+    model: env("BAMBU_MODEL") || DEFAULT_MODEL,
     slicer: {
       studio: env("BAMBU_STUDIO"), profiles: env("BAMBU_PROFILES"), nozzle: env("BAMBU_NOZZLE") || "0.4",
-      outDir: path.join(o.stateDir ?? path.join(process.cwd(), "bambu_printer"), "sliced"),
+      outDir: path.join(stateDir, "sliced"),
       timeoutMs: (Number(env("BAMBU_SLICE_TIMEOUT")) || 540) * 1000,
     },
   });

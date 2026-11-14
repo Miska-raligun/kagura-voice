@@ -224,6 +224,12 @@ MCP 工具本来只能她去问。服务器配置里加 `"notify": true` 之后�
 - 从 MakerWorld 下载模型：接浏览器 MCP（见上面「让她能操作浏览器」），她能搜、能点下载，下载下来的文件给 `printer_slice` 切
 - `"ownerOnly"` 那一行让「开始打印」「控制」「切片」只在你本人的对话里有——待办、定时任务、heartbeat 这些没人看着的场景里她碰不到
 
+**型号**：`BAMBU_MODEL` 写 Bambu Studio 里打印机名去掉「Bambu Lab」和喷嘴的那段（`P2S`、`P1S`、`X1 Carbon`、`A1 mini`…），不填默认 `P2S`。切片按它选配置，发打印前按它核对文件。
+
+**脱离 Kagura 单独用**：它是一个独立进程（Kagura 用 `kagura mcp bambu-printer` 拉起，走标准输入输出的 MCP 协议），任何支持 MCP 的客户端（Claude Desktop、Cursor、pi…）都能用，
+`command` 写 `kagura.exe` 的完整路径、`args` 写 `["mcp", "bambu-printer"]`、env 同上，再加一个 `BAMBU_STATE_DIR`（记证书指纹、放切好的文件，默认是当前目录下的 `bambu_printer/`）。
+区别：主动通知（打完 / 出错）靠 MCP 的日志通知，多数客户端不会把它转给你；`ownerOnly` 是 Kagura 自己的，别的客户端里没有这层限制（开始打印的两步确认还在）。
+
 打印机的证书是自签的：第一次连上记下指纹（`<数据目录>/bambu_printer/`），以后不一样就不连并提醒你；恢复出厂后跟她说「重新信任打印机」。
 协议（状态字段、控制指令、传文件）来自社区整理，没有官方文档；哪项不对，让她「调 printer_status 带 raw=true，把结果原样发我」核对。
 老机型（X1 / P1 / A1）发打印任务时文件地址的写法不同：env 里加 `"BAMBU_FILE_URL": "file:///sdcard/"`。多台打印机就加多段，名字不同即可。

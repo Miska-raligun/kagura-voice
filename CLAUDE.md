@@ -629,6 +629,8 @@ CoreS3 (MicroPython) ──HTTP──▶ server/（TypeScript 单文件可执行
 - **拓竹打印机 = 自带的 MCP 服务器（`server/src/printer/`，`kagura mcp bambu-printer`，2026-11）**：先是做成了核心模块（管理页 + 内置工具），主人说不该放进核心，改成这样——**别再搬回去**。
   拓竹的局域网接口 = TLS 上的 MQTT（8883，用户名 `bblp`、密码 = 访问码，订阅 `device/<序列号>/report`）。默认**只读**：只发一条 `pushall`（要完整状态）；
   不开「开发者模式」第三方发不了控制指令（拓竹的授权限制），控制类的见下面 `BAMBU_CONTROL`。
+  **它是独立进程、不依赖 Kagura 核心**（核心只负责按 mcp.json 拉起它、转发通知），别的 MCP 客户端也能直接跑 `kagura mcp bambu-printer`——别往里加只有 Kagura 才有的依赖；状态目录 `BAMBU_STATE_DIR`（默认当前目录 `bambu_printer/`）。
+  型号 `BAMBU_MODEL` 不填默认 `DEFAULT_MODEL`（P2S）。
   `mqttlite.ts` 最小 MQTT 客户端（不引 mqtt.js）；`bambu.ts` 连接 + 解析 + 事件；`mcp-server.ts` 是 MCP 这一层（一行一个 JSON-RPC，手写、零依赖）：配置走 env
   （`BAMBU_HOST` / `BAMBU_SERIAL` / `BAMBU_ACCESS_CODE` / `BAMBU_NAME` / `BAMBU_WARNINGS`；没填或还是模板的中文占位时服务器照样起来、工具说缺什么），
   工具 `printer_status`（`raw=true` 给原始数据）、`printer_retrust`，事件用 `notifications/message` 发出去（打完 notice，其余 warning），句子是 `eventText` 写的固定句式。
