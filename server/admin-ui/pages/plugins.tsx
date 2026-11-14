@@ -127,11 +127,11 @@ const MCP_EXAMPLE = `{
 
 /** 自带的拓竹打印机 MCP 服务器（command 写 kagura = 用这个程序自己） */
 const PRINTER_TEMPLATE = {
-  command: "kagura", args: ["mcp", "bambu-printer"], notify: true, timeout: 300,
+  command: "kagura", args: ["mcp", "bambu-printer"], notify: true, timeout: 600,
   description: "家里的拓竹 3D 打印机",
   // BAMBU_CONTROL：0 = 只看；1 = 还能暂停 / 停止 / 发文件去打印（打印机要开「仅局域网模式」+「开发者模式」）
-  env: { BAMBU_NAME: "P2S", BAMBU_HOST: "打印机的 IP", BAMBU_SERIAL: "序列号", BAMBU_ACCESS_CODE: "访问码", BAMBU_CONTROL: "0" },
-  ownerOnly: ["printer_print", "printer_control"],
+  env: { BAMBU_NAME: "P2S", BAMBU_MODEL: "P2S", BAMBU_HOST: "打印机的 IP", BAMBU_SERIAL: "序列号", BAMBU_ACCESS_CODE: "访问码", BAMBU_CONTROL: "0" },
+  ownerOnly: ["printer_print", "printer_control", "printer_slice"],
 };
 const delivered = (to: string) => !to ? "没送出去：没有设投递目标，也没有在线的设备"
   : to.startsWith("muted:") ? `按语音推送的设置没有播（${to.slice(6) === "away" ? "你不在家" : "已关闭语音推送"}）`

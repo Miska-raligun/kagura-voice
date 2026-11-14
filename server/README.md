@@ -197,9 +197,9 @@ MCP 工具本来只能她去问。服务器配置里加 `"notify": true` 之后�
 
 ```json
 { "mcpServers": { "printer": {
-    "command": "kagura", "args": ["mcp", "bambu-printer"], "notify": true, "timeout": 300,
-    "ownerOnly": ["printer_print", "printer_control"],
-    "env": { "BAMBU_NAME": "P2S", "BAMBU_HOST": "192.168.1.50", "BAMBU_SERIAL": "序列号", "BAMBU_ACCESS_CODE": "访问码", "BAMBU_CONTROL": "0" } } } }
+    "command": "kagura", "args": ["mcp", "bambu-printer"], "notify": true, "timeout": 600,
+    "ownerOnly": ["printer_print", "printer_control", "printer_slice"],
+    "env": { "BAMBU_NAME": "P2S", "BAMBU_MODEL": "P2S", "BAMBU_HOST": "192.168.1.50", "BAMBU_SERIAL": "序列号", "BAMBU_ACCESS_CODE": "访问码", "BAMBU_CONTROL": "0" } } } }
 ```
 
 `"command": "kagura"` = 用这个程序自己。IP、序列号、访问码都在打印机屏幕的设置里，和这台电脑在同一个局域网即可。
@@ -216,7 +216,13 @@ MCP 工具本来只能她去问。服务器配置里加 `"notify": true` 之后�
 - 列打印机上切好的文件（`printer_files`）
 - **把切好的文件发去打印**（`printer_print`）：这台电脑上的 `.gcode.3mf`（Bambu Studio 切片后「导出切片文件」）会先传到打印机，或者直接重打打印机上已有的文件。
   **不会切片**——只有模型时先在 Bambu Studio 里切。开始前她会先告诉你要打什么、用哪个槽的料，等你确认「热床上是空的」才真的开始
-- `"ownerOnly"` 那一行让「开始打印」和「控制」只在你本人的对话里有——待办、定时任务、heartbeat 这些没人看着的场景里她碰不到
+- **切片**（`printer_slice`）：用这台电脑上装的 Bambu Studio（命令行，不弹界面）把 `.3mf` / `.stl` 按这台打印机（`BAMBU_MODEL`）切好，告诉你预计时间和用料，再交给 `printer_print`。
+  可以指定层高、填充密度、墙层数、支撑（不加 / 普通 / 树状）、裙边；不指定就用文件里的。MakerWorld 上同一个模型常有好几份打印配置，**下载给你这台机型做的那份最稳**（用它自带的配置切）；
+  给别的机型的、STL 会换成这台的系统配置重切（实验性，原作者调过的参数带不过来；不行就在 Bambu Studio 里把打印机换成你这台、保存，再给她切）。
+  Bambu Studio 不在默认位置时在 env 里填 `BAMBU_STUDIO`（`bambu-studio.exe` 的完整路径）；系统配置目录找不到时填 `BAMBU_PROFILES`；喷嘴不是 0.4 的填 `BAMBU_NOZZLE`。切好的文件在 `<数据目录>/bambu_printer/sliced/`
+- 发去打印前会核对：文件是给别的机型切的不让打（会撞板）；用了几种料就要说清用 AMS 的几号槽；文件按 PETG 切、槽里是 PLA 这种会提醒你
+- 从 MakerWorld 下载模型：接浏览器 MCP（见上面「让她能操作浏览器」），她能搜、能点下载，下载下来的文件给 `printer_slice` 切
+- `"ownerOnly"` 那一行让「开始打印」「控制」「切片」只在你本人的对话里有——待办、定时任务、heartbeat 这些没人看着的场景里她碰不到
 
 打印机的证书是自签的：第一次连上记下指纹（`<数据目录>/bambu_printer/`），以后不一样就不连并提醒你；恢复出厂后跟她说「重新信任打印机」。
 协议（状态字段、控制指令、传文件）来自社区整理，没有官方文档；哪项不对，让她「调 printer_status 带 raw=true，把结果原样发我」核对。

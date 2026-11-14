@@ -7,6 +7,10 @@ import fs from "node:fs";
 import path from "node:path";
 import type { BambuPrinter, PrinterStatus } from "./bambu.ts";
 import { Ftps, type FtpDial, type FtpEntry } from "./ftps.ts";
+import { zipNames, platesOf, projectInfo, sliceInfo, modelMatches, fmtSeconds } from "./threemf.ts";
+import { slice, type SliceEnv } from "./slice.ts";
+
+export { zipNames, platesOf };
 
 export const CONTROL_TOOLS = [
   {
@@ -29,14 +33,14 @@ export const CONTROL_TOOLS = [
   {
     name: "printer_print", title: "开始打印",
     description: "开始打印一个**已经切好片**的文件（Bambu Studio 导出的 .gcode.3mf / 切片后的 .3mf）：可以是这台电脑上的文件路径（会先传到打印机），也可以是 printer_files 列出的打印机上的文件名。"
-      + "不会切片：只有模型（.stl / 没切片的 .3mf）时让主人先在 Bambu Studio 里切片导出。"
+      + "只有模型（.stl / 没切片的 .3mf，比如从 MakerWorld 下载的）时先用 printer_slice 切好，再把切好的文件给这里。"
       + "分两步：第一次调（不带 confirm）只返回要打什么和一个确认码；把内容告诉主人，主人确认「热床上是空的、就打这个、用这个料」之后，带上 confirm 用同样的参数再调一次才真的开始。主人没明确同意不要带 confirm。",
     inputSchema: {
       type: "object", required: ["file"],
       properties: {
         file: { type: "string", description: "这台电脑上的文件路径，或打印机上的文件名" },
         plate: { type: "number", description: "第几盘（一个文件里有多盘时），默认第一盘" },
-        slots: { type: "array", items: { type: "number" }, description: "文件里用到的每种料各在 AMS 的几号槽（1 起，按文件里料的顺序）；不填 = 用现在在用的那个槽" },
+        slots: { type: "array", items: { type: "number" }, description: "文件里用到的每种料各在 AMS 的几号槽（1 起，按文件里料的顺序）；文件只用一种料时不填 = 用现在在用的那个槽" },
         use_ams: { type: "boolean", description: "false = 用外挂料盘；不填 = 有 AMS 就用" },
         bed_leveling: { type: "boolean", description: "打印前调平，默认 true" },
         timelapse: { type: "boolean", description: "拍延时摄影，默认 false" },
@@ -44,34 +48,25 @@ export const CONTROL_TOOLS = [
       },
     },
   },
+  {
+    name: "printer_slice", title: "切片",
+    description: "用这台电脑上的 Bambu Studio 把模型切成能打的文件（.gcode.3mf），按这台打印机的配置切。输入是这台电脑上的 .3mf（Bambu Studio 项目、MakerWorld 下载的）或 .stl。"
+      + "MakerWorld 上同一个模型常有好几份打印配置，优先下载给这台打印机型号做的那份——用它自带的配置切最稳；给别的机型的、STL 会换成这台的系统配置重切（原作者调过的参数带不过来）。"
+      + "参数不填就用文件里 / 系统配置里的；主人提了要求（更结实、更快、要不要支撑）再改对应的几项。切好后把预计时间、用料告诉主人，再用 printer_print 打（它会再让主人确认）。切片可能要几分钟。",
+    inputSchema: {
+      type: "object", required: ["file"],
+      properties: {
+        file: { type: "string", description: "这台电脑上的 .3mf / .stl（绝对路径）" },
+        plate: { type: "number", description: "切第几盘，默认第一盘" },
+        layer_height: { type: "number", description: "层高 mm：0.12 细、0.2 标准、0.28 快" },
+        infill: { type: "number", description: "填充密度 %：15 一般、25~40 结实、100 实心" },
+        walls: { type: "number", description: "墙层数：2 一般、3~4 结实" },
+        supports: { type: "string", enum: ["off", "normal", "tree"], description: "支撑：off 不加、normal 普通、tree 树状（悬空多、好拆）" },
+        brim: { type: "string", enum: ["auto", "off", "outer"], description: "裙边（帮底面粘牢）：auto 自动、off 不加、outer 外圈加" },
+      },
+    },
+  },
 ];
-
-/** zip 里有哪些文件（只读末尾的目录，不解压；判断 3mf 切没切片用） */
-export function zipNames(file: string): string[] {
-  const fd = fs.openSync(file, "r");
-  try {
-    const size = fs.fstatSync(fd).size;
-    const tailLen = Math.min(size, 66_000);
-    const tail = Buffer.alloc(tailLen);
-    fs.readSync(fd, tail, 0, tailLen, size - tailLen);
-    let e = -1;
-    for (let i = tailLen - 22; i >= 0; i--) if (tail.readUInt32LE(i) === 0x06054b50) { e = i; break; }
-    if (e < 0) throw new Error("不是 zip / 3mf 文件");
-    const cdSize = tail.readUInt32LE(e + 12), cdOff = tail.readUInt32LE(e + 16);
-    if (cdSize > 32 * 1024 * 1024 || cdOff + cdSize > size) throw new Error("文件目录不对（文件可能不完整）");
-    const cd = Buffer.alloc(cdSize);
-    fs.readSync(fd, cd, 0, cdSize, cdOff);
-    const names: string[] = [];
-    for (let p = 0; p + 46 <= cd.length && cd.readUInt32LE(p) === 0x02014b50;) {
-      const n = cd.readUInt16LE(p + 28), x = cd.readUInt16LE(p + 30), c = cd.readUInt16LE(p + 32);
-      names.push(cd.subarray(p + 46, p + 46 + n).toString("utf8"));
-      p += 46 + n + x + c;
-    }
-    return names;
-  } finally { fs.closeSync(fd); }
-}
-/** 切好片的盘号（Metadata/plate_N.gcode） */
-export const platesOf = (names: string[]) => names.map((n) => /^Metadata\/plate_(\d+)\.gcode$/.exec(n)?.[1]).filter(Boolean).map(Number).sort((a, b) => a - b);
 
 const SPEED: Record<string, [string, string]> = { silent: ["1", "静音"], standard: ["2", "标准"], sport: ["3", "运动"], ludicrous: ["4", "狂暴"] };
 const light = (mode: "on" | "off") => ({ command: "ledctrl", led_node: "chamber_light", led_mode: mode, led_on_time: 500, led_off_time: 500, loop_times: 0, interval_time: 0 });
@@ -88,6 +83,10 @@ export interface ControlOpts {
   ftpDial?: FtpDial;
   /** project_file 里文件地址的前缀：P2 / H2 这代是 ftp:///，老机型（X1 / P1 / A1）是 file:///sdcard/ */
   fileUrl?: string;
+  /** 这台打印机的型号（「P2S」）：切片按它选配置；发打印前核对文件是不是给它切的。空 = 不核对 */
+  model?: string;
+  /** 切片（Bambu Studio 在哪、系统配置在哪、切好的放哪） */
+  slicer?: Omit<SliceEnv, "model" | "log">;
   log(line: string): void;
 }
 
@@ -152,6 +151,41 @@ export class PrinterControl {
     } catch (e: any) { return { text: `列文件出错：${e.message}`, isError: true }; } finally { ftp.close(); }
   }
 
+  private slicing: Promise<unknown> = Promise.resolve();
+
+  /** 切片：不用连着打印机（只用这台电脑上的 Bambu Studio）；一次只切一个 */
+  async slice(args: any): Promise<{ text: string; isError?: boolean }> {
+    if (!this.o.model) return { text: "MCP 配置的 env 里没填 BAMBU_MODEL（打印机型号，比如 P2S），不知道按哪台打印机切。", isError: true };
+    const file = String(args?.file ?? "").trim();
+    if (!path.isAbsolute(file)) return { text: "file 要给这台电脑上的完整路径（比如浏览器下载文件夹里的那个 .3mf）。", isError: true };
+    if (!/\.(3mf|stl)$/i.test(file)) return { text: "只能切 .3mf 和 .stl。别的格式（.step / .obj）让主人在 Bambu Studio 里打开、另存成 3mf。", isError: true };
+    if (!fs.existsSync(file)) return { text: `这台电脑上没有 ${file}。`, isError: true };
+    if (/\.gcode\.3mf$/i.test(file) || (/\.3mf$/i.test(file) && platesOf(zipNames(file)).length && modelMatches(projectInfo(file).printerModel, this.o.model) && !Object.keys(args).some((k) => k !== "file" && k !== "plate")))
+      return { text: "这个文件已经是给这台打印机切好的，直接用 printer_print 打就行；要改参数就带上参数再切一次。" };
+    const opts = { plate: args?.plate, layer_height: args?.layer_height, infill: args?.infill, walls: args?.walls, supports: args?.supports, brim: args?.brim };
+    for (const k of Object.keys(opts) as (keyof typeof opts)[]) if (opts[k] === undefined || opts[k] === null || opts[k] === "") delete opts[k];
+    const job = this.slicing.then(async () => {
+      const t0 = Date.now();
+      this.o.log(`[${this.o.name}] 🔪 切片 ${path.basename(file)} ${JSON.stringify(opts)}`);
+      const r = await slice(file, opts, { ...(this.o.slicer ?? { outDir: "." }), model: this.o.model!, log: this.o.log });
+      this.o.log(`[${this.o.name}] 🔪 切好了（${Math.round((Date.now() - t0) / 1000)} 秒）→ ${r.file}`);
+      return r;
+    });
+    this.slicing = job.catch(() => {});
+    try {
+      const r = await job;
+      const p = r.plates.find((x) => x.plate === (opts.plate ?? 1)) ?? r.plates[0];
+      const fil = p?.filaments.length ? `\n用料：${p.filaments.map((f, i) => `第 ${i + 1} 种 ${[f.color, f.type].filter(Boolean).join(" ")}${f.grams !== null ? ` ${f.grams.toFixed(1)} 克` : ""}`).join("、")}` : "";
+      const changed = Object.entries(opts).filter(([k]) => k !== "plate").map(([k, v]) => `${({ layer_height: "层高", infill: "填充", walls: "墙层数", supports: "支撑", brim: "裙边" } as any)[k]} ${v}${k === "infill" ? "%" : k === "layer_height" ? "mm" : ""}`);
+      return {
+        text: `切好了：${r.file}\n${r.mode === "project" ? `用的是文件自带的 ${this.o.model} 配置` : `换成了 ${this.o.model} 的系统配置`}${changed.length ? `，改了：${changed.join("、")}` : ""}。`
+          + (p?.seconds ? `\n预计打印 ${fmtSeconds(p.seconds)}` : "") + (p?.grams ? `${p?.seconds ? "，" : "\n"}总用料约 ${Math.round(p.grams)} 克` : "") + fil
+          + (r.warnings.length ? `\n注意：${r.warnings.join(" ")}` : "")
+          + `\n把这些告诉主人；要打就用 printer_print，file 填上面这个路径${p && p.filaments.length > 1 ? `，slots 按「第几种料用几号槽」的顺序填 ${p.filaments.length} 个` : ""}。`,
+      };
+    } catch (e: any) { return { text: String(e?.message ?? e), isError: true }; }
+  }
+
   async print(args: any): Promise<{ text: string; isError?: boolean }> {
     const r = this.ready();
     if (typeof r === "string") return { text: r, isError: true };
@@ -174,6 +208,14 @@ export class PrinterControl {
     if (!local && path.isAbsolute(file)) return { text: `这台电脑上没有 ${file}。`, isError: true };
     const plate = Number(args?.plate) || plates[0] || 1;
     if (local && !plates.includes(plate)) return { text: `这个文件里没有第 ${plate} 盘（切好的有：第 ${plates.join("、")} 盘）。`, isError: true };
+    // 是不是给这台打印机切的：拿别的机型的 G-code 打，喷头可能撞板
+    const proj = local ? projectInfo(local.path) : null;
+    if (proj?.printerModel && this.o.model && !modelMatches(proj.printerModel, this.o.model))
+      return { text: `这个文件是给「${proj.printerModel}」切的，不是 ${this.o.model}，不能直接打（喷头可能撞到打印板）。先用 printer_slice 按这台打印机重新切。`, isError: true };
+    const stat = local ? sliceInfo(local.path).find((x) => x.plate === plate) : undefined;
+    const used = stat?.filaments.length ? stat.filaments : (proj?.filaments ?? []).map((f, i) => ({ id: i + 1, type: f.type, color: f.color, grams: null }));
+    if (local && used.length > 1 && !(Array.isArray(args?.slots) && args.slots.length === used.length) && args?.use_ams !== false)
+      return { text: `这一盘用了 ${used.length} 种料：${used.map((f, i) => `第 ${i + 1} 种 ${[f.color, f.type].filter(Boolean).join(" ")}`).join("、")}。要说清每种料用 AMS 的几号槽（slots，按这个顺序，${used.length} 个数）。现在 AMS 里：${s.trays.map((t) => `${t.slot} 号 ${[t.color, t.type].filter(Boolean).join(" ")}`).join("、") || "没看到料"}。`, isError: true };
     // 用哪个料槽：没说就用现在在用的那个，再没有就 1 号
     const hasAms = s.trays.length > 0;
     const useAms = args?.use_ams === undefined ? hasAms : args.use_ams === true;
@@ -188,10 +230,17 @@ export class PrinterControl {
     if (!given || this.codes.get(given)?.key !== key) {
       const code = String(Math.floor(1000 + Math.random() * 9000));
       this.codes.set(code, { key, exp: now + CONFIRM_TTL_MS });
+      // 文件里的料和槽里的料材质对不上（比如按 PETG 切的、槽里是 PLA）：温度不对，提醒主人
+      const mismatch = (want: { type: string }[], sl: number[]) => {
+        const bad = sl.map((n, i) => ({ n, want: want[i]?.type ?? "", have: s.trays.find((x) => x.slot === n)?.type ?? "" }))
+          .filter((x) => x.want && x.have && !x.have.toUpperCase().startsWith(x.want.toUpperCase().split(/[\s-]/)[0]));
+        return bad.length ? `\n⚠️ 材质对不上：${bad.map((x) => `文件按 ${x.want} 切的，${x.n} 号槽是 ${x.have}`).join("；")}——温度不合适会打坏，最好换料或者按这个料重新切。` : "";
+      };
       const tray = (n: number) => { const t = s.trays.find((x) => x.slot === n); return `${n} 号槽${t ? `（${[t.color, t.type].filter(Boolean).join(" ")}${t.remain !== null ? `，剩 ${t.remain}%` : ""}）` : "（没看到这个槽里有料）"}`; };
       return {
         text: `还没开始打印。${given ? "确认码不对或者参数变了，重新确认：" : ""}\n要打的是：「${title}」第 ${plate} 盘${local ? `（这台电脑上的文件，${mb(local.size)}，会先传到打印机）` : "（打印机上的文件）"}`
-          + `\n用料：${useAms ? slots.map(tray).join("、") : "外挂料盘"}\n打印前调平：${args?.bed_leveling === false ? "否" : "是"}；延时摄影：${args?.timelapse === true ? "是" : "否"}`
+          + (stat && (stat.seconds || stat.grams) ? `\n预计：${stat.seconds ? fmtSeconds(stat.seconds) : "时间不知道"}${stat.grams ? `，用料约 ${Math.round(stat.grams)} 克` : ""}` : "")
+          + `\n用料：${useAms ? slots.map(tray).join("、") : "外挂料盘"}${mismatch(used, useAms ? slots : [])}\n打印前调平：${args?.bed_leveling === false ? "否" : "是"}；延时摄影：${args?.timelapse === true ? "是" : "否"}`
           + `\n把上面的内容告诉主人，并请主人确认：① 热床上是空的、打印板放好了；② 就打这个、用这个料。`
           + `\n主人明确同意后，带上 confirm="${code}"、其余参数不变再调一次（${CONFIRM_TTL_MS / 60_000} 分钟内有效）。主人没同意不要调。`,
       };

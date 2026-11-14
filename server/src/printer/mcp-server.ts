@@ -95,6 +95,12 @@ export function startBambuMcp(o: BambuMcpOpts): { close(): void; printer: BambuP
   const control = new PrinterControl({
     name, printer: () => printer, fingerprint: () => readState().fingerprint ?? "", log,
     ftpPort: Number(env("BAMBU_FTP_PORT")) || undefined, ftpDial: o.ftpDial, fileUrl: env("BAMBU_FILE_URL"),
+    model: env("BAMBU_MODEL"),
+    slicer: {
+      studio: env("BAMBU_STUDIO"), profiles: env("BAMBU_PROFILES"), nozzle: env("BAMBU_NOZZLE") || "0.4",
+      outDir: path.join(o.stateDir ?? path.join(process.cwd(), "bambu_printer"), "sliced"),
+      timeoutMs: (Number(env("BAMBU_SLICE_TIMEOUT")) || 540) * 1000,
+    },
   });
   const tools = controlOn ? [...TOOLS, ...CONTROL_TOOLS]
     : TOOLS.map((t) => (t.name === "printer_status" ? { ...t, description: t.description + "只能看，不能控制（暂停 / 停止 / 开始打印要主人自己在打印机或官方软件上操作）。" } : t));
@@ -123,7 +129,7 @@ export function startBambuMcp(o: BambuMcpOpts): { close(): void; printer: BambuP
       case "initialize": return ok({
         protocolVersion: m.params?.protocolVersion ?? "2025-03-26", capabilities: { tools: {}, logging: {} },
         serverInfo: { name: "kagura-bambu-printer", version: o.version ?? "0" },
-        instructions: controlOn ? `拓竹 3D 打印机（${name}）：看进度 / 温度 / 料 / 报错，暂停、继续、停止，把切好的文件发去打印`
+        instructions: controlOn ? `拓竹 3D 打印机（${name}）：看进度 / 温度 / 料 / 报错，暂停、继续、停止，切片（用这台电脑上的 Bambu Studio），把切好的文件发去打印`
           : `看拓竹 3D 打印机（${name}）的状态：进度、剩余时间、温度、料、报错（只读）`,
       });
       case "ping": case "logging/setLevel": return ok({});
@@ -138,6 +144,8 @@ export function startBambuMcp(o: BambuMcpOpts): { close(): void; printer: BambuP
           open();
           return text(`已经忘掉 ${name} 以前的证书，正在重新连接，这次连上的会被记成新的。过几秒用 printer_status 看看连上没有。`);
         }
+        // 切片不用连着打印机（只用这台电脑上的 Bambu Studio）
+        if (controlOn && tool === "printer_slice") { control.slice(args).then((r) => text(r.text, r.isError === true)).catch((e) => text(`出错了：${e?.message ?? e}`, true)); return; }
         if (controlOn && (tool === "printer_control" || tool === "printer_files" || tool === "printer_print")) {
           if (missing.length) return text(statusText(false), true);
           const run = tool === "printer_control" ? control.control(args) : tool === "printer_files" ? control.files() : control.print(args);

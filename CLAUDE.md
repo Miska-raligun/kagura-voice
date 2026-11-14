@@ -643,6 +643,11 @@ CoreS3 (MicroPython) ──HTTP──▶ server/（TypeScript 单文件可执行
   回执说失败 / 几秒没回执都照实说「不知道成没成，看状态」，**别说成功**；ⓒ `printer_print` 是两步：第一次只返回摘要 + 一次性确认码（绑着参数、10 分钟有效），带码同参数再调才上传并发 `project_file`——
   热床上有没有东西只有人看得到；正在打的时候不让开新的；ⓓ 只收**切好片**的 3mf（`zipNames` 看里面有没有 `Metadata/plate_N.gcode`），不做切片；ⓔ 文件走 FTPS（`ftps.ts`：990 端口隐式 TLS、数据通道复用控制通道的 TLS 会话、
   PASV 回复里的 IP 不用、上传完不等对方 TLS 收尾；登录前也验证书指纹）；ⓕ P2 / H2 这代文件地址是 `ftp:///<名字>`，老机型是 `file:///sdcard/`（env `BAMBU_FILE_URL`）。
+  **切片（`slice.ts` / `threemf.ts`，`printer_slice`，2026-11）**：调这台电脑上 Bambu Studio 的命令行（`--slice N --outputdir <dir>/ --export-3mf <名> <源>`，参数覆盖 `--key=value` 横线写法、优先级最高）。两条路：
+  ① 项目里的 `printer_model`（`Metadata/project_settings.config`）就是这台（`BAMBU_MODEL`，`modelMatches`）→ 用文件自带配置、只覆盖指定的几项（最稳）；② 别的机型 / 普通 3MF / STL → `Profiles` 把系统配置的 `inherits` 链展开成完整配置
+  （`from: "User"`、`inherits` = 自己的名字、`*_settings_id`；工艺 / 耗材里和机器重复的键去掉——社区的经验，命令行不认 inherits），`--load-settings 机器;工艺` + `--load-filaments` 每种料一份（同名换机型后缀 → 同材质 Generic）。实验性。
+  别改坏的点：ⓐ **切完一律核对输出的机型**，不是这台就不交出去（别的机型的 G-code 会撞板）；`printer_print` 发之前也核对一遍；ⓑ 临时目录每次删掉（一次切片几百 MB）；一次只切一个；ⓒ 统计从 `Metadata/slice_info.config` 读（prediction 秒、weight 克、每种料 used_g），读不到就不说；
+  ⓓ 多种料的文件发打印时必须给齐 `slots`，材质和槽里的对不上要提醒。命令行参数照官方 wiki + 社区整理，**没在真机上跑过**；测试用一个假的 `bambu-studio` 脚本（`test/slice.test.ts`）。
   Kagura 这边配 **`"ownerOnly": [工具名]`**（`mcp.ts`，通用）：这些工具只在主人本人的对话里有（`sceneOf(scope) === "owner"`），待办 / 定时任务 / heartbeat / 子任务 / agent 间都没有——模板里给 `printer_print` / `printer_control` 配上了。
   **字段含义全部来自社区逆向（ha-bambulab 等），写的时候没有真机（P2S）**：解析一律「有就用、没有就空着」，新机型的温度可能在 `device.*.info.temp`（目标 << 16 | 当前）；
   哪项不对让主人叫她调 `printer_status raw=true` 把原始数据发过来，照着改 `parseStatus`，测试里的 `FULL` 同步改。测试用 aedes 当假打印机、管道当标准输入输出（`test/printer.test.ts`），

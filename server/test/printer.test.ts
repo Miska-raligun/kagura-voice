@@ -443,7 +443,7 @@ describe("控制（BAMBU_CONTROL=1）", () => {
   const DEV = "3EC18FFF9CFF", NODEV = "3EC1AFFF9CFF";
   const closers: (() => any)[] = [];
   afterEach(async () => { for (const c of closers.splice(0)) await c(); });
-  async function setup(first: any, files: Record<string, Buffer> = {}) {
+  async function setup(first: any, files: Record<string, Buffer> = {}, studioBin?: string) {
     const fp = await fakePrinter();
     const ftp = await fakeFtp(files);
     const input = new PassThrough(), output = new PassThrough();
@@ -451,7 +451,7 @@ describe("控制（BAMBU_CONTROL=1）", () => {
     let buf = "", id = 0;
     output.on("data", (d) => { buf += d.toString(); for (let i; (i = buf.indexOf("\n")) >= 0;) { const m = JSON.parse(buf.slice(0, i)); buf = buf.slice(i + 1); if (m.id !== undefined) waiting.get(m.id)?.(m); } });
     const srv = startBambuMcp({ input, output, stateDir: tmpdir("bambu-state"), dial: plainDial(), ftpDial: plainFtp(), settleMs: 10, ackMs: 1200, log: () => {},
-      env: { BAMBU_NAME: "P2S", BAMBU_HOST: "127.0.0.1", BAMBU_PORT: String(fp.port), BAMBU_FTP_PORT: String(ftp.port), BAMBU_SERIAL: SERIAL, BAMBU_ACCESS_CODE: CODE, BAMBU_CONTROL: "1" } });
+      env: { BAMBU_NAME: "P2S", BAMBU_MODEL: "P2S", BAMBU_STUDIO: studioBin ?? "", BAMBU_HOST: "127.0.0.1", BAMBU_PORT: String(fp.port), BAMBU_FTP_PORT: String(ftp.port), BAMBU_SERIAL: SERIAL, BAMBU_ACCESS_CODE: CODE, BAMBU_CONTROL: "1" } });
     closers.push(() => { srv.close(); input.end(); }, fp.close, ftp.close);
     const rpc = (method: string, params: any = {}) => new Promise<any>((r) => { const n = ++id; waiting.set(n, r); input.write(JSON.stringify({ jsonrpc: "2.0", id: n, method, params }) + "\n"); });
     const call = async (name: string, args: any = {}) => { const r = (await rpc("tools/call", { name, arguments: args })).result; return { text: r.content[0].text as string, isError: !!r.isError }; };
@@ -464,7 +464,7 @@ describe("控制（BAMBU_CONTROL=1）", () => {
 
   it("多出三个控制工具；没开开发者模式时不发指令、说清楚怎么开", async () => {
     const s = await setup({ ...FULL, fun: NODEV });
-    expect((await s.rpc("tools/list")).result.tools.map((t: any) => t.name)).toEqual(["printer_status", "printer_retrust", "printer_control", "printer_files", "printer_print"]);
+    expect((await s.rpc("tools/list")).result.tools.map((t: any) => t.name)).toEqual(["printer_status", "printer_retrust", "printer_control", "printer_files", "printer_print", "printer_slice"]);
     expect((await s.call("printer_status")).text).toContain("打印机没开开发者模式：现在只能看");
     const r = await s.call("printer_control", { action: "pause" });
     expect(r).toMatchObject({ isError: true });
@@ -545,5 +545,58 @@ describe("控制（BAMBU_CONTROL=1）", () => {
     await s.fp.push({ command: "push_status", gcode_state: "RUNNING" });
     await until(() => s.srv.printer!.status.state === "printing");
     expect((await s.call("printer_print", { file: sliced })).text).toContain("正在打印");
+  });
+
+  it("发打印前核对：给别的机型切的不让打；用了几种料要说清几个槽；文件的料和槽里的对不上要提醒；带上预计时间和用量", async () => {
+    const dir = tmpdir("3mf");
+    const proj = (model: string) => JSON.stringify({ printer_model: model, filament_type: ["PLA", "PETG"], filament_colour: ["#FFFFFF", "#0000FF"] });
+    const info = `<config><plate><metadata key="index" value="1"/><metadata key="prediction" value="5460"/><metadata key="weight" value="23.81"/>
+      <filament id="1" type="PLA" color="#FFFFFF" used_g="18.2" /><filament id="2" type="PETG" color="#0000FF" used_g="5.6" /></plate></config>`;
+    const mk = (name: string, model: string) => { const f = path.join(dir, name); fs.writeFileSync(f, zip([{ name: "Metadata/plate_1.gcode", data: Buffer.from("G28") }, { name: "Metadata/project_settings.config", data: Buffer.from(proj(model)) }, { name: "Metadata/slice_info.config", data: Buffer.from(info) }])); return f; };
+    const s = await setup({ ...FULL, gcode_state: "IDLE", fun: DEV });
+    expect((await s.call("printer_print", { file: mk("x1c.gcode.3mf", "Bambu Lab X1 Carbon") })).text).toContain("是给「Bambu Lab X1 Carbon」切的，不是 P2S，不能直接打");
+    const ok = mk("双色.gcode.3mf", "Bambu Lab P2S");
+    const need = await s.call("printer_print", { file: ok });
+    expect(need.isError).toBe(true);
+    expect(need.text).toContain("这一盘用了 2 种料：第 1 种 #FFFFFF PLA、第 2 种 #0000FF PETG");
+    expect(need.text).toContain("现在 AMS 里：1 号 白色 PLA Basic、2 号 蓝色 PETG、4 号 黑色 PLA");
+    const bad = await s.call("printer_print", { file: ok, slots: [1, 4] });
+    expect(bad.text).toContain("预计：1 小时 31 分，用料约 24 克");
+    expect(bad.text).toContain("⚠️ 材质对不上：文件按 PETG 切的，4 号槽是 PLA");
+    const good = await s.call("printer_print", { file: ok, slots: [1, 2] });
+    expect(good.text).not.toContain("材质对不上");
+    await s.call("printer_print", { file: ok, slots: [1, 2], confirm: /confirm="(\d{4})"/.exec(good.text)![1] });
+    expect(s.sent().at(-1).print).toMatchObject({ command: "project_file", use_ams: true, ams_mapping: [0, 1] });
+    expect(s.sent()).toHaveLength(1);
+  });
+
+  it("printer_slice：交给这台电脑上的 Bambu Studio 切，回来说预计时间和用料；已经切好的不用再切", async () => {
+    const dir = tmpdir("slice-mcp");
+    const bin = path.join(dir, "bambu-studio");
+    fs.writeFileSync(bin, `#!/usr/bin/env node
+const fs = require("fs"); const a = process.argv.slice(2); const at = (k) => a[a.indexOf(k) + 1];
+fs.writeFileSync(process.env.FAKE_LOG, JSON.stringify(a));
+fs.copyFileSync(process.env.FAKE_OUT, at("--outputdir") + at("--export-3mf"));
+`);
+    fs.chmodSync(bin, 0o755);
+    const proj = JSON.stringify({ printer_model: "Bambu Lab P2S", filament_type: ["PLA"], filament_colour: ["#FFFFFF"] });
+    const info = `<config><plate><metadata key="index" value="1"/><metadata key="prediction" value="1500"/><metadata key="weight" value="9.4"/><filament id="1" type="PLA" color="#FFFFFF" used_g="9.4" /></plate></config>`;
+    const src = path.join(dir, "钥匙扣.3mf");
+    fs.writeFileSync(src, zip([{ name: "Metadata/project_settings.config", data: Buffer.from(proj) }]));
+    process.env.FAKE_OUT = path.join(dir, "out.3mf");
+    fs.writeFileSync(process.env.FAKE_OUT, zip([{ name: "Metadata/plate_1.gcode", data: Buffer.from("G28") }, { name: "Metadata/project_settings.config", data: Buffer.from(proj) }, { name: "Metadata/slice_info.config", data: Buffer.from(info) }]));
+    process.env.FAKE_LOG = path.join(dir, "log.json");
+    const s = await setup({ ...FULL, gcode_state: "IDLE", fun: DEV }, {}, bin);
+    const r = await s.call("printer_slice", { file: src, infill: 40, walls: 4 });
+    expect(r.isError).toBe(false);
+    expect(r.text).toMatch(/^切好了：.*sliced[\\/]钥匙扣\.gcode\.3mf\n用的是文件自带的 P2S 配置，改了：填充 40%、墙层数 4。\n预计打印 25 分钟，总用料约 9 克\n用料：第 1 种 #FFFFFF PLA 9\.4 克/);
+    expect(JSON.parse(fs.readFileSync(process.env.FAKE_LOG, "utf8"))).toContain("--wall-loops=4");
+    const out = /切好了：(.*)\n/.exec(r.text)![1];
+    expect((await s.call("printer_slice", { file: out })).text).toContain("已经是给这台打印机切好的");
+    expect((await s.call("printer_slice", { file: "猫.stl" })).text).toContain("完整路径");
+    expect((await s.call("printer_slice", { file: path.join(dir, "a.obj") })).text).toContain("只能切 .3mf 和 .stl");
+    // 切好的直接拿去打：第一步就带上预计时间
+    expect((await s.call("printer_print", { file: out })).text).toContain("预计：25 分钟，用料约 9 克");
+    delete process.env.FAKE_OUT;
   });
 });
