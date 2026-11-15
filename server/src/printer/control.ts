@@ -4,6 +4,7 @@
 // 热床上有没有东西只有人看得到。Kagura 那边再配 "ownerOnly"，后台场景（待办 / 定时任务 / heartbeat）里根本没有这两个工具（mcp.ts）。
 // 指令格式来自社区整理的协议（ha-bambulab / OpenBambuAPI），写的时候没有真机。
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import type { BambuPrinter, PrinterStatus } from "./bambu.ts";
 import { Ftps, type FtpDial, type FtpEntry } from "./ftps.ts";
@@ -257,18 +258,40 @@ export class PrinterControl {
       if (path.isAbsolute(file)) return { text: e?.code === "ENOENT" ? `这台电脑上没有 ${file}。` : `读不了 ${file}：${e.message}`, isError: true };
     }
     if (!local && path.isAbsolute(file)) return { text: `这台电脑上没有 ${file}。`, isError: true };
-    const plate = Number(args?.plate) || plates[0] || 1;
-    if (local && !plates.includes(plate)) return { text: `这个文件里没有第 ${plate} 盘（切好的有：第 ${plates.join("、")} 盘）。`, isError: true };
-    // 是不是给这台打印机切的：拿别的机型的 G-code 打，喷头可能撞板
-    const proj = local ? projectInfo(local.path) : null;
-    if (proj?.printerModel && this.o.model && !modelMatches(proj.printerModel, this.o.model))
-      return { text: `这个文件是给「${proj.printerModel}」切的，不是 ${this.o.model}，不能直接打（喷头可能撞到打印板）。先用 printer_slice 按这台打印机重新切。`, isError: true };
-    // 启动代码不对（不加热就挤料）的文件不发：打印机会空走、挤不出料
-    const bad = local ? startProblem(local.path, plate) : "";
-    if (bad) return { text: `不能打：${bad}。用 printer_slice 重新切，或者让主人在 Bambu Studio 里切好再给我。`, isError: true };
-    const stat = local ? sliceInfo(local.path).find((x) => x.plate === plate) : undefined;
-    const used = stat?.filaments.length ? stat.filaments : (proj?.filaments ?? []).map((f, i) => ({ id: i + 1, type: f.type, color: f.color, grams: null }));
-    if (local && used.length > 1 && !(Array.isArray(args?.slots) && args.slots.length === used.length) && args?.use_ams !== false)
+    // 打印机上已有的文件：先下载回来，和这台电脑上的文件一样检查（LRN 2026-11-15，症状「没有任何检查、一开打就空转、温度不升」——
+    // 打的是修复前切的、早就传到打印机上的旧文件，以前这种文件一条都不查直接开打）。下载不回来就不打
+    let tmp = "";
+    if (!local) {
+      tmp = path.join(os.tmpdir(), `kagura-print-${process.pid}-${Date.now()}.3mf`);
+      let ftp: Ftps | null = null;
+      try {
+        ftp = await this.ftp();
+        await ftp.download(`/${file.replace(/^\/+/, "")}`, tmp);
+      } catch (e: any) {
+        fs.rmSync(tmp, { force: true });
+        return { text: `打印机上的「${file}」下载不回来，没法先检查，所以不打（${e.message}）。可以用 printer_slice 重新切一份，打这台电脑上的文件。`, isError: true };
+      } finally { ftp?.close(); }
+    }
+    const checkFile = local?.path ?? tmp;
+    let plate = 1, proj: ReturnType<typeof projectInfo>, stat: ReturnType<typeof sliceInfo>[number] | undefined, used: { id: number; type: string; color: string; grams: number | null }[];
+    try {
+      if (!local) {
+        plates = platesOf(zipNames(checkFile));
+        if (!plates.length) return { text: `打印机上的「${file}」里没有切好的 G-code，不能打。`, isError: true };
+      }
+      plate = Number(args?.plate) || plates[0] || 1;
+      if (!plates.includes(plate)) return { text: `这个文件里没有第 ${plate} 盘（切好的有：第 ${plates.join("、")} 盘）。`, isError: true };
+      // 是不是给这台打印机切的：拿别的机型的 G-code 打，喷头可能撞板
+      proj = projectInfo(checkFile);
+      if (proj.printerModel && this.o.model && !modelMatches(proj.printerModel, this.o.model))
+        return { text: `这个文件是给「${proj.printerModel}」切的，不是 ${this.o.model}，不能直接打（喷头可能撞到打印板）。先用 printer_slice 按这台打印机重新切。`, isError: true };
+      // 启动代码不对（不加热就挤料）、温度不对的文件不发
+      const bad = startProblem(checkFile, plate);
+      if (bad) return { text: `不能打：${bad}。用 printer_slice 重新切，或者让主人在 Bambu Studio 里切好再给我。`, isError: true };
+      stat = sliceInfo(checkFile).find((x) => x.plate === plate);
+      used = stat?.filaments.length ? stat.filaments : proj.filaments.map((f, i) => ({ id: i + 1, type: f.type, color: f.color, grams: null }));
+    } finally { if (tmp) fs.rmSync(tmp, { force: true }); }
+    if (used.length > 1 && !(Array.isArray(args?.slots) && args.slots.length === used.length) && args?.use_ams !== false)
       return { text: `这一盘用了 ${used.length} 种料：${used.map((f, i) => `第 ${i + 1} 种 ${[f.color, f.type].filter(Boolean).join(" ")}`).join("、")}。要说清每种料用 AMS 的几号槽（slots，按这个顺序，${used.length} 个数）。现在 AMS 里：${s.trays.map((t) => `${t.slot} 号 ${[t.color, t.type].filter(Boolean).join(" ")}`).join("、") || "没看到料"}。`, isError: true };
     // 用哪个料槽：没说就用现在在用的那个，再没有就 1 号
     const hasAms = s.trays.length > 0;

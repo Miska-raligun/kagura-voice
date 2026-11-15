@@ -389,6 +389,13 @@ async function fakeFtp(files: Record<string, Buffer> = {}, o: { readonly?: boole
           s.write("H");
           s.end(names.map((n) => `-rw-rw-rw- 1 root root ${String(stored[n].length).padStart(8)} Nov 14 09:30 ${path.posix.basename(n)}`).join("\r\n") + "\r\ndrwxr-xr-x 2 root root 0 Nov 01 00:00 cache\r\n");
           c.write("226 done\r\n");
+        } else if (cmd === "RETR") {
+          const f = stored[arg];
+          if (!f) { c.write("550 Failed to open file.\r\n"); (await data!).destroy(); continue; }
+          c.write("150 sending\r\n");
+          const s = await data!;
+          s.write("H");
+          s.end(f, () => c.write("226 sent\r\n"));
         } else if (cmd === "STOR") {
           if (o.readonly) { c.write("553 Could not create file.\r\n"); (await data!).destroy(); continue; }
           c.write("150 go\r\n");
@@ -568,7 +575,12 @@ describe("控制（BAMBU_CONTROL=1）", () => {
     expect(s.sent()[0].print).toMatchObject({ command: "project_file", param: "Metadata/plate_1.gcode", url: "ftp:///小船.gcode.3mf", subtask_name: "小船", use_ams: true, ams_mapping: [0], bed_leveling: true, timelapse: false });
     // 码只能用一次
     expect((await s.call("printer_print", { file: sliced, slots: [1], confirm: code2 })).text).toContain("还没开始打印");
-    // 打印机上已有的文件：不上传，直接开；外挂料盘
+    // 打印机上已有的文件：先下载回来照样检查（启动代码不对的不打、下载不回来的不打），没问题再开；不上传；外挂料盘
+    s.ftp.stored["/cache/old.3mf"] = zip([{ name: "Metadata/plate_1.gcode", data: Buffer.from("M140 S60\nM104 S220\nM190 S60\nM109 S220\nG1 X5 Y5 E2\n") }]);
+    s.ftp.stored["/cache/冷的.3mf"] = fs.readFileSync(cold);
+    expect((await s.call("printer_print", { file: "cache/冷的.3mf", use_ams: false })).text).toMatch(/^不能打：第 1 盘的 G-code 在第一次挤料（第 2 行）之前没有给喷嘴加热/);
+    expect((await s.call("printer_print", { file: "cache/没有.3mf", use_ams: false })).text).toMatch(/打印机上的「cache\/没有\.3mf」下载不回来，没法先检查，所以不打（下载不了（550 Failed to open file\.））/);
+    expect(s.sent()).toHaveLength(1);
     const ask2 = await s.call("printer_print", { file: "cache/old.3mf", use_ams: false });
     expect(ask2.text).toContain("（打印机上的文件）");
     expect(ask2.text).toContain("用料：外挂料盘");
