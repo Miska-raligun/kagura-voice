@@ -668,6 +668,9 @@ CoreS3 (MicroPython) ──HTTP──▶ server/（TypeScript 单文件可执行
   **打印板类型**（`PLATE_TYPES` / `plateValue`，env `BAMBU_PLATE`，不填按纹理 PEI；LRN 2026-11-15，症状「打印机报 0500-8051 打印板类型与切片设置不符」）：Bambu Studio 没指定时 `curr_bed_type` 默认 Cool Plate，P2S 会识别板子、对不上就停。
   切片一律带 `--curr-bed-type=<配置的板子>`（`plate_type` 参数可改）；开打前文件里的 `curr_bed_type` 和配置的不一样就不打；确认摘要里写清放哪块板。板子类型同时决定热床温度，别让她「忽略此问题」。
   **打印机上已有的文件也查**（LRN 2026-11-15，症状「没有任何检查、一开打就空转、温度不升」——打的是修复前切的、早就传上去的旧文件）：`printer_print` 给的是打印机上的文件名时先 `Ftps.download`（RETR）到临时文件、和本机文件走同一套检查，下载不回来就不打。命令行参数照官方 wiki + 社区整理，**没在真机上跑过**；测试用一个假的 `bambu-studio` 脚本（`test/slice.test.ts`）。
+  **机内摄像头拍照（`printer_snapshot`，`camera.ts`，2026-11）**：P2S / X1 / H2 是 RTSPS（322 端口，`bblp` + 访问码，`/streaming/live/1`，H.264），P1 / A1 是 6000 端口 JPEG 流（没做）。
+  组件零依赖、解不了 H.264，所以借这台电脑上的 ffmpeg 取一帧（`findFfmpeg`：`BAMBU_FFMPEG` → PATH → winget 装的位置——Kagura 可能是装 ffmpeg 之前起的，PATH 里还没有），宽 1280 的 JPEG，图片直接作为 MCP image 给她，存 `<状态目录>/snapshots/` 只留 `KEEP` 张。
+  别改坏的点：① 访问码在地址里，ffmpeg 的报错会带出来——给她 / 打日志前一律 `redact`；② 拍之前先删目标文件（同一秒拍两次文件名一样，拍失败会被当成拍到了上一张）；③ 拍不到先提「局域网模式直播（LAN Only Liveview）」和「别的软件正在看直播」。不需要开发者模式，`BAMBU_CONTROL=0` 也有。真机没验证过。
   **料盒烘干（`printer_ams_dry`，2026-11）**：`{"print": {"command": "ams_filament_drying", ams_id, temp, cooling_temp: 45, duration（小时）, mode: 1 开 / 0 停, rotate_tray, …}}`（ha-bambulab 的格式；`cooling_temp` 低于 45 会被忽略）。
   料盒型号靠连上时发的只读 `get_version`（`info.module` 的名字前缀：`n3f/` = AMS 2 Pro、`n3s/` = AMS HT…，`amsModelsOf`），认出不能烘干的就不发；温度上限 AMS 2 Pro 65℃、HT 85℃，1~24 小时；
   状态 `ams[].dry_time`（分钟）从有变 0 = 烘干完，发 `dried` 通知（刚连上时看到的不算）。P2S 固件 01.01.50.40 以上才有烘干设置。

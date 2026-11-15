@@ -13,6 +13,7 @@ import { eventText, startBambuMcp } from "../src/printer/mcp-server.ts";
 import { Ftps, parseList, type FtpDial } from "../src/printer/ftps.ts";
 import { zipNames, platesOf } from "../src/printer/control.ts";
 import { zip } from "../src/util/zip.ts";
+import { findFfmpeg, cameraUrl, redact, takeSnapshot, KEEP } from "../src/printer/camera.ts";
 
 const SERIAL = "22E8AJ5C1234567", CODE = "12345678";
 const until = async (fn: () => boolean, ms = 3000) => { const t = Date.now(); while (!fn()) { if (Date.now() - t > ms) throw new Error("等不到"); await new Promise((r) => setTimeout(r, 10)); } };
@@ -294,13 +295,79 @@ describe("MCP 服务器", () => {
   const closers: (() => any)[] = [];
   afterEach(async () => { for (const c of closers.splice(0)) await c(); });
 
+  it("机内摄像头拍一张：借 ffmpeg 从 RTSPS 取一帧，图片直接给她；没装 ffmpeg / 拍不到都说清楚，报错里不带访问码", async () => {
+    const dir = tmpdir("cam");
+    const ffmpeg = path.join(dir, "ffmpeg");
+    // 假 ffmpeg：MODE=ok 写一张「JPEG」到最后一个参数；fail 学真的 ffmpeg 把地址（带访问码）带进报错；hang 一直不退
+    fs.writeFileSync(ffmpeg, `#!/usr/bin/env node
+const a = process.argv.slice(2), fs = require("fs");
+fs.writeFileSync(${JSON.stringify(path.join(dir, "args.json"))}, JSON.stringify(a));
+if (process.env.MODE === "fail") { console.error("[rtsp @ 0x1] method DESCRIBE failed: 401 Unauthorized\\n" + a[a.indexOf("-i") + 1] + ": Server returned 401 Unauthorized"); process.exit(1); }
+if (process.env.MODE === "hang") setInterval(() => {}, 1000);
+else fs.writeFileSync(a[a.length - 1], Buffer.from([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3, 0xff, 0xd9]));
+`);
+    fs.chmodSync(ffmpeg, 0o755);
+    const fp = await fakePrinter();
+    const env = { BAMBU_NAME: "P2S", BAMBU_HOST: "127.0.0.1", BAMBU_PORT: String(fp.port), BAMBU_SERIAL: SERIAL, BAMBU_ACCESS_CODE: CODE, BAMBU_FFMPEG: ffmpeg };
+    const s = serve(env);
+    closers.push(s.close, fp.close);
+    process.env.MODE = "ok";
+    try {
+      const r = await s.call("printer_snapshot");
+      expect(r.isError).toBeFalsy();
+      expect(r.content[0]).toMatchObject({ type: "image", mimeType: "image/jpeg", data: Buffer.from([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3, 0xff, 0xd9]).toString("base64") });
+      expect(r.content[1].text).toMatch(/P2S 机内摄像头刚拍的：.*snapshots[\\/]P2S-\d{8}-\d{6}\.jpg（要给主人看就用 send_file/);
+      const args = JSON.parse(fs.readFileSync(path.join(dir, "args.json"), "utf8"));
+      expect(args).toContain(cameraUrl("127.0.0.1", CODE));
+      expect(args.slice(args.indexOf("-rtsp_transport"), args.indexOf("-rtsp_transport") + 2)).toEqual(["-rtsp_transport", "tcp"]);
+      process.env.MODE = "fail";
+      const bad = await s.call("printer_snapshot");
+      expect(bad.isError).toBe(true);
+      expect(bad.content[0].text).toContain("摄像头拒绝登录（访问码不对？）");
+      expect(bad.content[0].text).not.toContain(CODE);
+      expect(s.logs.join("\n")).not.toContain(CODE);
+    } finally { delete process.env.MODE; }
+    // 没装 ffmpeg
+    const s2 = serve({ ...env, BAMBU_FFMPEG: path.join(dir, "没有") });
+    closers.push(s2.close);
+    expect((await s2.call("printer_snapshot")).content[0].text).toContain("winget install ffmpeg");
+  });
+
+  it("拍照的零件：找 ffmpeg（指定的 → PATH → winget 装的）、超时、只留最近几张", async () => {
+    const has = (set: string[]) => (p: string) => set.includes(p);
+    expect(findFfmpeg({ BAMBU_FFMPEG: "D:\\tools\\ffmpeg.exe" }, "win32")).toBe("D:\\tools\\ffmpeg.exe");
+    expect(findFfmpeg({ PATH: "/a:/usr/bin" }, "linux", has(["/usr/bin/ffmpeg"]))).toBe("/usr/bin/ffmpeg");
+    const pk = path.join("L", "Microsoft", "WinGet", "Packages");
+    const exe = path.join(pk, "Gyan.FFmpeg_x", "ffmpeg-8.0-full_build", "bin", "ffmpeg.exe");
+    expect(findFfmpeg({ LOCALAPPDATA: "L", PATH: "" }, "win32", has([exe]), (d) => d === pk ? ["Gyan.FFmpeg_x", "别的"] : ["ffmpeg-8.0-full_build"])).toBe(exe);
+    expect(findFfmpeg({ PATH: "" }, "linux", () => false)).toBe("");
+    expect(redact(`rtsps://bblp:${encodeURIComponent("a b")}@x`, "a b")).toBe("rtsps://bblp:***@x");
+    const dir = tmpdir("cam2");
+    const ff = path.join(dir, "ffmpeg");
+    fs.writeFileSync(ff, `#!/usr/bin/env node
+const a = process.argv.slice(2); if (process.env.MODE === "hang") setInterval(() => {}, 1000); else require("fs").writeFileSync(a[a.length - 1], "jpg");
+`);
+    fs.chmodSync(ff, 0o755);
+    process.env.MODE = "hang";
+    try {
+      await expect(takeSnapshot({ ffmpeg: ff, host: "h", code: "c", dir, name: "P2S", timeoutMs: 500 })).rejects.toThrow(/拍照超时[\s\S]*局域网模式直播/);
+    } finally { delete process.env.MODE; }
+    const out = path.join(dir, "shots");
+    for (let i = 0; i < KEEP + 3; i++) {
+      const f = await takeSnapshot({ ffmpeg: ff, host: "h", code: "c", dir: out, name: "P2S", now: new Date(2026, 0, 1, 0, 0, i) });
+      fs.utimesSync(f, new Date(2026, 0, 1, 0, 0, i), new Date(2026, 0, 1, 0, 0, i));
+    }
+    expect(fs.readdirSync(out).length).toBe(KEEP);
+    expect(fs.existsSync(path.join(out, "P2S-20260101-000000.jpg"))).toBe(false);
+  }, 20_000);
+
   it("握手、列工具、看状态、要原始数据；打完发一条通知（notice 级，原话）", async () => {
     const fp = await fakePrinter();
     const s = serve({ BAMBU_NAME: "P2S", BAMBU_HOST: "127.0.0.1", BAMBU_PORT: String(fp.port), BAMBU_SERIAL: SERIAL.toLowerCase(), BAMBU_ACCESS_CODE: CODE });
     closers.push(s.close, fp.close);
     const init = (await s.rpc("initialize", { protocolVersion: "2025-06-18" })).result;
     expect(init).toMatchObject({ protocolVersion: "2025-06-18", capabilities: { tools: {}, logging: {} }, serverInfo: { name: "kagura-bambu-printer" } });
-    expect((await s.rpc("tools/list")).result.tools.map((t: any) => t.name)).toEqual(["printer_status", "printer_retrust"]);
+    expect((await s.rpc("tools/list")).result.tools.map((t: any) => t.name)).toEqual(["printer_status", "printer_snapshot", "printer_retrust"]);
     expect((await s.rpc("nope")).error.code).toBe(-32601);
     await until(() => s.srv.printer?.conn === "online");
     expect((await s.call("printer_status")).content[0].text).toBe("P2S：刚连上，还没收到状态，过几秒再问。");
@@ -501,7 +568,7 @@ describe("控制（BAMBU_CONTROL=1）", () => {
 
   it("多出三个控制工具；没开开发者模式时不发指令、说清楚怎么开", async () => {
     const s = await setup({ ...FULL, fun: NODEV });
-    expect((await s.rpc("tools/list")).result.tools.map((t: any) => t.name)).toEqual(["printer_status", "printer_retrust", "printer_control", "printer_files", "printer_print", "printer_ams_dry", "printer_slice"]);
+    expect((await s.rpc("tools/list")).result.tools.map((t: any) => t.name)).toEqual(["printer_status", "printer_snapshot", "printer_retrust", "printer_control", "printer_files", "printer_print", "printer_ams_dry", "printer_slice"]);
     expect((await s.call("printer_status")).text).toContain("打印机没开开发者模式：现在只能看");
     const r = await s.call("printer_control", { action: "pause" });
     expect(r).toMatchObject({ isError: true });

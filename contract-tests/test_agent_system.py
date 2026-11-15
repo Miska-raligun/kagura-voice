@@ -841,7 +841,7 @@ def test_bundled_printer_mcp_and_notify(a):
         assert r.status_code == 200, r.text
         srv = r.json()["servers"][0]
         assert srv["state"] == "connected" and srv["notify"] is True, srv
-        assert [t["name"] for t in srv["tools"]] == ["printer_status", "printer_retrust"]      # 没开 BAMBU_CONTROL：只读
+        assert [t["name"] for t in srv["tools"]] == ["printer_status", "printer_snapshot", "printer_retrust"]      # 没开 BAMBU_CONTROL：只看（拍照不用开发者模式）
         a.fake_llm(tool("mcp__printer__printer_status", "打印机现在连不上"))
         assert a.post("/api/admin/chat", json={"agent": "main", "text": "打印到哪了"}).json()["reply"] == "打印机现在连不上"
         assert "P2S：连不上" in _transcript_text(a)
@@ -855,7 +855,7 @@ def test_bundled_printer_mcp_and_notify(a):
         cfg["mcpServers"]["printer"]["env"]["BAMBU_CONTROL"] = "1"
         cfg["mcpServers"]["printer"]["ownerOnly"] = ["printer_print", "printer_control"]
         srv = a.request("PUT", "/api/admin/mcp", json={"config": json.dumps(cfg)}).json()["servers"][0]
-        assert [t["name"] for t in srv["tools"]] == ["printer_status", "printer_retrust", "printer_control", "printer_files", "printer_print", "printer_ams_dry", "printer_slice"]
+        assert [t["name"] for t in srv["tools"]] == ["printer_status", "printer_snapshot", "printer_retrust", "printer_control", "printer_files", "printer_print", "printer_ams_dry", "printer_slice"]
         a.fake_llm(tool("mcp__printer__printer_control", "连不上，停不了", action="stop"))
         assert a.post("/api/admin/chat", json={"agent": "main", "text": "把打印停了"}).json()["reply"] == "连不上，停不了"
         assert "P2S 现在连不上" in _transcript_text(a)
