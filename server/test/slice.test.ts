@@ -76,7 +76,7 @@ function setup() {
   const log = path.join(dir, "log.json");
   process.env.FAKE_LOG = log;
   delete process.env.FAKE_OUT;
-  const env = { studio, profiles: profiles(path.join(dir, "profiles")), model: "P2S", outDir: path.join(dir, "sliced"), timeoutMs: 20_000 };
+  const env = { studio, profiles: profiles(path.join(dir, "profiles")), model: "P2S", outDir: path.join(dir, "sliced"), timeoutMs: 20_000, isOpen: async () => false };
   return { dir, env, last: () => JSON.parse(fs.readFileSync(log, "utf8")) };
 }
 
@@ -168,6 +168,14 @@ describe("切片", () => {
     await expect(slice(p2s, {}, { ...env, studio: path.join(dir, "nope") })).rejects.toThrow(/没找到 Bambu Studio/);
     await expect(slice(p2s, { layer_height: 1 }, env)).rejects.toThrow(/层高/);
     expect(fs.existsSync(env.outDir) ? fs.readdirSync(env.outDir) : []).toEqual([]);   // 失败的不留下
+  });
+
+  it("Bambu Studio 开着：不去切（会被它接走、一直卡着），马上说清楚要关掉", async () => {
+    const { dir, env, last } = setup();
+    const p2s = mk3mf(path.join(dir, "a.3mf"), { model: "Bambu Lab P2S" });
+    fs.writeFileSync(path.join(dir, "log.json"), "{}");
+    await expect(slice(p2s, {}, { ...env, isOpen: async () => true })).rejects.toThrow(/Bambu Studio 现在开着[\s\S]*关掉/);
+    expect(last()).toEqual({});                // 没起 Bambu Studio
   });
 
   it("卡住（后台弹了看不见的窗口）：到时间停掉，带上最后的输出，告诉主人怎么处理", async () => {

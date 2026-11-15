@@ -79,9 +79,19 @@ def round_edges(o, r, segments=3, angle=30):
     m.width = r; m.segments = segments; m.limit_method = "ANGLE"; m.angle_limit = math.radians(angle)
     _activate(o); bpy.ops.object.modifier_apply(modifier=m.name); return o
 
-_CJK_FONTS = [r"C:\Windows\Fonts\simhei.ttf", r"C:\Windows\Fonts\msyh.ttc", r"C:\Windows\Fonts\simsun.ttc",
-              "/System/Library/Fonts/PingFang.ttc", "/System/Library/Fonts/STHeiti Medium.ttc",
-              "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc"]
+def _cjk_fonts():
+    """系统里能用的中日文字体（先中文、后日文；「楽」这类日文写法的字中文字体里可能没有）"""
+    win = os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "Fonts")
+    local = os.path.join(os.environ.get("LOCALAPPDATA", ""), "Microsoft", "Windows", "Fonts")   # 只给当前用户装的字体在这
+    names = ["msyh.ttc", "msyhbd.ttc", "simhei.ttf", "Deng.ttf", "simsun.ttc", "YuGothM.ttc", "YuGothR.ttc", "meiryo.ttc", "msgothic.ttc"]
+    c = [os.path.join(d, n) for d in (win, local) for n in names] + [
+        "/System/Library/Fonts/PingFang.ttc", "/System/Library/Fonts/STHeiti Medium.ttc", "/System/Library/Fonts/Hiragino Sans GB.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc", "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc"]
+    return [f for f in c if os.path.exists(f)]
+
+_CJK_FONTS = _cjk_fonts()
+CJK_FONTS = _CJK_FONTS
 
 def text3d(s, size=10, depth=2, at=(0, 0, 0), font=None, align="CENTER"):
     """立体字：平躺在 XY 面上，字高约 size、厚 depth，底面中心在 at。有中文时自动找系统里的中文字体（也可以 font= 给字体文件路径）"""
@@ -89,7 +99,7 @@ def text3d(s, size=10, depth=2, at=(0, 0, 0), font=None, align="CENTER"):
     o = bpy.context.object
     o.data.body = s; o.data.size = size; o.data.extrude = depth / 2
     o.data.align_x = align; o.data.align_y = "CENTER"
-    path = font or (next((f for f in _CJK_FONTS if os.path.exists(f)), None) if any(ord(c) > 127 for c in s) else None)
+    path = font or ((_CJK_FONTS[0] if _CJK_FONTS else None) if any(ord(c) > 127 for c in s) else None)
     if path:
         o.data.font = bpy.data.fonts.load(path)
     elif any(ord(c) > 127 for c in s):

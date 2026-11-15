@@ -649,7 +649,9 @@ CoreS3 (MicroPython) ──HTTP──▶ server/（TypeScript 单文件可执行
   ① 项目里的 `printer_model`（`Metadata/project_settings.config`）就是这台（`BAMBU_MODEL`，`modelMatches`）→ 用文件自带配置、只覆盖指定的几项（最稳）；② 别的机型 / 普通 3MF / STL → `Profiles` 把系统配置的 `inherits` 链展开成完整配置
   （`from: "User"`、`inherits` = 自己的名字、`*_settings_id`；工艺 / 耗材里和机器重复的键去掉——社区的经验，命令行不认 inherits），`--load-settings 机器;工艺` + `--load-filaments` 每种料一份（同名换机型后缀 → 同材质 Generic）。实验性。
   别改坏的点：ⓐ **切完一律核对输出的机型**，不是这台就不交出去（别的机型的 G-code 会撞板）；`printer_print` 发之前也核对一遍；ⓑ 临时目录每次删掉（一次切片几百 MB）；一次只切一个；ⓒ 统计从 `Metadata/slice_info.config` 读（prediction 秒、weight 克、每种料 used_g），读不到就不说；
-  ⓓ 多种料的文件发打印时必须给齐 `slots`，材质和槽里的对不上要提醒。命令行参数照官方 wiki + 社区整理，**没在真机上跑过**；测试用一个假的 `bambu-studio` 脚本（`test/slice.test.ts`）。
+  ⓓ 多种料的文件发打印时必须给齐 `slots`，材质和槽里的对不上要提醒；
+  ⓔ **Bambu Studio 窗口开着就别切**（`studioRunning`，LRN 2026-11-15，症状「同一个 3mf 昨天几秒切完，今天卡 9 分钟超时」）：它默认只许开一个，命令行再起一个时参数会转给开着的窗口，命令行这边干等到超时。切之前先查进程、开着就立刻说「关掉」；超时报错带最后的输出，Windows 上 `taskkill /T` 连子进程一起结束（残留进程会让下一次接着卡）；
+  ⓕ 交给命令行的文件一律先**复制进临时目录、改英文名**（`input.3mf` / `input.stl` → `output.gcode.3mf`，切完再按原名存）——中文路径不一定认，也碰不到主人的源文件；**STL 先 `placeStl` 挪到打印板中间、底面贴 z=0**（中心取机器配置的 `printable_area`）：Blender / build123d 建的模型以原点为中心，拓竹的板原点在角上，不挪大半个在板外。命令行参数照官方 wiki + 社区整理，**没在真机上跑过**；测试用一个假的 `bambu-studio` 脚本（`test/slice.test.ts`）。
   **料盒烘干（`printer_ams_dry`，2026-11）**：`{"print": {"command": "ams_filament_drying", ams_id, temp, cooling_temp: 45, duration（小时）, mode: 1 开 / 0 停, rotate_tray, …}}`（ha-bambulab 的格式；`cooling_temp` 低于 45 会被忽略）。
   料盒型号靠连上时发的只读 `get_version`（`info.module` 的名字前缀：`n3f/` = AMS 2 Pro、`n3s/` = AMS HT…，`amsModelsOf`），认出不能烘干的就不发；温度上限 AMS 2 Pro 65℃、HT 85℃，1~24 小时；
   状态 `ams[].dry_time`（分钟）从有变 0 = 烘干完，发 `dried` 通知（刚连上时看到的不算）。P2S 固件 01.01.50.40 以上才有烘干设置。
@@ -672,7 +674,7 @@ CoreS3 (MicroPython) ──HTTP──▶ server/（TypeScript 单文件可执行
   **网格检查和预览图在 Node 里按 STL 做**（`raster.ts`：读二进制 / 文本 STL、焊点数破洞边、软件光栅化四个角度 + 深度二阶差分描边、手写 PNG 编码），不依赖 Blender / numpy；`cad_preview` 看现成 STL 不需要 Python。
   别改坏的点：① 找 Python（`findPython`）：env `PYTHON`（可带参数，如 `py -3.12`；**相对路径要转绝对**——建模在临时目录里跑）→ Windows `py -3` / `python` → `python3` / `python`，探测 `import build123d`，找不到说清楚怎么装；
   ② 跑的时候 `-I`（不读当前目录 / 用户 site 的同名模块）+ `PYTHONIOENCODING=utf-8`；③ 检查结果的话术复用 Blender 的 `describeReport`，指导的 printing / fits / review / look 四节用 `sharedSection`（两边同一份），build123d 自己只写 basics / api / examples / problems；
-  ④ Box / Cylinder 默认**居中**，指导里反复强调 `align=(…, …, Align.MIN)`；⑤ 示例在 `test/cad.test.ts` 里真跑（`PYTHON=<装了 build123d 的 python>`，CI 没装就跳过），改示例要重跑、看渲染图。
+  ④ 中文字体：`CJK_FONTS` = 系统里找到的全部（先中文、后日文，含 `%LOCALAPPDATA%` 下只给当前用户装的），`CJK_FONT` 是第一个；代码里有中文 Text 时回复里说清用的哪个、缺字（日文写法的「楽」中文字体里常没有）换日文字体——Blender 的 text3d 同一份列表；⑤ Box / Cylinder 默认**居中**，指导里反复强调 `align=(…, …, Align.MIN)`；⑥ 示例在 `test/cad.test.ts` 里真跑（`PYTHON=<装了 build123d 的 python>`，CI 没装就跳过），改示例要重跑、看渲染图。
 - **运行状况（`agent/health.ts`，管理界面总览「运行状况」卡片 +「日志」页，LRN 2026-10-31，症状「出了问题只能翻一个大日志文件，也说不清最常出的是哪种」）**：
   每一轮（`Runtime.run` 外层）记成功 / 失败（`errorClass` 归类：限流 429、服务商出错、网络、超时、空回复、上下文超长、单轮上限、Key / 额度、被取消、其它）和用时，
   兜底动作各记一条（`empty_retry` / `nudge` / `overflow` / `guard` / `compact` / `compact_failed` / `voice` / `push_failed` / `sub_cancelled` / `unclean_exit`），存 system.sqlite 的 `health_events`，留 30 天。

@@ -10,9 +10,16 @@ def save():
     with open(args["result"], "w", encoding="utf-8") as f:
         json.dump(res, f, ensure_ascii=False)
 
-_CJK = [r"C:\Windows\Fonts\simhei.ttf", r"C:\Windows\Fonts\msyh.ttc", r"C:\Windows\Fonts\simsun.ttc",
-        "/System/Library/Fonts/PingFang.ttc", "/System/Library/Fonts/STHeiti Medium.ttc",
-        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc"]
+def _cjk_fonts():
+    """系统里能用的中日文字体（先中文、后日文；「楽」这类日文写法的字中文字体里可能没有）"""
+    win = os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "Fonts")
+    local = os.path.join(os.environ.get("LOCALAPPDATA", ""), "Microsoft", "Windows", "Fonts")   # 只给当前用户装的字体在这
+    names = ["msyh.ttc", "msyhbd.ttc", "simhei.ttf", "Deng.ttf", "simsun.ttc", "YuGothM.ttc", "YuGothR.ttc", "meiryo.ttc", "msgothic.ttc"]
+    c = [os.path.join(d, n) for d in (win, local) for n in names] + [
+        "/System/Library/Fonts/PingFang.ttc", "/System/Library/Fonts/STHeiti Medium.ttc", "/System/Library/Fonts/Hiragino Sans GB.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc", "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc"]
+    return [f for f in c if os.path.exists(f)]
 
 buf = io.StringIO()
 try:
@@ -27,8 +34,10 @@ try:
     exec("from build123d import *", g)
     import math
     g["math"] = math
-    # 中文字体：Text("神乐", 8, font_path=CJK_FONT)
-    g["CJK_FONT"] = next((f for f in _CJK if os.path.exists(f)), None)
+    # 中文字体：Text("神乐", 8, font_path=CJK_FONT)；CJK_FONTS 是找到的全部（缺字时换一个）
+    fonts = _cjk_fonts()
+    g["CJK_FONTS"] = fonts; g["CJK_FONT"] = fonts[0] if fonts else None
+    res["fonts"] = fonts
     code = open(args["code_file"], encoding="utf-8").read()
     before = set(g)
     try:

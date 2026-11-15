@@ -37,6 +37,8 @@ export interface SliceEnv {
   outDir: string;
   timeoutMs?: number;
   log?(line: string): void;
+  /** Bambu Studio 是不是开着（测试里换掉）；默认 studioRunning */
+  isOpen?(): Promise<boolean>;
 }
 
 export interface SliceResult { file: string; plates: SliceInfo[]; mode: "project" | "switched"; info: ProjectInfo; warnings: string[] }
@@ -148,6 +150,22 @@ export function checkOptions(o: SliceOptions): string {
   return "";
 }
 
+/** Bambu Studio 开着没有。它默认只许开一个：窗口开着时从命令行再起一个，参数会转给开着的那个窗口，命令行这边就一直干等到超时
+ *  （LRN 2026-11-15：同一个 3mf 昨天几秒切完，今天卡 9 分钟，关掉窗口就好了）。只查 Windows / macOS，查不了当没开 */
+export function studioRunning(platform = process.platform): Promise<boolean> {
+  const [cmd, args, re] = platform === "win32" ? ["tasklist", ["/FI", "IMAGENAME eq bambu-studio.exe", "/NH"], /bambu-studio\.exe/i] as const
+    : platform === "darwin" ? ["pgrep", ["-x", "BambuStudio"], /\d/] as const : [null, [], /$^/] as const;
+  if (!cmd) return Promise.resolve(false);
+  return new Promise((resolve) => {
+    let out = "";
+    const c = spawn(cmd, [...args], { windowsHide: true, stdio: ["ignore", "pipe", "ignore"] });
+    c.stdout.on("data", (d: Buffer) => { out += d.toString(); });
+    c.once("error", () => resolve(false));
+    c.once("close", () => resolve(re.test(out)));
+    setTimeout(() => { c.kill(); resolve(false); }, 10_000);
+  });
+}
+
 /** 打印板中心：机器配置的 printable_area（["0x0","256x0","256x256","0x256"]）的中心；读不出按 256 × 256 */
 export function bedCenter(machine: Record<string, unknown>): [number, number] {
   const pts = (Array.isArray(machine.printable_area) ? machine.printable_area : []).map((v) => String(v).split(/x/i).map(Number)).filter((p) => p.length === 2 && p.every(Number.isFinite));
@@ -203,6 +221,7 @@ export async function slice(src: string, o: SliceOptions, env: SliceEnv): Promis
   if (!studio || !fs.existsSync(studio)) throw new Error("这台电脑上没找到 Bambu Studio。装了的话在 MCP 配置的 env 里填 BAMBU_STUDIO（bambu-studio.exe 的完整路径）。");
   const bad = checkOptions(o);
   if (bad) throw new Error(bad);
+  if (await (env.isOpen ?? studioRunning)()) throw new Error("Bambu Studio 现在开着（或者上次切片残留的 bambu-studio 进程还在）：开着的时候命令行切片会被它接走，一直卡着出不来。请主人关掉 Bambu Studio 窗口（任务管理器里没有 bambu-studio.exe 了）再切。");
   const isStl = /\.stl$/i.test(src);
   const info = isStl ? { bambu: false, printerModel: "", printerProfile: "", processProfile: "", layerHeight: "", filaments: [] } as ProjectInfo : projectInfo(src);
   const plate = Math.max(1, Math.round(o.plate ?? 1));
@@ -255,7 +274,7 @@ export async function slice(src: string, o: SliceOptions, env: SliceEnv): Promis
     const tail = r.out.trim().split(/\r?\n/).filter(Boolean).slice(-6).join("\n");
     // 卡住多半不是模型太复杂（一般一两分钟就切完），而是 Bambu Studio 弹了个看不见的窗口在等人点（更新提示、上次异常退出的报告…）
     if (r.timedOut) throw new Error(`切片超时（${Math.round((env.timeoutMs ?? 540_000) / 60_000)} 分钟还没切完），已经停掉。${tail ? `Bambu Studio 最后输出：\n${tail}\n` : "Bambu Studio 一行输出都没有。"}`
-      + "这种一般不是模型的问题，是 Bambu Studio 在后台弹了窗口等人点（刚自动更新过、上次被强行关掉后的报告窗口等）。请主人：① 任务管理器里结束所有 bambu-studio.exe；② 正常打开一次 Bambu Studio，把弹出来的窗口点掉，再关掉；③ 再切一次。");
+      + "这种一般不是模型的问题：要么切的时候 Bambu Studio 窗口被打开了（命令行切片会被它接走），要么它在后台弹了看不见的窗口等人点（刚自动更新过、上次被强行关掉后的报告窗口）。请主人：① 任务管理器里结束所有 bambu-studio.exe；② 还不行就正常打开一次 Bambu Studio，把弹窗点掉再关掉；③ 再切一次。");
     if (!produced) throw new Error(`切片失败（退出码 ${r.code ?? "?"}）${tail ? `：\n${tail}` : ""}${mode === "switched" ? "\n换配置切片在命令行里不太稳。可以让主人在 Bambu Studio 里打开这个文件、把打印机换成 " + env.model + "、保存项目，再拿保存的文件来切。" : ""}`);
     if (!platesOf(zipNames(produced)).length) throw new Error(`切出来的文件里没有 G-code（第 ${plate} 盘可能不存在，或者这一盘上没有东西）${tail ? `：\n${tail}` : ""}`);
     const outInfo = projectInfo(produced);

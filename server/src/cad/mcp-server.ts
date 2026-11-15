@@ -16,7 +16,7 @@ import { readStl, checkMesh, renderGrid } from "./raster.ts";
 import { guide, GUIDE_TOPICS } from "./guide.ts";
 import { describeReport, parseBed, type BuildReport } from "../blender/mcp-server.ts";
 
-export interface CadReport extends BuildReport { valid?: boolean; step?: string; step_error?: string; output?: string; picked?: string }
+export interface CadReport extends BuildReport { valid?: boolean; step?: string; step_error?: string; output?: string; picked?: string; fonts?: string[] }
 type Py = { cmd: string; pre: string[] };
 
 /** 候选的 Python：env PYTHON（可以带参数，如「py -3.12」）→ Windows 的 py -3 / python → python3 / python */
@@ -101,7 +101,7 @@ const TOOLS = [
       type: "object", required: ["name", "code"],
       properties: {
         name: { type: "string", description: "模型名（文件名用，字母数字中文 _ -），同名会覆盖上一版" },
-        code: { type: "string", description: "build123d 代码（已经 from build123d import *、import math；中文字体路径在 CJK_FONT）。最后 result = 零件" },
+        code: { type: "string", description: "build123d 代码（已经 from build123d import *、import math；中文字体路径在 CJK_FONT，全部候选在 CJK_FONTS）。最后 result = 零件" },
       },
     },
   },
@@ -170,7 +170,12 @@ export function startCadMcp(o: CadMcpOpts): { close(): void } {
     });
     log(`📐 建模 ${name}：${r.ok ? `好了（${Math.round((Date.now() - t0) / 1000)} 秒）` : `失败 ${String(r.error).split("\n")[0]}`}`);
     const picked = r.picked && r.picked !== "result" ? `\n（没写 result，用的是最后建的 ${r.picked}；最好明确写 result = …）` : "";
-    return reply(r, `建好了（build123d ${r.version ?? ""}）。STL：${r.stl}${r.step ? `\nSTEP：${r.step}（别的 CAD 能打开继续改）` : ""}\n代码存在 ${codeFile}${picked}`);
+    // 代码里有中文字：说清楚用的哪个字体——缺字时那个字是空的，只有看预览图才知道
+    const cjk = /Text\s*\(/.test(code) && /[\u3000-\u9fff]/.test(code)
+      ? r.fonts?.length ? `\n中文字体：CJK_FONT = ${r.fonts[0]}${r.fonts.length > 1 ? `（还有 ${r.fonts.slice(1).map((f) => path.basename(f)).join("、")}，在 CJK_FONTS 里）` : ""}。看预览图里每个字都在不在；缺字（尤其「楽」这类日文写法）就换 CJK_FONTS 里的日文字体（YuGoth / meiryo）。`
+        : "\n没找到中文字体（CJK_FONTS 是空的），中文字会是空的：用 font_path= 指定一个字体文件，或者让主人装一个中文字体。"
+      : "";
+    return reply(r, `建好了（build123d ${r.version ?? ""}）。STL：${r.stl}${r.step ? `\nSTEP：${r.step}（别的 CAD 能打开继续改）` : ""}\n代码存在 ${codeFile}${picked}${cjk}`);
   };
 
   const preview = async (args: any) => {
