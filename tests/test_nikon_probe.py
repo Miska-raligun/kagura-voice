@@ -177,3 +177,23 @@ def test_scan_finds_fake_camera(tmp_path, monkeypatch):
     assert probe.scan(cam.port, timeout=0.2) == ["127.0.0.1"]
     rc = probe.main(["--port", str(cam.port), "--out", str(tmp_path)])
     assert rc == 0
+
+
+def test_port_scan_and_discover_report(tmp_path, monkeypatch):
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(8)
+    port = srv.getsockname()[1]
+    assert probe.port_scan("127.0.0.1", ports=range(port - 3, port + 3), timeout=0.3) == [port]
+    monkeypatch.setattr(probe, "port_scan", lambda host: [port])
+    monkeypatch.setattr(probe, "mdns_query", lambda svcs: [{"from": "127.0.0.1", "strings": ["Z_6_2_8054789"]}])
+    monkeypatch.setattr(probe, "ssdp_search", lambda: [])
+    assert probe.main(["127.0.0.1", "--discover", "--out", str(tmp_path)]) == 0
+    rep = json.loads((tmp_path / "nikon_discover_report.json").read_text(encoding="utf-8"))
+    assert rep["open_tcp"] == [port] and rep["mdns"][0]["strings"] == ["Z_6_2_8054789"]
+    srv.close()
+
+
+def test_mdns_query_packet_is_wellformed():
+    assert probe.dns_name("_ptp._tcp.local") == b"\x04_ptp\x04_tcp\x05local\x00"
+    assert probe.printable_runs(b"\x00\x01Z_6_2_805\x07ab\x00Nikon") == ["Z_6_2_805", "Nikon"]

@@ -10,6 +10,7 @@
     python nikon_probe.py                 # 不写 IP：扫一遍本机所在网段，找开着 15740 端口的相机
     python nikon_probe.py 192.168.1.23
     python nikon_probe.py 192.168.1.23 --liveview --shoot
+    python nikon_probe.py 192.168.1.23 --discover   # 诊断：扫相机全部 TCP 端口 + mDNS / SSDP 问一圈（配对界面时用）
 
 结果打印在屏幕上，同时写进当前目录的 nikon_probe_report.json（把它发回来就行）。
 GUID（这台电脑在相机那里的身份）第一次随机生成，存在 nikon_probe_guid.txt，
@@ -425,6 +426,129 @@ def scan(port, timeout=0.4):
     return sorted(found, key=lambda ip: tuple(int(x) for x in ip.split(".")))
 
 
+# ── 诊断：配对界面时相机开了什么 ─────────────────────────────────────
+
+def port_scan(host, ports=range(1, 65536), timeout=0.6, workers=256):
+    found = []
+    lock = threading.Lock()
+    ports = list(ports)
+
+    def worker(chunk):
+        for p in chunk:
+            try:
+                socket.create_connection((host, p), timeout=timeout).close()
+                with lock:
+                    found.append(p)
+                print("    端口 %d 开着" % p)
+            except OSError:
+                pass
+
+    threads = [threading.Thread(target=worker, args=(ports[i::workers],), daemon=True) for i in range(workers)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    return sorted(found)
+
+
+def dns_name(labels):
+    out = b""
+    for part in labels.split("."):
+        out += bytes([len(part)]) + part.encode()
+    return out + b"\0"
+
+
+def printable_runs(b, n=4):
+    runs, cur = [], bytearray()
+    for c in b:
+        if 32 <= c < 127:
+            cur.append(c)
+        else:
+            if len(cur) >= n:
+                runs.append(cur.decode())
+            cur = bytearray()
+    if len(cur) >= n:
+        runs.append(cur.decode())
+    return runs
+
+
+def mdns_query(services, wait=3.0):
+    """从临时端口发 mDNS 查询：对方会单播回给我们，不用占 5353。"""
+    replies = []
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.settimeout(0.3)
+    for svc in services:
+        q = struct.pack(">HHHHHH", 0, 0, 1, 0, 0, 0) + dns_name(svc) + struct.pack(">HH", 12, 0x8001)
+        try:
+            s.sendto(q, ("224.0.0.251", 5353))
+        except OSError as e:
+            replies.append({"error": str(e)})
+    end = time.time() + wait
+    while time.time() < end:
+        try:
+            data, addr = s.recvfrom(9000)
+        except socket.timeout:
+            continue
+        except OSError:
+            break
+        replies.append({"from": addr[0], "strings": printable_runs(data)})
+    s.close()
+    return replies
+
+
+def ssdp_search(wait=3.0):
+    replies = []
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.settimeout(0.3)
+    msg = ("M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\nMAN: \"ssdp:discover\"\r\n"
+           "MX: 2\r\nST: ssdp:all\r\n\r\n").encode()
+    try:
+        s.sendto(msg, ("239.255.255.250", 1900))
+    except OSError as e:
+        return [{"error": str(e)}]
+    end = time.time() + wait
+    while time.time() < end:
+        try:
+            data, addr = s.recvfrom(9000)
+        except socket.timeout:
+            continue
+        except OSError:
+            break
+        replies.append({"from": addr[0], "text": data.decode("utf-8", "replace")})
+    s.close()
+    return replies
+
+
+def discover(host, out):
+    rep = {"host": host}
+    step("诊断 1/3：扫 %s 的全部 TCP 端口（约 2~3 分钟）" % host)
+    rep["open_tcp"] = port_scan(host)
+    print("  开着的端口：%s" % (rep["open_tcp"] or "一个都没有"))
+    step("诊断 2/3：mDNS")
+    svcs = ["_services._dns-sd._udp.local", "_ptp._tcp.local", "_nikon._tcp.local", "_http._tcp.local"]
+    rep["mdns"] = mdns_query(svcs)
+    for r in rep["mdns"]:
+        mark = "  ← 相机" if r.get("from") == host else ""
+        print("  %s %s%s" % (r.get("from", ""), " | ".join(r.get("strings", [])) or r.get("error", ""), mark))
+    if not rep["mdns"]:
+        print("  没有回应")
+    step("诊断 3/3：SSDP")
+    rep["ssdp"] = ssdp_search()
+    for r in rep["ssdp"]:
+        if r.get("from") == host:
+            print("  相机回应：\n    " + r["text"].strip().replace("\r\n", "\n    "))
+    others = sorted({r["from"] for r in rep["ssdp"] if r.get("from") and r["from"] != host})
+    if others:
+        print("  其它设备回应：%s" % "、".join(others))
+    if not any(r.get("from") == host for r in rep["ssdp"]):
+        print("  相机没回应 SSDP")
+    path = os.path.join(out, "nikon_discover_report.json")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(rep, f, ensure_ascii=False, indent=2)
+    print("\n报告：%s" % os.path.abspath(path))
+    return 0
+
+
 def step(title):
     print("\n== " + title)
 
@@ -439,9 +563,15 @@ def main(argv=None):
     ap.add_argument("--liveview", action="store_true", help="取一帧实时取景画面（不按快门）")
     ap.add_argument("--shoot", action="store_true", help="真的拍一张，缩略图存到本机")
     ap.add_argument("--out", default=".", help="报告和图片放哪个目录（默认当前目录）")
+    ap.add_argument("--discover", action="store_true", help="诊断：扫相机全部端口 + mDNS / SSDP（要写 IP）")
     a = ap.parse_args(argv)
 
     os.makedirs(a.out, exist_ok=True)
+    if a.discover:
+        if not a.host:
+            print("--discover 要写相机的 IP")
+            return 1
+        return discover(a.host, a.out)
     if not a.host:
         step("0. 找相机（端口 %d）" % a.port)
         found = scan(a.port)
