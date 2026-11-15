@@ -10,6 +10,7 @@
     python nikon_probe.py                 # 不写 IP：扫一遍本机所在网段，找开着 15740 端口的相机
     python nikon_probe.py 192.168.1.23
     python nikon_probe.py 192.168.1.23 --liveview --shoot
+    python nikon_probe.py 192.168.1.1 --pair       # 配对（相机停在「请启动无线传输器实用程序」那一屏时）
     python nikon_probe.py 192.168.1.23 --discover   # 诊断：扫相机全部 TCP 端口 + mDNS / SSDP 问一圈（配对界面时用）
 
 结果打印在屏幕上，同时写进当前目录的 nikon_probe_report.json（把它发回来就行）。
@@ -54,6 +55,8 @@ OPS = {
     0x9209: "Nikon.StartMovieRecInCard", 0x920A: "Nikon.EndMovieRec",
     0x920B: "Nikon.TerminateCapture", 0x920C: "Nikon.GetDevicePTPIPInfo",
     0x9400: "Nikon.GetPartialObjectHiSpeed",
+    0x9010: "Nikon.AdvancedTransfer",
+    0x952B: "Nikon.GetPairingCode", 0x935A: "Nikon.ConfirmPairing",
 }
 
 EVENTS = {
@@ -265,6 +268,9 @@ class Camera:
         ptype, body = recv_packet(self.cmd)
         if ptype == P_INIT_FAIL:
             reason = struct.unpack("<I", body[:4])[0] if len(body) >= 4 else -1
+            if reason == 1:
+                raise ProbeError("相机拒绝了连接（InitFail 原因码 1）：这个网络配置已经和别的电脑（别的 GUID）配对过了。"
+                                 "在相机上删掉这个网络配置重建，再用 --pair 配对")
             raise ProbeError("相机拒绝了连接（InitFail，原因码 0x%X）——多半是这台电脑还没和相机配对" % reason)
         if ptype != P_INIT_CMD_ACK:
             raise ProbeError("握手回了意外的包类型 %d" % ptype)
@@ -318,6 +324,8 @@ class Camera:
                 self.event_cond.wait(left)
 
     def transact(self, op, params=()):
+        if op == 0x1002:  # PTP 规定 OpenSession 的事务号是 0，之后从 1 数起
+            self.tid = -1
         self.tid += 1
         tid = self.tid
         send_packet(self.cmd, P_OP_REQ, struct.pack("<IHI", 1, op, tid) + struct.pack("<%dI" % len(params), *params))
@@ -549,6 +557,74 @@ def discover(host, out):
     return 0
 
 
+# ── 配对（libgphoto2 issue #1314 逆向出来的流程，作者在 Nikon ZR 上验证；Z6 II 是否相同未知） ──
+
+def parse_pair_code(data):
+    """0x952B 的数据：uint32 位数 + 每位一个字节（0~9 的数值，不是 ASCII）。"""
+    r = Reader(data)
+    n = r.u32()
+    digits = r.take(n)
+    if any(d > 9 for d in digits):
+        raise ProbeError("配对码格式不认识：%s" % data.hex())
+    return "".join(str(d) for d in digits)
+
+
+def pair(cam, report, err, ask=None, confirm_wait=120, reconnect_wait=60):
+    ask = ask or input
+    res = report.setdefault("pairing", {})
+    h = cam.connect()
+    res["handshake"] = h
+    print("  ✅ 握手成功：相机「%s」" % h["camera_name"])
+    code, _, _ = cam.transact(0x1002, (1,))  # 规定：OpenSession 之后紧接着取配对码，中间不能插别的指令
+    res["open_session"] = name(RESP, code)
+    if code not in (0x2001, 0x201E):
+        err("配对 OpenSession", name(RESP, code))
+        return False
+    code, _, data = cam.transact(0x952B)
+    res["get_code"] = name(RESP, code)
+    if code != 0x2001:
+        err("取配对码 0x952B", name(RESP, code) + "（相机可能不走这套配对流程）")
+        return False
+    pin = parse_pair_code(data)
+    res["code"] = pin
+    print("  配对码：%s" % pin)
+    ans = ask("  相机屏幕上显示的也是 %s 吗？对得上直接回车，不对输入 n 回车：" % pin).strip().lower()
+    if ans.startswith("n"):
+        err("配对", "配对码对不上，已取消")
+        return False
+    since = len(cam.events)
+    code, _, _ = cam.transact(0x935A, (0x2001,))
+    res["confirm"] = name(RESP, code)
+    if code != 0x2001:
+        err("确认配对 0x935A", name(RESP, code))
+        return False
+    print("  现在请在相机上确认这台电脑（%d 秒内）…" % confirm_wait)
+    ev = cam.wait_event({0x4008}, since, confirm_wait)
+    res["confirmed_event"] = ev is not None
+    if ev is None:
+        print("  没等到相机的确认事件，照样试着重连")
+    else:
+        print("  ✅ 相机已确认")
+    cam.close()  # 不发 CloseSession：相机会直接重置连接
+    print("  相机会重启 Wi-Fi，等它回来…")
+    end = time.time() + reconnect_wait
+    time.sleep(2)
+    while time.time() < end:
+        c2 = Camera(cam.host, cam.port, cam.guid, cam.name, cam.timeout)
+        try:
+            c2.connect()
+            c2.close()
+            res["reconnected"] = True
+            print("  ✅ 配对完成，用同一个 GUID 重新连上了")
+            return True
+        except (OSError, ProbeError) as e:
+            c2.close()
+            res["last_retry_error"] = str(e)
+            time.sleep(2)
+    err("配对后重连", res.get("last_retry_error", "超时"))
+    return False
+
+
 def step(title):
     print("\n== " + title)
 
@@ -564,6 +640,7 @@ def main(argv=None):
     ap.add_argument("--shoot", action="store_true", help="真的拍一张，缩略图存到本机")
     ap.add_argument("--out", default=".", help="报告和图片放哪个目录（默认当前目录）")
     ap.add_argument("--discover", action="store_true", help="诊断：扫相机全部端口 + mDNS / SSDP（要写 IP）")
+    ap.add_argument("--pair", action="store_true", help="先配对（相机停在配对界面时），成功后接着探测")
     a = ap.parse_args(argv)
 
     os.makedirs(a.out, exist_ok=True)
@@ -595,6 +672,16 @@ def main(argv=None):
         report["errors"].append({"step": where, "error": msg})
 
     try:
+        if a.pair:
+            step("配对 %s:%d（GUID %s，名字 %s）" % (a.host, a.port, guid, a.name))
+            try:
+                ok = pair(cam, report, err)
+            except OSError as e:
+                raise ProbeError("配对时连不上 %s:%d（%s）" % (a.host, a.port, e))
+            cam.close()
+            if not ok:
+                raise ProbeError("配对没成功")
+            cam = Camera(a.host, a.port, guid, a.name, a.timeout)
         step("1. 连接 %s:%d（GUID %s，名字 %s）" % (a.host, a.port, guid, a.name))
         print("  如果相机屏幕上弹出确认，请在相机上点「是」。")
         try:

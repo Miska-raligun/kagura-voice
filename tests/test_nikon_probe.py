@@ -59,18 +59,24 @@ class FakeCamera:
         self.seen_ops = []
         self.guid = None
         self.busy_once = True
+        self.sessions = 0
+        self.seen_tids = []
         threading.Thread(target=self.run, daemon=True).start()
 
     def run(self):
-        while True:  # 扫描时「连上就断」的空连接跳过
+        while True:  # 一次连接一个会话；扫描时「连上就断」的空连接跳过
             cmd, _ = self.srv.accept()
             try:
                 ptype, body = probe.recv_packet(cmd)
-                break
-            except probe.ProbeError:
+            except (probe.ProbeError, OSError):
                 cmd.close()
+                continue
+            self.session(cmd, ptype, body)
+
+    def session(self, cmd, ptype, body):
         assert ptype == probe.P_INIT_CMD_REQ
         self.guid = body[:16]
+        self.sessions += 1
         if self.reject:
             probe.send_packet(cmd, probe.P_INIT_FAIL, struct.pack("<I", 1))
             cmd.close()
@@ -90,6 +96,7 @@ class FakeCamera:
                 _, op, tid = struct.unpack("<IHI", body[:10])
                 params = struct.unpack("<%dI" % ((len(body) - 10) // 4), body[10:])
                 self.seen_ops.append(op)
+                self.seen_tids.append((op, tid))
                 code, data = self.handle(op, params, evt)
                 if data is not None:
                     probe.send_packet(cmd, probe.P_START_DATA, struct.pack("<IQ", tid, len(data)))
@@ -99,6 +106,8 @@ class FakeCamera:
                 probe.send_packet(cmd, probe.P_OP_RESP, struct.pack("<HI", code, tid))
         except (probe.ProbeError, OSError):
             pass
+        for sk in (cmd, evt):
+            sk.close()
 
     def handle(self, op, params, evt):
         if op == 0x1001:
@@ -127,6 +136,12 @@ class FakeCamera:
             return 0x2001, object_info()
         if op == 0x100A:
             return 0x2001, JPEG
+        if op == 0x952B:
+            return 0x2001, struct.pack("<I", 4) + bytes([1, 6, 5, 2])
+        if op == 0x935A:
+            assert params == (0x2001,)
+            probe.send_packet(evt, probe.P_EVENT, struct.pack("<HI", 0x4008, 0))
+            return 0x2001, None
         return 0x2001, None  # OpenSession / CloseSession / Start/EndLiveView
 
 
@@ -197,3 +212,33 @@ def test_port_scan_and_discover_report(tmp_path, monkeypatch):
 def test_mdns_query_packet_is_wellformed():
     assert probe.dns_name("_ptp._tcp.local") == b"\x04_ptp\x04_tcp\x05local\x00"
     assert probe.printable_runs(b"\x00\x01Z_6_2_805\x07ab\x00Nikon") == ["Z_6_2_805", "Nikon"]
+
+
+def test_pair_then_probe(tmp_path, monkeypatch):
+    cam = FakeCamera()
+    asked = []
+    monkeypatch.setattr("builtins.input", lambda prompt: asked.append(prompt) or "")
+    rc = probe.main(["127.0.0.1", "--port", str(cam.port), "--out", str(tmp_path), "--pair"])
+    report = json.loads((tmp_path / "nikon_probe_report.json").read_text(encoding="utf-8"))
+    assert rc == 0, report["errors"]
+    assert "1652" in asked[0]
+    p = report["pairing"]
+    assert p["code"] == "1652" and p["confirmed_event"] and p["reconnected"]
+    # OpenSession 用事务号 0，紧接着取配对码（1）、确认（2）；配对那一轮不发 CloseSession
+    assert cam.seen_tids[:3] == [(0x1002, 0), (0x952B, 1), (0x935A, 2)]
+    assert cam.seen_ops[3] == 0x1001
+    assert cam.sessions == 3  # 配对、重连验证、正式探测
+
+
+def test_pair_code_mismatch_cancels(tmp_path, monkeypatch):
+    cam = FakeCamera()
+    monkeypatch.setattr("builtins.input", lambda prompt: "n")
+    rc = probe.main(["127.0.0.1", "--port", str(cam.port), "--out", str(tmp_path), "--pair"])
+    assert rc == 1
+    assert 0x935A not in cam.seen_ops
+
+
+def test_parse_pair_code():
+    assert probe.parse_pair_code(bytes.fromhex("0400000001060502")) == "1652"
+    with pytest.raises(probe.ProbeError):
+        probe.parse_pair_code(bytes.fromhex("0100000031"))
