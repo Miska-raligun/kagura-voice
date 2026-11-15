@@ -53,7 +53,7 @@ fs.copyFileSync(process.env.FAKE_OUT, at("--outputdir") + at("--export-3mf"));
 
 /** 一小套系统配置：机器 / 工艺 / 耗材，带 inherits 链 */
 function profiles(root: string) {
-  const w = (kind: string, j: any) => { const d = path.join(root, "BBL", kind); fs.mkdirSync(d, { recursive: true }); fs.writeFileSync(path.join(d, `${j.name}.json`), JSON.stringify(j)); };
+  const w = (kind: string, j: any) => { const d = path.join(root, "BBL", kind); fs.mkdirSync(d, { recursive: true }); fs.writeFileSync(path.join(d, `${j.name}.json`), JSON.stringify({ type: kind, version: "02.00.00.00", ...j })); };   // 真的系统配置每份都带 type / version
   w("machine", { name: "fdm_machine_common", from: "system", instantiation: "false", nozzle_diameter: ["0.4"], printer_technology: "FFF" });
   w("machine", { name: "Bambu Lab P2S 0.4 nozzle", inherits: "fdm_machine_common", from: "system", instantiation: "true", printer_model: "Bambu Lab P2S", bed_exclude_area: ["0x0"], printable_area: ["0x0", "256x0", "256x256", "0x256"] });
   w("machine", { name: "Bambu Lab X1 Carbon 0.4 nozzle", inherits: "fdm_machine_common", from: "system", instantiation: "true", printer_model: "Bambu Lab X1 Carbon" });
@@ -135,6 +135,8 @@ describe("切片", () => {
     expect(machine.instantiation).toBeUndefined();
     expect(proc).toMatchObject({ name: "0.12mm Fine @BBL P2S", layer_height: "0.12", wall_loops: "2", print_settings_id: "0.12mm Fine @BBL P2S" });
     expect(proc.nozzle_diameter).toBeUndefined();                    // 和机器重复的键去掉
+    // 每份都带自己的 type（命令行靠它认；机器里也有 type，去重复键时不能把它删掉）
+    expect([machine.type, proc.type, ...l.loaded["--load-filaments"].map((f: any) => f.type)]).toEqual(["machine", "process", "filament", "filament"]);
     expect(l.loaded["--load-filaments"].map((f: any) => [f.name, f.nozzle_temperature[0]])).toEqual([["Bambu PLA Basic @BBL P2S", "220"], ["Generic PETG @BBL P2S", "250"]]);
     expect(l.args).toContain("--layer-height=0.12");
     // STL 也走这条路（默认 0.2 标准）；以原点为中心建的模型先挪到打印板中间、底面贴 z=0，文件名换成英文

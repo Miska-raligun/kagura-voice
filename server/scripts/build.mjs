@@ -48,6 +48,10 @@ const deviceFw = {
 };
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
+  // 自带的 MCP 组件是哪一版（sha256 + 源码时间）：下载的更新版比它新才用（src/components.ts）
+  const { buildComponents, sourceStamp } = await import("./build-mcp.mjs");
+  const stamp = sourceStamp();
+  const builtin = Object.fromEntries(Object.entries(await buildComponents()).map(([n, c]) => [n, { sha256: c.sha256, stamp }]));
   const r = await build({
     entryPoints: [entry],
     outfile,
@@ -59,6 +63,7 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.a
     define: {
       "import.meta.url": "__kagura_import_meta_url",
       // 版本号：发布时由 release.yml 从 tag 传入（KAGURA_VERSION=1.2.3），否则用 package.json 的
+      __MCP_BUILTIN__: JSON.stringify(builtin),
       __KAGURA_VERSION__: JSON.stringify(process.env.KAGURA_VERSION || JSON.parse(fs.readFileSync(path.join(here, "..", "package.json"), "utf8")).version),
     },
     banner: { js: 'const __kagura_import_meta_url = require("url").pathToFileURL(__filename).href;' },

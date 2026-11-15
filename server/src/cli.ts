@@ -36,6 +36,8 @@ export async function runCli(argv: string[]): Promise<boolean> {
   }
   if (cmd === "mcp") {
     // 自带的 MCP 服务器：标准输入输出上跑协议，别往标准输出打别的
+    // 管理界面单独更新过、比自带的新，就用更新版（src/components.ts）
+    if (rest[0] && (await import("./components.ts")).runUpdatedComponent(rest[0], VERSION)) return true;
     if (rest[0] === "bambu-printer") { (await import("./printer/mcp-server.ts")).runBambuMcp(VERSION); return true; }
     if (rest[0] === "blender") { (await import("./blender/mcp-server.ts")).runBlenderMcp(VERSION); return true; }
     if (rest[0] === "build123d") { (await import("./cad/mcp-server.ts")).runCadMcp(VERSION); return true; }
