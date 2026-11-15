@@ -153,7 +153,12 @@ function run(bin: string, args: string[], cwd: string, timeoutMs: number): Promi
     const child = spawn(bin, args, { cwd, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
     const keep = (d: Buffer) => { out = (out + d.toString("utf8")).slice(-20_000); };
     child.stdout.on("data", keep); child.stderr.on("data", keep);
-    const t = setTimeout(() => { timedOut = true; child.kill(); }, timeoutMs);
+    // Windows 上连它派生的子进程一起结束（只 kill 主进程的话，卡住的那个可能还挂在后台占着配置目录，下一次切片接着卡）
+    const t = setTimeout(() => {
+      timedOut = true;
+      if (process.platform === "win32" && child.pid) spawn("taskkill", ["/PID", String(child.pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" }).on("error", () => child.kill());
+      else child.kill();
+    }, timeoutMs);
     child.once("error", (e) => { clearTimeout(t); resolve({ code: null, out: String(e.message), timedOut }); });
     child.once("close", (code) => { clearTimeout(t); resolve({ code, out, timedOut }); });
   });
@@ -209,7 +214,9 @@ export async function slice(src: string, o: SliceOptions, env: SliceEnv): Promis
     const r = await run(studio, args, work, env.timeoutMs ?? 9 * 60_000);
     const produced = [path.join(work, outName), path.join(work, path.basename(outName))].find((p) => fs.existsSync(p));
     const tail = r.out.trim().split(/\r?\n/).filter(Boolean).slice(-6).join("\n");
-    if (r.timedOut) throw new Error(`切片超时（${Math.round((env.timeoutMs ?? 540_000) / 60_000)} 分钟还没切完），已经停掉`);
+    // 卡住多半不是模型太复杂（一般一两分钟就切完），而是 Bambu Studio 弹了个看不见的窗口在等人点（更新提示、上次异常退出的报告…）
+    if (r.timedOut) throw new Error(`切片超时（${Math.round((env.timeoutMs ?? 540_000) / 60_000)} 分钟还没切完），已经停掉。${tail ? `Bambu Studio 最后输出：\n${tail}\n` : "Bambu Studio 一行输出都没有。"}`
+      + "这种一般不是模型的问题，是 Bambu Studio 在后台弹了窗口等人点（刚自动更新过、上次被强行关掉后的报告窗口等）。请主人：① 任务管理器里结束所有 bambu-studio.exe；② 正常打开一次 Bambu Studio，把弹出来的窗口点掉，再关掉；③ 再切一次。");
     if (!produced) throw new Error(`切片失败（退出码 ${r.code ?? "?"}）${tail ? `：\n${tail}` : ""}${mode === "switched" ? "\n换配置切片在命令行里不太稳。可以让主人在 Bambu Studio 里打开这个文件、把打印机换成 " + env.model + "、保存项目，再拿保存的文件来切。" : ""}`);
     if (!platesOf(zipNames(produced)).length) throw new Error(`切出来的文件里没有 G-code（第 ${plate} 盘可能不存在，或者这一盘上没有东西）${tail ? `：\n${tail}` : ""}`);
     const outInfo = projectInfo(produced);

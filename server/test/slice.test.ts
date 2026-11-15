@@ -41,6 +41,7 @@ const at = (k) => { const i = a.indexOf(k); return i >= 0 ? a[i + 1] : undefined
 const loaded = {};
 for (const k of ["--load-settings", "--load-filaments"]) { const v = at(k); if (v) loaded[k] = v.split(";").filter(Boolean).map((f) => JSON.parse(fs.readFileSync(f, "utf8"))); }
 fs.writeFileSync(process.env.FAKE_LOG, JSON.stringify({ args: a, loaded, cwd: process.cwd() }));
+if (process.env.FAKE_HANG) { console.log("loading project..."); setInterval(() => {}, 1000); return; }
 if (!process.env.FAKE_OUT) { console.error("boom: plate 1 is empty"); process.exit(Number(process.env.FAKE_EXIT || 1)); }
 fs.copyFileSync(process.env.FAKE_OUT, at("--outputdir") + at("--export-3mf"));
 `);
@@ -155,6 +156,15 @@ describe("切片", () => {
     await expect(slice(p2s, {}, { ...env, studio: path.join(dir, "nope") })).rejects.toThrow(/没找到 Bambu Studio/);
     await expect(slice(p2s, { layer_height: 1 }, env)).rejects.toThrow(/层高/);
     expect(fs.existsSync(env.outDir) ? fs.readdirSync(env.outDir) : []).toEqual([]);   // 失败的不留下
+  });
+
+  it("卡住（后台弹了看不见的窗口）：到时间停掉，带上最后的输出，告诉主人怎么处理", async () => {
+    const { dir, env } = setup();
+    const p2s = mk3mf(path.join(dir, "a.3mf"), { model: "Bambu Lab P2S" });
+    process.env.FAKE_HANG = "1";
+    try {
+      await expect(slice(p2s, {}, { ...env, timeoutMs: 1500 })).rejects.toThrow(/切片超时[\s\S]*最后输出：\nloading project\.\.\.[\s\S]*结束所有 bambu-studio\.exe/);
+    } finally { delete process.env.FAKE_HANG; }
   });
 
   it("系统配置索引：不能直接用的（instantiation=false）不选；料先找同名的，再找同材质的 Generic", () => {
