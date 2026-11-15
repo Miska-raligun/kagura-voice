@@ -10,10 +10,10 @@ import fs from "node:fs";
 import path from "node:path";
 import readline from "node:readline";
 import type { Readable, Writable } from "node:stream";
-import { BambuPrinter, describeStatus, fmtDuration, type Dial, type PrinterEvent, type PrinterStatus } from "./bambu.ts";
+import { BambuPrinter, describeStatus, fmtDuration, tlsDial, type Dial, type PrinterEvent, type PrinterStatus } from "./bambu.ts";
 import { CONTROL_TOOLS, PrinterControl } from "./control.ts";
 import type { FtpDial } from "./ftps.ts";
-import { findFfmpeg, takeSnapshot } from "./camera.ts";
+import { CAMERA_PORT, cameraCertVerdict, findFfmpeg, takeSnapshot } from "./camera.ts";
 
 /** 通知的句子（系统直接写，不过模型） */
 export function eventText(name: string, e: PrinterEvent): string {
@@ -38,6 +38,8 @@ export interface BambuMcpOpts {
   log?(line: string): void;
   dial?: Dial;
   ftpDial?: FtpDial;
+  /** 拍照前核对摄像头端口证书用（默认 tlsDial） */
+  camDial?: Dial;
   settleMs?: number;
   ackMs?: number;
   version?: string;
@@ -79,8 +81,31 @@ export function startBambuMcp(o: BambuMcpOpts): { close(): void; printer: BambuP
   // 记证书指纹、放切好的文件的目录：Kagura 拉起时当前目录是数据目录；单独给别的 MCP 客户端用时可以 BAMBU_STATE_DIR 指定
   const stateDir = o.stateDir ?? (env("BAMBU_STATE_DIR") || path.join(process.cwd(), "bambu_printer"));
   const stateFile = path.join(stateDir, `${serial || "unknown"}.json`);
-  const readState = (): { fingerprint?: string; host?: string } => { try { return JSON.parse(fs.readFileSync(stateFile, "utf8")); } catch { return {}; } };
+  const readState = (): { fingerprint?: string; host?: string; camera?: string; cameraHost?: string } => { try { return JSON.parse(fs.readFileSync(stateFile, "utf8")); } catch { return {}; } };
   const writeState = (s: object) => { try { fs.mkdirSync(path.dirname(stateFile), { recursive: true }); fs.writeFileSync(stateFile, JSON.stringify(s)); } catch (e: any) { log(`记不下证书指纹：${e.message}`); } };
+
+  /** 交出访问码之前先核对摄像头端口的证书（ffmpeg 带 -tls_verify 0，它自己不验）：和 MQTT 那边记下的一样，或者和以前在摄像头端口记下的一样才拍；
+   *  第一次见、MQTT 那边又对不上（摄像头用的是另一张证书）就记下来，以后必须一样。printer_retrust 一起忘掉 */
+  let camMismatch = false;
+  const checkCameraCert = async (port: number) => {
+    let fp = "";
+    try {
+      const d = await (o.camDial ?? tlsDial)(host, port);
+      fp = d.fingerprint;
+      d.sock.destroy();
+    } catch (e: any) {
+      throw new Error(`连不上打印机的摄像头端口 ${port}（${e?.message ?? e}）。打印机上可能要打开「局域网模式直播」（LAN Only Liveview，在网络设置里）`);
+    }
+    const st = readState();
+    const known = st.host === host ? st.fingerprint ?? "" : "", camera = st.cameraHost === host ? st.camera ?? "" : "";
+    const v = cameraCertVerdict(fp, known, camera);
+    camMismatch = v === "mismatch";
+    if (v === "mismatch") {
+      log(`[${name}] ⚠️  摄像头端口的证书和记下的不一样，没拍`);
+      throw new Error(`摄像头端口的证书和以前记下的不一样，没拍（没把访问码交出去）。可能是换了机器 / 重置过，也可能有别的设备在冒充它。请主人确认是自己的打印机后再调 printer_retrust。`);
+    }
+    if (v === "remember") { writeState({ ...st, camera: fp, cameraHost: host }); log(`[${name}] 记下摄像头端口的证书指纹`); }
+  };
 
   let printer: BambuPrinter | null = null;
   const open = () => {
@@ -91,7 +116,7 @@ export function startBambuMcp(o: BambuMcpOpts): { close(): void; printer: BambuP
       // 换了 IP 就当换了机器：以前记的证书不作数
       fingerprint: st.host === host ? st.fingerprint : "",
       dial: o.dial, settleMs: o.settleMs, ackMs: o.ackMs, log: (l) => log(`[${name}] ${l}`),
-      onFingerprint: (fp) => writeState({ fingerprint: fp, host }),
+      onFingerprint: (fp) => writeState({ ...readState(), fingerprint: fp, host }),
       onEvent: (e) => {
         if (e.kind === "warning" && env("BAMBU_WARNINGS") === "0") return;
         const text = eventText(name, e);
@@ -158,7 +183,9 @@ export function startBambuMcp(o: BambuMcpOpts): { close(): void; printer: BambuP
           const ffmpeg = findFfmpeg(o.env);
           if (!ffmpeg || !fs.existsSync(ffmpeg)) return text("这台电脑上没找到 ffmpeg（拍照要用它把摄像头的视频解成图片）。让主人装一个：Windows 在命令行运行 winget install ffmpeg（macOS：brew install ffmpeg），装完不用重启 Kagura；装在别处的话在 MCP 配置的 env 里填 BAMBU_FFMPEG（ffmpeg.exe 的完整路径）。", true);
           const t0 = Date.now();
-          takeSnapshot({ ffmpeg, host, code, dir: path.join(stateDir, "snapshots"), name })
+          const camPort = Number(env("BAMBU_CAMERA_PORT")) || CAMERA_PORT;
+          checkCameraCert(camPort)
+            .then(() => takeSnapshot({ ffmpeg, host, code, port: camPort, dir: path.join(stateDir, "snapshots"), name }))
             .then((file) => {
               log(`[${name}] 📷 拍了一张（${Math.round((Date.now() - t0) / 1000)} 秒）→ ${file}`);
               ok({ content: [{ type: "image", data: fs.readFileSync(file).toString("base64"), mimeType: "image/jpeg" }, { type: "text", text: `${name} 机内摄像头刚拍的：${file}（要给主人看就用 send_file 发这个路径）` }] });
@@ -168,8 +195,9 @@ export function startBambuMcp(o: BambuMcpOpts): { close(): void; printer: BambuP
         }
         if (tool === "printer_retrust") {
           if (missing.length) return text(statusText(false), true);
-          if (!printer!.error.startsWith("证书")) return text("现在不是证书的问题，不用重新信任。" + statusText(false));
+          if (!printer!.error.startsWith("证书") && !camMismatch) return text("现在不是证书的问题，不用重新信任。" + statusText(false));
           writeState({});
+          camMismatch = false;
           open();
           return text(`已经忘掉 ${name} 以前的证书，正在重新连接，这次连上的会被记成新的。过几秒用 printer_status 看看连上没有。`);
         }

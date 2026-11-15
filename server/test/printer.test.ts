@@ -275,6 +275,9 @@ describe.skipIf(!hasOpenssl)("真的走 TLS（自签证书）", () => {
 
 describe("MCP 服务器", () => {
   /** 在进程里起服务器，用一对管道当标准输入输出 */
+  // 摄像头端口的证书：默认和 MQTT（plainDial 的 FP1）是同一张；cam.fp 改了模拟换证书，cam.down 模拟端口不通
+  const cam = { fp: "FP1", down: false, dials: 0 };
+  const camDial: Dial = async () => { cam.dials++; if (cam.down) throw new Error("connect ECONNREFUSED"); return { sock: new PassThrough(), fingerprint: cam.fp }; };
   function serve(env: Record<string, string>, dial: Dial = plainDial(), stateDir = tmpdir("bambu-state")) {
     const input = new PassThrough(), output = new PassThrough();
     const logs: string[] = [], notes: any[] = [];
@@ -287,7 +290,7 @@ describe("MCP 服务器", () => {
         if (m.id !== undefined) waiting.get(m.id)?.(m); else notes.push(m);
       }
     });
-    const srv = startBambuMcp({ input, output, env, stateDir, dial, settleMs: 10, log: (l) => logs.push(l), version: "t" });
+    const srv = startBambuMcp({ input, output, env, stateDir, dial, camDial, settleMs: 10, log: (l) => logs.push(l), version: "t" });
     const rpc = (method: string, params: any = {}) => new Promise<any>((r) => { const n = ++id; waiting.set(n, r); input.write(JSON.stringify({ jsonrpc: "2.0", id: n, method, params }) + "\n"); });
     const call = async (name: string, args: any = {}) => (await rpc("tools/call", { name, arguments: args })).result;
     return { srv, rpc, call, notes, logs, stateDir, close: () => { srv.close(); input.end(); } };
@@ -313,6 +316,8 @@ else fs.writeFileSync(a[a.length - 1], Buffer.from([0xff, 0xd8, 0xff, 0xe0, 1, 2
     closers.push(s.close, fp.close);
     process.env.MODE = "ok";
     try {
+      // 等 MQTT 那边连上、记下证书（FP1），摄像头那张跟它比
+      for (let i = 0; i < 100 && !fs.existsSync(path.join(s.stateDir, `${SERIAL}.json`)); i++) await new Promise((r) => setTimeout(r, 20));
       const r = await s.call("printer_snapshot");
       expect(r.isError).toBeFalsy();
       expect(r.content[0]).toMatchObject({ type: "image", mimeType: "image/jpeg", data: Buffer.from([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3, 0xff, 0xd9]).toString("base64") });
@@ -320,6 +325,26 @@ else fs.writeFileSync(a[a.length - 1], Buffer.from([0xff, 0xd8, 0xff, 0xe0, 1, 2
       const args = JSON.parse(fs.readFileSync(path.join(dir, "args.json"), "utf8"));
       expect(args).toContain(cameraUrl("127.0.0.1", CODE));
       expect(args.slice(args.indexOf("-rtsp_transport"), args.indexOf("-rtsp_transport") + 2)).toEqual(["-rtsp_transport", "tcp"]);
+      // 新版 ffmpeg 默认校验证书、打印机是自签的：必须带 -tls_verify 0，且在 -i 前面（输入选项）
+      expect(args.indexOf("-tls_verify")).toBeGreaterThanOrEqual(0);
+      expect(args[args.indexOf("-tls_verify") + 1]).toBe("0");
+      expect(args.indexOf("-tls_verify")).toBeLessThan(args.indexOf("-i"));
+      // 证书不是 MQTT 那张、也没记过：记下来照拍；之后再变就不拍、不调 ffmpeg（访问码不交出去），printer_retrust 忘掉后又能拍
+      cam.fp = "CAM1";
+      expect((await s.call("printer_snapshot")).isError).toBeFalsy();
+      expect(JSON.parse(fs.readFileSync(path.join(s.stateDir, `${SERIAL}.json`), "utf8"))).toMatchObject({ camera: "CAM1", cameraHost: "127.0.0.1" });
+      cam.fp = "EVIL";
+      fs.rmSync(path.join(dir, "args.json"));
+      const evil = await s.call("printer_snapshot");
+      expect(evil.isError).toBe(true);
+      expect(evil.content[0].text).toMatch(/证书和以前记下的不一样，没拍[\s\S]*printer_retrust/);
+      expect(fs.existsSync(path.join(dir, "args.json"))).toBe(false);
+      expect((await s.call("printer_retrust")).content[0].text).toContain("已经忘掉");
+      expect((await s.call("printer_snapshot")).isError).toBeFalsy();
+      cam.fp = "FP1";
+      cam.down = true;
+      expect((await s.call("printer_snapshot")).content[0].text).toMatch(/连不上打印机的摄像头端口 322[\s\S]*局域网模式直播/);
+      cam.down = false;
       process.env.MODE = "fail";
       const bad = await s.call("printer_snapshot");
       expect(bad.isError).toBe(true);
