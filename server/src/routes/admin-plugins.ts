@@ -21,7 +21,7 @@ export function mcpImportSources(env: NodeJS.ProcessEnv = process.env, home = os
 }
 
 export function registerAdminPlugins(r: Router, sys: AgentSystem) {
-  const { extensions, mcp, registry, packages, runtime } = sys;
+  const { extensions, mcp, registry, packages, runtime, components } = sys;
   const guard = (h: (req: Req) => Res | Promise<Res>) => async (req: Req): Promise<Res> => {
     if (!isLocal(req)) return json({ error: "管理接口只允许本机访问" }, 403);
     try { return await h(req); } catch (e: any) { return json({ error: String(e.message || e) }, e.status ?? 400); }
@@ -60,6 +60,24 @@ export function registerAdminPlugins(r: Router, sys: AgentSystem) {
     try { JSON.parse(text); } catch (e: any) { return json({ error: `不是合法的 JSON：${e.message}` }, 400); }
     await mcp.writeConfigText(text);
     return json({ servers: mcp.status() });
+  }));
+  // 自带组件（打印机 / Blender / build123d）单独更新：查、装、用回自带的。换了就重连用它的服务器（Kagura 不用重启）
+  const restartUsing = async (names: string[]) => {
+    for (const n of names) for (const srv of mcp.serversUsing(n)) await mcp.reconnect(srv).catch((e) => console.log(`[mcp] ⚠️  ${srv} 重连失败：${e.message}`));
+  };
+  const compState = () => ({ components: components.status(), checkedAt: components.remote?.checkedAt ?? null, error: components.error });
+  r.add("GET", "/api/admin/mcp/components", guard(() => json(compState())));
+  r.add("POST", "/api/admin/mcp/components/check", guard(async () => { await components.check(); return json(compState()); }));
+  r.add("POST", "/api/admin/mcp/components/update", guard(async (req) => {
+    const names = Array.isArray(req.json()?.names) ? req.json().names.map(String) : undefined;
+    let updated: string[] = [];
+    try { updated = await components.update(names); } catch (e: any) { return json({ ...compState(), error: String(e?.message ?? e) }, 502); }
+    await restartUsing(updated);
+    return json({ ...compState(), updated, servers: mcp.status() });
+  }));
+  r.add("POST", "/api/admin/mcp/components/<name>/reset", guard(async (req) => {
+    if (components.reset(req.params.name)) await restartUsing([req.params.name]);
+    return json({ ...compState(), servers: mcp.status() });
   }));
   r.add("POST", "/api/admin/mcp/<name>/reconnect", guard(async (req) => { await mcp.reconnect(req.params.name); return json({ servers: mcp.status() }); }));
   // 发一条测试通知：确认开了 "notify" 的服务器的通知会送到哪（不用等它真的有事）

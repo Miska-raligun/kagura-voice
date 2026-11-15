@@ -23,6 +23,7 @@ import { sendTools } from "./tools/send.ts";
 import { MemoryTidy, tidyTools } from "./tidy.ts";
 import { Watchdog } from "./watchdog.ts";
 import { webTools } from "./tools/web.ts";
+import { ComponentUpdater } from "../components.ts";
 import { McpManager } from "./mcp.ts";
 import { Extensions, extensionTools, setExtAgentDir } from "./extensions.ts";
 import { PackageManager } from "./packages.ts";
@@ -52,6 +53,8 @@ export interface AgentSystem {
   skills: Skills;
   channels: ChannelManager;
   mcp: McpManager;
+  /** 自带 MCP 组件的单独更新 */
+  components: ComponentUpdater;
   extensions: Extensions;
   packages: PackageManager;
   outbox?: Outbox;
@@ -107,7 +110,9 @@ export function createAgentSystem(cfg: Config, dirs: Dirs, fake: FakeLlm | null)
   // 发文件给主人（网页聊天、飞书等 IM 的回复里）
   runtime.addTools(sendTools());
   // 扩展（pi 格式，agent 也能自己写）与 MCP 服务器；启动后由 main 在后台加载 / 连接（startPlugins）
-  const mcp = new McpManager(path.join(cfg.dataDir, "mcp.json"), { fetch: proxiedFetch, cwd: cfg.dataDir, version: VERSION });
+  const mcp = new McpManager(path.join(cfg.dataDir, "mcp.json"), { fetch: proxiedFetch, cwd: cfg.dataDir, version: VERSION, componentsDir: path.join(cfg.dataDir, "mcp_components") });
+  // 自带 MCP 组件单独更新（KAGURA_COMPONENTS_API：测试用本地假发布源）
+  const components = new ComponentUpdater(path.join(cfg.dataDir, "mcp_components"), { fetch: proxiedFetch, mirrors: cfg.updateMirrors, api: process.env.KAGURA_COMPONENTS_API || undefined });
   const extensions = new Extensions(dirs.extensions, registry);
   extensions.onMcpServers = (list) => { mcp.setExtensionServers(list); mcp.reload().catch((e) => console.log(`[mcp] ⚠️  ${e.message}`)); };
   // pi 扩展包（pi.dev/packages 即 npm 上带 pi-package 关键字的包、git、本地、上传）：其中的扩展当全局扩展、技能当全局技能
@@ -123,7 +128,7 @@ export function createAgentSystem(cfg: Config, dirs: Dirs, fake: FakeLlm | null)
   const watchdog = new Watchdog(runtime, models, () => !fake && cfg.runtime.watchdog !== false);
   watchdog.start();
   const channels = new ChannelManager(new ChannelStore(path.join(cfg.dataDir, "channels.json")), runtime, registry, undefined, path.join(cfg.dataDir, "channels_seen.json"));
-  return { registry, models, runtime, memories, scheduler: null, tasks: null, a2a, skills, channels, mcp, extensions, packages };
+  return { registry, models, runtime, memories, scheduler: null, tasks: null, a2a, skills, channels, mcp, components, extensions, packages };
 }
 
 /** 依赖 Ctx 的部分（设备工具要推送、拍照；调度器要投递）在 Ctx 建好之后接上 */

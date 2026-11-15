@@ -626,6 +626,14 @@ CoreS3 (MicroPython) ──HTTP──▶ server/（TypeScript 单文件可执行
 - **自带的 MCP 服务器（`"command": "kagura"`，`cli.ts` 的 `mcp` 子命令）**：单文件可执行里没有 npx，自带的服务器由这个程序自己再起一份（`selfArgv`：SEA 是 exe 本身，node 跑脚本是 node + 脚本），
   对 McpManager 来说就是普通的 stdio 服务器，核心不 import 它（`cli.ts` 里动态 import）。**标准输出只能走协议**：子命令里别 `console.log`，日志写标准错误（管理界面看得到）。
   没在 Windows 托盘版（图形界面子系统的 exe 带管道当子进程）上验证过。
+- **自带 MCP 组件单独更新（`server/src/components.ts`、`scripts/build-mcp.mjs`、`.github/workflows/mcp-components.yml`，LRN 2026-11-15，主人「发版流程太久了，而且没必要」）**：
+  打印机 / Blender / build123d 三个自带服务器各打成一个 CJS（导出 `run(version)`），main 上这几个目录一改，CI 跑它们的单元测试、覆盖到固定 Release `mcp-components`（prerelease、不设 latest、tag 不是版本号——`pickLatest` 只认 semver，不会当成新版本）。
+  管理界面「扩展 / MCP → 自带组件」检查 / 更新 / 用回自带的（`/api/admin/mcp/components…`），装到 `<数据目录>/mcp_components/<名>.cjs + .json`，换了就 `mcp.serversUsing` 重连，Kagura 不重启。
+  `kagura mcp <名>` 起来先 `runUpdatedComponent`：McpManager 用 `KAGURA_COMPONENTS_DIR` 告诉它目录（别的 MCP 客户端直接跑没有这个变量 = 只用自带的）。别改坏的点：
+  ① **新旧只按源码时间比**（`sourceStamp` = 最后一次提交时间，主程序构建时把自带组件的 sha256 + 时间写进 `__MCP_BUILTIN__`）：以后正式版带了更新的代码，自带的就比下载的新、自动用回自带的；和自带的 sha256 一样的也不用；
+  ② **组件字节要可复现**（`buildComponent`：去注释——注释里有源文件路径；不放时间 / 版本），自带的是哪一版才认得出；③ 下载只认 GitHub 接口给的 `digest`，manifest 里的 sha256 和 digest 对不上的组件不认，镜像给的对不上丢掉；
+  装上的文件每次启动再核一遍 sha256，被改过 / 没写完的不用；④ 加载用 `createRequire(文件)`——Node SEA 里的 `require` 只认内置模块（实测 SEA 下能加载）；加载出错退回自带的、写标准错误。
+  组件代码只能 import 自己目录和这三个目录里的东西（要单独打包）；改了核心和组件之间的约定（env、参数）要完整发版。`mcp_components/` 不进导出（能重新下）。
 - **拓竹打印机 = 自带的 MCP 服务器（`server/src/printer/`，`kagura mcp bambu-printer`，2026-11）**：先是做成了核心模块（管理页 + 内置工具），主人说不该放进核心，改成这样——**别再搬回去**。
   拓竹的局域网接口 = TLS 上的 MQTT（8883，用户名 `bblp`、密码 = 访问码，订阅 `device/<序列号>/report`）。默认**只读**：只发一条 `pushall`（要完整状态）；
   不开「开发者模式」第三方发不了控制指令（拓竹的授权限制），控制类的见下面 `BAMBU_CONTROL`。

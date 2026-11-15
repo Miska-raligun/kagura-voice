@@ -900,6 +900,51 @@ def test_bundled_blender_mcp(a):
         a.request("PUT", "/api/admin/mcp", json={"config": json.dumps({"mcpServers": {}})})
 
 
+_FAKE_COMPONENT = r"""
+exports.run = (v) => {
+  const rl = require("readline").createInterface({ input: process.stdin });
+  rl.on("line", (l) => {
+    const m = JSON.parse(l); if (m.id === undefined) return;
+    const r = m.method === "initialize" ? { protocolVersion: (m.params || {}).protocolVersion || "2025-03-26", capabilities: { tools: {} }, serverInfo: { name: "updated", version: v } }
+      : m.method === "tools/list" ? { tools: [{ name: "updated_tool", description: "from updated component", inputSchema: { type: "object" } }] } : {};
+    process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: m.id, result: r }) + "\n");
+  });
+  process.stdin.on("end", () => process.exit(0));
+};
+"""
+
+
+def test_updated_component_is_used_and_can_be_reset(a):
+    """单独更新的自带组件：数据目录 mcp_components/ 里有比自带新的、校验对得上的，`kagura mcp <名>` 就跑它；用回自带的 = 删掉、重连"""
+    import hashlib
+    d = a.data / "mcp_components"
+    d.mkdir(exist_ok=True)
+    (d / "build123d.cjs").write_text(_FAKE_COMPONENT)
+    (d / "build123d.json").write_text(json.dumps({"sha256": hashlib.sha256(_FAKE_COMPONENT.encode()).hexdigest(), "stamp": 9999999999}))
+    try:
+        cfg = {"mcpServers": {"cad": {"command": "kagura", "args": ["mcp", "build123d"]}}}
+        srv = a.request("PUT", "/api/admin/mcp", json={"config": json.dumps(cfg)}).json()["servers"][0]
+        assert srv["state"] == "connected", srv
+        assert [t["name"] for t in srv["tools"]] == ["updated_tool"]
+        assert "用更新版 build123d" in srv["stderr"]
+        comp = {c["name"]: c for c in a.get("/api/admin/mcp/components").json()["components"]}
+        assert comp["build123d"]["active"] == "installed" and comp["blender"]["active"] == "builtin"
+        # 文件被改过：不用它，照常用自带的
+        (d / "build123d.cjs").write_text(_FAKE_COMPONENT + "// 改过")
+        srv = a.post("/api/admin/mcp/cad/reconnect", json={}).json()["servers"][0]
+        assert [t["name"] for t in srv["tools"]] == ["cad_build", "cad_guide", "cad_preview"]
+        (d / "build123d.cjs").write_text(_FAKE_COMPONENT)
+        assert [t["name"] for t in a.post("/api/admin/mcp/cad/reconnect", json={}).json()["servers"][0]["tools"]] == ["updated_tool"]
+        # 用回自带的：删掉下载的，用到它的服务器自动重连
+        r = a.post("/api/admin/mcp/components/build123d/reset", json={}).json()
+        assert [t["name"] for t in r["servers"][0]["tools"]] == ["cad_build", "cad_guide", "cad_preview"]
+        assert not (d / "build123d.cjs").exists()
+    finally:
+        a.request("PUT", "/api/admin/mcp", json={"config": json.dumps({"mcpServers": {}})})
+        for f in d.glob("build123d.*"):
+            f.unlink()
+
+
 def test_bundled_build123d_mcp(a):
     """自带的 build123d 建模服务器：自己拉起自己（kagura mcp build123d），三个工具；没装 Python 照实说"""
     try:

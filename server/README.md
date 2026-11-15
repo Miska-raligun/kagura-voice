@@ -234,6 +234,12 @@ MCP 工具本来只能她去问。服务器配置里加 `"notify": true` 之后�
 Blender 不在默认位置（Windows 的 `C:\Program Files\Blender Foundation\` 下）时在 env 里填 `BLENDER`；`MODEL_BED` 是打印范围（默认 256×256×256，P2S）。
 适合有明确尺寸的功能件（盒子、挂钩、支架、铭牌）；造型复杂的（手办、动物）还是去 MakerWorld 找。和打印机那个一样是独立进程，别的 MCP 客户端也能用。
 
+### 自带 MCP 组件单独更新
+
+打印机、Blender 建模、build123d 建模这三个自带服务器修了问题，不用等新版本：「扩展 / MCP」页的「自带组件」里点「检查更新」，有更新就装上，
+用到它的服务器自动重连，Kagura 不用重启。下载的是 GitHub 上 `mcp-components` 这个发布里的文件，按 GitHub 给的 sha256 校验，对不上不装。
+以后装了更新的正式版，会自动用回正式版里更新的那份；想退回就点「用回自带的」。
+
 ### 用 build123d 建模（自带的 MCP 服务器）
 
 「扩展 / MCP」里点「＋ build123d 建模」加上。[build123d](https://github.com/gumyr/build123d) 是 Python 的参数化 CAD 库（OpenCascade 内核，Apache 2.0，免费开源）：

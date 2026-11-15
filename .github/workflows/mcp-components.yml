@@ -1,0 +1,47 @@
+name: mcp-components
+
+# 自带的 MCP 组件（打印机 / Blender / build123d）单独发布，不走完整发版（server/src/components.ts）。
+# 这几个目录在 main 上一改：跑它们的单元测试 → scripts/build-mcp.mjs 打成 <名>.cjs + manifest.json → 覆盖到固定的 Release「mcp-components」。
+# 管理界面「扩展 / MCP → 自带组件 → 检查更新」从这里下载，按 GitHub 给的 sha256 校验；比程序自带的新才用。
+# 这个 Release 不是版本号 tag（不会被当成新版本），也不设成 latest。
+on:
+  push:
+    branches: [main]
+    paths: ["server/src/printer/**", "server/src/blender/**", "server/src/cad/**", "server/scripts/build-mcp.mjs", ".github/workflows/mcp-components.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: mcp-components
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "24.22.1", cache: npm, cache-dependency-path: server/package-lock.json }
+      - name: 组件的单元测试
+        working-directory: server
+        run: |
+          npm ci
+          npx vitest run test/printer.test.ts test/slice.test.ts test/blender.test.ts test/cad.test.ts test/components.test.ts test/plugins.test.ts
+      - name: 打组件
+        working-directory: server
+        run: node scripts/build-mcp.mjs out
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: mcp-components
+          target_commitish: ${{ github.sha }}
+          name: 自带 MCP 组件（单独更新用）
+          body: |
+            Kagura 自带的 MCP 服务器（拓竹打印机、Blender 建模、build123d 建模）的单独更新包。
+            不用手动下载：在 Kagura 管理界面「扩展 / MCP → 自带组件」点「检查更新」。
+            最近一次：${{ github.sha }}
+          files: server/out/*
+          prerelease: true
+          make_latest: false
+          overwrite_files: true

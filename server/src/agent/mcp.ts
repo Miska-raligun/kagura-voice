@@ -148,7 +148,12 @@ export class McpManager {
   /** 服务器主动发来、要送给主人的话（system.ts 接上） */
   onNotify?: (server: string, text: string) => void;
 
-  constructor(readonly file: string, private opts: { fetch?: typeof fetch; cwd: string; clientName?: string; version?: string; /** 测试用：自带服务器怎么起 */ self?: string[] }) {}
+  constructor(readonly file: string, private opts: { fetch?: typeof fetch; cwd: string; clientName?: string; version?: string; /** 测试用：自带服务器怎么起 */ self?: string[]; /** 单独更新的组件放哪（告诉自带服务器，见 components.ts） */ componentsDir?: string }) {}
+
+  /** 用某个自带组件（"command": "kagura", "args": ["mcp", 组件名]）的服务器 */
+  serversUsing(component: string): string[] {
+    return [...this.servers.values()].filter((s) => s.cfg.command === SELF_COMMAND && s.cfg.args?.[0] === "mcp" && s.cfg.args?.[1] === component).map((s) => s.name);
+  }
 
   /** 这个服务器的通知由谁说、送到哪（没开通知 = null） */
   notifyConfig(name: string): { agent?: string; delivery?: string } | null {
@@ -239,6 +244,7 @@ export class McpManager {
           for (const [k, v] of Object.entries(s.cfg.env ?? {})) env[k] = expandValue(String(v));
           const args = (s.cfg.args ?? []).map((a) => expandHome(String(a)));
           const self = s.cfg.command === SELF_COMMAND ? this.opts.self ?? selfArgv() : null;
+          if (self && this.opts.componentsDir) env.KAGURA_COMPONENTS_DIR = this.opts.componentsDir;
           transport = new StdioTransport({
             command: self ? self[0] : expandHome(s.cfg.command), args: self ? [...self.slice(1), ...args] : args,
             cwd: s.cfg.cwd ? path.resolve(this.opts.cwd, expandHome(s.cfg.cwd)) : this.opts.cwd,

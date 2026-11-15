@@ -178,6 +178,7 @@ function Mcp() {
         </tbody></table> : <Empty>暂无 MCP 服务器</Empty>}
         <p class="muted">工具名为 <code>mcp__服务器__工具</code>，仅可信会话可用；服务器配置 <code>"allowUntrusted": true</code> 后开放。工具多的服务器平时收着、她要用时才调出来，<code>"lazy": true / false</code> 可指定。<code>"notify": true</code> = 这个服务器有事时主动告诉你。</p>
       </Card>
+      <Components onChange={reload} />
       <Card title="mcp.json" actions={<>
         {d.import_sources.map((s: any) => (
           <Btn small disabled={!s.exists} title={s.file} onClick={async () => {
@@ -230,6 +231,50 @@ function Mcp() {
         </div>
       </Card>
     </>
+  );
+}
+
+const COMPONENT_LABEL: Record<string, string> = { "bambu-printer": "拓竹打印机", blender: "Blender 建模", build123d: "build123d 建模" };
+const when = (stamp?: number) => stamp ? new Date(stamp * 1000).toLocaleString("zh-CN", { hour12: false, month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "—";
+
+/** 自带组件：不用发完整版本，单独更新打印机 / 建模这几个 MCP 服务器 */
+function Components({ onChange }: { onChange: () => void }) {
+  const [d, setD] = useState<any>(null);
+  const [busy, setBusy] = useState("");
+  const load = async () => { try { setD(await api("/mcp/components")); } catch (e) { toastErr(e); } };
+  useEffect(() => { load(); }, []);
+  const run = async (label: string, fn: () => Promise<any>) => {
+    setBusy(label);
+    try { const r = await fn(); setD(r); if (r.error) toast(r.error, "err"); return r; } catch (e) { toastErr(e); } finally { setBusy(""); }
+  };
+  if (!d) return null;
+  const any = d.components.some((c: any) => c.updatable);
+  return (
+    <Card title="自带组件" actions={<>
+      <Btn small disabled={!!busy} onClick={() => run("check", () => api("/mcp/components/check", { body: {} }))}>{busy === "check" ? "检查中…" : "检查更新"}</Btn>
+      {any ? <>{" "}<Btn small kind="primary" disabled={!!busy} onClick={async () => {
+        const r = await run("update", () => api("/mcp/components/update", { body: {} }));
+        if (r?.updated) { toast(r.updated.length ? `已更新 ${r.updated.map((n: string) => COMPONENT_LABEL[n] ?? n).join("、")}，用到它的服务器已重连` : "没有可更新的"); onChange(); }
+      }}>{busy === "update" ? "更新中…" : "全部更新"}</Btn></> : null}
+    </>}>
+      <table><thead><tr><th>组件</th><th>正在用</th><th>最新</th><th /></tr></thead><tbody>
+        {d.components.map((c: any) => (
+          <tr>
+            <td><b>{COMPONENT_LABEL[c.name] ?? c.name}</b><br /><small class="muted"><code>kagura mcp {c.name}</code></small></td>
+            <td>{c.active === "installed" ? <>更新版 <small class="muted">{when(c.installed?.stamp)}</small></> : <>自带的 <small class="muted">{when(c.builtin?.stamp)}</small></>}</td>
+            <td>{c.latest ? (c.updatable ? <Badge s="connecting" text={`有更新 ${when(c.latest.stamp)}`} /> : <small class="muted">已是最新</small>) : <small class="muted">{d.checkedAt ? "—" : "还没检查"}</small>}</td>
+            <td>{c.updatable ? <Btn small disabled={!!busy} onClick={async () => {
+              const r = await run("update", () => api("/mcp/components/update", { body: { names: [c.name] } }));
+              if (r?.updated?.length) { toast(`已更新${COMPONENT_LABEL[c.name] ?? c.name}`); onChange(); }
+            }}>更新</Btn> : null}
+              {c.installed ? <>{" "}<Btn small kind="ghost" disabled={!!busy} onClick={confirmDo(`删掉下载的更新版，用回程序自带的${COMPONENT_LABEL[c.name] ?? c.name}？`, async () => {
+                await run("reset", () => api(`/mcp/components/${enc(c.name)}/reset`, { body: {} })); toast("已用回自带的"); onChange();
+              })}>用回自带的</Btn></> : null}</td>
+          </tr>))}
+      </tbody></table>
+      {d.error ? <p class="muted">⚠️ {d.error}</p> : null}
+      <p class="muted">打印机、建模这几个服务器可以单独更新，不用等新版本：点「检查更新」，有更新就装上，用到它的服务器自动重连，Kagura 不用重启。以后装了更新的正式版，会自动用回更新的那份。</p>
+    </Card>
   );
 }
 
