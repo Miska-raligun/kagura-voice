@@ -106,7 +106,7 @@ export function createAgentSystem(cfg: Config, dirs: Dirs, fake: FakeLlm | null)
   runtime.turnNotes.push((scope) => scope.kind === "sub" || !scope.trusted ? "" : [a2a.note(scope.agentId), bgJobs.note(scope.agentId)].filter(Boolean).join("\n"));
   runtime.addTools(webTools(cfg.tools));
   // 读 / 改 / 搜文件（权限同 exec），比拼命令行稳、改完能顺手确认
-  runtime.addTools(fileTools(cfg.tools));
+  runtime.addTools(fileTools(cfg.tools, (agent) => { try { return models.resolve(agent.model).input.includes("image"); } catch { return true; } }));
   // 发文件给主人（网页聊天、飞书等 IM 的回复里）
   runtime.addTools(sendTools());
   // 扩展（pi 格式，agent 也能自己写）与 MCP 服务器；启动后由 main 在后台加载 / 连接（startPlugins）

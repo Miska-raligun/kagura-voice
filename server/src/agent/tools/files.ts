@@ -83,7 +83,11 @@ async function walk(root: string, onFile: (abs: string, rel: string) => Promise<
 const isBinary = (b: Buffer) => b.subarray(0, 8000).includes(0);
 const numbered = (lines: string[], from: number) => lines.map((l, i) => `${String(from + i).padStart(5)}→${l.length > LINE_CHARS ? l.slice(0, LINE_CHARS) + "…（这一行太长，截断了）" : l}`).join("\n");
 
-export function fileTools(cfg: ToolsConfig) {
+/** 图片：read_file 直接把图交给模型看（LRN 2026-11-15，症状「让她看自己刚拍的照片，她去开 playwright 浏览器」：
+ *  工具结果里的图片只在那一轮里，落盘后只剩一行路径，之后想再看只能借别的工具）。模型不认图时 pi-ai 会换成占位文字，这里先说清楚 */
+export const IMAGE_TYPES: Record<string, string> = { ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp", ".gif": "image/gif" };
+
+export function fileTools(cfg: ToolsConfig, canSee: (agent: AgentInfo) => boolean = () => true) {
   return (scope: RunScope, agent: AgentInfo): AgentTool<any>[] => {
     if (!cfg.exec.enabled || !scope.trusted) return [];
     const ws = agent.workspace;
@@ -100,6 +104,7 @@ export function fileTools(cfg: ToolsConfig) {
       {
         name: "read_file", label: "读文件",
         description: `读一个文本文件，每行前面带行号（行号→内容，行号不是文件内容）。默认从头读 ${READ_LINES} 行；长文件用 offset（从第几行开始）、limit（读几行）分段读。`
+          + `图片（png / jpg / webp / gif）也用它看：直接把图给你看，不用开浏览器。`
           + `相对路径按你的工作目录（${ws}）算。看文件、改文件之前都用它，别用 exec 去 cat。`,
         parameters: Type.Object({
           path: Type.String({ description: "文件路径" }),
@@ -112,6 +117,12 @@ export function fileTools(cfg: ToolsConfig) {
           try { st = await fsp.stat(abs); } catch { return fail(`没有这个文件：${show(abs)}`); }
           if (st.isDirectory()) return fail(`${show(abs)} 是目录，用 list_files 看里面有什么`);
           if (st.size > MAX_FILE) return fail(`文件太大（${(st.size / 1048576).toFixed(1)}MB），用 search_files 找要看的那段，或者 exec 处理`);
+          const mime = IMAGE_TYPES[path.extname(abs).toLowerCase()];
+          if (mime) {
+            if (!canSee(agent)) return fail(`${show(abs)} 是图片，但你现在用的模型不支持看图（管理界面模型表里给它勾上「图片」，或者换个能看图的模型）。如实告诉主人。`);
+            const img = await fsp.readFile(abs);
+            return { content: [{ type: "image" as const, data: img.toString("base64"), mimeType: mime }, { type: "text" as const, text: `图片 ${show(abs)}（${Math.round(img.length / 1024)}KB）` }], details: { path: abs, image: true } };
+          }
           const buf = await fsp.readFile(abs);
           if (isBinary(buf)) return fail(`${show(abs)} 是二进制文件，不能按文本读`);
           remember(scope.sessionKey, abs, st);

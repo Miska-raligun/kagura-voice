@@ -96,4 +96,19 @@ describe("文件工具", () => {
     expect(fileTools(parseToolsConfig({ exec: { enabled: false } }))(scopeOf(), a)).toEqual([]);
     for (const n of FILE_TOOLS) expect(guestLocked(n)).toBe(true);
   });
+
+  it("read_file 看图片：直接把图交给模型（不用开浏览器）；模型不认图就说清楚", async () => {
+    const { ws, t, reg } = setup();
+    const jpg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 0x10, 0x4a, 0x46, 0x49, 0x46, 0, 1, 0xff, 0xd9]);
+    fs.mkdirSync(path.join(ws, "snapshots"), { recursive: true });
+    fs.writeFileSync(path.join(ws, "snapshots", "P2S.JPG"), jpg);
+    const r = await t.read_file({ path: "snapshots/P2S.JPG" });
+    expect(r.isError).toBeFalsy();
+    expect(r.content[0]).toEqual({ type: "image", mimeType: "image/jpeg", data: jpg.toString("base64") });
+    expect(r.content[1].text).toContain("图片 snapshots/P2S.JPG");
+    const blind = fileTools(parseToolsConfig({}), () => false)(scopeOf(), reg.get("main")!).find((x) => x.name === "read_file")!;
+    const b: any = await blind.execute("t", { path: "snapshots/P2S.JPG" });
+    expect(b.isError).toBe(true);
+    expect(b.content[0].text).toContain("不支持看图");
+  });
 });
