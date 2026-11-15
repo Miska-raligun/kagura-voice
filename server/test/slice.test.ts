@@ -2,6 +2,7 @@
 // 切完核对机型；用一个假的 bambu-studio 记下命令行、吐出准备好的结果
 import fs from "node:fs";
 import path from "node:path";
+import { readStl } from "../src/cad/raster.ts";
 import { describe, it, expect } from "vitest";
 import { tmpdir } from "./helpers.ts";
 import { zip } from "../src/util/zip.ts";
@@ -41,6 +42,8 @@ const at = (k) => { const i = a.indexOf(k); return i >= 0 ? a[i + 1] : undefined
 const loaded = {};
 for (const k of ["--load-settings", "--load-filaments"]) { const v = at(k); if (v) loaded[k] = v.split(";").filter(Boolean).map((f) => JSON.parse(fs.readFileSync(f, "utf8"))); }
 fs.writeFileSync(process.env.FAKE_LOG, JSON.stringify({ args: a, loaded, cwd: process.cwd() }));
+if (process.env.FAKE_KEEP) fs.copyFileSync(a[a.length - 1], process.env.FAKE_KEEP);
+if (process.env.FAKE_HANG) { console.log("loading project..."); setInterval(() => {}, 1000); return; }
 if (!process.env.FAKE_OUT) { console.error("boom: plate 1 is empty"); process.exit(Number(process.env.FAKE_EXIT || 1)); }
 fs.copyFileSync(process.env.FAKE_OUT, at("--outputdir") + at("--export-3mf"));
 `);
@@ -52,7 +55,7 @@ fs.copyFileSync(process.env.FAKE_OUT, at("--outputdir") + at("--export-3mf"));
 function profiles(root: string) {
   const w = (kind: string, j: any) => { const d = path.join(root, "BBL", kind); fs.mkdirSync(d, { recursive: true }); fs.writeFileSync(path.join(d, `${j.name}.json`), JSON.stringify(j)); };
   w("machine", { name: "fdm_machine_common", from: "system", instantiation: "false", nozzle_diameter: ["0.4"], printer_technology: "FFF" });
-  w("machine", { name: "Bambu Lab P2S 0.4 nozzle", inherits: "fdm_machine_common", from: "system", instantiation: "true", printer_model: "Bambu Lab P2S", bed_exclude_area: ["0x0"] });
+  w("machine", { name: "Bambu Lab P2S 0.4 nozzle", inherits: "fdm_machine_common", from: "system", instantiation: "true", printer_model: "Bambu Lab P2S", bed_exclude_area: ["0x0"], printable_area: ["0x0", "256x0", "256x256", "0x256"] });
   w("machine", { name: "Bambu Lab X1 Carbon 0.4 nozzle", inherits: "fdm_machine_common", from: "system", instantiation: "true", printer_model: "Bambu Lab X1 Carbon" });
   w("process", { name: "fdm_process_common", from: "system", instantiation: "false", layer_height: "0.2", wall_loops: "2", nozzle_diameter: ["0.4"] });
   w("process", { name: "0.20mm Standard @BBL P2S", inherits: "fdm_process_common", from: "system", instantiation: "true", compatible_printers: ["Bambu Lab P2S 0.4 nozzle"] });
@@ -73,7 +76,7 @@ function setup() {
   const log = path.join(dir, "log.json");
   process.env.FAKE_LOG = log;
   delete process.env.FAKE_OUT;
-  const env = { studio, profiles: profiles(path.join(dir, "profiles")), model: "P2S", outDir: path.join(dir, "sliced"), timeoutMs: 20_000 };
+  const env = { studio, profiles: profiles(path.join(dir, "profiles")), model: "P2S", outDir: path.join(dir, "sliced"), timeoutMs: 20_000, isOpen: async () => false };
   return { dir, env, last: () => JSON.parse(fs.readFileSync(log, "utf8")) };
 }
 
@@ -111,7 +114,7 @@ describe("切片", () => {
     expect(r.file).toBe(path.join(env.outDir, "猫猫.gcode.3mf"));
     expect(r.plates[0]).toMatchObject({ seconds: 5460, grams: 23.81 });
     const l = last();
-    expect(l.args).toEqual(["--slice", "1", "--sparse-infill-density=30%", "--enable-support=1", "--support-type=normal(auto)", "--outputdir", expect.stringMatching(/[\\/]$/), "--export-3mf", "猫猫.gcode.3mf", src]);
+    expect(l.args).toEqual(["--slice", "1", "--sparse-infill-density=30%", "--enable-support=1", "--support-type=normal(auto)", "--outputdir", expect.stringMatching(/[\\/]$/), "--export-3mf", "output.gcode.3mf", expect.stringMatching(/[\\/]input\.3mf$/)]);
     expect(l.loaded).toEqual({});
     expect(fs.existsSync(l.cwd)).toBe(false);
     // 再切一次不覆盖上一份
@@ -134,11 +137,21 @@ describe("切片", () => {
     expect(proc.nozzle_diameter).toBeUndefined();                    // 和机器重复的键去掉
     expect(l.loaded["--load-filaments"].map((f: any) => [f.name, f.nozzle_temperature[0]])).toEqual([["Bambu PLA Basic @BBL P2S", "220"], ["Generic PETG @BBL P2S", "250"]]);
     expect(l.args).toContain("--layer-height=0.12");
-    // STL 也走这条路（默认 0.2 标准）
-    fs.writeFileSync(path.join(dir, "件.stl"), "solid x\nendsolid x\n");
-    const s2 = await slice(path.join(dir, "件.stl"), {}, env);
-    expect(s2.warnings[0]).toContain("STL 没有打印配置");
+    // STL 也走这条路（默认 0.2 标准）；以原点为中心建的模型先挪到打印板中间、底面贴 z=0，文件名换成英文
+    fs.writeFileSync(path.join(dir, "件.stl"), "solid x\nfacet normal 0 0 1\nouter loop\nvertex -10 -5 -3\nvertex 10 -5 -3\nvertex 10 5 7\nendloop\nendfacet\nendsolid x\n");
+    process.env.FAKE_KEEP = path.join(dir, "placed.stl");
+    try {
+      const s2 = await slice(path.join(dir, "件.stl"), {}, env);
+      expect(s2.warnings[0]).toContain("STL 没有打印配置");
+      expect(s2.file).toBe(path.join(env.outDir, "件.gcode.3mf"));
+    } finally { delete process.env.FAKE_KEEP; }
     expect(last().loaded["--load-settings"][1].name).toBe("0.20mm Standard @BBL P2S");
+    expect(last().args.at(-1)).toMatch(/[\\/]input\.stl$/);
+    const placed = readStl(path.join(dir, "placed.stl"));
+    expect([...placed.tris]).toEqual([118, 123, 0, 138, 123, 0, 138, 133, 10]);
+    // 读不出三角面的说清楚
+    fs.writeFileSync(path.join(dir, "空.stl"), "solid x\nendsolid x\n");
+    await expect(slice(path.join(dir, "空.stl"), {}, env)).rejects.toThrow(/读不出三角面/);
   });
 
   it("失败说得出原因：命令行报错（带最后几行输出、换配置时给出手动的办法）、没切出 G-code、切出来不是给这台的、配置里没有这台、没装 Bambu Studio", async () => {
@@ -155,6 +168,23 @@ describe("切片", () => {
     await expect(slice(p2s, {}, { ...env, studio: path.join(dir, "nope") })).rejects.toThrow(/没找到 Bambu Studio/);
     await expect(slice(p2s, { layer_height: 1 }, env)).rejects.toThrow(/层高/);
     expect(fs.existsSync(env.outDir) ? fs.readdirSync(env.outDir) : []).toEqual([]);   // 失败的不留下
+  });
+
+  it("Bambu Studio 开着：不去切（会被它接走、一直卡着），马上说清楚要关掉", async () => {
+    const { dir, env, last } = setup();
+    const p2s = mk3mf(path.join(dir, "a.3mf"), { model: "Bambu Lab P2S" });
+    fs.writeFileSync(path.join(dir, "log.json"), "{}");
+    await expect(slice(p2s, {}, { ...env, isOpen: async () => true })).rejects.toThrow(/Bambu Studio 现在开着[\s\S]*关掉/);
+    expect(last()).toEqual({});                // 没起 Bambu Studio
+  });
+
+  it("卡住（后台弹了看不见的窗口）：到时间停掉，带上最后的输出，告诉主人怎么处理", async () => {
+    const { dir, env } = setup();
+    const p2s = mk3mf(path.join(dir, "a.3mf"), { model: "Bambu Lab P2S" });
+    process.env.FAKE_HANG = "1";
+    try {
+      await expect(slice(p2s, {}, { ...env, timeoutMs: 1500 })).rejects.toThrow(/切片超时[\s\S]*最后输出：\nloading project\.\.\.[\s\S]*结束所有 bambu-studio\.exe/);
+    } finally { delete process.env.FAKE_HANG; }
   });
 
   it("系统配置索引：不能直接用的（instantiation=false）不选；料先找同名的，再找同材质的 Generic", () => {

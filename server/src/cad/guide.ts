@@ -59,7 +59,7 @@ result = plate + extrude(sk.sketch, amount=text_h + 0.2)`],
 const SECTIONS: Record<string, [string, () => string]> = {
   basics: ["约定和流程", () => `## 约定
 - 单位毫米，z 轴朝上，模型的底面放在 z=0（打印时贴着板的那面）。
-- 代码开头已经有 from build123d import *、import math；中文字体文件的路径在 CJK_FONT（没找到是 None）。
+- 代码开头已经有 from build123d import *、import math；中文字体文件的路径在 CJK_FONT（没找到是 None），系统里找到的全部在 CJK_FONTS（先中文、后日文）。
 - **最后一定写 result = 零件**（Part / Solid / Compound 都行；用 BuildPart 写 result = p.part；几个分开打的零件 result = a + b 或 [a, b]）。
 - 每次调用都是新的 Python：每次给完整代码。上一版存在 <模型目录>/<name>/<name>.py，要改就 read_file 拿回来改了再整段交。
 - 同时导出 STL（给切片）和 STEP（精确实体，主人想在别的 CAD 里接着改就给它）。
@@ -147,7 +147,7 @@ result = p.part
 - 选边选错了：先 print(len(零件.edges().filter_by(Axis.Z))) 看选到几条。
 - 布尔之后 is_valid = False：两个物体有刚好重合的面——让挖的工具多伸出来 0.5~1 mm。
 - NameError：build123d 的名字都是大写开头（Box、Cylinder、Pos、Align）；函数是小写（fillet、extrude、mirror）。
-- 中文字是空的或报找不到字体：CJK_FONT 是 None，用 font_path=r"C:\\\\Windows\\\\Fonts\\\\simhei.ttf" 指定一个。
+- 中文字缺了（预览图上那个字是空的）：那个字体里没有这个字。日文写法的字（楽、桜、沢…）中文字体里常没有，换 CJK_FONTS 里的日文字体（YuGoth / meiryo）；CJK_FONTS 是空的就用 font_path= 指定一个字体文件。
 - 跑太久超时：别对上百个小物体逐个相减，先把它们 + 成一个再一次减掉；字少一点。
 ## 改了好几次还不对
 - 退回上一版能用的代码，一次只改一处。

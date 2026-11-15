@@ -112,6 +112,7 @@ describe("build123d 服务器", () => {
         if (name !== "带盖收纳盒") expect(text, name).not.toContain("分开的实体");
         for (const ext of ["stl", "step", "png", "py"]) expect(fs.existsSync(path.join(out, name, `${name}.${ext}`)), `${name}.${ext}`).toBe(true);
         expect(r.content[1].type).toBe("image");
+        if (name === "铭牌") expect(text).toMatch(/中文字体：CJK_FONT = |没找到中文字体/);   // 有中文字就说清楚用的哪个字体
       }
     }, 240_000);
 

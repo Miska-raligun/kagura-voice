@@ -11,6 +11,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
+import { readStl } from "../cad/raster.ts";
 import { platesOf, projectInfo, sliceInfo, modelMatches, zipNames, type ProjectInfo, type SliceInfo } from "./threemf.ts";
 
 export interface SliceOptions {
@@ -36,6 +37,8 @@ export interface SliceEnv {
   outDir: string;
   timeoutMs?: number;
   log?(line: string): void;
+  /** Bambu Studio 是不是开着（测试里换掉）；默认 studioRunning */
+  isOpen?(): Promise<boolean>;
 }
 
 export interface SliceResult { file: string; plates: SliceInfo[]; mode: "project" | "switched"; info: ProjectInfo; warnings: string[] }
@@ -147,13 +150,66 @@ export function checkOptions(o: SliceOptions): string {
   return "";
 }
 
+/** Bambu Studio 开着没有。它默认只许开一个：窗口开着时从命令行再起一个，参数会转给开着的那个窗口，命令行这边就一直干等到超时
+ *  （LRN 2026-11-15：同一个 3mf 昨天几秒切完，今天卡 9 分钟，关掉窗口就好了）。只查 Windows / macOS，查不了当没开 */
+export function studioRunning(platform = process.platform): Promise<boolean> {
+  const [cmd, args, re] = platform === "win32" ? ["tasklist", ["/FI", "IMAGENAME eq bambu-studio.exe", "/NH"], /bambu-studio\.exe/i] as const
+    : platform === "darwin" ? ["pgrep", ["-x", "BambuStudio"], /\d/] as const : [null, [], /$^/] as const;
+  if (!cmd) return Promise.resolve(false);
+  return new Promise((resolve) => {
+    let out = "";
+    const c = spawn(cmd, [...args], { windowsHide: true, stdio: ["ignore", "pipe", "ignore"] });
+    c.stdout.on("data", (d: Buffer) => { out += d.toString(); });
+    c.once("error", () => resolve(false));
+    c.once("close", () => resolve(re.test(out)));
+    setTimeout(() => { c.kill(); resolve(false); }, 10_000);
+  });
+}
+
+/** 打印板中心：机器配置的 printable_area（["0x0","256x0","256x256","0x256"]）的中心；读不出按 256 × 256 */
+export function bedCenter(machine: Record<string, unknown>): [number, number] {
+  const pts = (Array.isArray(machine.printable_area) ? machine.printable_area : []).map((v) => String(v).split(/x/i).map(Number)).filter((p) => p.length === 2 && p.every(Number.isFinite));
+  if (!pts.length) return [128, 128];
+  const xs = pts.map((p) => p[0]), ys = pts.map((p) => p[1]);
+  return [(Math.min(...xs) + Math.max(...xs)) / 2, (Math.min(...ys) + Math.max(...ys)) / 2];
+}
+
+/** 把 STL 挪到打印板中间、底面贴着 z=0，存成二进制 STL。
+ *  Blender / build123d 建的模型以原点为中心，而拓竹的打印板原点在角上——不挪的话大半个模型在板外面，命令行切片会失败或卡住 */
+export function placeStl(src: string, dest: string, center: [number, number]): void {
+  const m = readStl(src);
+  if (!m.count) throw new Error(`${path.basename(src)} 里读不出三角面（不是 STL，或者文件坏了）`);
+  const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+  for (let i = 0; i < m.count * 9; i++) { const a = i % 3; lo[a] = Math.min(lo[a], m.tris[i]); hi[a] = Math.max(hi[a], m.tris[i]); }
+  const d = [center[0] - (lo[0] + hi[0]) / 2, center[1] - (lo[1] + hi[1]) / 2, -lo[2]];
+  const b = Buffer.alloc(84 + m.count * 50);
+  b.write("kagura placed", 0, "ascii");
+  b.writeUInt32LE(m.count, 80);
+  for (let t = 0; t < m.count; t++) {
+    const o = 84 + t * 50;
+    const v = (k: number) => m.tris[t * 9 + k] + d[k % 3];
+    // 法线：按顶点重算（切片软件以顶点顺序为准，这里给个对的方便别的软件）
+    const ux = v(3) - v(0), uy = v(4) - v(1), uz = v(5) - v(2), wx = v(6) - v(0), wy = v(7) - v(1), wz = v(8) - v(2);
+    let nx = uy * wz - uz * wy, ny = uz * wx - ux * wz, nz = ux * wy - uy * wx;
+    const l = Math.hypot(nx, ny, nz) || 1; nx /= l; ny /= l; nz /= l;
+    b.writeFloatLE(nx, o); b.writeFloatLE(ny, o + 4); b.writeFloatLE(nz, o + 8);
+    for (let k = 0; k < 9; k++) b.writeFloatLE(v(k), o + 12 + k * 4);
+  }
+  fs.writeFileSync(dest, b);
+}
+
 function run(bin: string, args: string[], cwd: string, timeoutMs: number): Promise<{ code: number | null; out: string; timedOut: boolean }> {
   return new Promise((resolve) => {
     let out = "", timedOut = false;
     const child = spawn(bin, args, { cwd, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
     const keep = (d: Buffer) => { out = (out + d.toString("utf8")).slice(-20_000); };
     child.stdout.on("data", keep); child.stderr.on("data", keep);
-    const t = setTimeout(() => { timedOut = true; child.kill(); }, timeoutMs);
+    // Windows 上连它派生的子进程一起结束（只 kill 主进程的话，卡住的那个可能还挂在后台占着配置目录，下一次切片接着卡）
+    const t = setTimeout(() => {
+      timedOut = true;
+      if (process.platform === "win32" && child.pid) spawn("taskkill", ["/PID", String(child.pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" }).on("error", () => child.kill());
+      else child.kill();
+    }, timeoutMs);
     child.once("error", (e) => { clearTimeout(t); resolve({ code: null, out: String(e.message), timedOut }); });
     child.once("close", (code) => { clearTimeout(t); resolve({ code, out, timedOut }); });
   });
@@ -165,6 +221,7 @@ export async function slice(src: string, o: SliceOptions, env: SliceEnv): Promis
   if (!studio || !fs.existsSync(studio)) throw new Error("这台电脑上没找到 Bambu Studio。装了的话在 MCP 配置的 env 里填 BAMBU_STUDIO（bambu-studio.exe 的完整路径）。");
   const bad = checkOptions(o);
   if (bad) throw new Error(bad);
+  if (await (env.isOpen ?? studioRunning)()) throw new Error("Bambu Studio 现在开着（或者上次切片残留的 bambu-studio 进程还在）：开着的时候命令行切片会被它接走，一直卡着出不来。请主人关掉 Bambu Studio 窗口（任务管理器里没有 bambu-studio.exe 了）再切。");
   const isStl = /\.stl$/i.test(src);
   const info = isStl ? { bambu: false, printerModel: "", printerProfile: "", processProfile: "", layerHeight: "", filaments: [] } as ProjectInfo : projectInfo(src);
   const plate = Math.max(1, Math.round(o.plate ?? 1));
@@ -174,6 +231,7 @@ export async function slice(src: string, o: SliceOptions, env: SliceEnv): Promis
     const args = ["--slice", String(plate)];
     const same = info.bambu && modelMatches(info.printerModel, env.model);
     let mode: SliceResult["mode"] = "project";
+    let machineCfg: Record<string, unknown> = {};
     if (!same) {
       // ② 换成这台打印机的系统配置
       mode = "switched";
@@ -193,6 +251,7 @@ export async function slice(src: string, o: SliceOptions, env: SliceEnv): Promis
       });
       const write = (name: string, j: unknown) => { const p = path.join(work, name); fs.writeFileSync(p, JSON.stringify(j, null, 2)); return p; };
       const m = pr.flatten("machine", machine);
+      machineCfg = m;
       // 社区的经验：命令行会把每个加载文件里的每个键都用上，工艺 / 耗材里和机器重复的键去掉，免得盖掉机器的
       const strip = (j: Record<string, unknown>) => { for (const k of Object.keys(m)) if (!["name", "from", "inherits", "compatible_printers"].includes(k)) delete j[k]; return j; };
       args.push("--load-settings", `${write("machine.json", m)};${write("process.json", strip(pr.flatten("process", proc)))}`);
@@ -203,13 +262,19 @@ export async function slice(src: string, o: SliceOptions, env: SliceEnv): Promis
     }
     args.push(...overrides(o));
     const outName = `${path.basename(src).replace(/\.(gcode\.3mf|3mf|stl)$/i, "")}.gcode.3mf`;
+    // 交给命令行的文件名一律用英文（中文路径 Bambu Studio 的命令行不一定认），切完再按原名存；STL 先挪到打印板中间
+    const input = path.join(work, isStl ? "input.stl" : "input.3mf");
+    if (isStl) placeStl(src, input, bedCenter(machineCfg)); else fs.copyFileSync(src, input);
+    const outTmp = "output.gcode.3mf";
     // --outputdir 会直接拼在 --export-3mf 前面（社区整理的行为），目录末尾带分隔符
-    args.push("--outputdir", work + path.sep, "--export-3mf", outName, src);
+    args.push("--outputdir", work + path.sep, "--export-3mf", outTmp, input);
     env.log?.(`切片：${studio} ${args.join(" ")}`);
     const r = await run(studio, args, work, env.timeoutMs ?? 9 * 60_000);
-    const produced = [path.join(work, outName), path.join(work, path.basename(outName))].find((p) => fs.existsSync(p));
+    const produced = [path.join(work, outTmp)].find((p) => fs.existsSync(p));
     const tail = r.out.trim().split(/\r?\n/).filter(Boolean).slice(-6).join("\n");
-    if (r.timedOut) throw new Error(`切片超时（${Math.round((env.timeoutMs ?? 540_000) / 60_000)} 分钟还没切完），已经停掉`);
+    // 卡住多半不是模型太复杂（一般一两分钟就切完），而是 Bambu Studio 弹了个看不见的窗口在等人点（更新提示、上次异常退出的报告…）
+    if (r.timedOut) throw new Error(`切片超时（${Math.round((env.timeoutMs ?? 540_000) / 60_000)} 分钟还没切完），已经停掉。${tail ? `Bambu Studio 最后输出：\n${tail}\n` : "Bambu Studio 一行输出都没有。"}`
+      + "这种一般不是模型的问题：要么切的时候 Bambu Studio 窗口被打开了（命令行切片会被它接走），要么它在后台弹了看不见的窗口等人点（刚自动更新过、上次被强行关掉后的报告窗口）。请主人：① 任务管理器里结束所有 bambu-studio.exe；② 还不行就正常打开一次 Bambu Studio，把弹窗点掉再关掉；③ 再切一次。");
     if (!produced) throw new Error(`切片失败（退出码 ${r.code ?? "?"}）${tail ? `：\n${tail}` : ""}${mode === "switched" ? "\n换配置切片在命令行里不太稳。可以让主人在 Bambu Studio 里打开这个文件、把打印机换成 " + env.model + "、保存项目，再拿保存的文件来切。" : ""}`);
     if (!platesOf(zipNames(produced)).length) throw new Error(`切出来的文件里没有 G-code（第 ${plate} 盘可能不存在，或者这一盘上没有东西）${tail ? `：\n${tail}` : ""}`);
     const outInfo = projectInfo(produced);
