@@ -660,7 +660,9 @@ CoreS3 (MicroPython) ──HTTP──▶ server/（TypeScript 单文件可执行
   别改坏的点：ⓐ **切完一律核对输出的机型**，不是这台就不交出去（别的机型的 G-code 会撞板）；`printer_print` 发之前也核对一遍；ⓑ 临时目录每次删掉（一次切片几百 MB）；一次只切一个；ⓒ 统计从 `Metadata/slice_info.config` 读（prediction 秒、weight 克、每种料 used_g），读不到就不说；
   ⓓ 多种料的文件发打印时必须给齐 `slots`，材质和槽里的对不上要提醒；
   ⓔ **Bambu Studio 窗口开着就别切**（`studioRunning`，LRN 2026-11-15，症状「同一个 3mf 昨天几秒切完，今天卡 9 分钟超时」）：它默认只许开一个，命令行再起一个时参数会转给开着的窗口，命令行这边干等到超时。切之前先查进程、开着就立刻说「关掉」；超时报错带最后的输出，Windows 上 `taskkill /T` 连子进程一起结束（残留进程会让下一次接着卡）；
-  ⓕ 交给命令行的文件一律先**复制进临时目录、改英文名**（`input.3mf` / `input.stl` → `output.gcode.3mf`，切完再按原名存）——中文路径不一定认，也碰不到主人的源文件；**STL 先 `placeStl` 挪到打印板中间、底面贴 z=0**（中心取机器配置的 `printable_area`）：Blender / build123d 建的模型以原点为中心，拓竹的板原点在角上，不挪大半个在板外。命令行参数照官方 wiki + 社区整理，**没在真机上跑过**；测试用一个假的 `bambu-studio` 脚本（`test/slice.test.ts`）。
+  ⓕ 交给命令行的文件一律先**复制进临时目录、改英文名**（`input.3mf` / `input.stl` → `output.gcode.3mf`，切完再按原名存）——中文路径不一定认，也碰不到主人的源文件；**STL 先 `placeStl` 挪到打印板中间、底面贴 z=0**（中心取机器配置的 `printable_area`）：Blender / build123d 建的模型以原点为中心，拓竹的板原点在角上，不挪大半个在板外；
+  ⓖ **展开配置要并 `include` 的模板**（LRN 2026-11-15，症状「P2S 一开始打就空走：不调平、不加热、挤不出料」）：P2S 这代的启动 / 结束 / 换料 / 换层 G-code 放在 `… template machine_start_gcode` 这类模板里、由 `include` 列表引用，不在 `inherits` 链上；以前只认 inherits，拿到的是 `fdm_machine_common` 里通用的老启动代码。每层先并 include 再并自己的键，模板缺了就报错；耗材配置也有 include；
+  ⓗ **切完和发打印前都查启动代码**（`startCheck` / `startProblem`）：第一次挤料（E > 0）之前必须有喷嘴加热（M104 / M109 ≥ 150℃）和热床加热（M140 / M190），没有就不交出去、不发——兜住以后别的原因弄坏的启动代码。命令行参数照官方 wiki + 社区整理，**没在真机上跑过**；测试用一个假的 `bambu-studio` 脚本（`test/slice.test.ts`）。
   **料盒烘干（`printer_ams_dry`，2026-11）**：`{"print": {"command": "ams_filament_drying", ams_id, temp, cooling_temp: 45, duration（小时）, mode: 1 开 / 0 停, rotate_tray, …}}`（ha-bambulab 的格式；`cooling_temp` 低于 45 会被忽略）。
   料盒型号靠连上时发的只读 `get_version`（`info.module` 的名字前缀：`n3f/` = AMS 2 Pro、`n3s/` = AMS HT…，`amsModelsOf`），认出不能烘干的就不发；温度上限 AMS 2 Pro 65℃、HT 85℃，1~24 小时；
   状态 `ams[].dry_time`（分钟）从有变 0 = 烘干完，发 `dried` 通知（刚连上时看到的不算）。P2S 固件 01.01.50.40 以上才有烘干设置。

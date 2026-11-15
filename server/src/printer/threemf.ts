@@ -100,3 +100,33 @@ export function sliceInfo(file: string): SliceInfo[] {
 export const modelMatches = (printerModel: string, model: string) => !!model && new RegExp(`(^|\\s)${model.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i").test(printerModel.trim());
 
 export const fmtSeconds = (s: number) => { const m = Math.round(s / 60); return m >= 60 ? `${Math.floor(m / 60)} 小时${m % 60 ? ` ${m % 60} 分` : ""}` : `${Math.max(1, m)} 分钟`; };
+
+/** G-code 开头查一遍：第一次挤出（E > 0）之前有没有给喷嘴加热（M104 / M109 到 150℃ 以上）、给热床加热（M140 / M190）。
+ *  启动 G-code 不对的文件（LRN 2026-11-15：P2S 的启动代码没展开，打印机一开始就空走、挤不出料）在这里拦住，别发给打印机。
+ *  一直没挤出（只有移动）的不下结论：extrudes = false */
+export interface StartCheck { extrudes: boolean; nozzleHeat: boolean; bedHeat: boolean; line: number }
+export function startCheck(gcode: string): StartCheck {
+  let nozzleHeat = false, bedHeat = false, n = 0;
+  const val = (line: string, k: string) => { const m = new RegExp(`(?:^|\\s)${k}(-?\\d+(?:\\.\\d+)?)`, "i").exec(line); return m ? Number(m[1]) : null; };
+  for (let i = 0, start = 0; start < gcode.length; i++) {
+    let end = gcode.indexOf("\n", start); if (end < 0) end = gcode.length;
+    const line = gcode.slice(start, end).replace(/;.*/, "").trim();
+    start = end + 1; n = i + 1;
+    if (!line) continue;
+    const cmd = line.split(/\s+/)[0].toUpperCase();
+    if (cmd === "M104" || cmd === "M109") { const t = val(line, "S") ?? val(line, "R"); if (t !== null && t >= 150) nozzleHeat = true; }
+    else if (cmd === "M140" || cmd === "M190") { const t = val(line, "S") ?? val(line, "R"); if (t !== null && t > 0) bedHeat = true; }
+    else if (/^G[0-3]$/.test(cmd)) { const e = val(line, "E"); if (e !== null && e > 0) return { extrudes: true, nozzleHeat, bedHeat, line: n }; }
+  }
+  return { extrudes: false, nozzleHeat, bedHeat, line: n };
+}
+
+/** 切好的文件里第 N 盘的 G-code 开头对不对；不对返回给人看的原因，对 / 读不出（太大）返回空 */
+export function startProblem(file: string, plate: number): string {
+  const g = readZipEntry(file, `Metadata/plate_${plate}.gcode`, 256 * 1024 * 1024);
+  if (!g) return "";
+  const c = startCheck(g.toString("latin1"));
+  if (!c.extrudes) return "";
+  const miss = [!c.nozzleHeat && "给喷嘴加热", !c.bedHeat && "给热床加热"].filter(Boolean);
+  return miss.length ? `第 ${plate} 盘的 G-code 在第一次挤料（第 ${c.line} 行）之前没有${miss.join("、")}——启动代码不对，发出去打印机会空走、挤不出料（还可能刮板）` : "";
+}

@@ -545,6 +545,9 @@ describe("控制（BAMBU_CONTROL=1）", () => {
     expect((await s.call("printer_print", { file: path.join(dir, "没有.gcode.3mf") })).text).toContain("这台电脑上没有");
     expect((await s.call("printer_print", { file: "model.stl" })).text).toContain("只能打切好片的 .3mf");
     expect((await s.call("printer_print", { file: sliced, plate: 3 })).text).toContain("没有第 3 盘");
+    const cold = path.join(dir, "冷启动.gcode.3mf");
+    fs.writeFileSync(cold, zip([{ name: "Metadata/plate_1.gcode", data: Buffer.from("G28\nG1 X5 Y5 E2\n") }]));
+    expect((await s.call("printer_print", { file: cold })).text).toMatch(/不能打：第 1 盘的 G-code 在第一次挤料（第 2 行）之前没有给喷嘴加热/);
     const ask = await s.call("printer_print", { file: sliced });
     expect(ask.isError).toBe(false);
     expect(ask.text).toMatch(/还没开始打印。\n要打的是：「小船」第 1 盘（这台电脑上的文件/);

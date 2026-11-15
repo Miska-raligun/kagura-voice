@@ -12,7 +12,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { readStl } from "../cad/raster.ts";
-import { platesOf, projectInfo, sliceInfo, modelMatches, zipNames, type ProjectInfo, type SliceInfo } from "./threemf.ts";
+import { platesOf, projectInfo, sliceInfo, modelMatches, zipNames, startProblem, type ProjectInfo, type SliceInfo } from "./threemf.ts";
 
 export interface SliceOptions {
   plate?: number;
@@ -92,8 +92,20 @@ export class Profiles {
       chain.unshift(j);
       n = j.inherits || undefined;
     }
+    // 每一层：先并它 include 的模板，再并它自己的键（LRN 2026-11-15，症状「P2S 开始打印就空走：不调平、不加热、挤不出料」）。
+    // P2S 这代的启动 / 结束 / 换料 G-code 不在 inherits 链里，而在 include 的「… template machine_start_gcode」这类模板里；
+    // 以前只认 inherits，拿到的是最底层 fdm_machine_common 里一份通用的老启动代码
+    const meta = new Set(["name", "inherits", "include", "instantiation", "from", "type", "setting_id"]);
     const out: Record<string, unknown> = {};
-    for (const j of chain) Object.assign(out, j);
+    for (const j of chain) {
+      for (const inc of Array.isArray(j.include) ? j.include : []) {
+        const t = this.raw(kind, String(inc));
+        if (!t) throw new Error(`${kind === "machine" ? "机器" : kind === "process" ? "工艺" : "耗材"}配置「${j.name}」引用的模板「${inc}」找不到（Bambu Studio 的配置不全？）`);
+        for (const [k, v] of Object.entries(t)) if (!meta.has(k)) out[k] = v;
+      }
+      Object.assign(out, j);
+    }
+    delete out.include;
     out.name = name;
     // 命令行靠 type 认这份是机器 / 工艺 / 耗材（没有就报「unknown config type … in load-settings」）
     out.type = kind;
@@ -285,6 +297,8 @@ export async function slice(src: string, o: SliceOptions, env: SliceEnv): Promis
     if (!platesOf(zipNames(produced)).length) throw new Error(`切出来的文件里没有 G-code（第 ${plate} 盘可能不存在，或者这一盘上没有东西）${tail ? `：\n${tail}` : ""}`);
     const outInfo = projectInfo(produced);
     if (outInfo.printerModel && !modelMatches(outInfo.printerModel, env.model)) throw new Error(`切出来的文件是给「${outInfo.printerModel}」的，不是 ${env.model}，不能拿去打（会撞板）。${mode === "project" ? "" : "换配置没换成功。"}`);
+    const bad = startProblem(produced, plate);
+    if (bad) throw new Error(`切出来的文件不能用：${bad}。${mode === "switched" ? "换配置切片的启动代码没弄对，" : ""}别拿去打；可以让主人在 Bambu Studio 里打开、选好 ${env.model}、切片后「导出切片文件」。`);
     if (!outInfo.printerModel) warnings.push("切出来的文件里看不出是给哪台打印机的，打之前在 Bambu Studio 里确认一下。");
     fs.mkdirSync(env.outDir, { recursive: true });
     let dest = path.join(env.outDir, outName);
