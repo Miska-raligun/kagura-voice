@@ -7,7 +7,7 @@ import fs from "node:fs";
 import path from "node:path";
 import type { BambuPrinter, PrinterStatus } from "./bambu.ts";
 import { Ftps, type FtpDial, type FtpEntry } from "./ftps.ts";
-import { zipNames, platesOf, projectInfo, sliceInfo, modelMatches, fmtSeconds } from "./threemf.ts";
+import { zipNames, platesOf, projectInfo, sliceInfo, modelMatches, fmtSeconds, startProblem } from "./threemf.ts";
 import { DRYING_MODELS } from "./bambu.ts";
 import { slice, type SliceEnv } from "./slice.ts";
 
@@ -263,6 +263,9 @@ export class PrinterControl {
     const proj = local ? projectInfo(local.path) : null;
     if (proj?.printerModel && this.o.model && !modelMatches(proj.printerModel, this.o.model))
       return { text: `这个文件是给「${proj.printerModel}」切的，不是 ${this.o.model}，不能直接打（喷头可能撞到打印板）。先用 printer_slice 按这台打印机重新切。`, isError: true };
+    // 启动代码不对（不加热就挤料）的文件不发：打印机会空走、挤不出料
+    const bad = local ? startProblem(local.path, plate) : "";
+    if (bad) return { text: `不能打：${bad}。用 printer_slice 重新切，或者让主人在 Bambu Studio 里切好再给我。`, isError: true };
     const stat = local ? sliceInfo(local.path).find((x) => x.plate === plate) : undefined;
     const used = stat?.filaments.length ? stat.filaments : (proj?.filaments ?? []).map((f, i) => ({ id: i + 1, type: f.type, color: f.color, grams: null }));
     if (local && used.length > 1 && !(Array.isArray(args?.slots) && args.slots.length === used.length) && args?.use_ams !== false)

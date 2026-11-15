@@ -6,7 +6,7 @@ import { readStl } from "../src/cad/raster.ts";
 import { describe, it, expect } from "vitest";
 import { tmpdir } from "./helpers.ts";
 import { zip } from "../src/util/zip.ts";
-import { projectInfo, sliceInfo, modelMatches, readZipEntry, fmtSeconds } from "../src/printer/threemf.ts";
+import { projectInfo, sliceInfo, modelMatches, readZipEntry, fmtSeconds, startCheck, tempProblems } from "../src/printer/threemf.ts";
 import { slice, overrides, checkOptions, findStudio, Profiles } from "../src/printer/slice.ts";
 
 const SLICE_INFO = `<?xml version="1.0" encoding="UTF-8"?>
@@ -187,6 +187,53 @@ describe("切片", () => {
     try {
       await expect(slice(p2s, {}, { ...env, timeoutMs: 1500 })).rejects.toThrow(/切片超时[\s\S]*最后输出：\nloading project\.\.\.[\s\S]*结束所有 bambu-studio\.exe/);
     } finally { delete process.env.FAKE_HANG; }
+  });
+
+  it("include 的模板也并进来（P2S 的启动 / 换料 G-code 在模板里，不在 inherits 链上）；自己的键优先；模板缺了说清楚", () => {
+    const root = tmpdir("prof-inc");
+    const w = (j: any) => { const d = path.join(root, "BBL", "machine"); fs.mkdirSync(d, { recursive: true }); fs.writeFileSync(path.join(d, `${j.name}.json`), JSON.stringify({ type: "machine", ...j })); };
+    w({ name: "fdm_machine_common", instantiation: "false", machine_start_gcode: "G28 ; 通用的老启动代码", machine_end_gcode: "M84" });
+    w({ name: "P2S template machine_start_gcode", instantiation: "false", machine_start_gcode: "M190 S[bed]\nM109 S[nozzle]\nG29" });
+    w({ name: "P2S template change_filament_gcode", instantiation: "false", change_filament_gcode: "; 换料", printable_area: ["0x0", "1x1"] });
+    w({ name: "Bambu Lab P2S 0.4 nozzle", inherits: "fdm_machine_common", instantiation: "true", include: ["P2S template machine_start_gcode", "P2S template change_filament_gcode"], printable_area: ["0x0", "256x256"] });
+    w({ name: "坏的", inherits: "fdm_machine_common", instantiation: "true", include: ["没有这个模板"] });
+    const m = new Profiles(root).flatten("machine", "Bambu Lab P2S 0.4 nozzle");
+    expect(m).toMatchObject({ machine_start_gcode: "M190 S[bed]\nM109 S[nozzle]\nG29", change_filament_gcode: "; 换料", machine_end_gcode: "M84", printable_area: ["0x0", "256x256"], name: "Bambu Lab P2S 0.4 nozzle", type: "machine" });
+    expect(m.include).toBeUndefined();
+    expect(() => new Profiles(root).flatten("machine", "坏的")).toThrow(/引用的模板「没有这个模板」找不到/);
+  });
+
+  it("启动代码检查：第一次挤料之前要给喷嘴和热床加热；没挤料的不下结论", () => {
+    expect(startCheck("M140 S60\nM190 S60\nM104 S220\nG28\nM109 S220\nG1 X1 Y1 E2\n")).toMatchObject({ extrudes: true, nozzleHeat: true, bedHeat: true });
+    expect(startCheck("G28 ; home\nG1 E-2 ; 回抽不算\nG1 X5 Y5 E1.5\nM109 S220\n")).toMatchObject({ extrudes: true, nozzleHeat: false, bedHeat: false, line: 3 });
+    expect(startCheck("M104 S140 ; 低温擦嘴不算加热\nM140 S55\nG1 X1 E1\n")).toMatchObject({ nozzleHeat: false, bedHeat: true });
+    expect(startCheck("G28\nG1 X1 Y1\n").extrudes).toBe(false);
+  });
+
+  it("温度检查：料和喷嘴温度对不上、超过喷嘴 / 热床上限的拦下；只看这一盘用到的料；正常的不报", () => {
+    const dir = tmpdir("temps");
+    const mk = (settings: any, used?: number[]) => {
+      const f = path.join(dir, `${Math.random()}.3mf`);
+      const info = used ? `<config><plate><metadata key="index" value="1"/>${used.map((id) => `<filament id="${id}" type="X" color="#fff" used_g="1"/>`).join("")}</plate></config>` : "";
+      fs.writeFileSync(f, zip([{ name: "Metadata/project_settings.config", data: Buffer.from(JSON.stringify(settings)) }, ...(info ? [{ name: "Metadata/slice_info.config", data: Buffer.from(info) }] : [])]));
+      return f;
+    };
+    const ok = { filament_type: ["PLA", "PETG"], nozzle_temperature: ["220", "255"], nozzle_temperature_initial_layer: ["220", "250"], hot_plate_temp: ["55", "70"], textured_plate_temp_initial_layer: ["65", "70"] };
+    expect(tempProblems(mk(ok), 1)).toEqual([]);
+    expect(tempProblems(mk({ ...ok, nozzle_temperature: ["260", "255"] }), 1)).toEqual(["第 1 种料是 PLA，喷嘴却是 220~260℃（PLA 一般 180~245℃）"]);
+    expect(tempProblems(mk({ ...ok, nozzle_temperature: ["220", "320"] }), 1)).toEqual(["第 2 种料（PETG）喷嘴 320℃，超过打印机上限 300℃"]);
+    expect(tempProblems(mk({ ...ok, hot_plate_temp: ["55", "120"] }), 1)).toEqual(["热床温度设到了 120℃（hot_plate_temp），超过上限 110℃"]);
+    expect(tempProblems(mk({ ...ok, nozzle_temperature: ["220", "200"] }, [1]), 1)).toEqual([]);          // 第 2 种料这一盘没用到
+  });
+
+  it("切出来的文件启动代码不对（不加热就挤料）：不交出去", async () => {
+    const { dir, env } = setup();
+    const p2s = mk3mf(path.join(dir, "a.3mf"), { model: "Bambu Lab P2S" });
+    const out = path.join(dir, "cold.3mf");
+    fs.writeFileSync(out, zip([{ name: "Metadata/plate_1.gcode", data: Buffer.from("G28\nG1 X5 Y5 E2\n") }, { name: "Metadata/project_settings.config", data: Buffer.from(JSON.stringify({ printer_model: "Bambu Lab P2S" })) }]));
+    process.env.FAKE_OUT = out;
+    await expect(slice(p2s, { infill: 20 }, env)).rejects.toThrow(/切出来的文件不能用：第 1 盘的 G-code 在第一次挤料（第 2 行）之前没有给喷嘴加热、给热床加热/);
+    expect(fs.existsSync(env.outDir) ? fs.readdirSync(env.outDir) : []).toEqual([]);
   });
 
   it("系统配置索引：不能直接用的（instantiation=false）不选；料先找同名的，再找同材质的 Generic", () => {
