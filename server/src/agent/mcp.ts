@@ -197,7 +197,9 @@ export class McpManager {
 
   private readConfig(): Record<string, McpServerConfig> {
     try {
-      const j = JSON.parse(fs.readFileSync(this.file, "utf8"));
+      const text = fs.readFileSync(this.file, "utf8");
+      this.loadedText = text;
+      const j = JSON.parse(text);
       return j?.mcpServers && typeof j.mcpServers === "object" ? j.mcpServers : {};
     } catch (e: any) {
       if (fs.existsSync(this.file)) this.configErrors.push({ name: "mcp.json", error: `解析失败：${e.message}` });
@@ -295,20 +297,20 @@ export class McpManager {
    *  改到一半不是合法 JSON 的不管，等改完再说 */
   watch() {
     if (this.watcher) return;
-    let timer: NodeJS.Timeout | null = null;
-    this.watcher = fs.watchFile(this.file, { interval: 2000 }, (cur, prev) => {
-      if (cur.mtimeMs === prev.mtimeMs) return;
-      if (timer) clearTimeout(timer);
-      timer = setTimeout(() => {
-        try { JSON.parse(fs.readFileSync(this.file, "utf8")); } catch { return; }
-        console.log("[mcp] 🔄 mcp.json 改了，重新加载");
-        this.reload().catch((e) => console.log(`[mcp] ⚠️  ${e.message}`));
-      }, 500);
-      timer.unref?.();
-    });
+    // 比内容不比修改时间：fs.watchFile 的基准是异步取的，刚 watch 就改的那一下会被算进基准、永远看不出变化；有的文件系统修改时间也只精确到秒
+    this.watcher = setInterval(() => {
+      let t: string;
+      try { t = fs.readFileSync(this.file, "utf8"); } catch { return; }
+      if (t === this.loadedText) return;
+      try { JSON.parse(t); } catch { return; }
+      console.log("[mcp] 🔄 mcp.json 改了，重新加载");
+      this.reload().catch((e) => console.log(`[mcp] ⚠️  ${e.message}`));
+    }, 2000);
     this.watcher.unref?.();
   }
-  private watcher: fs.StatWatcher | null = null;
+  private watcher: NodeJS.Timeout | null = null;
+  /** 上次按哪份文件内容加载的（watch 拿来比较） */
+  private loadedText: string | null = null;
 
   async reconnect(name: string) {
     // 先按文件里现在的配置来（文件被直接改过的话，改了的那个服务器这就重建、重连了，不用再连一遍）；文件不是合法 JSON 就不动（不然全断开）
@@ -325,7 +327,7 @@ export class McpManager {
   }
 
   async closeAll() {
-    if (this.watcher) { fs.unwatchFile(this.file); this.watcher = null; }
+    if (this.watcher) { clearInterval(this.watcher); this.watcher = null; }
     for (const s of this.servers.values()) await this.disconnect(s);
   }
 
