@@ -62,8 +62,13 @@ class FakeCamera:
         threading.Thread(target=self.run, daemon=True).start()
 
     def run(self):
-        cmd, _ = self.srv.accept()
-        ptype, body = probe.recv_packet(cmd)
+        while True:  # 扫描时「连上就断」的空连接跳过
+            cmd, _ = self.srv.accept()
+            try:
+                ptype, body = probe.recv_packet(cmd)
+                break
+            except probe.ProbeError:
+                cmd.close()
         assert ptype == probe.P_INIT_CMD_REQ
         self.guid = body[:16]
         if self.reject:
@@ -164,3 +169,11 @@ def test_unreachable(tmp_path):
     rc = probe.main(["127.0.0.1", "--port", str(port), "--out", str(tmp_path), "--timeout", "2"])
     report = json.loads((tmp_path / "nikon_probe_report.json").read_text(encoding="utf-8"))
     assert rc == 1 and "连不上" in report["errors"][0]["error"]
+
+
+def test_scan_finds_fake_camera(tmp_path, monkeypatch):
+    cam = FakeCamera()
+    monkeypatch.setattr(probe, "local_ips", lambda: ["127.0.0.5"])
+    assert probe.scan(cam.port, timeout=0.2) == ["127.0.0.1"]
+    rc = probe.main(["--port", str(cam.port), "--out", str(tmp_path)])
+    assert rc == 0

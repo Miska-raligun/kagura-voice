@@ -7,6 +7,7 @@
 加 --liveview 取一帧实时取景画面（不按快门）；加 --shoot 真的拍一张（照片存在卡上，缩略图存到本机）。
 
 用法：
+    python nikon_probe.py                 # 不写 IP：扫一遍本机所在网段，找开着 15740 端口的相机
     python nikon_probe.py 192.168.1.23
     python nikon_probe.py 192.168.1.23 --liveview --shoot
 
@@ -380,13 +381,57 @@ def load_guid(arg, path):
     return g
 
 
+def local_ips():
+    """本机在局域网里的 IPv4 地址（不发包，只借 UDP connect 问系统走哪块网卡）。"""
+    ips = set()
+    for probe_ip in ("192.168.1.1", "10.0.0.1", "172.16.0.1", "8.8.8.8"):
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect((probe_ip, 9))
+            ips.add(s.getsockname()[0])
+            s.close()
+        except OSError:
+            pass
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            ips.add(info[4][0])
+    except OSError:
+        pass
+    return sorted(ip for ip in ips if not ip.startswith("127.") and not ip.startswith("169.254."))
+
+
+def scan(port, timeout=0.4):
+    """把本机所在的每个 /24 网段扫一遍，返回开着 port 的地址。"""
+    found = []
+    lock = threading.Lock()
+    nets = sorted({ip.rsplit(".", 1)[0] for ip in local_ips()})
+    print("  扫描网段：%s" % ("、".join(n + ".0/24" for n in nets) or "（没找到本机地址）"))
+    targets = ["%s.%d" % (n, i) for n in nets for i in range(1, 255)]
+
+    def worker(chunk):
+        for ip in chunk:
+            try:
+                socket.create_connection((ip, port), timeout=timeout).close()
+                with lock:
+                    found.append(ip)
+            except OSError:
+                pass
+
+    threads = [threading.Thread(target=worker, args=(targets[i::64],), daemon=True) for i in range(64)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    return sorted(found, key=lambda ip: tuple(int(x) for x in ip.split(".")))
+
+
 def step(title):
     print("\n== " + title)
 
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description="尼康 Z 系列 Wi-Fi（PTP/IP）探测")
-    ap.add_argument("host", help="相机的 IP 地址")
+    ap.add_argument("host", nargs="?", help="相机的 IP 地址（不写就扫描本机所在网段）")
     ap.add_argument("--port", type=int, default=PORT)
     ap.add_argument("--name", default="Kagura", help="在相机那里显示的电脑名（默认 Kagura）")
     ap.add_argument("--guid", help="指定 GUID（不填就用 nikon_probe_guid.txt 里的，没有就新生成）")
@@ -397,6 +442,17 @@ def main(argv=None):
     a = ap.parse_args(argv)
 
     os.makedirs(a.out, exist_ok=True)
+    if not a.host:
+        step("0. 找相机（端口 %d）" % a.port)
+        found = scan(a.port)
+        if not found:
+            print("  ❌ 没找到。确认相机停在配对 / 已连接的界面、和电脑连的是同一个 Wi-Fi；也可以直接写 IP 再试")
+            return 1
+        if len(found) > 1:
+            print("  找到好几个：%s——请把相机的那个 IP 写在命令后面再跑一次" % "、".join(found))
+            return 1
+        a.host = found[0]
+        print("  ✅ 找到相机：%s" % a.host)
     report = {"script": "nikon_probe 1", "host": a.host, "time": time.strftime("%Y-%m-%d %H:%M:%S"),
               "errors": []}
     guid = load_guid(a.guid, os.path.join(a.out, "nikon_probe_guid.txt"))
