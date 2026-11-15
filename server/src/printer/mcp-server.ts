@@ -103,6 +103,8 @@ export function startBambuMcp(o: BambuMcpOpts): { close(): void; printer: BambuP
     ftpPort: Number(env("BAMBU_FTP_PORT")) || undefined, ftpDial: o.ftpDial, fileUrl: env("BAMBU_FILE_URL"),
     // 型号：切片按它选配置、发打印前按它核对文件；不填默认 P2S
     model: env("BAMBU_MODEL") || DEFAULT_MODEL,
+    // 打印机上放的打印板：不填按纹理 PEI 板（拓竹打印机大多出厂带这块）
+    plateType: env("BAMBU_PLATE") || "textured",
     slicer: {
       studio: env("BAMBU_STUDIO"), profiles: env("BAMBU_PROFILES"), nozzle: env("BAMBU_NOZZLE") || "0.4",
       outDir: path.join(stateDir, "sliced"),

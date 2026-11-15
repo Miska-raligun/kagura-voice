@@ -10,7 +10,7 @@ import type { BambuPrinter, PrinterStatus } from "./bambu.ts";
 import { Ftps, type FtpDial, type FtpEntry } from "./ftps.ts";
 import { zipNames, platesOf, projectInfo, sliceInfo, modelMatches, fmtSeconds, startProblem } from "./threemf.ts";
 import { DRYING_MODELS } from "./bambu.ts";
-import { slice, type SliceEnv } from "./slice.ts";
+import { slice, plateValue, PLATE_TYPES, PLATE_LABEL, type SliceEnv } from "./slice.ts";
 
 export { zipNames, platesOf };
 
@@ -80,6 +80,7 @@ export const CONTROL_TOOLS = [
         walls: { type: "number", description: "墙层数：2 一般、3~4 结实" },
         supports: { type: "string", enum: ["off", "normal", "tree"], description: "支撑：off 不加、normal 普通、tree 树状（悬空多、好拆）" },
         brim: { type: "string", enum: ["auto", "off", "outer"], description: "裙边（帮底面粘牢）：auto 自动、off 不加、outer 外圈加" },
+        plate_type: { type: "string", enum: Object.keys(PLATE_TYPES), description: "打印板：textured 纹理 PEI、smooth 光面 PEI（高温板）、cool 低温板、engineering 工程板、supertack 超粘低温板。要和打印机上那块一样（不一样打印机会报「打印板类型与切片设置不符」，热床温度也不对）。不填 = 配置里的那块" },
       },
     },
   },
@@ -98,6 +99,8 @@ export interface ControlOpts {
   fingerprint(): string;
   ftpPort?: number;
   ftpDial?: FtpDial;
+  /** 打印机上放的是哪块打印板（PLATE_TYPES 的键或名字）：切片默认按它切，开打前核对 */
+  plateType?: string;
   /** project_file 里文件地址的前缀：P2 / H2 这代是 ftp:///，老机型（X1 / P1 / A1）是 file:///sdcard/ */
   fileUrl?: string;
   /** 这台打印机的型号（「P2S」）：切片按它选配置；发打印前核对文件是不是给它切的。空 = 不核对 */
@@ -212,9 +215,12 @@ export class PrinterControl {
     if (!path.isAbsolute(file)) return { text: "file 要给这台电脑上的完整路径（比如浏览器下载文件夹里的那个 .3mf）。", isError: true };
     if (!/\.(3mf|stl)$/i.test(file)) return { text: "只能切 .3mf 和 .stl。别的格式（.step / .obj）让主人在 Bambu Studio 里打开、另存成 3mf。", isError: true };
     if (!fs.existsSync(file)) return { text: `这台电脑上没有 ${file}。`, isError: true };
-    if (/\.gcode\.3mf$/i.test(file) || (/\.3mf$/i.test(file) && platesOf(zipNames(file)).length && modelMatches(projectInfo(file).printerModel, this.o.model) && !Object.keys(args).some((k) => k !== "file" && k !== "plate")))
+    // 已经给这台切好、打印板也对得上、又没要改参数的，不用再切
+    const wantPlate = plateValue(args?.plate_type || this.o.plateType);
+    const sameBed = !wantPlate || !projectInfo(file).bedType || projectInfo(file).bedType === wantPlate;
+    if (sameBed && (/\.gcode\.3mf$/i.test(file) || (/\.3mf$/i.test(file) && platesOf(zipNames(file)).length && modelMatches(projectInfo(file).printerModel, this.o.model))) && !Object.keys(args).some((k) => k !== "file" && k !== "plate"))
       return { text: "这个文件已经是给这台打印机切好的，直接用 printer_print 打就行；要改参数就带上参数再切一次。" };
-    const opts = { plate: args?.plate, layer_height: args?.layer_height, infill: args?.infill, walls: args?.walls, supports: args?.supports, brim: args?.brim };
+    const opts = { plate: args?.plate, layer_height: args?.layer_height, infill: args?.infill, walls: args?.walls, supports: args?.supports, brim: args?.brim, plate_type: args?.plate_type || this.o.plateType };
     for (const k of Object.keys(opts) as (keyof typeof opts)[]) if (opts[k] === undefined || opts[k] === null || opts[k] === "") delete opts[k];
     const job = this.slicing.then(async () => {
       const t0 = Date.now();
@@ -228,7 +234,8 @@ export class PrinterControl {
       const r = await job;
       const p = r.plates.find((x) => x.plate === (opts.plate ?? 1)) ?? r.plates[0];
       const fil = p?.filaments.length ? `\n用料：${p.filaments.map((f, i) => `第 ${i + 1} 种 ${[f.color, f.type].filter(Boolean).join(" ")}${f.grams !== null ? ` ${f.grams.toFixed(1)} 克` : ""}`).join("、")}` : "";
-      const changed = Object.entries(opts).filter(([k]) => k !== "plate").map(([k, v]) => `${({ layer_height: "层高", infill: "填充", walls: "墙层数", supports: "支撑", brim: "裙边" } as any)[k]} ${v}${k === "infill" ? "%" : k === "layer_height" ? "mm" : ""}`);
+      const changed = Object.entries(opts).filter(([k]) => k !== "plate").map(([k, v]) => k === "plate_type" ? `打印板 ${PLATE_LABEL[plateValue(String(v))] ?? v}`
+        : `${({ layer_height: "层高", infill: "填充", walls: "墙层数", supports: "支撑", brim: "裙边" } as any)[k]} ${v}${k === "infill" ? "%" : k === "layer_height" ? "mm" : ""}`);
       return {
         text: `切好了：${r.file}\n${r.mode === "project" ? `用的是文件自带的 ${this.o.model} 配置` : `换成了 ${this.o.model} 的系统配置`}${changed.length ? `，改了：${changed.join("、")}` : ""}。`
           + (p?.seconds ? `\n预计打印 ${fmtSeconds(p.seconds)}` : "") + (p?.grams ? `${p?.seconds ? "，" : "\n"}总用料约 ${Math.round(p.grams)} 克` : "") + fil
@@ -288,6 +295,10 @@ export class PrinterControl {
       // 启动代码不对（不加热就挤料）、温度不对的文件不发
       const bad = startProblem(checkFile, plate);
       if (bad) return { text: `不能打：${bad}。用 printer_slice 重新切，或者让主人在 Bambu Studio 里切好再给我。`, isError: true };
+      // 打印板对不上：打印机会停下来报 0500-8051「打印板类型与切片设置不符」，热床温度也是按别的板子定的（LRN 2026-11-15）
+      const want = plateValue(this.o.plateType);
+      if (want && proj.bedType && proj.bedType !== want)
+        return { text: `不能打：这个文件是按「${PLATE_LABEL[proj.bedType] ?? proj.bedType}」切的，打印机上配置的是「${PLATE_LABEL[want] ?? want}」——打印机会报打印板类型不符，热床温度也不对。用 printer_slice 重新切（会按配置里的板子切）；主人换过板子的话，改 MCP 配置里的 BAMBU_PLATE。`, isError: true };
       stat = sliceInfo(checkFile).find((x) => x.plate === plate);
       used = stat?.filaments.length ? stat.filaments : proj.filaments.map((f, i) => ({ id: i + 1, type: f.type, color: f.color, grams: null }));
     } finally { if (tmp) fs.rmSync(tmp, { force: true }); }
@@ -317,8 +328,8 @@ export class PrinterControl {
       return {
         text: `还没开始打印。${given ? "确认码不对或者参数变了，重新确认：" : ""}\n要打的是：「${title}」第 ${plate} 盘${local ? `（这台电脑上的文件，${mb(local.size)}，会先传到打印机）` : "（打印机上的文件）"}`
           + (stat && (stat.seconds || stat.grams) ? `\n预计：${stat.seconds ? fmtSeconds(stat.seconds) : "时间不知道"}${stat.grams ? `，用料约 ${Math.round(stat.grams)} 克` : ""}` : "")
-          + `\n用料：${useAms ? slots.map(tray).join("、") : "外挂料盘"}${mismatch(used, useAms ? slots : [])}\n打印前调平：${args?.bed_leveling === false ? "否" : "是"}；延时摄影：${args?.timelapse === true ? "是" : "否"}`
-          + `\n把上面的内容告诉主人，并请主人确认：① 热床上是空的、打印板放好了；② 就打这个、用这个料。`
+          + `\n用料：${useAms ? slots.map(tray).join("、") : "外挂料盘"}${mismatch(used, useAms ? slots : [])}\n打印板：${proj.bedType ? PLATE_LABEL[proj.bedType] ?? proj.bedType : "文件里没写"}（打印机上要放这块）\n打印前调平：${args?.bed_leveling === false ? "否" : "是"}；延时摄影：${args?.timelapse === true ? "是" : "否"}`
+          + `\n把上面的内容告诉主人，并请主人确认：① 热床上是空的、放的是上面说的那块打印板；② 就打这个、用这个料。`
           + `\n主人明确同意后，带上 confirm="${code}"、其余参数不变再调一次（${CONFIRM_TTL_MS / 60_000} 分钟内有效）。主人没同意不要调。`,
       };
     }
