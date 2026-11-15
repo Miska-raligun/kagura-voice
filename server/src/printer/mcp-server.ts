@@ -188,7 +188,7 @@ export function startBambuMcp(o: BambuMcpOpts): { close(): void; printer: BambuP
             .then(() => takeSnapshot({ ffmpeg, host, code, port: camPort, dir: path.join(stateDir, "snapshots"), name }))
             .then((file) => {
               log(`[${name}] 📷 拍了一张（${Math.round((Date.now() - t0) / 1000)} 秒）→ ${file}`);
-              ok({ content: [{ type: "image", data: fs.readFileSync(file).toString("base64"), mimeType: "image/jpeg" }, { type: "text", text: `${name} 机内摄像头刚拍的：${file}（要给主人看就用 send_file 发这个路径）` }] });
+              ok({ content: [{ type: "image", data: fs.readFileSync(file).toString("base64"), mimeType: "image/jpeg" }, { type: "text", text: `${name} 机内摄像头刚拍的：${file}（要给主人看就用 send_file 发这个路径；之后想再看一眼用 read_file 读它）` }] });
             })
             .catch((e) => { log(`[${name}] 📷 没拍到：${String(e?.message ?? e).split("\n")[0]}`); text(String(e?.message ?? e), true); });
           return;
