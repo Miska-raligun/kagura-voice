@@ -389,6 +389,13 @@ async function fakeFtp(files: Record<string, Buffer> = {}, o: { readonly?: boole
           s.write("H");
           s.end(names.map((n) => `-rw-rw-rw- 1 root root ${String(stored[n].length).padStart(8)} Nov 14 09:30 ${path.posix.basename(n)}`).join("\r\n") + "\r\ndrwxr-xr-x 2 root root 0 Nov 01 00:00 cache\r\n");
           c.write("226 done\r\n");
+        } else if (cmd === "RETR") {
+          const f = stored[arg];
+          if (!f) { c.write("550 Failed to open file.\r\n"); (await data!).destroy(); continue; }
+          c.write("150 sending\r\n");
+          const s = await data!;
+          s.write("H");
+          s.end(f, () => c.write("226 sent\r\n"));
         } else if (cmd === "STOR") {
           if (o.readonly) { c.write("553 Could not create file.\r\n"); (await data!).destroy(); continue; }
           c.write("150 go\r\n");
@@ -568,7 +575,12 @@ describe("控制（BAMBU_CONTROL=1）", () => {
     expect(s.sent()[0].print).toMatchObject({ command: "project_file", param: "Metadata/plate_1.gcode", url: "ftp:///小船.gcode.3mf", subtask_name: "小船", use_ams: true, ams_mapping: [0], bed_leveling: true, timelapse: false });
     // 码只能用一次
     expect((await s.call("printer_print", { file: sliced, slots: [1], confirm: code2 })).text).toContain("还没开始打印");
-    // 打印机上已有的文件：不上传，直接开；外挂料盘
+    // 打印机上已有的文件：先下载回来照样检查（启动代码不对的不打、下载不回来的不打），没问题再开；不上传；外挂料盘
+    s.ftp.stored["/cache/old.3mf"] = zip([{ name: "Metadata/plate_1.gcode", data: Buffer.from("M140 S60\nM104 S220\nM190 S60\nM109 S220\nG1 X5 Y5 E2\n") }]);
+    s.ftp.stored["/cache/冷的.3mf"] = fs.readFileSync(cold);
+    expect((await s.call("printer_print", { file: "cache/冷的.3mf", use_ams: false })).text).toMatch(/^不能打：第 1 盘的 G-code 在第一次挤料（第 2 行）之前没有给喷嘴加热/);
+    expect((await s.call("printer_print", { file: "cache/没有.3mf", use_ams: false })).text).toMatch(/打印机上的「cache\/没有\.3mf」下载不回来，没法先检查，所以不打（下载不了（550 Failed to open file\.））/);
+    expect(s.sent()).toHaveLength(1);
     const ask2 = await s.call("printer_print", { file: "cache/old.3mf", use_ams: false });
     expect(ask2.text).toContain("（打印机上的文件）");
     expect(ask2.text).toContain("用料：外挂料盘");
@@ -622,8 +634,15 @@ fs.copyFileSync(process.env.FAKE_OUT, at("--outputdir") + at("--export-3mf"));
     const s = await setup({ ...FULL, gcode_state: "IDLE", fun: DEV }, {}, bin);
     const r = await s.call("printer_slice", { file: src, infill: 40, walls: 4 });
     expect(r.isError).toBe(false);
-    expect(r.text).toMatch(/^切好了：.*sliced[\\/]钥匙扣\.gcode\.3mf\n用的是文件自带的 P2S 配置，改了：填充 40%、墙层数 4。\n预计打印 25 分钟，总用料约 9 克\n用料：第 1 种 #FFFFFF PLA 9\.4 克/);
+    expect(r.text).toMatch(/^切好了：.*sliced[\\/]钥匙扣\.gcode\.3mf\n用的是文件自带的 P2S 配置，改了：填充 40%、墙层数 4、打印板 纹理 PEI 板。\n预计打印 25 分钟，总用料约 9 克\n用料：第 1 种 #FFFFFF PLA 9\.4 克/);
     expect(JSON.parse(fs.readFileSync(process.env.FAKE_LOG, "utf8"))).toContain("--wall-loops=4");
+    expect(JSON.parse(fs.readFileSync(process.env.FAKE_LOG, "utf8"))).toContain("--curr-bed-type=Textured PEI Plate");   // 没指定 = 配置里的板子（默认纹理 PEI）
+    // 按别的板子切的不打（打印机会报 0500-8051）；对得上的在确认里写清楚放哪块板
+    const mkBed = (name: string, bed: string) => { const f = path.join(dir, name); fs.writeFileSync(f, zip([{ name: "Metadata/plate_1.gcode", data: Buffer.from("G28") }, { name: "Metadata/project_settings.config", data: Buffer.from(JSON.stringify({ printer_model: "Bambu Lab P2S", curr_bed_type: bed })) }])); return f; };
+    expect((await s.call("printer_print", { file: mkBed("低温板.gcode.3mf", "Cool Plate") })).text).toMatch(/^不能打：这个文件是按「低温板」切的，打印机上配置的是「纹理 PEI 板」/);
+    expect((await s.call("printer_print", { file: mkBed("纹理.gcode.3mf", "Textured PEI Plate"), use_ams: false })).text).toContain("打印板：纹理 PEI 板（打印机上要放这块）");
+    // 按别的板子切好的，再交给 printer_slice 会按配置的板子重切（不说「已经切好」）
+    expect((await s.call("printer_slice", { file: mkBed("低温板2.gcode.3mf", "Cool Plate") })).text).not.toContain("已经是给这台打印机切好的");
     const out = /切好了：(.*)\n/.exec(r.text)![1];
     expect((await s.call("printer_slice", { file: out })).text).toContain("已经是给这台打印机切好的");
     expect((await s.call("printer_slice", { file: "猫.stl" })).text).toContain("完整路径");

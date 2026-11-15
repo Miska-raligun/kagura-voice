@@ -22,6 +22,27 @@ export interface SliceOptions {
   walls?: number;
   supports?: "off" | "normal" | "tree";
   brim?: "auto" | "off" | "outer";
+  /** 打印板类型（PLATE_TYPES 的键）：要和打印机上那块一样，不然打印机报 0500-8051「打印板类型与切片设置不符」，热床温度也不对 */
+  plate_type?: string;
+}
+
+/** 打印板：键 → Bambu Studio 配置里 curr_bed_type 的值（PrintConfig.cpp 的 s_keys_map_BedType）。没指定时 Bambu Studio 默认是 Cool Plate */
+export const PLATE_TYPES: Record<string, string> = {
+  textured: "Textured PEI Plate", smooth: "High Temp Plate", cool: "Cool Plate", engineering: "Engineering Plate", supertack: "Supertack Plate",
+};
+export const PLATE_LABEL: Record<string, string> = {
+  "Textured PEI Plate": "纹理 PEI 板", "High Temp Plate": "光面 PEI 板（高温板）", "Cool Plate": "低温板", "Engineering Plate": "工程板", "Supertack Plate": "超粘低温板（SuperTack）",
+};
+/** 「textured」「纹理」「Textured PEI Plate」都认 → curr_bed_type 的值；认不出返回空 */
+export function plateValue(s: string | undefined): string {
+  const t = String(s ?? "").trim();
+  if (!t) return "";
+  if (PLATE_TYPES[t.toLowerCase()]) return PLATE_TYPES[t.toLowerCase()];
+  const exact = Object.values(PLATE_TYPES).find((v) => v.toLowerCase() === t.toLowerCase());
+  if (exact) return exact;
+  const zh: [RegExp, string][] = [[/纹理/, "textured"], [/光面|高温/, "smooth"], [/超粘|supertack/i, "supertack"], [/工程/, "engineering"], [/低温|冷/, "cool"]];
+  const hit = zh.find(([re]) => re.test(t));
+  return hit ? PLATE_TYPES[hit[1]] : "";
 }
 
 export interface SliceEnv {
@@ -154,6 +175,8 @@ export function overrides(o: SliceOptions): string[] {
   if (o.supports === "off") a.push("--enable-support=0");
   else if (o.supports) a.push("--enable-support=1", `--support-type=${o.supports}(auto)`);
   if (o.brim) a.push(`--brim-type=${o.brim === "off" ? "no_brim" : o.brim === "outer" ? "outer_only" : "auto_brim"}`);
+  const plate = plateValue(o.plate_type);
+  if (plate) a.push(`--curr-bed-type=${plate}`);
   return a;
 }
 
@@ -161,6 +184,7 @@ export function checkOptions(o: SliceOptions): string {
   if (o.layer_height !== undefined && !(o.layer_height >= 0.06 && o.layer_height <= 0.32)) return "层高要在 0.06 ~ 0.32 mm 之间（0.4 喷嘴常用 0.12 / 0.16 / 0.2 / 0.24 / 0.28）";
   if (o.infill !== undefined && !(o.infill >= 0 && o.infill <= 100)) return "填充密度是 0 ~ 100（百分比）";
   if (o.walls !== undefined && !(Number.isInteger(o.walls) && o.walls >= 1 && o.walls <= 10)) return "墙层数是 1 ~ 10 的整数";
+  if (o.plate_type !== undefined && o.plate_type !== "" && !plateValue(o.plate_type)) return `打印板类型认不出：${o.plate_type}（可以是 ${Object.keys(PLATE_TYPES).join(" / ")}）`;
   return "";
 }
 
@@ -241,7 +265,7 @@ export async function slice(src: string, o: SliceOptions, env: SliceEnv): Promis
   if (bad) throw new Error(bad);
   if (await (env.isOpen ?? studioRunning)()) throw new Error("Bambu Studio 现在开着（或者上次切片残留的 bambu-studio 进程还在）：开着的时候命令行切片会被它接走，一直卡着出不来。请主人关掉 Bambu Studio 窗口（任务管理器里没有 bambu-studio.exe 了）再切。");
   const isStl = /\.stl$/i.test(src);
-  const info = isStl ? { bambu: false, printerModel: "", printerProfile: "", processProfile: "", layerHeight: "", filaments: [] } as ProjectInfo : projectInfo(src);
+  const info = isStl ? { bambu: false, printerModel: "", printerProfile: "", processProfile: "", layerHeight: "", bedType: "", filaments: [] } as ProjectInfo : projectInfo(src);
   const plate = Math.max(1, Math.round(o.plate ?? 1));
   const work = fs.mkdtempSync(path.join(os.tmpdir(), "kagura-slice-"));
   const warnings: string[] = [];

@@ -2,6 +2,7 @@
 // 打印机的 FTP 是「隐式 TLS」（990 端口，一连上就是 TLS，不是先明文再 AUTH），用户名 bblp、密码 = 访问码；
 // 数据通道也要 TLS，而且要**复用控制通道的 TLS 会话**（不复用有的机型会拒绝）。和 MQTT 一样最高 TLS 1.2。
 // 只实现用得到的：登录、被动模式、LIST、STOR。没在真机上验证过（写的时候没有打印机）。
+import fs from "node:fs";
 import tls from "node:tls";
 import type { Duplex, Readable } from "node:stream";
 import { TLS_MAX } from "./bambu.ts";
@@ -121,6 +122,23 @@ export class Ftps {
     await new Promise<void>((resolve) => { d.on("data", (c: Buffer) => chunks.push(c)); d.once("end", resolve); d.once("close", resolve); d.once("error", () => resolve()); });
     if (r.code < 200) await this.reply();           // 150 之后还有一条 226
     return parseList(Buffer.concat(chunks).toString("utf8"));
+  }
+
+  /** 下载到本地文件（开打打印机上已有的文件前，拿回来检查）；超过 maxBytes 就停 */
+  async download(remote: string, dest: string, maxBytes = 300 * 1024 * 1024): Promise<number> {
+    const { d, r } = await this.withData(`RETR ${remote}`, "下载");
+    const out = fs.createWriteStream(dest);
+    let got = 0;
+    try {
+      await new Promise<void>((resolve, reject) => {
+        d.on("data", (c: Buffer) => { got += c.length; if (got > maxBytes) { d.destroy(); reject(new Error(`文件太大（超过 ${Math.round(maxBytes / 1048576)}MB）`)); return; } out.write(c); });
+        d.once("error", reject);
+        d.once("end", resolve);
+        d.once("close", resolve);
+      });
+    } finally { await new Promise<void>((ok) => out.end(ok)); }
+    if (r.code < 200) await this.expect(await this.reply(), 226, "下载到一半出错了");
+    return got;
   }
 
   /** 上传；onProgress 报已发的字节数 */

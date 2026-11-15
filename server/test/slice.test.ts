@@ -7,7 +7,7 @@ import { describe, it, expect } from "vitest";
 import { tmpdir } from "./helpers.ts";
 import { zip } from "../src/util/zip.ts";
 import { projectInfo, sliceInfo, modelMatches, readZipEntry, fmtSeconds, startCheck, tempProblems } from "../src/printer/threemf.ts";
-import { slice, overrides, checkOptions, findStudio, Profiles } from "../src/printer/slice.ts";
+import { slice, overrides, checkOptions, findStudio, Profiles, plateValue } from "../src/printer/slice.ts";
 
 const SLICE_INFO = `<?xml version="1.0" encoding="UTF-8"?>
 <config>
@@ -208,6 +208,13 @@ describe("切片", () => {
     expect(startCheck("G28 ; home\nG1 E-2 ; 回抽不算\nG1 X5 Y5 E1.5\nM109 S220\n")).toMatchObject({ extrudes: true, nozzleHeat: false, bedHeat: false, line: 3 });
     expect(startCheck("M104 S140 ; 低温擦嘴不算加热\nM140 S55\nG1 X1 E1\n")).toMatchObject({ nozzleHeat: false, bedHeat: true });
     expect(startCheck("G28\nG1 X1 Y1\n").extrudes).toBe(false);
+  });
+
+  it("打印板类型：键 / 官方名字 / 中文都认；写进 --curr-bed-type；认不出的挡掉", () => {
+    expect(["textured", "Textured PEI Plate", "纹理 PEI", "光面", "smooth", "低温板", "supertack", "工程板"].map(plateValue)).toEqual(["Textured PEI Plate", "Textured PEI Plate", "Textured PEI Plate", "High Temp Plate", "High Temp Plate", "Cool Plate", "Supertack Plate", "Engineering Plate"]);
+    expect(plateValue("")).toBe("");
+    expect(overrides({ plate_type: "smooth" })).toEqual(["--curr-bed-type=High Temp Plate"]);
+    expect(checkOptions({ plate_type: "木板" })).toContain("打印板类型认不出");
   });
 
   it("温度检查：料和喷嘴温度对不上、超过喷嘴 / 热床上限的拦下；只看这一盘用到的料；正常的不报", () => {

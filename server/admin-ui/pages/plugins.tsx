@@ -130,7 +130,8 @@ const PRINTER_TEMPLATE = {
   command: "kagura", args: ["mcp", "bambu-printer"], notify: true, timeout: 600,
   description: "家里的拓竹 3D 打印机",
   // BAMBU_CONTROL：0 = 只看；1 = 还能暂停 / 停止 / 发文件去打印（打印机要开「仅局域网模式」+「开发者模式」）
-  env: { BAMBU_NAME: "P2S", BAMBU_MODEL: "P2S", BAMBU_HOST: "打印机的 IP", BAMBU_SERIAL: "序列号", BAMBU_ACCESS_CODE: "访问码", BAMBU_CONTROL: "0" },
+  // BAMBU_PLATE：打印机上放的打印板（textured 纹理 PEI / smooth 光面 PEI / cool 低温板 / engineering 工程板 / supertack），切片按它切
+  env: { BAMBU_NAME: "P2S", BAMBU_MODEL: "P2S", BAMBU_HOST: "打印机的 IP", BAMBU_SERIAL: "序列号", BAMBU_ACCESS_CODE: "访问码", BAMBU_CONTROL: "0", BAMBU_PLATE: "textured" },
   ownerOnly: ["printer_print", "printer_control", "printer_slice"],
 };
 /** 自带的 Blender 建模 MCP 服务器（后台运行，不用开着 Blender） */

@@ -60,6 +60,8 @@ export interface ProjectInfo {
   printerProfile: string;
   processProfile: string;
   layerHeight: string;
+  /** 打印板类型（curr_bed_type，比如 Textured PEI Plate）；没写是空 */
+  bedType: string;
   filaments: { type: string; color: string; profile: string }[];
 }
 
@@ -68,11 +70,11 @@ const arr = (v: unknown): string[] => (Array.isArray(v) ? v.map(String) : typeof
 export function projectInfo(file: string): ProjectInfo {
   let j: any = null;
   try { const b = readZipEntry(file, "Metadata/project_settings.config"); if (b) j = JSON.parse(b.toString("utf8")); } catch { j = null; }
-  if (!j || typeof j !== "object") return { bambu: false, printerModel: "", printerProfile: "", processProfile: "", layerHeight: "", filaments: [] };
+  if (!j || typeof j !== "object") return { bambu: false, printerModel: "", printerProfile: "", processProfile: "", layerHeight: "", bedType: "", filaments: [] };
   const types = arr(j.filament_type), colors = arr(j.filament_colour), ids = arr(j.filament_settings_id);
   return {
     bambu: true, printerModel: String(j.printer_model ?? ""), printerProfile: String(j.printer_settings_id ?? ""),
-    processProfile: String(j.print_settings_id ?? ""), layerHeight: String(j.layer_height ?? ""),
+    processProfile: String(j.print_settings_id ?? ""), layerHeight: String(j.layer_height ?? ""), bedType: String(j.curr_bed_type ?? ""),
     filaments: types.map((t, i) => ({ type: t, color: colors[i] ?? "", profile: ids[i] ?? "" })),
   };
 }
