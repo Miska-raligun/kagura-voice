@@ -13,6 +13,7 @@ import type { Readable, Writable } from "node:stream";
 import { BambuPrinter, describeStatus, fmtDuration, type Dial, type PrinterEvent, type PrinterStatus } from "./bambu.ts";
 import { CONTROL_TOOLS, PrinterControl } from "./control.ts";
 import type { FtpDial } from "./ftps.ts";
+import { findFfmpeg, takeSnapshot } from "./camera.ts";
 
 /** 通知的句子（系统直接写，不过模型） */
 export function eventText(name: string, e: PrinterEvent): string {
@@ -51,6 +52,12 @@ const TOOLS = [
     description: "看家里 3D 打印机现在的情况：在不在打印、打的是什么、进度、还要多久、温度、料还剩多少、有没有报错。问到打印机的事先看一眼再答，别凭之前的印象说。"
       + "打完、失败、暂停时会自动通知主人，不用你盯着。",
     inputSchema: { type: "object", properties: { raw: { type: "boolean", description: "true = 返回打印机发来的原始数据（排查显示不对时用，平时不要）" } } },
+  },
+  {
+    name: "printer_snapshot", title: "用打印机的摄像头拍一张",
+    description: "用打印机机内的摄像头拍一张照片（看打印进度、看打完的成品、看热床上有没有东西）。图片直接给你看；要给主人看就用 send_file 发回复里的那个路径。"
+      + "需要这台电脑上装了 ffmpeg；拍不到时照返回的提示告诉主人。别频繁拍（每次要连一下摄像头，十几秒）。",
+    inputSchema: { type: "object", properties: {} },
   },
   {
     name: "printer_retrust", title: "重新信任打印机",
@@ -146,6 +153,19 @@ export function startBambuMcp(o: BambuMcpOpts): { close(): void; printer: BambuP
       case "tools/call": {
         const tool = m.params?.name, args = m.params?.arguments ?? {};
         if (tool === "printer_status") return text(statusText(args.raw === true));
+        if (tool === "printer_snapshot") {
+          if (missing.length) return text(statusText(false), true);
+          const ffmpeg = findFfmpeg(o.env);
+          if (!ffmpeg || !fs.existsSync(ffmpeg)) return text("这台电脑上没找到 ffmpeg（拍照要用它把摄像头的视频解成图片）。让主人装一个：Windows 在命令行运行 winget install ffmpeg（macOS：brew install ffmpeg），装完不用重启 Kagura；装在别处的话在 MCP 配置的 env 里填 BAMBU_FFMPEG（ffmpeg.exe 的完整路径）。", true);
+          const t0 = Date.now();
+          takeSnapshot({ ffmpeg, host, code, dir: path.join(stateDir, "snapshots"), name })
+            .then((file) => {
+              log(`[${name}] 📷 拍了一张（${Math.round((Date.now() - t0) / 1000)} 秒）→ ${file}`);
+              ok({ content: [{ type: "image", data: fs.readFileSync(file).toString("base64"), mimeType: "image/jpeg" }, { type: "text", text: `${name} 机内摄像头刚拍的：${file}（要给主人看就用 send_file 发这个路径）` }] });
+            })
+            .catch((e) => { log(`[${name}] 📷 没拍到：${String(e?.message ?? e).split("\n")[0]}`); text(String(e?.message ?? e), true); });
+          return;
+        }
         if (tool === "printer_retrust") {
           if (missing.length) return text(statusText(false), true);
           if (!printer!.error.startsWith("证书")) return text("现在不是证书的问题，不用重新信任。" + statusText(false));

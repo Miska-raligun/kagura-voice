@@ -250,6 +250,8 @@ Blender 不在默认位置（Windows 的 `C:\Program Files\Blender Foundation\` 
 `cad_guide`（约定、常用写法、打印规矩、配合尺寸、自查清单、示例；后面几节和 Blender 那个是同一份）、`cad_preview`（看现成的 STL，不需要 Python）。
 预览图在服务器里自己画（不需要 Blender）。文件在 `<数据目录>/models/<名字>/`。
 
+**用打印机的摄像头拍照**：她会用 `printer_snapshot` 拍一张机内的照片（看进度、看成品），要给你看就发过来。需要这台电脑上装 ffmpeg（Windows：命令行运行 `winget install ffmpeg`），装在别处就在 env 里填 `BAMBU_FFMPEG`。拍不到的话，在打印机的网络设置里打开「局域网模式直播」（LAN Only Liveview）。
+
 **型号**：`BAMBU_MODEL` 写 Bambu Studio 里打印机名去掉「Bambu Lab」和喷嘴的那段（`P2S`、`P1S`、`X1 Carbon`、`A1 mini`…），不填默认 `P2S`。切片按它选配置，发打印前按它核对文件。
 
 **脱离 Kagura 单独用**：它是一个独立进程（Kagura 用 `kagura mcp bambu-printer` 拉起，走标准输入输出的 MCP 协议），任何支持 MCP 的客户端（Claude Desktop、Cursor、pi…）都能用，
