@@ -95,6 +95,8 @@ export class Profiles {
     const out: Record<string, unknown> = {};
     for (const j of chain) Object.assign(out, j);
     out.name = name;
+    // 命令行靠 type 认这份是机器 / 工艺 / 耗材（没有就报「unknown config type … in load-settings」）
+    out.type = kind;
     out.from = "User";
     out.inherits = name;
     delete out.instantiation;
@@ -215,6 +217,10 @@ function run(bin: string, args: string[], cwd: string, timeoutMs: number): Promi
   });
 }
 
+/** 去掉工艺 / 耗材里和机器重复的键时要留下的：配置自己的身份（type 尤其不能丢——机器配置里也有 type，
+ *  以前一起删了，命令行认不出工艺那份：LRN 2026-11-15「unknown config type of file …process.json in load-settings」） */
+const KEEP_KEYS = ["name", "type", "from", "inherits", "version", "compatible_printers"];
+
 /** 切一个文件。成功返回切好的文件（已核对是给这台打印机切的）；失败抛错，错误信息是给人看的 */
 export async function slice(src: string, o: SliceOptions, env: SliceEnv): Promise<SliceResult> {
   const studio = findStudio(env);
@@ -253,7 +259,7 @@ export async function slice(src: string, o: SliceOptions, env: SliceEnv): Promis
       const m = pr.flatten("machine", machine);
       machineCfg = m;
       // 社区的经验：命令行会把每个加载文件里的每个键都用上，工艺 / 耗材里和机器重复的键去掉，免得盖掉机器的
-      const strip = (j: Record<string, unknown>) => { for (const k of Object.keys(m)) if (!["name", "from", "inherits", "compatible_printers"].includes(k)) delete j[k]; return j; };
+      const strip = (j: Record<string, unknown>) => { for (const k of Object.keys(m)) if (!KEEP_KEYS.includes(k)) delete j[k]; return j; };
       args.push("--load-settings", `${write("machine.json", m)};${write("process.json", strip(pr.flatten("process", proc)))}`);
       args.push("--load-filaments", fils.map((n, i) => write(`filament${i + 1}.json`, strip(pr.flatten("filament", n)))).join(";"));
       warnings.push(info.bambu ? `这个文件原本是给「${info.printerModel || info.printerProfile || "别的打印机"}」配的，已经换成 ${env.model} 的系统配置（${proc}；料：${[...new Set(fils)].join("、")}）重新切。原作者调过的参数没有带过来。`
