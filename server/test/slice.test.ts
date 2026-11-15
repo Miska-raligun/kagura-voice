@@ -6,7 +6,7 @@ import { readStl } from "../src/cad/raster.ts";
 import { describe, it, expect } from "vitest";
 import { tmpdir } from "./helpers.ts";
 import { zip } from "../src/util/zip.ts";
-import { projectInfo, sliceInfo, modelMatches, readZipEntry, fmtSeconds, startCheck } from "../src/printer/threemf.ts";
+import { projectInfo, sliceInfo, modelMatches, readZipEntry, fmtSeconds, startCheck, tempProblems } from "../src/printer/threemf.ts";
 import { slice, overrides, checkOptions, findStudio, Profiles } from "../src/printer/slice.ts";
 
 const SLICE_INFO = `<?xml version="1.0" encoding="UTF-8"?>
@@ -208,6 +208,22 @@ describe("切片", () => {
     expect(startCheck("G28 ; home\nG1 E-2 ; 回抽不算\nG1 X5 Y5 E1.5\nM109 S220\n")).toMatchObject({ extrudes: true, nozzleHeat: false, bedHeat: false, line: 3 });
     expect(startCheck("M104 S140 ; 低温擦嘴不算加热\nM140 S55\nG1 X1 E1\n")).toMatchObject({ nozzleHeat: false, bedHeat: true });
     expect(startCheck("G28\nG1 X1 Y1\n").extrudes).toBe(false);
+  });
+
+  it("温度检查：料和喷嘴温度对不上、超过喷嘴 / 热床上限的拦下；只看这一盘用到的料；正常的不报", () => {
+    const dir = tmpdir("temps");
+    const mk = (settings: any, used?: number[]) => {
+      const f = path.join(dir, `${Math.random()}.3mf`);
+      const info = used ? `<config><plate><metadata key="index" value="1"/>${used.map((id) => `<filament id="${id}" type="X" color="#fff" used_g="1"/>`).join("")}</plate></config>` : "";
+      fs.writeFileSync(f, zip([{ name: "Metadata/project_settings.config", data: Buffer.from(JSON.stringify(settings)) }, ...(info ? [{ name: "Metadata/slice_info.config", data: Buffer.from(info) }] : [])]));
+      return f;
+    };
+    const ok = { filament_type: ["PLA", "PETG"], nozzle_temperature: ["220", "255"], nozzle_temperature_initial_layer: ["220", "250"], hot_plate_temp: ["55", "70"], textured_plate_temp_initial_layer: ["65", "70"] };
+    expect(tempProblems(mk(ok), 1)).toEqual([]);
+    expect(tempProblems(mk({ ...ok, nozzle_temperature: ["260", "255"] }), 1)).toEqual(["第 1 种料是 PLA，喷嘴却是 220~260℃（PLA 一般 180~245℃）"]);
+    expect(tempProblems(mk({ ...ok, nozzle_temperature: ["220", "320"] }), 1)).toEqual(["第 2 种料（PETG）喷嘴 320℃，超过打印机上限 300℃"]);
+    expect(tempProblems(mk({ ...ok, hot_plate_temp: ["55", "120"] }), 1)).toEqual(["热床温度设到了 120℃（hot_plate_temp），超过上限 110℃"]);
+    expect(tempProblems(mk({ ...ok, nozzle_temperature: ["220", "200"] }, [1]), 1)).toEqual([]);          // 第 2 种料这一盘没用到
   });
 
   it("切出来的文件启动代码不对（不加热就挤料）：不交出去", async () => {

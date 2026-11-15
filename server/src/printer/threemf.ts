@@ -121,12 +121,49 @@ export function startCheck(gcode: string): StartCheck {
   return { extrudes: false, nozzleHeat, bedHeat, line: n };
 }
 
-/** 切好的文件里第 N 盘的 G-code 开头对不对；不对返回给人看的原因，对 / 读不出（太大）返回空 */
+/** 喷嘴温度的合理范围（℃，按料的类型前缀认；宽一点，只拦明显不对的：配错料、配置拼错） */
+const NOZZLE_RANGE: [RegExp, number, number][] = [
+  [/^PLA/, 180, 245], [/^PET/, 210, 280], [/^(ABS|ASA)/, 230, 290], [/^(TPU|TPE)/, 190, 250],
+  [/^(PA|PPA)/, 250, 300], [/^PC/, 250, 300], [/^PVA/, 180, 240], [/^HIPS/, 220, 260],
+];
+/** P2S 这档机器的上限（喷嘴 300℃、热床 110℃）：超过的配置一定是拼错了 */
+export const MAX_NOZZLE = 300, MAX_BED = 110;
+
+/** 切好的文件里自带的最终配置（project_settings.config）查温度：这一盘用到的每种料，喷嘴温度在不在那种料的范围里、有没有超上限；热床温度有没有超上限。
+ *  不看 G-code 里的温度——启动代码里有擦嘴用的 140 / 170℃ 这类中间步骤，看那个会误报 */
+export function tempProblems(file: string, plate: number): string[] {
+  let j: any = null;
+  try { const b = readZipEntry(file, "Metadata/project_settings.config"); if (b) j = JSON.parse(b.toString("utf8")); } catch { j = null; }
+  if (!j || typeof j !== "object") return [];
+  const types = arr(j.filament_type), noz = arr(j.nozzle_temperature), noz0 = arr(j.nozzle_temperature_initial_layer);
+  const used = sliceInfo(file).find((x) => x.plate === plate)?.filaments.map((f) => f.id - 1).filter((i) => i >= 0 && i < types.length);
+  const out: string[] = [];
+  for (const i of used?.length ? used : types.map((_, i) => i)) {
+    const type = String(types[i] ?? "").toUpperCase();
+    const temps = [noz[i], noz0[i]].map(Number).filter((x) => Number.isFinite(x) && x > 0);
+    if (!temps.length) continue;
+    const hi = Math.max(...temps), lo = Math.min(...temps);
+    const r = NOZZLE_RANGE.find(([re]) => re.test(type));
+    if (hi > MAX_NOZZLE) out.push(`第 ${i + 1} 种料（${type || "未知"}）喷嘴 ${hi}℃，超过打印机上限 ${MAX_NOZZLE}℃`);
+    else if (r && (lo < r[1] || hi > r[2])) out.push(`第 ${i + 1} 种料是 ${type}，喷嘴却是 ${lo === hi ? lo : `${lo}~${hi}`}℃（${type} 一般 ${r[1]}~${r[2]}℃）`);
+  }
+  for (const [k, v] of Object.entries(j)) {
+    if (!/_plate_temp(_initial_layer)?$/.test(k)) continue;
+    const hot = arr(v).map(Number).filter((x) => Number.isFinite(x) && x > MAX_BED);
+    if (hot.length) { out.push(`热床温度设到了 ${Math.max(...hot)}℃（${k}），超过上限 ${MAX_BED}℃`); break; }
+  }
+  return out;
+}
+
+/** 切好的文件第 N 盘能不能拿去打：启动代码（先加热再挤料）+ 温度。不对返回给人看的原因，对 / 读不出返回空 */
 export function startProblem(file: string, plate: number): string {
+  const probs: string[] = [];
   const g = readZipEntry(file, `Metadata/plate_${plate}.gcode`, 256 * 1024 * 1024);
-  if (!g) return "";
-  const c = startCheck(g.toString("latin1"));
-  if (!c.extrudes) return "";
-  const miss = [!c.nozzleHeat && "给喷嘴加热", !c.bedHeat && "给热床加热"].filter(Boolean);
-  return miss.length ? `第 ${plate} 盘的 G-code 在第一次挤料（第 ${c.line} 行）之前没有${miss.join("、")}——启动代码不对，发出去打印机会空走、挤不出料（还可能刮板）` : "";
+  if (g) {
+    const c = startCheck(g.toString("latin1"));
+    const miss = [!c.nozzleHeat && "给喷嘴加热", !c.bedHeat && "给热床加热"].filter(Boolean);
+    if (c.extrudes && miss.length) probs.push(`第 ${plate} 盘的 G-code 在第一次挤料（第 ${c.line} 行）之前没有${miss.join("、")}——启动代码不对，发出去打印机会空走、挤不出料（还可能刮板）`);
+  }
+  probs.push(...tempProblems(file, plate));
+  return probs.join("；");
 }
