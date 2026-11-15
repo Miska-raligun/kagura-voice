@@ -623,7 +623,7 @@ CoreS3 (MicroPython) ──HTTP──▶ server/（TypeScript 单文件可执行
   别改坏的点：① 只认开了 `notify` 的服务器——别的服务器的日志（常有 error 级）不能变成打扰；② 每个服务器 10 分钟最多 `NOTIFY_MAX`（6）条、单条 500 字；
   ③ 开了 notify 的服务器要一直连着：连不上 / 断了 `retryLater`（10 秒起翻倍到 5 分钟），`disconnect` 里清定时器；别的服务器照旧「下次调用时重连」；
   ④ 管理界面服务器表的「测试通知」= `POST /api/admin/mcp/<名>/test-notify`，走的是同一条路。**以后想让某个外部东西主动说话，优先做成 MCP 服务器 + notify，别往核心里加模块。**
-- **mcp.json 直接改也生效**（`McpManager.watch`，LRN 2026-11-15，症状「她改了访问码，说要重启 Kagura 才能重新读配置」）：每 2 秒看一次文件，改了（且是合法 JSON）就 `reload`；「重连」也先按文件重新加载。改到一半的坏 JSON 不动现在的连接（不然 `readConfig` 返回空 = 全断开）。
+- **mcp.json 直接改也生效**（`McpManager.watch`，LRN 2026-11-15，症状「她改了访问码，说要重启 Kagura 才能重新读配置」）：每 2 秒读一次文件、和上次加载的内容（`loadedText`）比，变了（且是合法 JSON）就 `reload`——**比内容不比修改时间**（`fs.watchFile` 的基准是异步取的，刚 watch 就改的那一下会漏，CI 上抓到过）；「重连」也先按文件重新加载。改到一半的坏 JSON 不动现在的连接（不然 `readConfig` 返回空 = 全断开）。
 - **自带的 MCP 服务器（`"command": "kagura"`，`cli.ts` 的 `mcp` 子命令）**：单文件可执行里没有 npx，自带的服务器由这个程序自己再起一份（`selfArgv`：SEA 是 exe 本身，node 跑脚本是 node + 脚本），
   对 McpManager 来说就是普通的 stdio 服务器，核心不 import 它（`cli.ts` 里动态 import）。**标准输出只能走协议**：子命令里别 `console.log`，日志写标准错误（管理界面看得到）。
   没在 Windows 托盘版（图形界面子系统的 exe 带管道当子进程）上验证过。
