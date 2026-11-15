@@ -111,6 +111,7 @@ export function createAgentSystem(cfg: Config, dirs: Dirs, fake: FakeLlm | null)
   runtime.addTools(sendTools());
   // 扩展（pi 格式，agent 也能自己写）与 MCP 服务器；启动后由 main 在后台加载 / 连接（startPlugins）
   const mcp = new McpManager(path.join(cfg.dataDir, "mcp.json"), { fetch: proxiedFetch, cwd: cfg.dataDir, version: VERSION, componentsDir: path.join(cfg.dataDir, "mcp_components") });
+  mcp.watch();
   // 自带 MCP 组件单独更新（KAGURA_COMPONENTS_API：测试用本地假发布源）
   const components = new ComponentUpdater(path.join(cfg.dataDir, "mcp_components"), { fetch: proxiedFetch, mirrors: cfg.updateMirrors, api: process.env.KAGURA_COMPONENTS_API || undefined });
   const extensions = new Extensions(dirs.extensions, registry);

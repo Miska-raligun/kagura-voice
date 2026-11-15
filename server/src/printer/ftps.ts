@@ -8,6 +8,13 @@ import { TLS_MAX } from "./bambu.ts";
 
 export interface FtpEntry { name: string; size: number; dir: boolean; date: string }
 /** 连一条通道；session = 复用哪条连接的 TLS 会话（数据通道用） */
+/** 打印机拒绝的话翻成人话：553 / 550 多半是存储不让写（没插卡、卡满、写保护），不是我们这边的问题 */
+export function denied(what: string, text: string): string {
+  const last = text.split("\n").pop() ?? text;
+  if (what === "传" && /^55[03]/.test(last)) return `打印机不让写文件（${last}）。多半是打印机的存储没准备好：没插存储卡 / 卡满了 / 卡写保护或格式不认，打印机屏幕上看看存储状态；也可以用 Bambu Studio 的「发送到打印机」试一次——它也失败就是打印机那边的问题`;
+  return `${what === "传" ? "传不上去" : `${what}不了`}（${last}）`;
+}
+
 export type FtpDial = (host: string, port: number, session?: Buffer) => Promise<{ sock: Duplex; fingerprint: string; session?: Buffer }>;
 
 export const ftpsDial: FtpDial = (host, port, session) => new Promise((resolve, reject) => {
@@ -94,30 +101,31 @@ export class Ftps {
     return r;
   }
 
-  /** 被动模式开一条数据通道（地址用控制通道那个，回复里的 IP 不可信；TLS 会话复用控制通道的） */
-  private async data(): Promise<Duplex> {
-    const r = await this.cmd("PASV");
-    const m = /\((\d+),(\d+),(\d+),(\d+),(\d+),(\d+)\)/.exec(r.text);
-    if (r.code !== 227 || !m) throw new Error(`开不了数据通道（${r.text}）`);
-    return (await (this.o.dial ?? ftpsDial)(this.o.host, Number(m[5]) * 256 + Number(m[6]), this.session)).sock;
+  /** 被动模式开一条数据通道并发命令。地址用控制通道那个（回复里的 IP 不可信），TLS 会话复用控制通道的。
+   *  **先发命令、再等数据通道握手完成**（LRN 2026-11-15，症状「列文件 / 传文件都是『连接超时』」）：打印机（vsftpd）要收到 LIST / STOR
+   *  才去接这条连接、开始 TLS 握手；以前先等握手再发命令，两边互等到超时。现在 TCP 先连上、命令马上发，握手和等回复同时进行 */
+  private async withData(command: string, what: string): Promise<{ d: Duplex; r: { code: number; text: string } }> {
+    const p = await this.cmd("PASV");
+    const m = /\((\d+),(\d+),(\d+),(\d+),(\d+),(\d+)\)/.exec(p.text);
+    if (p.code !== 227 || !m) throw new Error(`开不了数据通道（${p.text}）`);
+    const dial = (this.o.dial ?? ftpsDial)(this.o.host, Number(m[5]) * 256 + Number(m[6]), this.session);
+    dial.catch(() => {});                           // 命令被拒时没人等它，别报未处理的错误
+    const r = await this.cmd(command);
+    if (r.code >= 400) { dial.then((x) => x.sock.destroy(), () => {}); throw new Error(denied(what, r.text)); }
+    return { d: (await dial).sock, r };
   }
 
   async list(dir = "/"): Promise<FtpEntry[]> {
-    const d = await this.data();
+    const { d, r } = await this.withData(`LIST ${dir}`, `列 ${dir}`);
     const chunks: Buffer[] = [];
-    const done = new Promise<void>((resolve) => { d.on("data", (c: Buffer) => chunks.push(c)); d.once("end", resolve); d.once("close", resolve); d.once("error", () => resolve()); });
-    const r = await this.cmd(`LIST ${dir}`);
-    if (r.code >= 400) { d.destroy(); throw new Error(`列不出 ${dir}（${r.text.split("\n").pop()}）`); }
-    await done;
+    await new Promise<void>((resolve) => { d.on("data", (c: Buffer) => chunks.push(c)); d.once("end", resolve); d.once("close", resolve); d.once("error", () => resolve()); });
     if (r.code < 200) await this.reply();           // 150 之后还有一条 226
     return parseList(Buffer.concat(chunks).toString("utf8"));
   }
 
   /** 上传；onProgress 报已发的字节数 */
   async upload(remote: string, src: Readable, onProgress?: (n: number) => void): Promise<void> {
-    const d = await this.data();
-    const r = await this.cmd(`STOR ${remote}`);
-    if (r.code >= 400) { d.destroy(); throw new Error(`传不上去（${r.text.split("\n").pop()}）`); }
+    const { d, r } = await this.withData(`STOR ${remote}`, "传");
     let sent = 0;
     await new Promise<void>((resolve, reject) => {
       src.on("data", (c: Buffer) => { sent += c.length; onProgress?.(sent); });
