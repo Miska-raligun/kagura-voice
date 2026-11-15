@@ -919,7 +919,8 @@ def test_updated_component_is_used_and_can_be_reset(a):
     import hashlib
     d = a.data / "mcp_components"
     d.mkdir(exist_ok=True)
-    (d / "build123d.cjs").write_text(_FAKE_COMPONENT)
+    # 写字节：write_text 在 Windows 上会把 \n 换成 \r\n，和记下的 sha256 对不上（加载器会当成被改过、照样用自带的）
+    (d / "build123d.cjs").write_bytes(_FAKE_COMPONENT.encode())
     (d / "build123d.json").write_text(json.dumps({"sha256": hashlib.sha256(_FAKE_COMPONENT.encode()).hexdigest(), "stamp": 9999999999}))
     try:
         cfg = {"mcpServers": {"cad": {"command": "kagura", "args": ["mcp", "build123d"]}}}
@@ -930,10 +931,10 @@ def test_updated_component_is_used_and_can_be_reset(a):
         comp = {c["name"]: c for c in a.get("/api/admin/mcp/components").json()["components"]}
         assert comp["build123d"]["active"] == "installed" and comp["blender"]["active"] == "builtin"
         # 文件被改过：不用它，照常用自带的
-        (d / "build123d.cjs").write_text(_FAKE_COMPONENT + "// 改过")
+        (d / "build123d.cjs").write_bytes((_FAKE_COMPONENT + "// 改过").encode())
         srv = a.post("/api/admin/mcp/cad/reconnect", json={}).json()["servers"][0]
         assert [t["name"] for t in srv["tools"]] == ["cad_build", "cad_guide", "cad_preview"]
-        (d / "build123d.cjs").write_text(_FAKE_COMPONENT)
+        (d / "build123d.cjs").write_bytes(_FAKE_COMPONENT.encode())
         assert [t["name"] for t in a.post("/api/admin/mcp/cad/reconnect", json={}).json()["servers"][0]["tools"]] == ["updated_tool"]
         # 用回自带的：删掉下载的，用到它的服务器自动重连
         r = a.post("/api/admin/mcp/components/build123d/reset", json={}).json()
