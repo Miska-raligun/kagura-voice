@@ -291,15 +291,43 @@ export class McpManager {
     if (resetState && s.state === "connected") s.state = "disabled";
   }
 
+  /** mcp.json 被直接改了（她用 write_file / edit_file 改、主人用编辑器改）也生效，不用重启 Kagura（LRN 2026-11-15，症状「她改了访问码，说要重启 Kagura 才能重新读配置」）。
+   *  改到一半不是合法 JSON 的不管，等改完再说 */
+  watch() {
+    if (this.watcher) return;
+    let timer: NodeJS.Timeout | null = null;
+    this.watcher = fs.watchFile(this.file, { interval: 2000 }, (cur, prev) => {
+      if (cur.mtimeMs === prev.mtimeMs) return;
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => {
+        try { JSON.parse(fs.readFileSync(this.file, "utf8")); } catch { return; }
+        console.log("[mcp] 🔄 mcp.json 改了，重新加载");
+        this.reload().catch((e) => console.log(`[mcp] ⚠️  ${e.message}`));
+      }, 500);
+      timer.unref?.();
+    });
+    this.watcher.unref?.();
+  }
+  private watcher: fs.StatWatcher | null = null;
+
   async reconnect(name: string) {
+    // 先按文件里现在的配置来（文件被直接改过的话，改了的那个服务器这就重建、重连了，不用再连一遍）；文件不是合法 JSON 就不动（不然全断开）
+    const before = this.servers.get(name);
+    let parsed = true;
+    try { if (fs.existsSync(this.file)) JSON.parse(fs.readFileSync(this.file, "utf8")); } catch { parsed = false; }
+    if (parsed) await this.reload();
     const s = this.servers.get(name);
+    if (s && s !== before) return;
     if (!s) throw new Error(`没有 MCP 服务器 ${name}`);
     await this.disconnect(s);
     if (s.cfg.enabled === false) { s.state = "disabled"; return; }
     await this.connect(s);
   }
 
-  async closeAll() { for (const s of this.servers.values()) await this.disconnect(s); }
+  async closeAll() {
+    if (this.watcher) { fs.unwatchFile(this.file); this.watcher = null; }
+    for (const s of this.servers.values()) await this.disconnect(s);
+  }
 
   status() {
     return [...this.servers.values()].map((s) => ({

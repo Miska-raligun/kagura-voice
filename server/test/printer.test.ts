@@ -354,8 +354,10 @@ describe("MCP 服务器", () => {
   });
 });
 
-/** 假的打印机文件服务：明文（测试里不走 TLS），够 Ftps 用的那几条命令 */
-async function fakeFtp(files: Record<string, Buffer> = {}) {
+/** 假的打印机文件服务：明文（测试里不走 TLS），够 Ftps 用的那几条命令。
+ *  照真打印机（vsftpd）的样子：数据通道连上之后，要等控制通道收到 LIST / STOR 才开始「握手」（这里用先发一个字节 H 代替 TLS 握手）——
+ *  先等握手完成再发命令的客户端会和它互等到超时（LRN 2026-11-15）。readonly = 存储不让写（STOR 回 553） */
+async function fakeFtp(files: Record<string, Buffer> = {}, o: { readonly?: boolean } = {}) {
   const stored: Record<string, Buffer> = { ...files };
   const log: string[] = [];
   const servers: net.Server[] = [];
@@ -384,11 +386,14 @@ async function fakeFtp(files: Record<string, Buffer> = {}) {
           if (dir === "/cache" && !names.length) { c.write("550 no such dir\r\n"); (await data!).destroy(); continue; }
           c.write("150 here\r\n");
           const s = await data!;
+          s.write("H");
           s.end(names.map((n) => `-rw-rw-rw- 1 root root ${String(stored[n].length).padStart(8)} Nov 14 09:30 ${path.posix.basename(n)}`).join("\r\n") + "\r\ndrwxr-xr-x 2 root root 0 Nov 01 00:00 cache\r\n");
           c.write("226 done\r\n");
         } else if (cmd === "STOR") {
+          if (o.readonly) { c.write("553 Could not create file.\r\n"); (await data!).destroy(); continue; }
           c.write("150 go\r\n");
           const s = await data!; const chunks: Buffer[] = [];
+          s.write("H");
           s.on("data", (x) => chunks.push(x)); s.resume();
           s.once("close", () => { stored[arg] = Buffer.concat(chunks); c.write("226 stored\r\n"); });
         } else if (cmd === "QUIT") c.end("221 bye\r\n");
@@ -400,12 +405,33 @@ async function fakeFtp(files: Record<string, Buffer> = {}) {
   await new Promise<void>((r) => ctl.listen(0, "127.0.0.1", () => r()));
   return { port: (ctl.address() as net.AddressInfo).port, stored, log, close: () => { ctl.close(); for (const d of servers) d.close(); } };
 }
-const plainFtp = (fp = "FP1"): FtpDial => (host, port) => new Promise((resolve, reject) => { const s = net.connect(port, host, () => resolve({ sock: s, fingerprint: fp })); s.once("error", reject); });
+/** 控制通道连上就算好；数据通道（带 session 的那种）要等服务器先发来「握手」字节 H 才算好，同 TLS */
+const plainFtp = (fp = "FP1"): FtpDial => (host, port, session) => new Promise((resolve, reject) => {
+  const s = net.connect(port, host, () => { if (!session) resolve({ sock: s, fingerprint: fp, session: Buffer.from("S") }); });
+  s.once("error", reject);
+  if (session) {
+    const t = setTimeout(() => { s.destroy(); reject(new Error("连接超时")); }, 3000);
+    s.once("readable", () => { const h = s.read(1); clearTimeout(t); if (String(h) !== "H") return reject(new Error("没握手")); resolve({ sock: s, fingerprint: fp }); });
+  }
+});
 
 describe("文件服务（FTPS）与切片文件", () => {
   it("列表解析：名字里有空格、目录、大小", () => {
     expect(parseList("-rw-rw-rw- 1 root root   123456 Nov 14 09:30 小船 final.gcode.3mf\r\ndrwxr-xr-x 2 root root 0 Nov 01 00:00 cache\r\ntotal 3\r\n")).toEqual([
       { name: "小船 final.gcode.3mf", size: 123456, dir: false, date: "Nov 14 09:30" }, { name: "cache", size: 0, dir: true, date: "Nov 01 00:00" }]);
+  });
+
+  it("打印机存储不让写（553）：马上说清楚多半是存储卡的问题，不卡住、不说成超时", async () => {
+    const srv = await fakeFtp({}, { readonly: true });
+    try {
+      const f = await Ftps.open({ host: "127.0.0.1", port: srv.port, password: CODE, dial: plainFtp(), fingerprint: "FP1" });
+      const { Readable } = await import("node:stream");
+      const t0 = Date.now();
+      await expect(f.upload("/x.gcode.3mf", Readable.from([Buffer.from("x")]))).rejects.toThrow(/打印机不让写文件（553 Could not create file\.）。多半是打印机的存储没准备好[\s\S]*Bambu Studio/);
+      expect(Date.now() - t0).toBeLessThan(1000);
+      expect((await f.list("/")).map((x) => x.name)).toEqual(["cache"]);           // 之后照样能用
+      f.close();
+    } finally { srv.close(); }
   });
 
   it("登录、列文件、上传（数据通道连的是控制通道那个地址，不信回复里的 IP）；访问码不对、证书不对都说清楚", async () => {

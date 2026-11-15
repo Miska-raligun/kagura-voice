@@ -97,6 +97,27 @@ describe("MCP 管理（真起一个 stdio 服务器）", () => {
     for (const o of [{ purpose: "task" }, { purpose: "cron" }, { purpose: "heartbeat" }, { kind: "sub" }, { channel: "a2a" }]) expect(names(o)).toEqual(["mcp__p__echo", "mcp__p__secret"]);
   });
 
+  it("mcp.json 被直接改了（她用文件工具改、主人用编辑器改）：重连按新配置，或者等一会儿自己重新加载；改坏的 JSON 不动现在的连接", async () => {
+    const dir = tmpdir("mcp");
+    const file = path.join(dir, "mcp.json");
+    mgr = new McpManager(file, { cwd: dir });
+    const cfg = (p: string) => JSON.stringify({ mcpServers: { echo: { command: process.execPath, args: [FIXTURE], env: { ECHO_PREFIX: p } } } });
+    await mgr.writeConfigText(cfg("A:"));
+    const echo = async () => text(await mgr!.tools()(scopeOf(true), { id: "main" } as any).find((t) => t.name === "mcp__echo__echo")!.execute("1", { text: "hi" }) as any);
+    expect(await echo()).toBe("A:hi");
+    fs.writeFileSync(file, cfg("B:"));                         // 直接改文件（换访问码那种）
+    await mgr.reconnect("echo");
+    expect(await echo()).toBe("B:hi");
+    fs.writeFileSync(file, "{ 改到一半");                     // 坏的 JSON：重连照旧，不会把服务器都断开
+    await mgr.reconnect("echo");
+    expect(mgr.status()[0].state).toBe("connected");
+    mgr.watch();
+    fs.writeFileSync(file, cfg("C:"));
+    const t0 = Date.now();
+    while (Date.now() - t0 < 8000) { await new Promise((r) => setTimeout(r, 300)); if (mgr.status()[0]?.state === "connected" && (await echo().catch(() => "")) === "C:hi") break; }
+    expect(await echo()).toBe("C:hi");
+  }, 15_000);
+
   it("自带的服务器：command 写 kagura = 用这个程序自己起（参数接在后面）", async () => {
     const dir = tmpdir("mcp");
     mgr = new McpManager(path.join(dir, "mcp.json"), { cwd: dir, self: [process.execPath, FIXTURE] });
