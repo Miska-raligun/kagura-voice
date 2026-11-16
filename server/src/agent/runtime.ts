@@ -458,6 +458,46 @@ export function silentMsg(m: any): boolean {
 }
 export const NUDGE_TEXT = "[系统] 你刚才只在心里想了，没有说出来，主人什么都没收到。现在直接把要对主人说的话写出来（不用再想，也不要再调工具）。";
 
+/**
+ * 回复写到一半撞上输出上限（借鉴 deepseek-ai/chat-demo 的「继续生成」，2026-11）：最后一条助手消息 stopReason = length、
+ * 写了正文、没调工具。以前这半截原样交出去，主人收到的话断在半句上。现在在同一轮里让她从断开处接着写，最多 CONTINUE_MAX 次，
+ * 接上的正文并回那条消息（催的那句不进历史）。chat-demo 用的是 Anthropic 接口的「末尾助手消息 = 续写前缀」，
+ * OpenAI 兼容接口各家不一（DeepSeek 要 beta 地址 + prefix 字段），所以这里用一句系统提示，哪家都能用。
+ * 调工具时被截断的不接（工具参数写了一半，接不上）。
+ */
+export const CONTINUE_MAX = 2;
+export function truncatedMsg(m: any): boolean {
+  if (m?.role !== "assistant" || m.stopReason !== "length") return false;
+  const c = m.content ?? [];
+  return !c.some((x: any) => x.type === "toolCall") && c.some((x: any) => x.type === "text" && String(x.text).trim());
+}
+export function continueText(m: any): string {
+  const text = (m?.content ?? []).filter((x: any) => x.type === "text").map((x: any) => x.text).join("");
+  const tail = Array.from(text.trimEnd()).slice(-30).join("");
+  return `[系统] 你上一条回复写到输出长度上限被截断了，最后几个字是「${tail}」。从断开的地方直接接着写，别重复已经写过的、别解释、别打招呼（不用再想，也不要调工具）。`;
+}
+function addUsage(a: any, b: any): any {
+  if (!a || !b) return a ?? b;
+  const n = (k: string) => (a[k] ?? 0) + (b[k] ?? 0);
+  const cost: any = {};
+  for (const k of new Set([...Object.keys(a.cost ?? {}), ...Object.keys(b.cost ?? {})])) cost[k] = (a.cost?.[k] ?? 0) + (b.cost?.[k] ?? 0);
+  return { ...a, input: n("input"), output: n("output"), cacheRead: n("cacheRead"), cacheWrite: n("cacheWrite"), totalTokens: n("totalTokens"), cost };
+}
+/** 截断的那条 + 「接着写」+ 接上的那条 → 一条（接上的又调了工具就不并，那句提示照常留在历史里） */
+export function mergeContinued(msgs: Message[]): Message[] {
+  const out = [...msgs];
+  for (let i = out.findIndex((m: any) => m.kcont); i >= 0; i = out.findIndex((m: any) => m.kcont)) {
+    const prev: any = out[i - 1], next: any = out[i + 1];
+    const { kcont, ...plain } = out[i] as any;
+    if (prev?.role === "assistant" && next?.role === "assistant" && !(next.content ?? []).some((c: any) => c.type === "toolCall")) {
+      const merged = { ...prev, content: [...prev.content, ...(next.content ?? []).filter((c: any) => c.type === "text")], stopReason: next.stopReason, usage: addUsage(prev.usage, next.usage) };
+      out.splice(i - 1, 3, merged);
+    } else if (next) out[i] = plain as Message;
+    else out.splice(i, 1);
+  }
+  return out;
+}
+
 /** 模型正常结束却一个字没说、也没调工具（上下文快满时有的服务商会这样直接收尾）：execute 抛这个，run 压一压再试一次 */
 export const EMPTY_RE = /^空回复：/;
 export const OVERFLOW_RE = /context[_ ]?(length|window)|maximum context|prompt is too long|too many tokens|input (length|tokens?)|token limit|exceed(s|ed)? .*(context|token)|上下文.*(超|长)|超长|超出.*(长度|限制)/i;
@@ -942,6 +982,7 @@ export class Runtime {
     // 这一轮已经说出口的字（被打断时记进历史用；中止时那条没说完的消息内容会被清空，只能自己攒）
     let spoken = "";
     let nudged = false;
+    let continued = 0;
     // 朗读版：开头的 <voice>…</voice> 扣下来一写完就交出去，实时页 / 调用方 / 已说出口的字里都不带它
     const tap = req.onVoice ? new VoiceTap((v) => {
       scope.meta.voice = v;
@@ -955,7 +996,9 @@ export class Runtime {
       const tail = tap && e.type === "message_end" && e.message?.role === "assistant" ? tap.end() : "";
       if (textDelta) spoken += textDelta;
       if (tail) spoken += tail;
-      if (e.type === "message_end" && e.message?.role === "assistant" && spoken && !spoken.endsWith("\n")) spoken += "\n";
+      // 被截断、马上要接着写的那条不算一条消息结束：边生成边播的句子缓冲别在半句上切开，已说出口的字也别插换行
+      const willContinue = e.type === "message_end" && truncatedMsg(e.message) && !timedOut && continued < CONTINUE_MAX;
+      if (e.type === "message_end" && e.message?.role === "assistant" && !willContinue && spoken && !spoken.endsWith("\n")) spoken += "\n";
       if (liveRun) {
         try {
           if (tail) { liveRun.partial.text += tail; this.emitLive(lockKey, { type: "delta", kind: "text", delta: tail }); }
@@ -994,7 +1037,7 @@ export class Runtime {
       try {
         if (tail) req.onEvent({ type: "text", delta: tail });
         if (textDelta) req.onEvent({ type: "text", delta: textDelta });
-        else if (e.type === "message_end" && e.message?.role === "assistant") {
+        else if (e.type === "message_end" && e.message?.role === "assistant" && !willContinue) {
           const calls = (e.message.content ?? []).filter((c: any) => c.type === "toolCall");
           req.onEvent({ type: "message_end", toolCalls: calls.length, toolNames: calls.map((c: any) => String(c.name)) });
         }
@@ -1025,6 +1068,15 @@ export class Runtime {
           await pi.prompt({ role: "user", content: [{ type: "text", text: NUDGE_TEXT }], timestamp: Date.now(), knudge: true } as any);
           await pi.waitForIdle();
         }
+        // 正文写到输出上限被截断：同一轮里接着写（不让想——多半是思考把额度吃掉了）
+        while (!timedOut && continued < CONTINUE_MAX && truncatedMsg(pi.state.messages.at(-1))) {
+          const m = pi.state.messages.at(-1) as any;
+          continued++;
+          console.log(`[agent] ✂️  ${agent.id} ${req.sessionKey} 回复写到输出上限被截断（输出 ${m.usage?.output ?? "?"} token），接着写（第 ${continued} 次）`);
+          scope.noThink = true;
+          await pi.prompt({ role: "user", content: [{ type: "text", text: continueText(m) }], timestamp: Date.now(), kcont: true } as any);
+          await pi.waitForIdle();
+        }
       });
       work.catch(() => {});                          // 放弃等待之后它再报错也别变成未处理的 rejection
       await Promise.race([work, gaveUp]);
@@ -1038,6 +1090,13 @@ export class Runtime {
       const after = fresh.filter((m) => m.role === "assistant").at(-1);
       console.log(`[agent] 💭 ${agent.id} 催过之后${after && !silentMsg(after) ? "说话了" : "还是没说话"}`);
       health.record({ kind: "nudge", ok: !!after && !silentMsg(after), agent: agent.id, session: req.sessionKey, purpose: scope.purpose, detail: { model: `${model.provider}/${model.id}` } });
+    }
+    if (continued) {
+      fresh = mergeContinued(fresh);
+      const after: any = fresh.filter((m) => m.role === "assistant").at(-1);
+      const ok = !!after && after.stopReason !== "length";
+      console.log(`[agent] ✂️  ${agent.id} 接着写了 ${continued} 次，${ok ? "写完了" : "还是没写完"}`);
+      health.record({ kind: "continue", ok, agent: agent.id, session: req.sessionKey, purpose: scope.purpose, detail: { n: continued, model: `${model.provider}/${model.id}` } });
     }
     const assistants = fresh.filter((m) => m.role === "assistant") as AssistantMessage[];
     const last = assistants.at(-1);
