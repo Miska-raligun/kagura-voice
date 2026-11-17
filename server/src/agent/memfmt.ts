@@ -13,7 +13,7 @@ export function provOf(t: string): { refs: string[]; how: string } {
   const refs: string[] = [];
   let how = "";
   for (const m of t.matchAll(PROV_RE)) {
-    for (const r of m[1].split(/[、,，\s]+/)) if (/^(m\d+(-m?\d+)?|session:\S+|daily:\d{4}-\d{2}-\d{2})$/.test(r) && !refs.includes(r)) refs.push(r);
+    for (const r of m[1].split(/[、,，\s]+/)) if (/^(m\d+(-m?\d+)?|session:\S+)$/.test(r) && !refs.includes(r)) refs.push(r);
     if (m[2] && !how) how = m[2].trim();
   }
   return { refs, how };
@@ -25,8 +25,7 @@ export function provOf(t: string): { refs: string[]; how: string } {
 export function provShort(t: string): string {
   const { refs, how } = provOf(t);
   const body = stripProv(t).replace(/\s*\n\s*/g, " ");
-  // 从每日笔记里提炼的写「出自 2026-11-10 的笔记」（写全，read_ref 要用）：她要细节就 read_ref 读 daily:<日期>
-  const ids = [...refs.filter((r) => r.startsWith("m")).map((r) => `#${r}`), ...refs.filter((r) => r.startsWith("daily:")).map((r) => `出自 ${r.slice(6)} 的笔记`)].join("、");
+  const ids = [...refs.filter((r) => r.startsWith("m")).map((r) => `#${r}`)].join("、");
   const guess = /推测|猜/.test(how);
   return guess || ids ? `${body}（${[guess ? "推测，主人没确认过" : "", ids].filter(Boolean).join("；")}）` : body;
 }

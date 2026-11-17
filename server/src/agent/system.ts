@@ -40,7 +40,7 @@ import { setSharedDir } from "./persona.ts";
 import { health } from "./health.ts";
 import { recallTerms } from "./memory.ts";
 import { messageText } from "./messages.ts";
-import { pinnedLines, provShort, stripProv } from "./memfmt.ts";
+import { pinnedLines, provShort } from "./memfmt.ts";
 
 export interface AgentSystem {
   registry: AgentRegistry;
@@ -358,12 +358,6 @@ export function attachAgentSystem(sys: AgentSystem, ctx: Ctx) {
     report: async (id, text) => { await report(id, "", text); },
     guide: (a) => toolGuide(runtime.allToolNames(a).map((t) => t.name)),
     usage: (a) => sys.memories.of(a.id).usageByText(),
-    write: (a, target, text, prov) => sys.memories.of(a.id).write(target, text, new Date(), "", prov),
-    related: async (a, text) => {
-      const idx = sys.memories.of(a.id);
-      const paths = idx.recallPaths();
-      return paths.length ? (await idx.search(text, 12, paths)).map((h) => stripProv(h.text).replace(/^[-*•]\s*/, "").trim()).filter(Boolean) : [];
-    },
     // 出处 → 原文节选：只挑和这条记忆沾边的几句（一段对话几十条，全给太长），每句截短
     sources: (a, refs, text) => {
       const store = runtime.store(a.id);
@@ -383,12 +377,6 @@ export function attachAgentSystem(sys: AgentSystem, ctx: Ctx) {
         // 记的时候这一轮还没落盘：编号是那时会话里最后一条，这一轮在它后面
         if (m) { const r = store.message(Number(m[1])); if (r) out.push(...pick(store.range(r.session, r.id, r.id + 400, 6), 3)); continue; }
         if (ref.startsWith("session:")) out.push(...pick(store.transcript(ref.slice(8), 20) as any, 3));
-        // 从每日笔记里提炼的：给那天笔记里和它沾边的几行
-        if (ref.startsWith("daily:")) {
-          const lines = dailyLines(a, ref.slice(6));
-          const hit = lines.filter((l) => terms.some((t) => l.toLowerCase().includes(t)));
-          out.push(...(hit.length ? hit : lines).slice(0, 4).map((l) => `[${ref.slice(6)} 的笔记] ${Array.from(l).slice(0, 200).join("")}`));
-        }
       }
       return out.join("\n").slice(0, 900);
     },
