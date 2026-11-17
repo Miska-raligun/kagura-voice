@@ -40,7 +40,7 @@ import { setSharedDir } from "./persona.ts";
 import { health } from "./health.ts";
 import { recallTerms } from "./memory.ts";
 import { messageText } from "./messages.ts";
-import { pinnedLines, provShort } from "./memfmt.ts";
+import { pinnedLines, provShort, stripProv } from "./memfmt.ts";
 
 export interface AgentSystem {
   registry: AgentRegistry;
@@ -96,9 +96,11 @@ export function createAgentSystem(cfg: Config, dirs: Dirs, fake: FakeLlm | null)
   // 长期记忆不整篇放进提示：每轮按主人这句话检索，相关的几条附在消息上（见 Runtime.recallFor）
   runtime.recall = async (agent, text, context) => {
     const idx = memories.of(agent.id);
-    const hits = await idx.recall(text, { context });
+    const hits = [...await idx.recall(text, { context }), ...await idx.recallDaily(text, { context })];
     idx.noteRecalled(hits.map((h) => h.text));
-    return hits.map((h) => ({ line: provShort(h.text), raw: h.text, why: h.terms?.length ? h.terms.join("、") : h.via === "keyword" ? "" : "意思相近" }));
+    // 笔记里的标上是哪天的：那是当时的情况，不一定是现在
+    const dayOf = (p: string) => { const m = /(\d{4})-(\d{2})-(\d{2})\.md$/.exec(p); return m ? `（${Number(m[2])} 月 ${Number(m[3])} 日的笔记）` : ""; };
+    return hits.map((h) => ({ line: (h.path.startsWith("memory/") ? dayOf(h.path) : "") + provShort(h.text).replace(/^[-*•]\s*/, ""), raw: h.text, why: h.terms?.length ? h.terms.join("、") : h.via === "keyword" ? "" : "意思相近" }));
   };
   runtime.recallUsed = (agent, raw, query, reply, pinned) => {
     const idx = memories.of(agent.id);
@@ -344,6 +346,11 @@ export function attachAgentSystem(sys: AgentSystem, ctx: Ctx) {
   const tasks = new TaskQueue(ctx.dirs.systemDb, registry, { run: (req) => runtime.run(req), report, reset: (a, k) => runtime.store(a).reset(k) });
   sys.tasks = tasks;
   // 记忆整理：每 N 天在待办的静默时段、她空闲时做一次；结果按 heartbeat 的投递方式告诉主人
+  const dailyLines = (agent: { workspace: string }, day: string): string[] => {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return [];
+    const p = path.join(agent.workspace, "memory", `${day}.md`);
+    try { return fs.readFileSync(p, "utf8").split("\n").filter((l) => l.trim() && !/^#\s/.test(l)).map((l) => l.replace(/^[-*•]\s*/, "").trim()); } catch { return []; }
+  };
   const tidy = new MemoryTidy(registry, sys.models, {
     everyDays: () => (ctx.cfg.fakeProviders ? 0 : ctx.cfg.memoryTidy?.everyDays ?? 7),
     window: () => tasks.settings().window,
@@ -351,6 +358,12 @@ export function attachAgentSystem(sys: AgentSystem, ctx: Ctx) {
     report: async (id, text) => { await report(id, "", text); },
     guide: (a) => toolGuide(runtime.allToolNames(a).map((t) => t.name)),
     usage: (a) => sys.memories.of(a.id).usageByText(),
+    write: (a, target, text, prov) => sys.memories.of(a.id).write(target, text, new Date(), "", prov),
+    related: async (a, text) => {
+      const idx = sys.memories.of(a.id);
+      const paths = idx.recallPaths();
+      return paths.length ? (await idx.search(text, 12, paths)).map((h) => stripProv(h.text).replace(/^[-*•]\s*/, "").trim()).filter(Boolean) : [];
+    },
     // 出处 → 原文节选：只挑和这条记忆沾边的几句（一段对话几十条，全给太长），每句截短
     sources: (a, refs, text) => {
       const store = runtime.store(a.id);
@@ -370,6 +383,12 @@ export function attachAgentSystem(sys: AgentSystem, ctx: Ctx) {
         // 记的时候这一轮还没落盘：编号是那时会话里最后一条，这一轮在它后面
         if (m) { const r = store.message(Number(m[1])); if (r) out.push(...pick(store.range(r.session, r.id, r.id + 400, 6), 3)); continue; }
         if (ref.startsWith("session:")) out.push(...pick(store.transcript(ref.slice(8), 20) as any, 3));
+        // 从每日笔记里提炼的：给那天笔记里和它沾边的几行
+        if (ref.startsWith("daily:")) {
+          const lines = dailyLines(a, ref.slice(6));
+          const hit = lines.filter((l) => terms.some((t) => l.toLowerCase().includes(t)));
+          out.push(...(hit.length ? hit : lines).slice(0, 4).map((l) => `[${ref.slice(6)} 的笔记] ${Array.from(l).slice(0, 200).join("")}`));
+        }
       }
       return out.join("\n").slice(0, 900);
     },
@@ -377,6 +396,11 @@ export function attachAgentSystem(sys: AgentSystem, ctx: Ctx) {
   tidy.start();
   sys.tidy = tidy;
   runtime.addTools(tidyTools(tidy));
+  // read_ref daily:YYYY-MM-DD：从每日笔记提炼的记忆，出处就是那天的笔记
+  runtime.refs.set("daily", (agent, id) => {
+    const lines = dailyLines(agent, id);
+    return lines.length ? `${id} 的每日笔记：\n${lines.map((l) => `- ${l}`).join("\n")}` : null;
+  });
   runtime.refs.set("task", (agent, id) => {
     const t = tasks.get(id);
     if (!t || t.agent !== agent.id) return null;

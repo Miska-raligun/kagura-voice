@@ -33,6 +33,27 @@ export const MAX_GROW = 1.3;
 export const VERIFY_MAX = 20;
 /** 核对过的条目（按出处）多少天内不再核对 */
 export const VERIFY_DAYS = 30;
+/** 每日笔记提炼：第一次（还没提炼过）往回看多少天；更早的照旧留着、能搜 */
+export const DAILY_BACKLOG_DAYS = 60;
+/** 每次交给模型的笔记量（字） */
+export const DAILY_CHUNK_CHARS = 12_000;
+/** 一趟整理最多提炼几段（积压多的分几周做完） */
+export const DAILY_MAX_CALLS = 4;
+/** 一趟最多从笔记里记下几条 */
+export const DISTILL_MAX_ITEMS = 30;
+
+const DISTILL_PROMPT = `你在帮一个 AI 助手回顾它这几天的每日笔记（N 是第几行），把以后还用得上的挑出来记进长期记忆。每日笔记只在当天和第二天带着，过后就不会再主动想起；没被挑出来的仍然留在笔记里、能搜到。
+
+挑这些（判据：过几天、几周再读到还成立吗？以后用得上吗？）：
+- 主人新说的偏好、习惯、约定、计划（计划写清楚是哪天的事）
+- 试过管用 / 不管用的做法、踩过的坑、查证过的结论
+- 还没做完、以后要接着做的事
+- 关于主人本人的稳定信息（称呼、家人、生日、作息、口味）放进 user，每条一句短话
+不要：当天的经过和心情、heartbeat / 定时任务的例行记录、随时查得到的状态（设备 / 打印机 / 天气 / 在不在家）、已经过去的一次性安排、「相关的已有记忆」里已经有的。
+宁缺毋滥：没什么值得记的就输出空数组。每条写成脱离当天也看得懂的一句话（别写「今天」「刚才」，要写就写日期），不超过 100 字。今天是 {TODAY}。
+
+只输出一个 JSON：{"long": [{"text": "…", "from": "笔记日期 YYYY-MM-DD", "how": "主人说的 / 查过 / 推测"}], "user": [{"text": "…", "from": "YYYY-MM-DD"}], "summary": "一句话"}`;
+
 /** MEMORY.md + 主题页超过这么多字，才考虑把同一件事的条目挪进主题页 */
 export const TOPIC_SPLIT_CHARS = 2500;
 export const ARCHIVE_FILE = "MEMORY.archive.md";
@@ -98,6 +119,8 @@ export interface TidyResult {
   pinned?: number;
   /** 这次新建 / 改过的主题页 */
   topics?: string[];
+  /** 每日笔记提炼：记进长期记忆 / USER.md 几条、看了哪几天、还剩几天没看（积压多的下次接着） */
+  daily?: { long: number; user: number; days: string[]; left: number; why?: string };
   summary?: string;
   backups?: string[];
 }
@@ -220,6 +243,10 @@ export interface TidyHost {
   sources?(agent: AgentInfo, refs: string[], text: string): string;
   /** 自动回忆的使用统计：条目原文（去掉出处）→ 附上过几次、用上过几次 */
   usage?(agent: AgentInfo): Map<string, { recalled: number; used: number }>;
+  /** 记一条记忆（提炼每日笔记用；走 memory.write，USER.md 的上限、去重都在那里） */
+  write?(agent: AgentInfo, target: "long" | "user", text: string, prov: { ref?: string; how?: string }): string;
+  /** 跟这段文字相关的已有长期记忆（几条原文，去重用） */
+  related?(agent: AgentInfo, text: string): Promise<string[]>;
 }
 
 const sha = (s: string) => createHash("sha1").update(s).digest("hex");
@@ -233,12 +260,14 @@ export class MemoryTidy {
   private docHash: Record<string, string> = {};
   /** 核对过原文的出处（agent|出处编号 → 时刻）：VERIFY_DAYS 天内不再核对 */
   private verified: Record<string, number> = {};
+  /** 每日笔记提炼到哪一天了（agent → YYYY-MM-DD，含这一天） */
+  private dailyUpto: Record<string, string> = {};
   private running = new Set<string>();
   private timer: ReturnType<typeof setInterval> | null = null;
 
   constructor(private reg: AgentRegistry, private models: ModelRegistry, private host: TidyHost, private stateFile: string | null = null) {
     try {
-      if (stateFile) { const j = JSON.parse(fs.readFileSync(stateFile, "utf8")); this.state = j.agents ?? {}; this.docHash = j.docs ?? {}; this.verified = j.verified ?? {}; }
+      if (stateFile) { const j = JSON.parse(fs.readFileSync(stateFile, "utf8")); this.state = j.agents ?? {}; this.docHash = j.docs ?? {}; this.verified = j.verified ?? {}; this.dailyUpto = j.daily ?? {}; }
     } catch { /* 还没有 */ }
   }
 
@@ -289,16 +318,22 @@ export class MemoryTidy {
     let r: TidyResult = { ...base, status: "nochange" };
     try {
       if (scope !== "docs") {
+        // 先把每日笔记里还用得上的提炼进长期记忆，再整理（新记下的跟着一起去重、核对）。提炼出错不耽误整理
+        let distilled: Awaited<ReturnType<MemoryTidy["distillDaily"]>> = { long: 0, user: 0, days: [], left: 0 };
+        try { distilled = await this.distillDaily(agent, now); }
+        catch (e: any) { distilled = { long: 0, user: 0, days: [], left: 0, why: String(e?.message ?? e).slice(0, 200) }; }
         let m: Omit<TidyResult, "agent" | "at" | "trigger">;
         try { m = await this.tidyMemory(agent, trigger, now); }
         catch (e: any) { m = { status: "failed", why: String(e?.message ?? e).slice(0, 300) }; }
-        r = { ...r, ...m, memStatus: m.status };
+        r = { ...r, ...m, memStatus: m.status, daily: distilled };
       }
       if (scope !== "memory") r.docs = await this.tidyDocs(agent, trigger, now);
       r.status = worst([...(r.memStatus ? [r.memStatus] : []), ...(r.docs ?? []).map((d) => d.status)]);
+      // 只提炼了每日笔记、整理没改：也算做了事
+      if (r.status === "nochange" && r.daily && r.daily.long + r.daily.user > 0) r.status = "done";
     } finally { this.running.delete(agentId); this.prog.delete(agentId); }
     this.state[agentId] = r;
-    if (this.stateFile) { try { fs.writeFileSync(this.stateFile, JSON.stringify({ agents: this.state, docs: this.docHash, verified: this.verified }, null, 1)); } catch { /* 存不下就算了 */ } }
+    if (this.stateFile) { try { fs.writeFileSync(this.stateFile, JSON.stringify({ agents: this.state, docs: this.docHash, verified: this.verified, daily: this.dailyUpto }, null, 1)); } catch { /* 存不下就算了 */ } }
     console.log(`[tidy] 🧹 ${agentId}（${trigger}）${describe(r).split("\n").join("｜").slice(0, 300)}`);
     health.record({ kind: "memory_tidy", ok: r.status === "done" || r.status === "nochange", agent: agentId,
       detail: { status: r.status, why: r.why, removed: (r.removed?.length ?? 0) + (r.docs ?? []).reduce((n, d) => n + (d.removed?.length ?? 0), 0), docs: (r.docs ?? []).map((d) => `${d.scope === "shared" ? "共享 " : ""}${d.file}:${d.status}`) } });
@@ -311,6 +346,67 @@ export class MemoryTidy {
       { maxTokens: Math.max(model.maxTokens || 0, 16_000), signal: AbortSignal.timeout(ms), think: true });
     if (res.stopReason === "error" || res.stopReason === "aborted") throw new Error(res.errorMessage || "模型调用失败");
     return { text: res.content.filter((c: any) => c.type === "text").map((c: any) => c.text).join(""), cut: res.stopReason === "length" };
+  }
+
+  /**
+   * 每日笔记提炼（2026-11，主人「把每日的记忆也利用起来」）：每日笔记只在当天和第二天进提示，以前过后就沉底——一件事只记在笔记里，就只剩她自己想起来去搜这一条路。
+   * 整理时把上次提炼以来的笔记（今天的不算，还在写）交给模型，挑出以后还用得上的记进长期记忆 / USER.md，出处是 daily:<日期>。
+   * 第一次只往回看 DAILY_BACKLOG_DAYS 天；积压多的一趟最多 DAILY_MAX_CALLS 段，剩下的下次接着。笔记本身不动、照样能搜
+   */
+  async distillDaily(agent: AgentInfo, now: number): Promise<{ long: number; user: number; days: string[]; left: number; why?: string }> {
+    const none = { long: 0, user: 0, days: [] as string[], left: 0 };
+    if (!this.host.write) return none;
+    const dir = path.join(agent.workspace, "memory");
+    const today = dayOf(now);
+    const floor = dayOf(now - DAILY_BACKLOG_DAYS * 86400_000);
+    const from = this.dailyUpto[agent.id] ?? "";
+    let files: string[] = [];
+    try { files = fs.readdirSync(dir).filter((f) => /^\d{4}-\d{2}-\d{2}\.md$/.test(f)).map((f) => f.slice(0, 10)).sort(); } catch { return none; }
+    const days = files.filter((d) => d < today && d > from && d >= floor);
+    if (!days.length) return none;
+    // 按天攒成段，一段不超过 DAILY_CHUNK_CHARS
+    const chunks: { days: string[]; text: string }[] = [];
+    for (const d of days) {
+      const body = fs.readFileSync(path.join(dir, `${d}.md`), "utf8").split("\n").filter((l) => l.trim() && !/^#\s/.test(l)).map((l, i) => `${i + 1}. ${l.replace(/^[-*•]\s*/, "")}`).join("\n");
+      if (!body) continue;
+      const block = `=== ${d} ===\n${body}`;
+      const last = chunks.at(-1);
+      if (last && Array.from(last.text).length + Array.from(block).length <= DAILY_CHUNK_CHARS) { last.days.push(d); last.text += `\n\n${block}`; }
+      else chunks.push({ days: [d], text: Array.from(block).slice(0, DAILY_CHUNK_CHARS).join("") });
+    }
+    const todo = chunks.slice(0, DAILY_MAX_CALLS);
+    let nLong = 0, nUser = 0;
+    const done: string[] = [];
+    for (const [i, c] of todo.entries()) {
+      this.stage(agent.id, `提炼每日笔记（${c.days[0]}${c.days.length > 1 ? ` ~ ${c.days.at(-1)}` : ""}${todo.length > 1 ? `，${i + 1}/${todo.length}` : ""}）`);
+      // 相关的已有记忆：免得把已经记过的再记一遍
+      let related: string[] = [];
+      try { related = (await this.host.related?.(agent, c.text)) ?? []; } catch { /* 没有就算了 */ }
+      const input = `${related.length ? `相关的已有记忆（已经记过的，别重复）：\n${related.map((x) => `- ${x}`).join("\n")}\n\n` : ""}每日笔记：\n${c.text}`;
+      const res = await this.ask(agent, DISTILL_PROMPT.replace("{TODAY}", today), input, now, TIDY_CALL_MS);
+      const t = stripThinkText(res.text);
+      const a = t.indexOf("{"), b = t.lastIndexOf("}");
+      let o: any = null;
+      try { o = a >= 0 && b > a ? JSON.parse(t.slice(a, b + 1)) : null; } catch { o = null; }
+      if (!o) throw new Error(`提炼每日笔记时模型没按格式输出（${c.days[0]} 起），这几天的下次再提炼`);
+      const take = (x: any) => ({ text: stripProv(String(x?.text ?? x ?? "")).replace(/^[-*•]\s*/, "").trim().slice(0, 200), from: /^\d{4}-\d{2}-\d{2}$/.test(String(x?.from)) ? String(x.from) : c.days.at(-1)!, how: String(x?.how ?? "").slice(0, 20) });
+      for (const x of (Array.isArray(o.long) ? o.long : []).map(take).filter((x: any) => x.text)) {
+        if (nLong + nUser >= DISTILL_MAX_ITEMS) break;
+        this.host.write(agent, "long", x.text, { ref: `daily:${x.from}`, how: x.how || "从笔记里整理的" });
+        nLong++;
+      }
+      for (const x of (Array.isArray(o.user) ? o.user : []).map(take).filter((x: any) => x.text)) {
+        if (nLong + nUser >= DISTILL_MAX_ITEMS) break;
+        this.host.write(agent, "user", x.text, { ref: `daily:${x.from}` });
+        nUser++;
+      }
+      done.push(...c.days);
+      // 每段做完就记下进度：后面哪段出错，前面的不用重来
+      this.dailyUpto[agent.id] = c.days.at(-1)!;
+    }
+    const left = chunks.slice(todo.length).reduce((n, c) => n + c.days.length, 0);
+    if (nLong + nUser) console.log(`[tidy] 📓 ${agent.id} 从 ${done.length} 天的笔记里记下 ${nLong} 条长期记忆、${nUser} 条关于主人的${left ? `（还有 ${left} 天下次接着）` : ""}`);
+    return { long: nLong, user: nUser, days: done, left };
   }
 
   private async tidyMemory(agent: AgentInfo, trigger: string, now: number): Promise<Omit<TidyResult, "agent" | "at" | "trigger">> {
@@ -516,6 +612,8 @@ export function describe(r: TidyResult): string {
     if (r.topics?.length) lines.push(`整理出主题页：${r.topics.map((n) => `topics/${n}.md`).join("、")}`);
     if (r.removed?.length) lines.push(`移出了 ${r.removed.length} 条（放在 ${ARCHIVE_FILE}，没真删）：`, ...listRemoved(r.removed, 8));
   }
+  if (r.daily && r.daily.long + r.daily.user) lines.push(`从 ${r.daily.days.length} 天的每日笔记里记下 ${r.daily.long} 条长期记忆${r.daily.user ? `、${r.daily.user} 条关于你的` : ""}${r.daily.left ? `（还有 ${r.daily.left} 天的笔记下次接着看）` : ""}`);
+  if (r.daily?.why) lines.push(`每日笔记没提炼成：${r.daily.why}`);
   const name = (d: DocResult) => `${d.scope === "shared" ? "共享的 " : ""}${d.file}`;
   const docs = r.docs ?? [];
   for (const d of docs) {

@@ -8,7 +8,7 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import type { AgentInfo } from "./registry.ts";
-import { dailyNotePath } from "./soul.ts";
+import { dailyNotePath, BG_NOTE_RE } from "./soul.ts";
 import { strftime } from "../util/time.ts";
 import { isShared, personaText, sharedPath } from "./persona.ts";
 import { stripProv, provTag, pinnedOf, TOPICS_DIR, type Prov } from "./memfmt.ts";
@@ -127,6 +127,11 @@ export function recallTerms(q: string): string[] {
   }
   return [...out].filter((t) => !STOP_TERMS.has(t)).slice(0, 32);
 }
+
+/** 自动回忆看最近几天的每日笔记（今天、昨天的已经在提示里，从前天开始） */
+export const DAILY_RECALL_DAYS = 14;
+/** 每轮最多附几条笔记 */
+export const DAILY_RECALL_K = 2;
 
 /** 两路排名合并（RRF）的常数：越大越看重「两路都靠前」而不是某一路的第一名 */
 const RRF_K = 20;
@@ -324,7 +329,23 @@ export class MemoryIndex {
    * 只看 MEMORY.md（LRN 2026-10-30）：每日笔记记的是「当时」的事（「今天有点累」「下午去超市」），检索出来混在消息里，
    * 模型分不清是哪天的，容易当成现在的情况；旧笔记要查让 agent 自己 memory_search（结果带文件名 = 日期）。
    */
-  async recall(query: string, o: { k?: number; maxChars?: number; paths?: string[]; context?: string } = {}): Promise<MemoryHit[]> {
+  /**
+   * 最近的每日笔记里挑（2026-11，主人「把每日的记忆也利用起来」）：今天、昨天的本来就在提示里；更早的 3~DAILY_RECALL_DAYS 天里，
+   * 跟这句话相关的最多附 DAILY_RECALL_K 条，调用方标上是哪天的笔记——以前不检索每日笔记是怕她把当时的情况当成现在，标了日期就分得清。
+   * 后台流水（heartbeat / 定时任务 / 待办的记录）不附
+   */
+  async recallDaily(query: string, o: { context?: string; now?: Date } = {}): Promise<MemoryHit[]> {
+    const now = o.now ?? new Date();
+    const paths: string[] = [];
+    for (let d = 2; d <= DAILY_RECALL_DAYS; d++) {
+      const rel = path.relative(this.agent.workspace, dailyNotePath(this.agent.workspace, new Date(now.getTime() - d * 86400_000))).split(path.sep).join("/");
+      if (fs.existsSync(path.join(this.agent.workspace, rel))) paths.push(rel);
+    }
+    if (!paths.length) return [];
+    return this.recall(query, { paths, context: o.context, k: DAILY_RECALL_K, maxChars: 400, skipBg: true });
+  }
+
+  async recall(query: string, o: { k?: number; maxChars?: number; paths?: string[]; context?: string; skipBg?: boolean } = {}): Promise<MemoryHit[]> {
     const paths = o.paths ?? this.recallPaths();
     const strip = (t: string) => t.replace(/^\[[^\]]*\]\s*/, "").trim();
     const q = strip(query);
@@ -351,6 +372,7 @@ export class MemoryIndex {
       const body = stripProv(h.text).toLowerCase();
       if (!body || (pinned && pinned.includes(stripProv(h.text)))) continue;
       if (/^#{1,6}\s/.test(body) && !body.includes("\n")) continue;          // 只是个标题
+      if (o.skipBg && BG_NOTE_RE.test(stripProv(h.text).trim())) continue;
       // 「打印」「打印机」这种一个包着另一个的只算一个
       const hit = terms.filter((t) => body.includes(t)).filter((t, _i, a) => !a.some((u) => u !== t && u.includes(t)));
       const strongVec = h.vec !== undefined && (h.vecZ ? h.vecZ >= 2.5 && h.vec >= 0.3 : h.vec >= 0.5);

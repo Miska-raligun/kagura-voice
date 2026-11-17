@@ -130,7 +130,7 @@ const readSafe = (p: string) => { try { return fs.readFileSync(p, "utf8"); } cat
 /** 后台场景写每日笔记时带的标记（memory_write 按这一轮的用途加）：聊天时不把这些流水带进系统提示 */
 export const BG_NOTE_TAGS: Record<string, string> = { heartbeat: "heartbeat", cron: "定时任务", task: "待办" };
 /** 后台写的笔记行：带标记的，或者（加标记之前的老笔记）时刻后面紧跟 heartbeat 字样的 */
-const BG_NOTE_RE = /^[-*•]?\s*(\d{1,2}:\d{2}\s+)?(\[(heartbeat|定时任务|待办)\]|heartbeat)/i;
+export const BG_NOTE_RE = /^[-*•]?\s*(\d{1,2}:\d{2}\s+)?(\[(heartbeat|定时任务|待办)\]|heartbeat)/i;
 
 /**
  * 系统提示里的今昨笔记（LRN 2026-11-13，症状「系统提示上万 token」）：只带最近的几条，从最新的往回数到字数上限为止；

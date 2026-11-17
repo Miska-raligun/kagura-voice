@@ -54,10 +54,10 @@ export function recallTools(rt: Runtime, agents: AgentRegistry) {
     return [{
       name: "read_ref", label: "按编号读原文",
       description: "按编号读原文：截短的工具结果（tool:…）、摘要里注的出处（#m123 或 m123，连带前后几条；m100-m130 读一段）、"
-        + "近况里的会话（session:…）、系统记下的事（task:… / job:… / a2a:…）、记忆条目注释里的出处。只记得大概、编号又找不到时，用 query 在这个会话的全部记录（含已压缩的）里按关键词找；"
+        + "近况里的会话（session:…）、系统记下的事（task:… / job:… / a2a:…）、某天的每日笔记（daily:2026-11-10）、记忆条目注释里的出处。只记得大概、编号又找不到时，用 query 在这个会话的全部记录（含已压缩的）里按关键词找；"
         + "是在别的对话里说的（「上次在飞书说的」「前几天提过的」）、记忆里又没有，加 all_sessions=true 在你和主人的所有对话里找——对话原文比记忆更全、更准。",
       parameters: Type.Object({
-        ref: Type.Optional(Type.String({ description: "编号，如 tool:call_1、m123、m100-m130、session:main:main、task:abc" })),
+        ref: Type.Optional(Type.String({ description: "编号，如 tool:call_1、m123、m100-m130、session:main:main、task:abc、daily:2026-11-10" })),
         query: Type.Optional(Type.String({ description: "关键词（空格分开，都要出现），在当前会话的全部记录里找" })),
         all_sessions: Type.Optional(Type.Boolean({ description: "true = 在你和主人的所有对话里找（只有主人参与的对话，群聊 / 陌生人的不算）" })),
         offset: Type.Optional(Type.Number({ description: "长原文从第几个字接着读" })),

@@ -9,7 +9,7 @@
   `memory_get` 能读所有人设文件。HEARTBEAT.md 现在走场景表，别再在 scheduler 里用 extraSystem 另塞一遍。加载的文件仍是整篇注入（每个上限 `BUDGETS`）。
   **三种加载方式 + 长期记忆改检索**（LRN 2026-10-30，症状「AGENTS / TOOLS / MEMORY 全量注入，上下文大头」）：每格是全文 `X.md` / 目录 `X.md:toc`（`tocOf`：只放各节标题和行号，用到时 memory_get 读那节；`TOC_FILES` 才能选）/ 不加载。
   默认 TOOLS 在主人对话 / 定时任务 / agent 间只放目录（待办、子任务要干活，给全文）。**MEMORY.md 只有 heartbeat 带全文**，其它场景由 `Runtime.recallFor` 每轮拿主人这句话检索（`MemoryIndex.recall`：
-  先从这句话里抠掉常用词（`STOP_TERMS`）再切两字词、再去掉在记忆里到处都是的（出现在超过 15% 的块里）；中 2 个，或中 1 个很少见的（≤2 块），或向量 ≥0.5；最多 5 条 / 1200 字；**清单每一项单独成块**（`chunkMarkdown`，改切块要加 `CHUNKER_VERSION`，旧索引自动重建），**只检索 MEMORY.md**——每日笔记记的是当时的事，混进来模型分不清哪天、会当成现在（LRN 2026-10-30），旧笔记由 agent 自己 memory_search；最多等 `RECALL_WAIT_MS`），以 `RECALL_TAG` 开头附在**这一轮用户消息**里——不进系统提示（前缀缓存），
+  先从这句话里抠掉常用词（`STOP_TERMS`）再切两字词、再去掉在记忆里到处都是的（出现在超过 15% 的块里）；中 2 个，或中 1 个很少见的（≤2 块），或向量 ≥0.5；最多 5 条 / 1200 字；**清单每一项单独成块**（`chunkMarkdown`，改切块要加 `CHUNKER_VERSION`，旧索引自动重建），**主检索只看 MEMORY.md + 主题页**——每日笔记记的是当时的事，混进来模型分不清哪天、会当成现在（LRN 2026-10-30）；每日笔记另走一路 `recallDaily`（见下面「每日笔记也用起来」），**每条必须标上日期**；最多等 `RECALL_WAIT_MS`），以 `RECALL_TAG` 开头附在**这一轮用户消息**里——不进系统提示（前缀缓存），
   落盘前 `stripRecall` 去掉。关于主人本人的稳定信息走常驻的 USER.md：压缩摘要的「【记住】主人：」和 `memory_write target=user` 追加到 USER.md 末尾 `USER_AUTO_HEAD` 那节，
   去重、上限 `USER_AUTO_MAX`，满了改记 MEMORY.md 并打日志，不碰手写部分。**USER.md 只放主人本人的稳定个人信息**（LRN 2026-10-30，症状「什么都往 USER.md 写」：MEMORY.md 不常驻后，模型觉得写进 USER 才「看得见」）：memory_write 默认 / 拿不准用 long、user 排最后且列明「不是 user」的；压缩摘要大多写「长期：」；单条超过 `USER_ITEM_MAX`（80 字）的改记 MEMORY.md。**改记别处时工具结果要说清原因**（超长 / 自动记录满了，LRN 2026-11-07，症状「她说 memory_write 说写 USER.md、结果落到 MEMORY.md，工具说一套做一套」：以前只回「已记到 MEMORY.md」）。**long 不收流水**（`looksLikeLog`，LRN 2026-11-01，症状「heartbeat / 定时任务把『22:14 heartbeat…』写进 MEMORY.md，之后每轮被自动回忆出来」）：上一条把默认改成 long 矫枉过正，现在 memory_write 拿不准用 daily、判据是「过几天再读到还成立吗」；`write("long")` 遇到时刻 / 日期 / 「今天、刚才」开头（「今天起」除外）的改记当天笔记并告诉她；开头的「- 」去掉（以前写出「- - …」），多行用「；」接。旧版整表保存过的默认（`OLD_DEFAULT`）当没改过、跟新默认走。
 - **共享人设与系统守则（`agent/persona.ts`、`soul.toolGuide`，LRN 2026-10-30，症状「每个 agent 七个人设文件维护太累；加了新机制要一个个去补 AGENTS.md」）**：
@@ -87,3 +87,19 @@
   ③ **「## 常用」到下一个标题为止**：新建这一节、或者挪出来的条目 / 新主题页索引往文件末尾接时，后面没有标题就会被算进常用、每轮常驻——`applyOps` 最后统一重排，常用后面紧跟的不是标题就补「## 其它」；
   ④ 进度（`MemoryTidy.progress`，返回副本）：读取 → 对照原文核对 i/n → 等模型整理第 i/m 段 → 写入；管理界面「整理记忆」走 `background: true` 立刻返回、每 2 秒轮询 `GET /api/admin/memory-tidy` 的 `running`，结果在 `last[agent].text`。
   守则文件（AGENTS / TOOLS / HEARTBEAT）还是整份重写（上限 `DOC_MAX_CHARS` 2 万字，一般远小于这个）。
+
+## 每日笔记也用起来（2026-11）
+
+症状：一件事只记在每日笔记里（她当时用 daily 记、或者 heartbeat 顺手记的），过了两天就再也想不起来——笔记只在当天和第二天进提示，自动回忆又只看 MEMORY.md，只剩她自己想到去 memory_search 这一条路。
+
+- **自动回忆**：`MemoryIndex.recallDaily` 另看 2~`DAILY_RECALL_DAYS`（14）天前的笔记，最多 `DAILY_RECALL_K`（2）条、400 字，和主检索的结果拼在一起，
+  每条前面标「（11 月 10 日的笔记）」（`system.ts` 的 `runtime.recall`）。**别把日期标签去掉**——2026-10-30 那次不让笔记进自动回忆就是因为不带日期、模型当成现在的事。
+  今天 / 昨天的不看（已经整份在提示里）；`skipBg` 跳过带后台标记的流水（`BG_NOTE_RE`，heartbeat / 定时任务 / 待办写的）。
+- **整理时提炼**：`MemoryTidy.distillDaily` 是整理的第一步（进度显示「提炼每日笔记」），把上次提炼之后、今天之前的笔记交给模型，挑出以后还用得上的
+  经 `host.write` → `memory.write` 记进 MEMORY.md（出处 `daily:<日期>`）或 USER.md 自动记录；先记、再整理，新记下的跟着一起去重、核对。
+  - 进度存在 `memory_tidy.json` 的 `daily`（agent → 提炼到哪天，含）。**每段做完就写进度**，后面哪段出错前面的不重来；第一次只往回看 `DAILY_BACKLOG_DAYS`（60）天，
+    一趟最多 `DAILY_MAX_CALLS` 段 × `DAILY_CHUNK_CHARS` 字、`DISTILL_MAX_ITEMS` 条，积压多的下周接着（结果里写「还有 N 天下次接着看」）。
+  - 交给模型的还有 `host.related`：按这段笔记搜出来的已有记忆，免得重复记。**提炼出错不耽误整理**，结果里单写一行「每日笔记没提炼成」。
+  - 只提炼了、整理没改：状态算 done（不然主人看到「没什么要改的」，不知道记下了东西）。
+  - 笔记本身不动、不删，照样能 memory_search。
+- 出处 `daily:2026-11-10`：`provOf` 认、`provShort` 显示「出自 2026-11-10 的笔记」（写全日期，`read_ref daily:2026-11-10` 要用）；整理核对原文时 `sources` 给那天笔记里沾边的几行。
