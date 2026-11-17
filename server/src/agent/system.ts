@@ -32,6 +32,7 @@ import { roleVoice } from "../roles.ts";
 import { proxiedFetch } from "../util/proxy.ts";
 import { ChannelStore } from "../channels/store.ts";
 import { ChannelManager } from "../channels/manager.ts";
+import fs from "node:fs";
 import path from "node:path";
 import { TaskQueue } from "./tasks.ts";
 import { taskTools } from "./tools/tasks.ts";
@@ -39,6 +40,7 @@ import { setSharedDir } from "./persona.ts";
 import { health } from "./health.ts";
 import { recallTerms } from "./memory.ts";
 import { messageText } from "./messages.ts";
+import { pinnedLines } from "./memfmt.ts";
 
 export interface AgentSystem {
   registry: AgentRegistry;
@@ -98,7 +100,16 @@ export function createAgentSystem(cfg: Config, dirs: Dirs, fake: FakeLlm | null)
     idx.noteRecalled(hits.map((h) => h.text));
     return hits.map((h) => ({ line: `${h.text.replace(/\s*\n\s*/g, " ")}`, raw: h.text, why: h.terms?.length ? h.terms.join("、") : h.via === "keyword" ? "" : "意思相近" }));
   };
-  runtime.recallUsed = (agent, raw, query, reply) => { memories.of(agent.id).noteUsed(raw, query, reply); };
+  runtime.recallUsed = (agent, raw, query, reply, pinned) => {
+    const idx = memories.of(agent.id);
+    let all = raw;
+    if (pinned) {
+      let lines: string[] = [];
+      try { lines = pinnedLines(fs.readFileSync(path.join(agent.workspace, "MEMORY.md"), "utf8")); } catch { /* 没有就算了 */ }
+      if (lines.length) { idx.noteRecalled(lines); all = [...raw, ...lines]; }
+    }
+    if (all.length) idx.noteUsed(all, query, reply);
+  };
   const skills = new Skills(dirs.skills);
   runtime.skillCatalog = (a) => skills.catalog(a);
   runtime.addTools(skills.tools());

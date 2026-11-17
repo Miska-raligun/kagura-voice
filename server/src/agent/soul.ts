@@ -5,7 +5,7 @@ import path from "node:path";
 import type { AgentInfo } from "./registry.ts";
 import { parseLocalTime, strftime } from "../util/time.ts";
 import { personaText } from "./persona.ts";
-import { pinnedOf, PINNED_MAX } from "./memfmt.ts";
+import { pinnedOf, PINNED_MAX, stripProv } from "./memfmt.ts";
 
 /** 每个文件注入的字数上限（字符数，中文一个字算一个） */
 // 每个人设文件最多注入多少字（超出部分截掉，文件本身不动）。默认与 OpenClaw 的 bootstrapMaxChars 一致：每个文件 2 万字。
@@ -259,7 +259,8 @@ export function buildSystemPrompt(o: SoulOpts): string {
   for (const f of PROMPT_FILES) {
     if (f === "daily") continue;
     const mode = loadMode(o.scene, f);
-    const t = mode ? personaText(ws, f).trim() : "";
+    // MEMORY.md 整篇加载时（heartbeat）去掉条目末尾的出处注释：那是给整理核对用的，放进提示里只占地方
+    const t = mode ? (f === "MEMORY.md" ? stripProv(personaText(ws, f)) : personaText(ws, f)).trim() : "";
     if (t && mode === "full") parts.push(`<${f}>\n${clip(t, BUDGETS[f])}\n</${f}>`);
     else if (t) parts.push(`<${f} only="目录">\n${tocOf(f, t)}\n</${f}>`);
     if (t && (mode === "full" || mode === "toc")) {

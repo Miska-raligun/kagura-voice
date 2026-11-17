@@ -35,6 +35,16 @@ export function pinnedOf(memText: string): string {
   return out.join("\n").trim();
 }
 
+/** 「常用」节里的条目原样（带出处），使用统计按它对 */
+export function pinnedLines(memText: string): string[] {
+  const lines = memText.split(/\r?\n/);
+  const at = lines.findIndex((l) => l.trim() === PINNED_HEAD);
+  if (at < 0) return [];
+  const out: string[] = [];
+  for (const l of lines.slice(at + 1)) { if (/^#{1,6}\s/.test(l)) break; if (/^\s*[-*•]\s+/.test(l)) out.push(l.trim()); }
+  return out;
+}
+
 /** 主题页（2026-11）：MEMORY.md 太长时，同一件事的许多条由整理挪到 topics/<主题>.md，MEMORY.md 里留一行索引。自动回忆也检索它们 */
 export const TOPICS_DIR = "topics";
 export const topicName = (s: string) => s.trim().replace(/\.md$/i, "").replace(/[\\/:*?"<>|\s]+/g, "-").replace(/^[-.]+|[-.]+$/g, "").slice(0, 24);

@@ -180,7 +180,7 @@ export class Runtime {
   /** 自动回忆（memory 模块注入）：按这句话检索长期记忆，返回要附上的几条（「路径：内容」）。skip = 已整篇在提示里的文件 */
   recall: ((agent: AgentInfo, text: string, context?: string) => Promise<{ line: string; why: string; raw?: string }[]>) | null = null;
   /** 回复出来以后告诉记忆模块：这一轮附上的那几条（raw）用上了没有，由它自己判断、记进使用统计 */
-  recallUsed: ((agent: AgentInfo, raw: string[], query: string, reply: string) => void) | null = null;
+  recallUsed: ((agent: AgentInfo, raw: string[], query: string, reply: string, pinned?: boolean) => void) | null = null;
   /** 回复后在后台预先压缩（测试里关掉，免得和假模型的回复队列抢） */
   backgroundCompact = true;
   /** 工具按需加载（toolgroups.ts）：用得少的几组工具先不摆出来。false = 像以前一样全给 */
@@ -680,7 +680,9 @@ export class Runtime {
     const textOf = (a: AssistantMessage) => stripVoice(a.content.filter((c: any) => c.type === "text").map((c: any) => c.text).join("")).trim();
     // 只写了 <voice> 没写正文：朗读版本身就当回复
     const text = textOf(last) || assistants.map(textOf).filter(Boolean).join("\n") || (tap?.fired ?? "");
-    if (recalled.raw.length && text) { try { this.recallUsed?.(agent, recalled.raw, req.text, text); } catch { /* 统计记不下不影响回复 */ } }
+    // 「常用」那节这一轮也在提示里：一起算用没用上（它不经检索，不这样记就永远攒不到统计，整理时判断不了还用不用得着）
+    const pinnedOn = scope.trusted && !req.noTurnContext && sceneOf(scope) !== "guest" && loadMode(sceneOf(scope), "MEMORY.md") !== "full";
+    if ((recalled.raw.length || pinnedOn) && text) { try { this.recallUsed?.(agent, recalled.raw, req.text, text, pinnedOn); } catch { /* 统计记不下不影响回复 */ } }
     // 一个字没说也没调工具：不落盘（库里不留空的助手消息），交给 run 压一压重试。调过工具的不重试——会把工具再执行一遍
     if (!text && !toolCalls.length) throw new Error(`空回复：模型没说话就结束了（${last.stopReason}，输出 ${last.usage?.output ?? "?"} token）`);
     if (persist && (!req.keepIf || req.keepIf(text))) {

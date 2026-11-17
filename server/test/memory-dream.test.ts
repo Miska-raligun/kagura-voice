@@ -177,3 +177,30 @@ describe("跨会话搜原文", () => {
     expect(none.content[0].text).toContain("没找到");
   });
 });
+
+describe("按需检索下的两处衔接", () => {
+  it("heartbeat 整篇加载 MEMORY.md 时不带出处注释", () => {
+    const env = setup();
+    fs.writeFileSync(path.join(env.ws, "MEMORY.md"), "# 长期记忆\n- 主人对花生过敏 <!-- 出处 m12；主人说的 -->\n");
+    const sys = buildSystemPrompt({ agent: env.a, scene: "heartbeat" } as any);
+    expect(sys).toContain("- 主人对花生过敏");
+    expect(sys).not.toContain("出处");
+  });
+
+  it("「常用」那节不经检索，也照样攒使用统计（提示里带了、回复里用上了）", async () => {
+    const env = setup();
+    fs.writeFileSync(path.join(env.ws, "MEMORY.md"), "# 长期记忆\n## 常用\n- 打印机是拓竹 P2S，在书房 <!-- 出处 m3 -->\n\n## 其它\n- 团子是家里的猫\n");
+    const idx = env.mem.of("main");
+    await idx.sync();
+    env.rt.recallUsed = (agent: any, raw: string[], q: string, reply: string, pinned?: boolean) => {
+      const { pinnedLines } = require("../src/agent/memfmt.ts");
+      const lines = pinned ? pinnedLines(fs.readFileSync(path.join(env.ws, "MEMORY.md"), "utf8")) : [];
+      if (lines.length) idx.noteRecalled(lines);
+      idx.noteUsed([...raw, ...lines], q, reply);
+    };
+    env.fake.queue.push("那台拓竹 P2S 在书房呢。");
+    await env.rt.run({ agentId: "main", sessionKey: "main:main", kind: "main", channel: "webchat", text: "打印机放哪了" });
+    const u = idx.usageByText().get("打印机是拓竹 P2S，在书房");
+    expect(u).toEqual({ recalled: 1, used: 1 });
+  });
+});
