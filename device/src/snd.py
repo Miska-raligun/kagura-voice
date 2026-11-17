@@ -172,10 +172,10 @@ def alloc_rec_buf():
     return 0
 
 
-def _record_audio():
+def _record_audio(max_wait=0):
     """
     启动麦克风，用 VAD 检测说话，返回整段 WAV（memoryview，含 44 字节头）。
-    无说话返回 b""。
+    无说话返回 b""。max_wait = 开口前最多等多少块（0 = cfg.MAX_WAIT_CHUNKS）。
     若用户在录音期间长按屏幕，立即停止录音并返回 None（哨兵，表示用户主动中断）。
 
     **返回值指向共享缓冲**：下一次录音会覆盖它，用完（上传/转 base64）再录下一段。
@@ -243,7 +243,7 @@ def _record_audio():
                     if len(pre) > cfg.PREROLL_CHUNKS:
                         pre.pop(0)
                     waited += 1
-                    if waited >= cfg.MAX_WAIT_CHUNKS:
+                    if waited >= (max_wait or cfg.MAX_WAIT_CHUNKS):
                         break
             else:
                 rmv[44 + nchunks * csz:44 + (nchunks + 1) * csz] = buf
@@ -541,6 +541,8 @@ def play_file(path=None, env=None):
     **段与段之间不 end/begin 扬声器**：那会白搭上收尾的 150ms 消 pop 静音，
     缝隙从几十毫秒变成两百多毫秒，一耳朵就听得出来。
     """
+    global _file_stopped
+    _file_stopped = False
     cfg.St.stage = "play"
     segs = [(path, 0)] if path else (_segs or [(cfg.PLAY_PATH, 0)])
     hw._mic_off()   # Mic/Speaker 共享音频通路：播放前确保麦克风已释放
@@ -566,6 +568,7 @@ def play_file(path=None, env=None):
                 time.sleep(0.2)           # 让扬声器余音散去
                 hw.drain_touch()
                 stopped = True
+                _file_stopped = True
                 break
             if env:
                 idx = time.ticks_diff(time.ticks_ms(), t0) // 100
@@ -597,6 +600,7 @@ def play_file(path=None, env=None):
 
 last_play = {}      # 最近一次流式播放的统计，调用方写进诊断日志
 _stream_bad = False  # 本次开机已确认内存播放不出声 → 直接走落盘
+_file_stopped = False  # 最近一次落盘播放（play_file）是不是被点停的：落盘路径也要报 stopped，插话靠它
 
 
 def _spk_depth():
@@ -669,6 +673,7 @@ def _fallback(resp, raw, head):
     n = save_stream(_Resp(_Prefixed(head, raw), size))
     if n > 0:
         play_file()
+        last_play["stopped"] = _file_stopped
     return n
 
 
@@ -685,7 +690,8 @@ def stream_play(resp):
         n = save_stream(resp)
         if n > 0:
             play_file()
-        last_play = {"mode": "file", "kb": n >> 10 if n > 0 else 0}
+        last_play = {"mode": "file", "kb": n >> 10 if n > 0 else 0,
+                     "stopped": n > 0 and _file_stopped}
         return n
 
     cfg.St.stage = "play"

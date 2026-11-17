@@ -293,7 +293,14 @@ CoreS3 (MicroPython) ──HTTP──▶ server/（TypeScript 单文件可执行
   ③ 最后一条消息没调工具 = 最终回复，头里按完整回复写（否则短回复也被标成未完，多取一次全文）；④ 等待期间 `St.awaiting=True`，
   推送入队而不是按「重复推送」丢掉（这也是只对内置 agent 开的原因：OpenClaw 的 cores3-speak 会重复推送）；⑤ 每次成功轮询刷新
   `St.last_ok_ms`，否则任务超过 30 分钟死人开关会把正在等回复的设备复位。快捷指令短路、老服务端照旧同步返回。
-- **会话锁不能被无限占着**（`agent/runtime.ts`，LRN 2026-10-24，症状「某个 agent 突然不理人、再发也没反应，换个 agent 正常」）：
+- **`agent/runtime.ts` 拆过一次（2026-11）**：原来 1460 行，独立的部分搬到了同目录——`context.ts`（token 估算、`pruneToolResults`、`repairHistory`、`OVERFLOW_RE`）、
+  `turnguard.ts`（`TurnGuard`、`GUARD_STOP`）、`messages.ts`（`flattenUser`、`stripRecall`、`stripImages`、`RECALL_TAG`、`silentMsg`、`EMPTY_RE`）、
+  `voicetap.ts`（`VoiceTap`、`voicePrompt`、`unvoice`）、`live.ts`（`LiveHub`、`liveMessage`）、`locks.ts`（`SessionLocks.serial`、`Semaphore`）、
+  `compact.ts`（`Compactor`：`maybeCompact` / `afterReply` / `compactNow`、`parseCompactOutput`）、`recent.ts`（近况）、`spoken.ts`（朗读兜底）。
+  下面条目里写「`runtime.ts` 的 X」「`Runtime.X`」的，X 可能已经在这些文件里（`runtime.ts` 用 `export *` 转出，从原处照样 import 得到）。
+  `Runtime` 上的开关（`compactChunk`、`backgroundCompact`、`beforeCompact`、`remember`）没动，`Compactor` 从 `Runtime` 上读。
+  留在 `runtime.ts` 的是 `Runtime` 类：`run` / `runInner`（排队、互等、超长与空回复重试）、`execute`（一轮本身，300 多行，没拆）、`toolsFor`、`recallFor`、`note`、`steer`。
+- **会话锁不能被无限占着**（`agent/runtime.ts` + `locks.ts`，LRN 2026-10-24，症状「某个 agent 突然不理人、再发也没反应，换个 agent 正常」）：
   同一会话的轮次串行（`serial`），一轮卡住后面全排队。占锁的每一段都要有时限、能被取消：① 回复前的压缩（记忆冲刷 + 摘要模型调用）
   以前既没超时也不理取消，接口一卡就永远锁死——现在上限 2×`timeout_secs`、接上 `req.signal`，超时 / 取消就跳过压缩、照常回复，
   放弃之后回来的结果**不再改历史**；② 工具执行期间不按 idle 计时，但最多 `TOOL_MAX_MS`（15 分钟）；③ 流式写音频的 `write` 要同时听 `drain` 和 `close`，
@@ -778,7 +785,14 @@ CoreS3 (MicroPython) ──HTTP──▶ server/（TypeScript 单文件可执行
   回退 `camera.snapshot()`→`image.Image`），预览走 `_cam_show()`（优先
   `Lcd.drawRawBuf`，回退 `Lcd.show`，探测一次后固定）。帧是 raw RGB565，
   分辨率靠字节数反查 `_CAM_SIZES`——改这张表要同步服务端 `RGB565_SIZES`。
-- **回退开关**（设备端顶部常量）：`WAKE_MIC_PERSISTENT`、`WATCHDOG_ENABLED`、
+- **插话**（`cfg.BARGE_IN`，`chat.record_and_send`，2026-11）：她说话时点一下屏幕，以前只是停播、回待机，想接着说还得再点一下；
+  现在单次 / 唤醒模式下点停后直接进下一轮录音（连续模式本来就这样）。别改坏的点：① 判据是 `snd.last_play["stopped"]`，
+  落盘播放路径（`play_file`）经 `snd._file_stopped` 也要报——固件退回落盘播放时插话才不会悄悄失效；② 进下一轮前 `hw.touch_reset()`，
+  不然录音循环把这次按下当成「说完了」的轻点；③ 插话那一轮开口前只等 `BARGE_WAIT_CHUNKS`（5 秒），没开口**不显示「没听到」**、直接回待机
+  （多半只是想让她停）；④ 被点停的回复不再接着拍照（`X-Need-Photo`）；说了「退出」的告别语被点停照旧退出（`cont_exit` 判在前面）。
+  只管对话回复，推送播报、取景拍照的回复点停后照旧回待机。语音打断（边播边听）没做：设备上没有回声消除，扬声器的声音会把自己打断。
+  `import_sim` 有一组用例；**真机没验证过**——点停后扬声器余音会不会被当成开口，要看 rec 日志的 `peak`。
+- **回退开关**（设备端顶部常量）：`BARGE_IN`、`WAKE_MIC_PERSISTENT`、`WATCHDOG_ENABLED`、
   `SHOW_CHAT_TEXT`、`VISUAL_ENABLED`、`USE_STATE_IMAGES`、`CAMERA_MODE_ENABLED`、
   `CAMERA_QVGA`、`PREVIEW_SWAP`、`MIC_GAPLESS`、`PLAY_STREAMING`、
   `HANDS_FREE_TH_RATIO`（改 1.0 = 免手模式不加门槛）、`STREAM_ENABLED`、`STREAM_QQVGA`、

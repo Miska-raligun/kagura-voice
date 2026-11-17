@@ -751,6 +751,50 @@ cfg.St.awaiting = False
 chat.netsvc._mqtt_callback(b"kagura/push/x", b'{"type":"push","url":"/q"}')
 assert chat.netsvc._pending_push == [("/p", None)], "普通对话中照旧丢重复推送"
 cfg.St.busy = False; chat.netsvc._pending_push[:] = []
+
+# ⑦ 插话：她说话时被点停 → 不回待机，直接再听一轮（少等一会儿）；没接话就安静回待机
+_saved_barge = (chat.snd._record_audio, chat._post_wav, chat.ui.draw_state, chat.ui._update_chat_text, chat.ui.set_role, chat.cam.capture_photo)
+_recs = []; _waits = []; _states = []; _stops = []; _shots = []
+def _rec(max_wait=0):
+    _waits.append(max_wait); return _recs.pop(0)
+chat.snd._record_audio = _rec
+chat._post_wav = lambda wav, hdrs: _R(200, {"X-Reply-Text": "r", "X-Need-Photo": _hdr_photo[0]})
+chat.ui.draw_state = lambda st, *a, **k: _states.append(st)
+chat.ui._update_chat_text = lambda *a: None
+chat.ui.set_role = lambda *a: None
+chat.cam.capture_photo = lambda: _shots.append(1) or ""
+def _sp2(r):
+    chat.snd.last_play = {"stopped": _stops.pop(0)}; return 100
+chat.snd.stream_play = _sp2
+_hdr_photo = [""]
+_speech = b"\0" * 100
+cfg.St.continuous = False; cfg.St.wake = False
+# 第一条回复被点停 → 再录一轮（等 BARGE_WAIT_CHUNKS）→ 说了话 → 回复正常播完 → 待机
+_recs[:] = [_speech, _speech]; _stops[:] = [True, False]; _waits.clear(); _states.clear()
+chat.record_and_send()
+assert _waits == [0, cfg.BARGE_WAIT_CHUNKS] and not _recs and not _stops, (_waits, _recs, _stops)
+assert _states.count("recording") == 2 and _states[-1] == "idle" and not cfg.St.busy
+# 点停之后没接话：不显示"没听到"，直接回待机
+_recs[:] = [_speech, b""]; _stops[:] = [True]; _waits.clear(); _states.clear()
+chat.record_and_send()
+assert _waits == [0, cfg.BARGE_WAIT_CHUNKS] and "no_speech" not in _states and _states[-1] == "idle"
+# "我看看"被点停：不再去拍照，直接听
+_hdr_photo[0] = "1"
+_recs[:] = [_speech, b""]; _stops[:] = [True]; _waits.clear()
+chat.record_and_send()
+assert not _shots and len(_waits) == 2, "被点停的回复不该接着拍照"
+_hdr_photo[0] = ""
+# 平时没开口照旧提示；关掉开关 = 点停后回待机（旧行为）
+_recs[:] = [b""]; _waits.clear(); _states.clear()
+chat.record_and_send()
+assert "no_speech" in _states and _waits == [0]
+cfg.BARGE_IN = False
+_recs[:] = [_speech]; _stops[:] = [True]; _waits.clear()
+chat.record_and_send()
+assert _waits == [0], "BARGE_IN=False 时点停不该再听"
+cfg.BARGE_IN = True
+(chat.snd._record_audio, chat._post_wav, chat.ui.draw_state, chat.ui._update_chat_text, chat.ui.set_role, chat.cam.capture_photo) = _saved_barge
+print("  插话（点停后直接听）        = 再听一轮且少等 ✓ 没接话安静回待机 ✓ 被点停不拍照 ✓ 开关可关 ✓")
 (chat.urequests, chat.netsvc.mqtt_check, chat.netsvc.mqtt_ping, chat.snd._touched, chat.snd.stream_play, chat.time.sleep) = _saved_async
 (chat.hw.drain_touch, chat.hw.touch_reset) = _saved_drain
 print("  长轮询 / 分段 / 取消 / 推送  = 轮询间泵 MQTT ✓ 分段接着播 ✓ 按住取消 ✓ 点停取消 ✓ 等待中推送入队 ✓ 同步回复兼容 ✓")

@@ -227,6 +227,7 @@ def record_and_send():
     """
     录音 → 发送服务端 → 播放回复。
     若 St.continuous 开启则播完立刻进入下一轮录音；
+    她说话时被点停 = 插话（cfg.BARGE_IN）：不回待机，直接听下一句，没开口再回待机；
     退出连续模式的路子（LRN 2026-10-19，旧版只有"录音时长按"一条，
     一有点声音就触发新一轮，用户掐不准时机，只能关机）：
       ① 听的时候轻点或长按屏幕；② 说"退出/不聊了/再见"之类（服务端回 X-Cont-Exit）；
@@ -238,6 +239,7 @@ def record_and_send():
     gc.collect()
     empties = 0                 # 连续"识别为空"的次数
     last_real = time.time()     # 最近一轮有效对话（或进入本函数）的时刻
+    barge = False               # 这一轮是点停回复之后直接接着听的（插话）
 
     try:
         while True:
@@ -247,7 +249,9 @@ def record_and_send():
                 toggle_continuous()
                 return
             ui.draw_state("recording")
-            wav = snd._record_audio()     # 整段 WAV（指向共享录音缓冲，零复制）
+            barged, barge = barge, False
+            # 整段 WAV（指向共享录音缓冲，零复制）。插话那一轮少等一会儿：多半只是想让她停
+            wav = snd._record_audio(cfg.BARGE_WAIT_CHUNKS if barged else 0)
             if wav is not None and len(wav) > 44:
                 # 门槛/峰值/有没有缝：识别不灵时先看这行。空录音不记——
                 # 连续模式没人说话时每 10 秒一条，会把环形日志里的证据挤掉
@@ -263,6 +267,8 @@ def record_and_send():
             if len(wav) <= 44:
                 if cfg.St.continuous:
                     continue          # 连续模式：没人说话就接着听，别停 1 秒、别闪屏
+                if barged:
+                    break             # 点停之后没接话：只是不想听了，安静回待机
                 ui.draw_state("no_speech")
                 time.sleep(1)
                 break
@@ -357,8 +363,11 @@ def record_and_send():
                     toggle_wake_mode()
                 return
 
+            # 这条回复是被点停的：不再接着拍照（"我看看"被打断 = 不用看了）
+            stopped = bool(snd.last_play.get("stopped"))
+
             # ── 语音触发拍照：播完简短应答后立即拍照并发送 /chat-vision ──
-            if need_photo:
+            if need_photo and not stopped:
                 gc.collect()   # 回复 WAV 是直接落盘的，堆里本来就没有它
                 wav_b64 = ubinascii.b2a_base64(wav).decode("utf-8").strip()
                 del wav       # 只是放掉对共享录音缓冲的引用（缓冲本身常驻）
@@ -412,6 +421,14 @@ def record_and_send():
 
             if not cfg.St.continuous:
                 netsvc.mqtt_check()   # 趁 St.busy=True 消费掉 OpenClaw 触发的重复 push
+                if cfg.BARGE_IN and snd.last_play.get("stopped"):
+                    # 插话：她说话时被点停（含拍照后那条回复）→ 直接听下一句。
+                    # 点停时手已经抬起（播放那边 drain 过），这里作废这次按下，
+                    # 不然录音循环会把它当成"说完了"的轻点
+                    diag.dbg("barge-in")
+                    hw.touch_reset()
+                    barge = True
+                    continue
                 break
 
             # ── 连续模式：轮间检查主动播报 ───────────────────────────
