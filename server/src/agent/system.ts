@@ -40,7 +40,7 @@ import { setSharedDir } from "./persona.ts";
 import { health } from "./health.ts";
 import { recallTerms } from "./memory.ts";
 import { messageText } from "./messages.ts";
-import { pinnedLines } from "./memfmt.ts";
+import { pinnedLines, provShort } from "./memfmt.ts";
 
 export interface AgentSystem {
   registry: AgentRegistry;
@@ -98,7 +98,7 @@ export function createAgentSystem(cfg: Config, dirs: Dirs, fake: FakeLlm | null)
     const idx = memories.of(agent.id);
     const hits = await idx.recall(text, { context });
     idx.noteRecalled(hits.map((h) => h.text));
-    return hits.map((h) => ({ line: `${h.text.replace(/\s*\n\s*/g, " ")}`, raw: h.text, why: h.terms?.length ? h.terms.join("、") : h.via === "keyword" ? "" : "意思相近" }));
+    return hits.map((h) => ({ line: provShort(h.text), raw: h.text, why: h.terms?.length ? h.terms.join("、") : h.via === "keyword" ? "" : "意思相近" }));
   };
   runtime.recallUsed = (agent, raw, query, reply, pinned) => {
     const idx = memories.of(agent.id);

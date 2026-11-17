@@ -13,7 +13,7 @@ import type { AgentInfo, AgentRegistry } from "./registry.ts";
 import type { ModelRegistry } from "./models.ts";
 import { stripThinkText } from "./models.ts";
 import { USER_AUTO_HEAD, USER_AUTO_MAX, USER_ITEM_MAX, STALE_RECALLS } from "./memory.ts";
-import { stripProv, provOf, pinnedOf, PINNED_HEAD, PINNED_MAX, TOPICS_DIR, topicName } from "./memfmt.ts";
+import { stripProv, stripAlias, provOf, pinnedOf, PINNED_HEAD, PINNED_MAX, TOPICS_DIR, topicName } from "./memfmt.ts";
 import { ownExtra, sharedPath } from "./persona.ts";
 import { inActiveHours } from "./cron.ts";
 import { health } from "./health.ts";
@@ -322,7 +322,8 @@ export class MemoryTidy {
     const autoItems = at >= 0 ? items(userText.slice(at + USER_AUTO_HEAD.length)) : [];
     const memItems = items(memText);
     const topicItems = [...topicText.values()].flatMap(items);
-    const plain = (a: string[]) => a.map(stripProv);
+    // 比字数时不算出处注释和别称：老记忆第一次整理会给每条补「〔又：…〕」，条目短的一下子多三四成，算进去就永远被判成「变多了」不写
+    const plain = (a: string[]) => a.map((x) => stripAlias(stripProv(x)));
     const before = chars(autoItems) + chars(plain(memItems)) + chars(plain(topicItems));
     if (!autoItems.length && !memItems.length && !topicItems.length) return { status: "nochange", why: "没有要整理的记忆" };
     const total = Array.from(memText).length + [...topicText.values()].reduce((n, t) => n + Array.from(t).length, 0);

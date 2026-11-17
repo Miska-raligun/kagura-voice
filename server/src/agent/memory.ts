@@ -89,30 +89,41 @@ export function recallTerms(q: string): string[] {
   if (!seg) {
     for (const t of ftsQuery(text).split(" OR ").map((t) => t.replace(/"/g, "").replace(/ /g, ""))) if (t) out.add(t);
   } else {
-    let run: string[] = [], prevWord = "";
-    // 连着的单字：相邻两字都取（「爱喝无糖」→ 爱喝、喝无、无糖），三个字的整个也取（多半是个名字）。
-    // 拼出来的假词（「喝无」）在记忆里搜不到，会被出现频率那道筛掉，不碍事
-    const flushRun = () => {
-      for (let i = 0; i + 1 < run.length; i++) out.add(run[i] + run[i + 1]);
-      if (run.length === 3) out.add(run.join(""));
-      run = [];
+    // 先按词切，记下每个字是不是某个多字词的头 / 尾。词典里的词照收；再补相邻两字——只拦「上一个多字词的尾 + 下一个多字词的头」
+    // （「主人｜今天」里的「人今」就是这样来的）和带虚词的。分词切错时（「哪天生日」被切成「天生｜日」）两字组合能把「生日」补回来；
+    // 拼出来的假词在记忆里搜不到，会被出现频率那道筛掉
+    const chars: { c: string; head: boolean; tail: boolean; multi: boolean; func: boolean }[] = [];
+    const flush = () => {
+      for (let i = 0; i + 1 < chars.length; i++) {
+        const x = chars[i], y = chars[i + 1];
+        if (x.func || y.func || (x.multi && x.tail && y.multi && y.head)) continue;
+        out.add(x.c + y.c);
+      }
+      chars.length = 0;
     };
-    for (const s of seg.segment(text)) {
-      const w = s.segment;
-      const chars = Array.from(w);
+    let prevWord = "", singles: string[] = [];
+    for (const sg of seg.segment(text)) {
+      const w = sg.segment;
+      const cs = Array.from(w);
       const cjk = CJK.test(w);
-      if (!s.isWordLike) { flushRun(); prevWord = ""; continue; }
-      if (cjk && chars.length === 1) {
-        if (FUNC_CHARS.has(w)) { flushRun(); prevWord = ""; continue; }
-        if (prevWord && !run.length) out.add(prevWord + w);
-        run.push(w);
+      if (!sg.isWordLike || !cjk) {
+        flush(); prevWord = "";
+        if (singles.length === 3) out.add(singles.join(""));
+        singles = [];
+        if (sg.isWordLike && /^[a-z0-9_]{2,}$/.test(w)) out.add(w);
         continue;
       }
-      flushRun();
-      if (cjk ? chars.length >= 2 : /^[a-z0-9_]{2,}$/.test(w)) out.add(w);
-      prevWord = cjk ? w : "";
+      const multi = cs.length >= 2;
+      if (multi) out.add(w);
+      // 多字词后面紧跟一个单字（「打印」+「机」）：连起来也算一个
+      if (!multi && prevWord && !FUNC_CHARS.has(w)) out.add(prevWord + w);
+      cs.forEach((c, i) => chars.push({ c, head: i === 0, tail: i === cs.length - 1, multi, func: !multi && FUNC_CHARS.has(c) }));
+      // 连着三个单字（多半是个名字）整个也取
+      if (!multi && !FUNC_CHARS.has(w)) singles.push(w); else { if (singles.length === 3) out.add(singles.join("")); singles = []; }
+      prevWord = multi ? w : "";
     }
-    flushRun();
+    flush();
+    if (singles.length === 3) out.add(singles.join(""));
   }
   return [...out].filter((t) => !STOP_TERMS.has(t)).slice(0, 32);
 }

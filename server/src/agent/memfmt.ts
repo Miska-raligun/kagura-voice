@@ -18,6 +18,20 @@ export function provOf(t: string): { refs: string[]; how: string } {
   }
   return { refs, how };
 }
+/**
+ * 附在消息里给她看的样子：注释换成简短的「（#m120）」（和压缩摘要的出处同一个写法，read_ref 认）；
+ * 只是推测、主人没确认过的标出来——她据此决定要不要先问一句，别当成定论说
+ */
+export function provShort(t: string): string {
+  const { refs, how } = provOf(t);
+  const body = stripProv(t).replace(/\s*\n\s*/g, " ");
+  const ids = refs.filter((r) => r.startsWith("m")).map((r) => `#${r}`).join("、");
+  const guess = /推测|猜/.test(how);
+  return guess || ids ? `${body}（${[guess ? "推测，主人没确认过" : "", ids].filter(Boolean).join("；")}）` : body;
+}
+/** 别称「〔又：…〕」：整理补的，给检索用 */
+export const stripAlias = (t: string) => t.replace(/\s*〔又[：:][^〕]*〕/g, "");
+
 export const provTag = (ref: string, how = "") => (ref || how ? ` <!-- 出处 ${ref}${how ? `；${how.replace(/-->|[\n<>]/g, "").slice(0, 40)}` : ""} -->` : "");
 
 /**

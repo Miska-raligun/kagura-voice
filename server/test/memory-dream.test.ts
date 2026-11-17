@@ -204,3 +204,37 @@ describe("按需检索下的两处衔接", () => {
     expect(u).toEqual({ recalled: 1, used: 1 });
   });
 });
+
+describe("老版本升级上来", () => {
+  const OLD = "# 长期记忆\n" + ["主人爱喝乌龙茶", "猫叫团子", "妈妈生日3月5日", "周五打羽毛球", "不吃香菜", "女儿叫朵朵", "车是蓝色的", "常去山海居", "睡前看书", "怕冷"].map((x) => `- ${x}`).join("\n") + "\n";
+
+  it("没有出处、没有别称的老记忆照常被想起；附在消息里的是干净的一句", async () => {
+    const env = setup();
+    fs.writeFileSync(path.join(env.ws, "MEMORY.md"), OLD);
+    const hits = await env.mem.of("main").recall("我妈哪天生日来着");
+    expect(hits.map((h) => h.text)).toEqual(["- 妈妈生日3月5日"]);
+    const { provShort } = await import("../src/agent/memfmt.ts");
+    expect(provShort(hits[0].text)).toBe("- 妈妈生日3月5日");
+    expect(provShort("- 主人对花生过敏 <!-- 出处 m12；推测 -->")).toBe("- 主人对花生过敏（推测，主人没确认过；#m12）");
+    expect(provShort("- 猫叫团子 <!-- 出处 m3-m9；主人说的 -->")).toBe("- 猫叫团子（#m3-m9）");
+  });
+
+  it("第一次整理给每条短记忆都补上别称：字数一下子多了，但不算「变多太多」，照常写入", async () => {
+    const env = setup();
+    fs.writeFileSync(path.join(env.ws, "USER.md"), `# 主人\n\n${USER_AUTO_HEAD}\n- 主人叫小明\n`);
+    fs.writeFileSync(path.join(env.ws, "MEMORY.md"), OLD);
+    const withAlias = OLD.trim().split("\n").map((l) => (l.startsWith("- ") ? `${l}〔又：别称一、别称二〕` : l)).join("\n");
+    env.fake.queue.push(json({ user: ["主人叫小明"], memory_md: withAlias, topics: {}, corrected: [], removed: [], summary: "补了别称" }));
+    const r = await env.tidy.run("main", "manual");
+    expect(r.status).toBe("done");
+    expect(fs.readFileSync(path.join(env.ws, "MEMORY.md"), "utf8")).toContain("- 猫叫团子〔又：别称一、别称二〕");
+  });
+
+  it("旧的整理状态文件（没有 verified）照常读", () => {
+    const env = makeRuntime();
+    const f = path.join(fs.mkdtempSync(path.join(require("node:os").tmpdir(), "tidy-")), "memory_tidy.json");
+    fs.writeFileSync(f, JSON.stringify({ agents: { main: { agent: "main", at: 1, trigger: "auto", status: "done" } }, docs: {} }));
+    const t = new MemoryTidy(env.reg, env.models, { everyDays: () => 7, window: () => "00:00-23:59", busy: () => false, report: async () => {} }, f);
+    expect(t.last("main")?.status).toBe("done");
+  });
+});
