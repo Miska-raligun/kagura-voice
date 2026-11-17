@@ -3,6 +3,10 @@
 // 手机 = 一台新设备：用手机自己的麦克风、喇叭、摄像头，对话走和 CoreS3 一样的 /chat、/chat-vision、异步长轮询；
 // 「看家」页用监控接口远程看 CoreS3（令牌在 ctx.tokenOk 里等同 API_TOKEN）。
 import os from "node:os";
+import fs from "node:fs";
+import path from "node:path";
+import type { AgentRegistry } from "../agent/registry.ts";
+import { resolveInside } from "../agent/paths.ts";
 import { json, bytes, type Req, type Res, type Router } from "../http/router.ts";
 import type { Ctx } from "../ctx.ts";
 import { Clients } from "../clients.ts";
@@ -12,7 +16,7 @@ import APP_HTML from "../../../web/app.html";
 
 const ICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><rect width="512" height="512" rx="112" fill="#0d1f24"/><circle cx="256" cy="232" r="132" fill="#2dd4bf"/><circle cx="208" cy="214" r="18" fill="#0d1f24"/><circle cx="304" cy="214" r="18" fill="#0d1f24"/><path d="M206 280q50 40 100 0" stroke="#0d1f24" stroke-width="16" fill="none" stroke-linecap="round"/><rect x="176" y="392" width="160" height="28" rx="14" fill="#2dd4bf" opacity=".6"/></svg>`;
 
-export function registerClient(r: Router, ctx: Ctx, clients: Clients) {
+export function registerClient(r: Router, ctx: Ctx, clients: Clients, agents?: AgentRegistry) {
   const guard = (h: (req: Req) => Res | Promise<Res>) => async (req: Req): Promise<Res> => {
     if (!isLocal(req)) return json({ error: "管理接口只允许本机访问" }, 403);
     try { return await h(req); } catch (e: any) { return json({ error: String(e.message || e) }, e.status ?? 400); }
@@ -48,6 +52,23 @@ export function registerClient(r: Router, ctx: Ctx, clients: Clients) {
     const c = clients.fromReq(req);
     if (!c) return unauthorized();
     return { status: 200, headers: {}, body: "", raw: (res) => clients.subscribe(c.id, res) };
+  });
+
+  /** 她用 send_file 发来的文件（只认 agent 工作目录 sent/ 下的）。<img> 设不了头，令牌也收 ?ct= */
+  r.get("/client/file", (req) => {
+    if (!clients.fromReq(req)) return unauthorized();
+    const a = agents?.get(String(req.query.get("agent") ?? ""));
+    const rel = String(req.query.get("path") ?? "");
+    if (!a || !rel.startsWith("sent/")) return json({ error: "没有这个文件" }, 404);
+    let f = "";
+    try { f = resolveInside(a.workspace, rel); } catch { return json({ error: "没有这个文件" }, 404); }
+    // sent/../MEMORY.md 这种：解析后还得在 sent/ 里
+    if (path.relative(path.join(fs.realpathSync(a.workspace), "sent"), f).startsWith("..")) return json({ error: "没有这个文件" }, 404);
+    if (!fs.existsSync(f) || !fs.statSync(f).isFile()) return json({ error: "没有这个文件" }, 404);
+    const mime = ({ ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp", ".gif": "image/gif", ".bmp": "image/bmp", ".pdf": "application/pdf" } as Record<string, string>)[path.extname(f).toLowerCase()] ?? "application/octet-stream";
+    const dl = mime === "application/octet-stream" || req.query.get("download") === "1";
+    return bytes(fs.readFileSync(f), mime, { "Cache-Control": "private, max-age=86400", "X-Content-Type-Options": "nosniff",
+      ...(dl ? { "Content-Disposition": `attachment; filename*=UTF-8''${encodeURIComponent(path.basename(f))}` } : {}) });
   });
 
   // ── 管理界面：配对 ──

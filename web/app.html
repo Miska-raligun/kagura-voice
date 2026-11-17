@@ -502,6 +502,19 @@ function addMsg(kind, text, img) {
   $("log").scrollTop = $("log").scrollHeight;
   return d;
 }
+/** 她用 send_file 发来的文件：图片直接显示（点开看原图），其它给个下载链接 */
+function showFiles(agent, files) {
+  for (const f of files) {
+    const url = `/client/file?agent=${encodeURIComponent(agent)}&path=${encodeURIComponent(f.rel)}&ct=${encodeURIComponent(S.token)}`;
+    const d = addMsg("her", "", f.image ? url : "");
+    const a = document.createElement("a");
+    a.className = "act"; a.target = "_blank"; a.rel = "noopener";
+    a.href = f.image ? url : url + "&download=1";
+    const kb = f.size >= 1048576 ? (f.size / 1048576).toFixed(1) + "MB" : Math.max(1, Math.round(f.size / 1024)) + "KB";
+    a.textContent = f.image ? "看原图" : `📎 ${f.name}（${kb}）`;
+    d.appendChild(a);
+  }
+}
 /**
  * 舞台图跟着状态换，规则同 CoreS3（device/src/ui.py 的 _IMG_MAP）：待机 img_bg、录音 img_recording、
  * 思考 img_streaming、说话 img_playing。手机有自己的一套图（GET /app/img，服务端挑：先角色的再默认的，
@@ -801,6 +814,7 @@ function connectEvents() {
     if (d.action === "role" && d.role) { S.role = d.role; renderRoles(); }
     else if (d.action === "images") imagesChanged();
     else if (d.action === "capture") addMsg("sys", "她想拍照：点左下角相机拍一张发给她");
+    else if (d.action === "files") showFiles(d.agent, d.files || []);
   });
 }
 async function drainPushes() {

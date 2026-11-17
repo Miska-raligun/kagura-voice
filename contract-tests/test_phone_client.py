@@ -217,3 +217,46 @@ def test_phone_images_separate_from_cores3(token_server):
         s.request("DELETE", "/api/admin/device-files?p=resource/img_bg.jpg")
         s.request("DELETE", "/api/admin/app-images?role=&name=img_bg")
         s.request("DELETE", f"/api/admin/clients/{cid}")
+
+
+@pytest.mark.skipif(os.environ.get("KAGURA_BRAIN") != "pi", reason="send_file 是内置 agent 的工具")
+def test_send_file_reaches_phone(srv):
+    """她在手机对话里用 send_file 发文件：页面经推送通道收到清单，凭配对令牌取回；硬件设备的对话里没有这个工具"""
+    import json as _json
+    cid, token = _pair(srv, "收文件的手机")
+    src = srv.data / "报告.txt"
+    src.write_text("周报内容", encoding="utf-8")
+    got, ready = [], threading.Event()
+
+    def listen():
+        with requests.get(srv.base + f"/client/events?ct={token}", stream=True, timeout=30) as ev:
+            ready.set()
+            for line in ev.iter_lines(decode_unicode=True):
+                got.append(line)
+                if line.startswith("data:") and '"files"' in line:
+                    break
+    t = threading.Thread(target=listen, daemon=True)
+    t.start()
+    assert ready.wait(5)
+    time.sleep(0.3)
+    srv.fake_llm({"text": "", "tool_calls": [{"name": "send_file", "args": {"path": str(src)}}], "then": "发你了。"})
+    r = _bare(srv, "POST", "/chat-vision", token, json={"text": "把周报发我"}, headers={"X-Device-Id": cid}, timeout=30)
+    assert r.status_code == 200, r.text
+    t.join(10)
+    data = next(_json.loads(l[5:]) for l in got if l.startswith("data:") and '"files"' in l)
+    assert data["action"] == "files" and data["files"][0]["name"] == "报告.txt" and not data["files"][0]["image"]
+    rel, agent = data["files"][0]["rel"], data["agent"]
+    assert rel.startswith("sent/")
+    f = _bare(srv, "GET", f"/client/file?agent={agent}&path={requests.utils.quote(rel)}", token)
+    assert f.status_code == 200 and f.content.decode("utf-8") == "周报内容"
+    # 没令牌、路径想钻出 sent/ 都不给
+    assert _bare(srv, "GET", f"/client/file?agent={agent}&path={requests.utils.quote(rel)}").status_code == 401
+    assert _bare(srv, "GET", f"/client/file?agent={agent}&path=sent/../MEMORY.md", token).status_code == 404
+    # 硬件设备的语音对话里没有 send_file（发了没人收）
+    from conftest import wav
+    srv.fake_reset()
+    srv.post("/heartbeat", json={"device_id": "hw1"})
+    srv.fake_asr("把周报发我")
+    srv.fake_llm({"text": "", "tool_calls": [{"name": "send_file", "args": {"path": str(src)}}], "then": "我这边发不了。"})
+    assert srv.post("/chat", data=wav(), headers={"X-Device-Id": "hw1"}).status_code == 200
+    assert "📎" not in srv.log().split("hw1")[-1]

@@ -62,6 +62,9 @@ export interface AgentSystem {
   mirror?: (agentId: string, text: string, source: string, meta?: { announced?: boolean; voice?: string }) => Promise<void>;
   /** 会被顺带念的回复：给 RunRequest.onVoice 用（朗读版写好就先念）；按策略不念时 undefined */
   voiceFirst?: (agentId: string, source: string) => ((text: string) => void) | undefined;
+  /** 这台设备是不是配对的手机 / 平板（attach 时把 phones.has 接到 ctx.clients；之前一律不是） */
+  isPhone: (deviceId: string) => boolean;
+  phones: { has: (deviceId: string) => boolean };
 }
 
 export function createAgentSystem(cfg: Config, dirs: Dirs, fake: FakeLlm | null): AgentSystem {
@@ -108,7 +111,8 @@ export function createAgentSystem(cfg: Config, dirs: Dirs, fake: FakeLlm | null)
   // 读 / 改 / 搜文件（权限同 exec），比拼命令行稳、改完能顺手确认
   runtime.addTools(fileTools(cfg.tools, (agent) => { try { return models.resolve(agent.model).input.includes("image"); } catch { return true; } }));
   // 发文件给主人（网页聊天、飞书等 IM 的回复里）
-  runtime.addTools(sendTools());
+  const phones = { has: (_dev: string) => false };
+  runtime.addTools(sendTools({ isPhone: (dev) => phones.has(dev) }));
   // 扩展（pi 格式，agent 也能自己写）与 MCP 服务器；启动后由 main 在后台加载 / 连接（startPlugins）
   const mcp = new McpManager(path.join(cfg.dataDir, "mcp.json"), { fetch: proxiedFetch, cwd: cfg.dataDir, version: VERSION, componentsDir: path.join(cfg.dataDir, "mcp_components") });
   mcp.watch();
@@ -129,12 +133,13 @@ export function createAgentSystem(cfg: Config, dirs: Dirs, fake: FakeLlm | null)
   const watchdog = new Watchdog(runtime, models, () => !fake && cfg.runtime.watchdog !== false);
   watchdog.start();
   const channels = new ChannelManager(new ChannelStore(path.join(cfg.dataDir, "channels.json")), runtime, registry, undefined, path.join(cfg.dataDir, "channels_seen.json"));
-  return { registry, models, runtime, memories, scheduler: null, tasks: null, a2a, skills, channels, mcp, components, extensions, packages };
+  return { registry, models, runtime, memories, scheduler: null, tasks: null, a2a, skills, channels, mcp, components, extensions, packages, phones, isPhone: (dev) => phones.has(dev) };
 }
 
 /** 依赖 Ctx 的部分（设备工具要推送、拍照；调度器要投递）在 Ctx 建好之后接上 */
 export function attachAgentSystem(sys: AgentSystem, ctx: Ctx) {
   const { runtime, registry } = sys;
+  sys.phones.has = (dev) => !!ctx.clients?.list().some((c) => c.id === dev);
   // IM 斜杠命令（/status /model /restart …）要用到的东西
   sys.channels.commands = {
     version: VERSION,
@@ -166,7 +171,7 @@ export function attachAgentSystem(sys: AgentSystem, ctx: Ctx) {
     rolePush: () => ctx.cfg.rolePush ?? "hold",
     presence, onlineDevices: online,
     knownDevices: () => [...ctx.hb.devices.keys(), ...(ctx.clients?.list() ?? []).map((c) => c.id)],
-    portable: (dev) => !!ctx.clients?.list().some((c) => c.id === dev),
+    portable: (dev) => sys.isPhone(dev),
     roleAgent: (dev) => ctx.roles.get(dev).agent,
     hasRole: (agentId) => ctx.roles.all().some((r) => r.agent === agentId),
     busy: (dev) => (ctx.activeChats.get(dev) ?? 0) > 0,

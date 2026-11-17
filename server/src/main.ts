@@ -139,7 +139,14 @@ async function main() {
   const clients = new Clients(path.join(cfg.dataDir, "clients.json"));
   ctx.clients = clients;
   mqtt.taps.push((t, p) => clients.onPublish(t, p));
-  registerClient(r, ctx, clients);
+  registerClient(r, ctx, clients, sys.registry);
+  // 她在手机对话里用 send_file 发的文件：走发给设备的命令通道（手机经 SSE 收到），页面凭配对令牌来取
+  if (brain instanceof PiBrain) {
+    brain.onFiles = (dev, agent, files) => {
+      mqtt.publish(`kagura/cmd/${dev}`, { action: "files", agent, files });
+      console.log(`[${dev}] 📎 发了 ${files.length} 个文件：${files.map((f) => f.name).join("、")}${clients.online(dev) ? "" : "（页面没开着，没收到）"}`);
+    };
+  }
   registerAdmin(r, ctx, sys);
   registerAdminSystem(r, ctx);
   registerAdminUi(r);

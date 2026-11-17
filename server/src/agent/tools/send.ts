@@ -1,6 +1,6 @@
 // 发文件给主人（send_file）：图片、文档、表格、压缩包……网页会话里显示在对话中（图片直接显示，其它可下载），
 // 飞书发成图片 / 文件消息，OneBot（QQ 个人号）只能发图片。只在回复会直接送到人眼前的会话里有（网页聊天、IM），
-// 设备语音、待办、定时任务、子任务里没有（发了也没人收）。只给可信会话：它能读这台电脑上的任意文件，陌生人用它就是把文件往外拿。
+// 手机 / 平板网页客户端（/app）的对话里也有：文件经推送通道送到页面上。硬件设备的语音对话、待办、定时任务、子任务里没有（发了也没人收）。只给可信会话：它能读这台电脑上的任意文件，陌生人用它就是把文件往外拿。
 //
 // 文件先复制一份到工作目录 sent/<日期>/：网页上的历史记录一直看得到当时发的那份（原文件后来改了、删了都不影响），
 // 管理界面也只从工作目录里取文件。工具结果里带一行 `[文件 sent/…]`，会话页认这行画成附件（不折叠在工具结果里）。
@@ -28,9 +28,11 @@ export const SENT_RE = /^\[文件 (sent\/[^\]\n]+)\]$/gm;
 
 const kb = (n: number) => (n >= 1024 * 1024 ? `${(n / 1024 / 1024).toFixed(1)}MB` : `${Math.max(1, Math.round(n / 1024))}KB`);
 
-export function sendTools() {
+/** isPhone：这台设备是不是配对的手机 / 平板（它有屏幕能收文件；硬件设备只有喇叭） */
+export function sendTools(o: { isPhone?: (deviceId: string) => boolean } = {}) {
   return (scope: RunScope, agent: AgentInfo): AgentTool<any>[] => {
-    if (!scope.trusted || scope.kind === "sub" || !CHANNELS.has(scope.channel)) return [];
+    const phone = scope.channel === "device" && !!scope.deviceId && !!o.isPhone?.(scope.deviceId);
+    if (!scope.trusted || scope.kind === "sub" || !(CHANNELS.has(scope.channel) || phone)) return [];
     const imagesOnly = scope.channel === "onebot";
     return [{
       name: "send_file", label: "发文件给主人",
