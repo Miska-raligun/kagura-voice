@@ -16,6 +16,14 @@ export function Usage() {
   const monthCost = d.reduce((s, a) => s + a.days.filter((x: any) => x.day.startsWith(month)).reduce((t: number, x: any) => t + (x.cost ?? 0), 0), 0);
   const dayOfMonth = new Date().getDate();
   const daysInMonth = new Date(new Date().getFullYear(), new Date().getMonth() + 1, 0).getDate();
+  // 各 agent 的场景合到一起
+  const sceneMap = new Map<string, any>();
+  for (const a of d) for (const x of a.scenes ?? []) {
+    const s = sceneMap.get(x.scene) ?? { scene: x.scene, calls: 0, input: 0, cache_read: 0, cache_write: 0, cost: 0 };
+    s.calls += x.calls; s.input += x.input; s.cache_read += x.cache_read; s.cache_write += x.cache_write; s.cost += x.cost;
+    sceneMap.set(x.scene, s);
+  }
+  const scenes = [...sceneMap.values()].sort((a, b) => (b.input + b.cache_read + b.cache_write) - (a.input + a.cache_read + a.cache_write));
   const W = 640, H = 160, bw = allDays.length ? W / allDays.length : W;
   return (
     <>
@@ -36,11 +44,26 @@ export function Usage() {
           <div class="legend">{d.map((a, k) => <span><i style={{ background: COLORS[k % COLORS.length] }} />{a.name}</span>)}</div>
         </> : <Empty>无调用</Empty>}
       </Card>
+      <Card title="缓存命中（按场景）">
+        {scenes.length ? <>
+          <table><thead><tr><th>场景</th><th>调用</th><th>输入 token</th><th style={{ width: "34%" }}>命中缓存</th><th>写缓存</th><th>费用</th></tr></thead>
+            <tbody>{scenes.map((s) => {
+              const total = s.input + s.cache_read + s.cache_write;
+              const rate = total ? s.cache_read / total : 0;
+              const reported = s.cache_read + s.cache_write > 0;
+              return <tr><td>{s.scene}</td><td>{s.calls}</td><td>{total.toLocaleString()}</td>
+                <td>{reported ? <span class="hit"><i><b style={{ width: `${Math.round(rate * 100)}%` }} /></i>{Math.round(rate * 100)}%</span> : <span class="muted">服务商没报</span>}</td>
+                <td>{s.cache_write ? s.cache_write.toLocaleString() : "—"}</td><td>{money(s.cost)}</td></tr>;
+            })}</tbody></table>
+          <p class="muted">命中 = 这次请求的开头和上一次一样、服务商直接复用（便宜、快）。命中低的场景，多半是系统提示每轮在变（近况、今昨笔记），或两次调用隔得太久缓存过期了。</p>
+        </> : <Empty>无调用</Empty>}
+      </Card>
       <Card title="按 agent 汇总">
-        <table><thead><tr><th>agent</th><th>调用</th><th>输入 token</th><th>输出 token</th><th>缓存命中</th><th>费用</th></tr></thead>
+        <table><thead><tr><th>agent</th><th>调用</th><th>输入 token</th><th>输出 token</th><th>命中缓存</th><th>命中率</th><th>费用</th></tr></thead>
           <tbody>{d.map((a) => {
-            const s = a.days.reduce((t: any, x: any) => ({ calls: t.calls + x.calls, input: t.input + (x.input ?? 0), output: t.output + (x.output ?? 0), cache: t.cache + (x.cache_read ?? 0), cost: t.cost + (x.cost ?? 0) }), { calls: 0, input: 0, output: 0, cache: 0, cost: 0 });
-            return <tr><td>{a.name}</td><td>{s.calls}</td><td>{s.input.toLocaleString()}</td><td>{s.output.toLocaleString()}</td><td>{s.cache.toLocaleString()}</td><td>{money(s.cost)}</td></tr>;
+            const s = a.days.reduce((t: any, x: any) => ({ calls: t.calls + x.calls, input: t.input + (x.input ?? 0), output: t.output + (x.output ?? 0), cache: t.cache + (x.cache_read ?? 0), write: t.write + (x.cache_write ?? 0), cost: t.cost + (x.cost ?? 0) }), { calls: 0, input: 0, output: 0, cache: 0, write: 0, cost: 0 });
+            const all = s.input + s.cache + s.write;
+            return <tr><td>{a.name}</td><td>{s.calls}</td><td>{s.input.toLocaleString()}</td><td>{s.output.toLocaleString()}</td><td>{s.cache.toLocaleString()}</td><td>{s.cache + s.write > 0 && all ? `${Math.round(s.cache / all * 100)}%` : "—"}</td><td>{money(s.cost)}</td></tr>;
           })}</tbody></table>
       </Card>
     </>

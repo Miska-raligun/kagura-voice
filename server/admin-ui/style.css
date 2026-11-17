@@ -352,3 +352,4 @@ span.who { display:inline-flex; align-items:center; }
 .logbox { max-height: 70vh; overflow: auto; font-size: 12px; line-height: 1.5; white-space: pre-wrap; word-break: break-all; }
 .logbox div.over { color: var(--err, #e5484d); }
 .nowrap { white-space: nowrap; }
+.hit { display:flex; align-items:center; gap:8px; font-variant-numeric:tabular-nums; } .hit i { flex:1; height:8px; border-radius:4px; background:var(--line2); overflow:hidden; } .hit b { display:block; height:100%; background:#3fb8a5; }

@@ -188,7 +188,46 @@ export class AgentStore {
   usageByDay(days = 30) {
     const since = Date.now() / 1000 - days * 86400;
     return this.db.prepare(`SELECT date(ts, 'unixepoch', 'localtime') AS day, COUNT(*) AS calls,
-        SUM(input) AS input, SUM(output) AS output, SUM(cache_read) AS cache_read, SUM(cost) AS cost
+        SUM(input) AS input, SUM(output) AS output, SUM(cache_read) AS cache_read, SUM(cache_write) AS cache_write, SUM(cost) AS cost
       FROM usage WHERE ts >= ? GROUP BY day ORDER BY day`).all(since);
   }
+
+  /**
+   * 按场景汇总用量（主会话 / 设备 / IM / heartbeat / 定时任务 / 待办 / 压缩…）：看哪个场景的前缀缓存没命中。
+   * input 是没命中缓存的输入，命中率 = cache_read /（input + cache_read + cache_write）
+   */
+  usageByScene(days = 30): SceneUsage[] {
+    const since = Date.now() / 1000 - days * 86400;
+    const rows = this.db.prepare(`SELECT purpose, session, COUNT(*) AS calls, SUM(input) AS input, SUM(output) AS output,
+        SUM(cache_read) AS cache_read, SUM(cache_write) AS cache_write, SUM(cost) AS cost
+      FROM usage WHERE ts >= ? GROUP BY purpose, session`).all(since) as any[];
+    const by = new Map<string, SceneUsage>();
+    for (const r of rows) {
+      const scene = usageScene(String(r.purpose ?? ""), String(r.session ?? ""));
+      const s = by.get(scene) ?? { scene, calls: 0, input: 0, output: 0, cache_read: 0, cache_write: 0, cost: 0 };
+      s.calls += r.calls; s.input += r.input ?? 0; s.output += r.output ?? 0; s.cache_read += r.cache_read ?? 0; s.cache_write += r.cache_write ?? 0; s.cost += r.cost ?? 0;
+      by.set(scene, s);
+    }
+    return [...by.values()].sort((a, b) => (b.input + b.cache_read + b.cache_write) - (a.input + a.cache_read + a.cache_write));
+  }
+}
+
+export interface SceneUsage { scene: string; calls: number; input: number; output: number; cache_read: number; cache_write: number; cost: number }
+
+/** 一次模型调用算哪个场景：内部小任务按用途，其余按会话 key 认来源（同会话页的 sourceOf） */
+export function usageScene(purpose: string, session: string): string {
+  if (purpose === "compact") return "压缩摘要";
+  if (purpose === "voice") return "朗读兜底";
+  if (purpose === "flush") return "记忆冲刷";
+  if (session.endsWith(":heartbeat") || purpose === "heartbeat") return "heartbeat";
+  if (session.includes(":cron:") || purpose === "cron") return "定时任务";
+  if (session.includes(":task:") || purpose === "task") return "待办";
+  if (session.includes(":sub:") || purpose === "spawn") return "子任务";
+  if (session.includes(":a2a:") || purpose === "a2a") return "agent 间";
+  if (session.endsWith(":main")) return "主会话";
+  const ch = session.split(":")[1] ?? "";
+  if (ch === "device") return "设备";
+  if (ch === "webchat") return "网页";
+  if (ch === "feishu" || ch === "qq" || ch === "onebot") return "IM";
+  return purpose || "其它";
 }

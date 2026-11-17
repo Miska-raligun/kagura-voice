@@ -706,7 +706,7 @@ export function registerAdmin(r: Router, ctx: Ctx, sys: AgentSystem) {
   // ── 用量（全部 agent）──
   get("/api/admin/usage", (req) => {
     const days = Number(req.query.get("days") ?? 30);
-    return json(registry.list().map((a) => ({ agent: a.id, name: a.name, days: runtime.store(a.id).usageByDay(days) })));
+    return json(registry.list().map((a) => ({ agent: a.id, name: a.name, days: runtime.store(a.id).usageByDay(days), scenes: runtime.store(a.id).usageByScene(days) })));
   });
 
   // ── 设备日志 / 崩溃报告 / 录音 ──
