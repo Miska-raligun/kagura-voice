@@ -1,27 +1,20 @@
 # 契约测试（黑盒协议测试）
 
 只通过 HTTP / MQTT / UDP / TCP 和被测服务端打交道，不 import、不打桩任何内部函数。
-**同一套用例先对 Python 版跑绿，再对 TypeScript 版（`server/`）跑绿**——这是迁移计划里
-「现有功能原样支持」的验收标准（[计划 §9](../docs/plan-kagura-agent.md)）。
+被测的是打包好的服务端（`server/`，自带 MQTT broker 与 UDP 发现）；CI 上对三个系统的单文件可执行、
+以及装好的安装包各跑一遍。这套用例最初是为了保证从 Python 版迁移时「现有功能原样支持」
+（[计划 §9](../docs/plan-kagura-agent.md)），Python 版已删除，用例留下来守设备协议。
 
 ## 运行
 
 ```bash
-pip install -r requirements.txt -r contract-tests/requirements.txt
-cd contract-tests && pytest                      # 默认测 Python 版 voice_server.py
+pip install -r contract-tests/requirements.txt
+cd server && npm ci && node scripts/build.mjs && cd ../contract-tests
+KAGURA_SERVER_CMD="node server/dist/kagura.cjs" python -m pytest -q                  # OpenClaw 适配器（假的）
+KAGURA_BRAIN=pi KAGURA_SERVER_CMD="node server/dist/kagura.cjs" python -m pytest -q  # 内置 agent
 ```
 
-对 TypeScript 版（M2 起）：
-
-```bash
-KAGURA_SERVER_CMD="node ../server/dist/kagura.cjs" \
-KAGURA_SERVER_PROVIDES=broker,discovery \
-pytest
-```
-
-- `KAGURA_SERVER_CMD`：启动命令，工作目录是仓库根。
-- `KAGURA_SERVER_PROVIDES`：被测服务端自带的组件。TS 版内置 MQTT broker 与 UDP 发现；
-  Python 版两者都没有，由测试框架拉起 `_broker.py`（amqtt）和 `discovery_relay.py`。
+- `KAGURA_SERVER_CMD`：启动命令（必填），工作目录是仓库根。
 
 ## 被测服务端必须支持的环境变量
 
@@ -33,11 +26,11 @@ pytest
 | `KAGURA_STREAM_PORT` | 直播 TCP 端口 |
 | `KAGURA_DISC_PORT` | UDP 发现端口 |
 | `KAGURA_DATA_DIR` | 所有运行时数据写这里（每个测试实例一个临时目录） |
-| `KAGURA_TEST_CONFIG` | JSON：`{"api_token", "stream_token", "roles"}`。Python 版改读同目录的 `config.py`（框架会一起生成） |
+| `KAGURA_TEST_CONFIG` | JSON：`{"api_token", "stream_token", "roles"}` |
 
 ## `/__fake/*` 测试协议
 
-两版服务端在 `KAGURA_FAKE_PROVIDERS=1` 时都要实现（Python 版在 `fake_providers.py`）：
+`KAGURA_FAKE_PROVIDERS=1` 时才有（`server/src/fake.ts`）：
 
 | 接口 | 作用 |
 |---|---|
@@ -47,7 +40,7 @@ pytest
 | `GET /__fake/log` | `{"asr": 次数, "llm": [{"message","session","agent","image","local_time"}], "tts": [{"text","per"}]}` |
 
 `llm[].message` 是交给模型的完整用户消息（含触觉背景、快捷指令上下文等注入），
-`session` 只要求「同一会话相同、不同会话不同」，具体取值两版可以不同。
+`session` 只要求「同一会话相同、不同会话不同」。
 
 ## 覆盖范围
 
@@ -61,7 +54,7 @@ pytest
 验证过测试能抓出问题：故意改坏服务端（响应头、角色音色、直播结束帧、下载即删、限流阈值等）
 都会让用例失败。
 
-## 内置 agent 模式（`KAGURA_BRAIN=pi`，只对 TS 版）
+## 内置 agent 模式（`KAGURA_BRAIN=pi`）
 
 同一套用例在内置 agent 上再跑一遍，另外 `test_agent_system.py` 覆盖工具、会话落盘、调度器、agent 通信与管理接口
 （其它模式下自动跳过）。`/__fake/llm` 的脚本项除了字符串，还可以是：

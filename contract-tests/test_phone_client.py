@@ -1,4 +1,4 @@
-"""手机 / 平板网页客户端（/app）：新服务端才有。
+"""手机 / 平板网页客户端（/app）。
 
 配对（管理接口发令牌）→ 凭令牌拿身份、收 SSE 推送、打字聊天、用监控接口（令牌等同 API_TOKEN）→ 吊销后全部失效。
 """
@@ -8,9 +8,6 @@ import time
 
 import pytest
 import requests
-
-pytestmark = pytest.mark.skipif("broker" not in os.environ.get("KAGURA_SERVER_PROVIDES", ""),
-                                reason="只有新服务端（TS）有手机客户端")
 
 
 def _pair(s, name="测试手机"):

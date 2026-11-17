@@ -144,4 +144,4 @@ OpenClaw 时代的人设和任务里常写着「用 cores3-speak 播报」「用
 - **设备找不到服务端**：确认防火墙规则（安装包会加一条叫 Kagura 的规则）；电脑和设备在同一个 WiFi；
   方案 B 还要确认发现中继窗口开着。
 - **管理界面打不开 / 403**：只能在运行服务端的那台电脑上开；方案 B 用 `http://localhost:5080/admin`。
-- **想回到旧版**：卸载新版（数据不会删），重新运行 `openclaw-startup.ps1` 和 `voice_server.py` 即可，旧数据没动过。
+- **想回到旧版**：卸载新版（数据不会删），旧数据没动过；旧版 Python 服务端的代码已经从仓库里删掉了，要用得先 `git checkout v1.0.0-rc.51` 回到还带着它的版本，再运行 `openclaw-startup.ps1` 和 `voice_server.py`。

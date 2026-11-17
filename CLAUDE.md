@@ -13,29 +13,21 @@ CoreS3 (MicroPython) ──HTTP──▶ server/（TypeScript 单文件可执行
 - 设备录音上传 `/chat` → 服务端 ASR → （短路链 或 agent）→ TTS → 返回 WAV（新固件边生成边播）
 - 服务端主动推送：TTS 存 `push_audio/` → MQTT 发 JSON 通知 → 设备 HTTP 下载播放
 - UDP :5001 广播 `KAGURA_DISCOVER`/`KAGURA_HERE` 自动发现服务端 IP
-- **当前主线是 `server/`**。根目录的 Python 版（`voice_server.py` 等）已冻结，只修严重 bug；
-  契约测试仍对两版都跑，等 1.0 正式版稳定后删除（见 `docs/legacy-python.md`）。
+- 服务端只有 `server/` 这一版。早期的 Python 版（`voice_server.py` 等）已于 2026-11 删除（最后带着它的版本是 `v1.0.0-rc.51`）；
+  下面有些早期条目还用着它的函数名（`_send_push`、`_capture_and_wait`、`stream_server.SOCKET_TIMEOUT` 等），
+  机制没变，对应实现在 `server/src/`（`ctx.sendPush`、`routes/`、`stream.ts`、`shortcut/`、`jobs/`）。
 
 ## 文件
 
 | 文件 | 说明 |
 |---|---|
-| `server/` | **服务端（主线）**：单文件可执行、内置 MQTT broker、内置 agent 系统（基于 pi：记忆、定时任务、heartbeat、agent 间通信、技能、扩展 / 扩展包 / MCP）、IM 渠道（飞书/QQ）、本机管理界面 `/admin`、Windows 托盘版。见 `server/README.md`、`docs/plan-kagura-agent.md`。`contract-tests/` 新旧两版共用（`KAGURA_BRAIN=pi` 再跑一轮内置 agent） |
-| `voice_server.py` | 旧版 Flask 服务端（**已冻结**）：路由、ASR/TTS、`ServerState`、`_send_push`。改设备协议时契约测试还会跑它 |
+| `server/` | **服务端（主线）**：单文件可执行、内置 MQTT broker、内置 agent 系统（基于 pi：记忆、定时任务、heartbeat、agent 间通信、技能、扩展 / 扩展包 / MCP）、IM 渠道（飞书/QQ）、本机管理界面 `/admin`、Windows 托盘版。见 `server/README.md`、`docs/plan-kagura-agent.md`。|
 | `device/src/*.py` | CoreS3 固件（**MicroPython**，不能用 CPython 特性/typing；改后需真机烧录验证） |
 | `device/main.py` | 烧成 `/flash/main.py` 的引导：把 `/flash/kagura/src` 加进 sys.path |
-| `cores3_client.py` | 旧单文件版，**已弃用勿改**，真机验证通过后删除 |
-| `voice_assistant.py` | 本地 CLI 模式（ffmpeg 录音 + edge-tts），与服务端独立 |
-| `quick_commands.py` | 短路规则：时间/日期/星期 `match`、音量 `match_volume`、提醒解析 `match_reminder` |
-| `reminders.py` | 提醒调度：`schedule`/`fire_due`，落盘 `reminders.json`，线程 `init(send_fn)` |
-| `photo_schedules.py` | 每日定时拍照：`add`/`update`/`fire_due`，落盘 `photo_schedules.json`，`init(run_fn)` |
-| `stream_server.py` | 直播流接收（TCP :5002）。`_Reader` 带缓冲，`latest`/`stats`/`drop` 给路由用 |
-| `web/monitor.html` | Web 监控页（单文件，无外部依赖）。由 `/monitor` 路由 `send_file` 直出 |
-| `web/app.html` | 手机 / 平板网页客户端（单文件，无外部依赖），新服务端 `/app` 直出：对话 + 看家 |
-| `roles.py` | 角色（多 agent）：`get`/`set_role`/`session_key`/`match_switch`，落盘 `roles_state.json`，表来自 `config.ROLES` |
-| `baidu_tokens.py` | 百度 token 缓存（`BaiduTokenCache`，线程安全） |
-| `oc_utils.py` | `_extract_json`（raw_decode 提取 CLI stdout 里的 JSON）、`strip_markdown` |
-| `config.py` | 不提交。`config.example.py` 为模板；`API_TOKEN` 可选（留空=开放） |
+| `web/monitor.html` | Web 监控页（单文件，无外部依赖）。构建时内联进服务端，`/monitor` 直出 |
+| `web/app.html` | 手机 / 平板网页客户端（单文件，无外部依赖），`/app` 直出：对话 + 看家 |
+| `contract-tests/` | 黑盒契约测试（Python + pytest）：起打包好的服务端，只走 HTTP / MQTT / UDP / TCP；`KAGURA_BRAIN=pi` 再跑一轮内置 agent |
+| `openclaw-startup.ps1`、`discovery_relay.ps1` | 只给「服务端跑在 WSL 里」的用法：Windows 侧端口转发、UDP 发现中继 |
 
 ## 关键机制（改动前必读）
 
@@ -826,8 +818,7 @@ cfg → hw → clock → ui → {wifisetup, snd} → cam → feel
 > 新增模块取名前先在 REPL 验一句：
 > `import 名字 as m; print(getattr(m, "__file__", "FROZEN——换个名字"))`
 
-设备端由 `tools/` 下的生成器从单文件版拆出，**注释逐行保留**（顶层语句之间的
-独立注释块会随下一条语句一起被抽走，否则段头和踩坑记录会全部丢失）。
+设备端最初是从单文件版（`cores3_client.py`，已删除）用生成器拆出来的，现在 `device/src/` 就是源头，直接改。
 
 **三条铁律**：
 
@@ -855,30 +846,32 @@ cfg → hw → clock → ui → {wifisetup, snd} → cam → feel
 ## 测试与验证
 
 ```bash
-pip install -r requirements.txt
-pytest tests/ -q                 # 200+ 例，外部依赖全打桩（conftest 注入 config/paho 桩）
-python3 tools/check_split.py     # 设备端拆分静态校验（5 项）
+cd server && npm ci && npx tsc --noEmit -p . && npx tsc --noEmit -p admin-ui && npx vitest run   # 类型检查 + 单测
+node scripts/build.mjs           # 打出 dist/kagura.cjs（契约测试测的是它）
+cd ../contract-tests && pip install -r requirements.txt
+KAGURA_SERVER_CMD="node server/dist/kagura.cjs" python -m pytest -q                  # OpenClaw 适配器（假的）
+KAGURA_BRAIN=pi KAGURA_SERVER_CMD="node server/dist/kagura.cjs" python -m pytest -q  # 内置 agent
+cd .. && python3 tools/check_split.py     # 设备端静态校验（5 项）
 python3 tools/import_sim.py      # 桩件环境下真的 import 一遍设备模块
 # 监控页 JS 语法检查（node --check 只认真实文件，不能用进程替换）
 python3 -c "import re;open('/tmp/m.js','w').write(re.search(r'<script>(.*)</script>', \
   open('web/monitor.html').read(), re.S).group(1))" && node --check /tmp/m.js
 ```
 
-- 服务端改动必须跑 pytest；`tests/conftest.py` 的 `vs` fixture 每测试重置 `ServerState`。
+- 服务端改动必须跑 vitest；碰到设备协议（路由、响应头、MQTT、直播）的再跑契约测试——它起的是构建产物，**改完先重新 build**。
 - 设备端无法本地运行，但有两层静态兜底（CI 也跑）：
   - `tools/check_split.py`：名字解析、import 无环、可变全局导入方式、
-    跨模块 `mod.attr` 是否悬空、函数是否丢失
+    跨模块 `mod.attr` 是否悬空、`global` 声明是否有主；固件星号导入提供的名字（`Lcd`、`Mic` 等）
+    登记在脚本的 `baseline` 里，用到新的要加
   - `tools/import_sim.py`：用桩件模拟 M5/MicroPython 环境**真的 import 一遍**，
     并验证 `rms`/`rms_slices` 一致性、WAV 头、包络等纯函数行为
   - 最终仍需 uiflow2.m5stack.com 真机烧录确认
-- paho-mqtt 用 1.x API（`mqtt.Client()`），勿升 2.x。
+- 契约测试里的模拟设备用 paho-mqtt 1.x API（`mqtt.Client()`），勿升 2.x。
 
 ## 惯例
 
 - 提交信息中文，格式 `类型: 摘要`（feat/fix/perf/refactor/docs/chore）。
-- 注释中文为主；服务端有 type hints，设备端（MicroPython）没有。
-- 运行时产物（`push_audio/`、`tts_cache/`、`snapshots/`、`debug_audio/`、`roles_state.json`、`reminders.json`、
-  `photo_schedules.json`）已 gitignore，勿提交。
+- 注释中文为主；设备端是 MicroPython，不写类型标注。
 - 设备目录：`/flash/kagura/src`（代码）、`/flash/kagura/resource`（图片，
   用 `cfg.res()` 取路径）、`/flash/kagura/data`（运行时状态，`cfg.data()`，
   `cfg.ensure_dirs()` 自动创建）。新增文件路径一律走这两个助手，别硬编码。

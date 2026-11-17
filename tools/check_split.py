@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """设备端模块拆分的静态校验（无法真机测试时的安全网）。
 
-检查四件事：
-  1. 每个模块引用的名字都能解析（本模块定义 / 显式 import / 星号导入基线）
+检查五件事：
+  1. 每个模块引用的名字都能解析（本模块定义 / 显式 import / 固件星号导入提供的）
   2. import 图无环
   3. 没有模块用 `from cfg import <运行时可变量>`（会读到值拷贝，静默失效）
-  4. 拆分后没有丢函数（对比单文件版本）
+  4. 跨模块 `mod.attr` 引用不悬空
+  5. `global` 声明的名字在本模块有人赋值
 用法: python3 tools/check_split.py
 """
 import ast, builtins, os, sys
 
 SRC = "device/src"
-LEGACY = "cores3_client.py"      # 单文件基线（若还在）
 MUTABLE = {"SERVER_BASE", "SERVER_URL", "VISION_URL", "UPLOAD_URL",
            "MQTT_BROKER", "SILENCE_THRESHOLD", "WAKE_THRESHOLD"}
 BUILTINS = set(dir(builtins)) | {"__name__", "__file__", "const"}
@@ -71,11 +71,9 @@ def analyse(path):
     fns = {n.name for n in tree.body if isinstance(n, ast.FunctionDef)}
     return tree, mod_binds, undef, imports, fns
 
-# ── 基线：单文件版里"未定义"的名字 = 星号导入 + 内置提供的 ──
-baseline = set()
-legacy_fns = set()
-if os.path.exists(LEGACY):
-    _, _, baseline, _, legacy_fns = analyse(LEGACY)
+# ── `from M5 import *` / `from hardware import *` 提供的名字 ──
+# 以前从单文件版（cores3_client.py，已删除）里算出来；用到新的固件全局时加在这里。
+baseline = {"Lcd", "Mic", "Rgb", "Speaker", "Widgets"}
 
 mods = sorted(f[:-3] for f in os.listdir(SRC) if f.endswith(".py"))
 fail = 0
@@ -220,23 +218,6 @@ if orphan:
     fail += 1
 else:
     print("  ✓ 所有 global 声明都有对应的赋值")
-
-print("\n=== 6. 函数完整性（对比单文件基线）===")
-if legacy_fns:
-    new_fns = set()
-    for m in mods:
-        _, _, _, _, fns = analyse(os.path.join(SRC, m + ".py"))
-        new_fns |= fns
-    renamed = {"_update_chat_text": "update_chat_text", "_mic_on": "mic_on",
-               "_mic_off": "mic_off", "_wdt_feed": "wdt_feed",
-               "_volume_load": "volume_load", "_volume_adjust": "volume_adjust"}
-    missing = {f for f in legacy_fns if f not in new_fns and renamed.get(f) not in new_fns}
-    if missing:
-        print("  ✗ 丢失: %s" % ", ".join(sorted(missing))); fail += 1
-    else:
-        print("  ✓ 基线 %d 个函数全部落位（含 %d 处重命名）" % (len(legacy_fns), len(renamed)))
-else:
-    print("  - 跳过（单文件基线已删除）")
 
 print("\n" + ("❌ %d 项未通过" % fail if fail else "✅ 全部通过"))
 sys.exit(1 if fail else 0)

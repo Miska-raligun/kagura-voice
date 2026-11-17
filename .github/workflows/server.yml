@@ -3,7 +3,7 @@ name: server
 # 新服务端（server/，TypeScript）的 CI：
 #   unit     ：类型检查 + vitest 单测 + M0 验证脚本（Node 22 / 24）
 #   contract ：打出真正的单文件可执行，在 Windows / Linux / macOS 上跑全部契约用例
-#              （contract-tests/，与 Python 版同一套）
+#              （contract-tests/）
 on:
   push:
     branches: [feat/kagura-agent-server]
@@ -87,8 +87,6 @@ jobs:
       - name: Contract tests（对单文件可执行）
         working-directory: contract-tests
         shell: bash
-        env:
-          KAGURA_SERVER_PROVIDES: broker,discovery
         run: |
           exe=server/dist/kagura; [ -f ../server/dist/kagura.exe ] && exe=server/dist/kagura.exe
           KAGURA_SERVER_CMD="$exe" python -m pytest -q
@@ -96,7 +94,6 @@ jobs:
         working-directory: contract-tests
         shell: bash
         env:
-          KAGURA_SERVER_PROVIDES: broker,discovery
           KAGURA_BRAIN: pi
         run: |
           exe=server/dist/kagura; [ -f ../server/dist/kagura.exe ] && exe=server/dist/kagura.exe

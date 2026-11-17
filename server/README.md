@@ -1,6 +1,6 @@
 # Kagura 服务端（TypeScript 版）
 
-`voice_server.py` 的替代品：一个单文件可执行，内置 MQTT broker、UDP 发现、直播 TCP，
+一个单文件可执行（取代了早期的 Python 版 `voice_server.py`），内置 MQTT broker、UDP 发现、直播 TCP，
 设备端固件**不用改**（新固件多一个「边生成边播」）。大脑二选一：**内置 agent 系统**（基于 pi）或 OpenClaw CLI 适配器。
 这份文档面向配置与开发；使用者先看仓库根目录的 [README](../README.md)。完整计划见 `docs/plan-kagura-agent.md`。
 
@@ -411,10 +411,10 @@ CI 每次推送都会在 Windows/Linux/macOS 上打出可执行并跑契约测�
 ```bash
 npx tsc --noEmit -p .      # 类型检查
 npx vitest run             # 单测
-# 契约测试（与 Python 版同一套黑盒用例）
-cd ../contract-tests && KAGURA_SERVER_CMD=server/dist/kagura KAGURA_SERVER_PROVIDES=broker,discovery python -m pytest -q
+# 契约测试（黑盒：起打包好的程序，只走 HTTP / MQTT / UDP / TCP）
+cd ../contract-tests && KAGURA_SERVER_CMD=server/dist/kagura python -m pytest -q
 # 同一套再对内置 agent 跑一遍（另加 test_agent_system.py 的内置 agent 专用用例）
-KAGURA_BRAIN=pi KAGURA_SERVER_CMD=server/dist/kagura KAGURA_SERVER_PROVIDES=broker,discovery python -m pytest -q
+KAGURA_BRAIN=pi KAGURA_SERVER_CMD=server/dist/kagura python -m pytest -q
 ```
 
 ## 代码结构

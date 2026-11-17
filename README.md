@@ -94,9 +94,9 @@ Windows 安装包会自动放行；Linux 如果开了防火墙需要手动放行
 |---|---|
 | [`server/`](server/README.md) | 服务端（TypeScript，打成单文件可执行）：设备接口、agent 系统、IM 渠道、管理界面 |
 | [`device/`](docs/device.md) | CoreS3 固件（MicroPython） |
-| `contract-tests/` | 黑盒契约测试：只走 HTTP/MQTT/UDP/TCP，新旧服务端共用一套 |
-| `docs/` | [开发计划](docs/plan-kagura-agent.md)、[设备使用指南](docs/device.md)、[旧版服务端说明](docs/legacy-python.md) |
-| `voice_server.py` 等 | 旧版 Python 服务端（已被 `server/` 取代，保留到迁移完成） |
+| `contract-tests/` | 黑盒契约测试：只走 HTTP/MQTT/UDP/TCP，对打包好的服务端跑 |
+| `docs/` | [开发计划](docs/plan-kagura-agent.md)、[设备使用指南](docs/device.md)、[从旧版迁移](docs/migrate-from-wsl.md) |
+| `openclaw-startup.ps1`、`discovery_relay.ps1` | 只给「服务端跑在 WSL 里」的用法：Windows 侧端口转发与 UDP 发现中继 |
 | `CLAUDE.md` | 架构与踩坑记录（开发必读） |
 
 ## 开发
@@ -105,7 +105,7 @@ Windows 安装包会自动放行；Linux 如果开了防火墙需要手动放行
 cd server && npm ci
 npx tsc --noEmit -p . && npx tsc --noEmit -p admin-ui && npx vitest run   # 类型检查 + 单测
 node scripts/build.mjs && node dist/kagura.cjs                              # 构建并运行
-cd ../contract-tests && KAGURA_SERVER_CMD="node server/dist/kagura.cjs" KAGURA_SERVER_PROVIDES=broker,discovery python -m pytest -q
+cd ../contract-tests && KAGURA_SERVER_CMD="node server/dist/kagura.cjs" python -m pytest -q
 python3 tools/check_split.py && python3 tools/import_sim.py                # 固件静态检查
 ```
 

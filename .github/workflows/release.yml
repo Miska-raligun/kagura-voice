@@ -72,8 +72,8 @@ jobs:
           test -L /usr/bin/kagura && test -f /usr/lib/systemd/user/kagura.service
           pip install "paho-mqtt==1.6.1" pytest requests
           cd contract-tests
-          KAGURA_SERVER_CMD=/usr/bin/kagura KAGURA_SERVER_PROVIDES=broker,discovery python -m pytest -q
-          KAGURA_BRAIN=pi KAGURA_SERVER_CMD=/usr/bin/kagura KAGURA_SERVER_PROVIDES=broker,discovery python -m pytest -q
+          KAGURA_SERVER_CMD=/usr/bin/kagura python -m pytest -q
+          KAGURA_BRAIN=pi KAGURA_SERVER_CMD=/usr/bin/kagura python -m pytest -q
           sudo dpkg -r kagura
           test ! -e /usr/bin/kagura
       - name: AppImage 冒烟
@@ -82,7 +82,7 @@ jobs:
           app=$(ls $PWD/server/dist/Kagura-*-x86_64.AppImage)
           "$app" --version
           cd contract-tests
-          KAGURA_SERVER_CMD="$app" KAGURA_SERVER_PROVIDES=broker,discovery python -m pytest -q test_00_smoke.py
+          KAGURA_SERVER_CMD="$app" python -m pytest -q test_00_smoke.py
       - uses: actions/upload-artifact@v4
         with:
           name: release-linux
@@ -151,8 +151,8 @@ jobs:
           pip install "paho-mqtt==1.6.1" pytest requests
           cd contract-tests
           exe='"C:/Program Files/Kagura/kagura.exe"'
-          KAGURA_SERVER_CMD="$exe" KAGURA_SERVER_PROVIDES=broker,discovery python -m pytest -q
-          KAGURA_BRAIN=pi KAGURA_SERVER_CMD="$exe" KAGURA_SERVER_PROVIDES=broker,discovery python -m pytest -q
+          KAGURA_SERVER_CMD="$exe" python -m pytest -q
+          KAGURA_BRAIN=pi KAGURA_SERVER_CMD="$exe" python -m pytest -q
       - name: 在线更新冒烟：运行中的托盘版下载安装包、静默重装、自己重新拉起
         shell: pwsh
         run: |

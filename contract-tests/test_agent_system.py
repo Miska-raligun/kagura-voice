@@ -1,4 +1,4 @@
-"""内置 agent 系统（M3–M6）的黑盒用例：只在 KAGURA_BRAIN=pi 时跑（Python 版与 OpenClaw 模式没有这些功能）。
+"""内置 agent 系统（M3–M6）的黑盒用例：只在 KAGURA_BRAIN=pi 时跑（OpenClaw 模式没有这些功能）。
 
 假模型的脚本项除了字符串，还可以是 {"text": ..., "tool_calls": [{"name": ..., "args": {...}}], "then": <工具结果之后的回复>}。
 """

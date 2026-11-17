@@ -1,17 +1,11 @@
-"""设备文件同步（管理界面传图 / 换代码 → 设备自己拉）：新服务端才有，两种大脑都跑。
+"""设备文件同步（管理界面传图 / 换代码 → 设备自己拉）：两种大脑都跑。
 
 设备侧：GET /device/files、GET /device/file、POST /device/sync-result；管理侧：/api/admin/device-files*。
 """
 import base64
 import hashlib
-import os
-
-import pytest
 
 from conftest import Device
-
-pytestmark = pytest.mark.skipif("broker" not in os.environ.get("KAGURA_SERVER_PROVIDES", ""),
-                                reason="只有新服务端（TS）有设备文件同步")
 
 JPG = b"\xff\xd8\xff\xe0" + b"fake-jpeg" * 50
 

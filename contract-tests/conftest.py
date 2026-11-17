@@ -1,13 +1,9 @@
 """契约测试：只通过 HTTP / MQTT / UDP / TCP 和被测服务端打交道，不碰任何内部函数。
 
-同一套用例先对 Python 版（voice_server.py）跑绿，再对 TypeScript 版（server/）跑绿——
-这是「现有功能原样支持」的验收标准。用法见 README.md。
+被测的是打包好的服务端（server/），它自带 MQTT broker 与 UDP 发现。用法见 README.md。
 
-被测服务端通过环境变量切换：
-  KAGURA_SERVER_CMD       启动命令（默认：python voice_server.py）。命令里可以用
-                          {port} {mqtt_port} {stream_port} {disc_port} {data} 占位
-  KAGURA_SERVER_PROVIDES  被测服务端自带的组件，逗号分隔：broker,discovery
-                          （TS 版内置 MQTT broker 与 UDP 发现；Python 版两者都要外部拉起）
+  KAGURA_SERVER_CMD       启动命令（必填，工作目录是仓库根），如 node server/dist/kagura.cjs。
+                          命令里可以用 {port} {mqtt_port} {stream_port} {disc_port} {data} 占位
 """
 
 import json
@@ -26,7 +22,6 @@ import requests
 
 ROOT = Path(__file__).resolve().parent.parent
 HERE = Path(__file__).resolve().parent
-PROVIDES = {x.strip() for x in os.environ.get("KAGURA_SERVER_PROVIDES", "").split(",") if x.strip()}
 
 
 def _free_port(kind=socket.SOCK_STREAM) -> int:
@@ -64,15 +59,6 @@ class Server:
         self.api_token = api_token
         self.base = f"http://127.0.0.1:{self.port}"
         self._procs: list[subprocess.Popen] = []
-        # Python 版从 config.py 读密钥；放进数据目录并加到 PYTHONPATH 最前
-        cfg = [
-            'BAIDU_API_KEY = "x"', 'BAIDU_SECRET_KEY = "x"',
-            'BAIDU_TTS_API_KEY = "x"', 'BAIDU_TTS_SECRET_KEY = "x"',
-            f'API_TOKEN = {api_token!r}', f'STREAM_TOKEN = {stream_token!r}',
-        ]
-        if roles is not None:
-            cfg.append(f"ROLES = {roles!r}")
-        (self.data / "config.py").write_text("\n".join(cfg) + "\n", encoding="utf-8")
         (self.data / "kagura-test-config.json").write_text(json.dumps(
             {"api_token": api_token, "stream_token": stream_token, "roles": roles}, ensure_ascii=False), encoding="utf-8")
 
@@ -94,20 +80,11 @@ class Server:
             "KAGURA_DATA_DIR": str(self.data),
             "KAGURA_OPENCLAW_DIR": str(self.data / "openclaw"),
             "KAGURA_TEST_CONFIG": str(self.data / "kagura-test-config.json"),
-            "PYTHONPATH": str(self.data) + os.pathsep + env.get("PYTHONPATH", ""),
-            "PYTHONUNBUFFERED": "1",
         })
         env.update(self.extra_env)
-        if "broker" not in PROVIDES:
-            p = self._spawn([sys.executable, str(HERE / "_broker.py"), str(self.mqtt_port)], "broker", env, HERE)
-            deadline = time.time() + 10
-            while "BROKER-READY" not in (self.data / "broker.log").read_text(encoding="utf-8", errors="replace"):
-                if time.time() > deadline or p.poll() is not None:
-                    raise RuntimeError("MQTT broker 起不来：" + (self.data / "broker.log").read_text(encoding="utf-8", errors="replace"))
-                time.sleep(0.1)
-        if "discovery" not in PROVIDES:
-            self._spawn([sys.executable, str(ROOT / "discovery_relay.py")], "discovery", env, ROOT)
-        cmd = os.environ.get("KAGURA_SERVER_CMD") or f"{shlex.quote(sys.executable)} voice_server.py"
+        cmd = os.environ.get("KAGURA_SERVER_CMD")
+        if not cmd:
+            raise RuntimeError("先设 KAGURA_SERVER_CMD（被测服务端的启动命令），见 contract-tests/README.md")
         cmd = cmd.format(port=self.port, mqtt_port=self.mqtt_port, stream_port=self.stream_port,
                          disc_port=self.disc_port, data=self.data)
         args = shlex.split(cmd)
@@ -116,7 +93,7 @@ class Server:
             args[0] = str(ROOT / args[0])
         proc = self._spawn(args, "server", env, ROOT)
         _wait_http(self.base + "/health", proc, self.data / "server.log")
-        # Python 版连 broker 是异步的，等它真的连上（/api/monitor/state 的 mqtt 字段）
+        # 等内置 broker 起来（/api/monitor/state 的 mqtt 字段）
         deadline = time.time() + 10
         while time.time() < deadline:
             st = self.get("/api/monitor/state").json()
