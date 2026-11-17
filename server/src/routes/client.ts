@@ -57,7 +57,9 @@ export function registerClient(r: Router, ctx: Ctx, clients: Clients, agents?: A
     const c = clients.fromReq(req);
     if (!c) return unauthorized();
     const t = Date.now() / 1000;
-    const devices = [...ctx.hb.devices.entries()].map(([id, rec]) => ({ id, online: t - rec.ts < 180, secs_ago: Math.trunc(t - rec.ts) }));
+    // 只列硬件设备（手机对话时也会刷新心跳时刻，别把手机自己当成能「看家」的设备）
+    const phones = new Set(clients.list().map((x) => x.id));
+    const devices = [...ctx.hb.devices.entries()].filter(([id]) => !phones.has(id)).map(([id, rec]) => ({ id, online: t - rec.ts < 180, secs_ago: Math.trunc(t - rec.ts) }));
     const cur = ctx.roles.get(c.id);
     return json({
       id: c.id, name: c.name, version: VERSION, brain: ctx.brain.kind,

@@ -3,7 +3,7 @@
 //   schedule  at（一次性）/ every（间隔）/ cron（5 段 + 时区）
 //   kind      agentTurn（发提示词让 agent 干活）/ systemEvent（往 main 会话注入一条事件，可以不回）/ heartbeat
 //   session   main（共享主会话上下文）/ isolated（每次全新上下文：早报这类不需要聊天历史的任务）
-//   delivery  device:<id>（合成语音推到设备）/ webchat / none
+//   delivery  device:<id>（合成语音推到设备）/ auto（出口挑：在线的设备 → 开着的手机 → 手机通知）/ webchat / none
 //   activeHours 时段外跳过；idleOnly 设备正在对话时延后；失败指数退避重试
 //
 // 设备提醒（reminders.ts，走短路链不经 LLM）与每日定时拍照保持原样，不并进来（§4.2）。
@@ -95,7 +95,7 @@ export function validateSchedule(s: any): Schedule {
   throw new Error("schedule.kind 只能是 at / every / cron");
 }
 
-const DELIVERY_RE = /^(none|webchat|device:[A-Za-z0-9_-]{1,32}|(feishu|qq|onebot):.+)$/;
+const DELIVERY_RE = /^(none|webchat|auto|device:[A-Za-z0-9_-]{1,32}|(feishu|qq|onebot):.+)$/;
 
 export class Scheduler {
   db: DatabaseSync;
@@ -159,7 +159,7 @@ export class Scheduler {
   private check(j: Job) {
     if (!["agentTurn", "systemEvent", "heartbeat"].includes(j.kind)) throw new Error("kind 只能是 agentTurn / systemEvent / heartbeat");
     if (!["main", "isolated"].includes(j.session)) throw new Error("session 只能是 main / isolated");
-    if (!DELIVERY_RE.test(j.delivery)) throw new Error("delivery 只能是 none / webchat / device:<设备id> / feishu|qq|onebot:<账号>:<聊天id>");
+    if (!DELIVERY_RE.test(j.delivery)) throw new Error("delivery 只能是 none / webchat / auto（自动挑设备） / device:<设备id> / feishu|qq|onebot:<账号>:<聊天id>");
     if (j.kind !== "heartbeat" && !j.message.trim()) throw new Error("message 不能为空");
     if (j.active_hours && !/^\d{1,2}:\d{2}\s*-\s*\d{1,2}:\d{2}$/.test(j.active_hours)) throw new Error("active_hours 格式：08:00-23:00");
   }
@@ -330,7 +330,8 @@ export class Scheduler {
 
   private async runAgent(j: Job): Promise<RunResult> {
     const agent = this.agents.get(j.agent)!;
-    const voice = j.delivery.startsWith("device:");
+    // auto 多半也是念出来（出口挑在线的设备 / 手机），按语音写
+    const voice = j.delivery.startsWith("device:") || j.delivery === "auto";
     const dev = voice ? j.delivery.slice("device:".length) : undefined;
     const main = `${agent.id}:main`;
     const base = {

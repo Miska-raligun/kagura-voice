@@ -11,7 +11,7 @@ export interface Role { id: string; name: string; agent: string; per: number; tt
 export const roleVoice = (r: Pick<Role, "per" | "tts_provider" | "tts_voice">) =>
   ({ per: r.per, ...(r.tts_provider ? { provider: r.tts_provider } : {}), ...(r.tts_voice ? { voice: r.tts_voice } : {}) });
 
-const DEFAULT: RoleDef[] = [{ id: "", name: "神乐", agent: "main", per: 111, aliases: [] }];
+const DEFAULT: RoleDef[] = [{ id: "", name: "小助手", agent: "main", per: 111, aliases: [] }];
 const ID_RE = /^[A-Za-z0-9_-]{0,24}$/;
 const PUNCT = /[\s，。！？、,.!?~～…]+/g;
 // 只有"切换意图词"和"角色名"同时出现才算：防止"换个话题""让我想想"误触发

@@ -76,7 +76,8 @@ const inside = (parent: string, child: string) => {
 const DEFAULTS: Omit<AgentConfig, "id" | "name"> = {
   aliases: [], per: 111, tts_provider: "", tts_voice: "", device_role: "", order: 0, model: "", cheap_model: "",
   tools: ["*"], skills: ["*"], a2a: { allow: [] },
-  heartbeat: { enabled: false, every_minutes: 30, active_hours: "08:00-23:00", delivery: "device:cores3" },
+  // auto = 由出口挑：在线的硬件设备 → 开着的手机 → 手机通知（没有硬件设备的也收得到；以前写死 device:cores3）
+  heartbeat: { enabled: false, every_minutes: 30, active_hours: "08:00-23:00", delivery: "auto" },
   // 现在的模型上下文普遍 12.8 万起、有前缀缓存：攒到 6 万再压，保留最近 30 条原文（以前 1.6 万 / 16 条，压得太勤、丢细节）
   compaction: { max_tokens: 60000, keep_messages: 30 },
   device_in_main: true,
@@ -84,10 +85,17 @@ const DEFAULTS: Omit<AgentConfig, "id" | "name"> = {
   workspace_dir: "",
 };
 
+/**
+ * 首次启动时默认 agent 的名字（2026-11：以前写死「神乐」，可新用户不一定想叫这个）。
+ * 只是占位：「设置 → 快速开始」第一步就是给她起名字，改名时还没动过的人设模板跟着换（见 update）
+ */
+export const DEFAULT_AGENT_NAME = "小助手";
+
+/** 人设模板：不假定主人有哪种设备（硬件设备、手机、网页、聊天软件都可能只用其中几样） */
 export function templates(name: string): Record<string, string> {
   return {
-    "SOUL.md": `# ${name} 的灵魂\n\n你是${name}，住在主人桌上那台小小的 CoreS3 设备里。\n性格温柔、俏皮，偶尔有点小脾气；真诚，不讨好，不说空话。\n`,
-    "IDENTITY.md": `# 身份\n\n- 名字：${name}\n- 形态：一台带屏幕、摄像头、麦克风和扬声器的桌面小设备\n`,
+    "SOUL.md": `# ${name} 的灵魂\n\n你是${name}，主人的私人助手和伙伴。\n性格温柔、俏皮，偶尔有点小脾气；真诚，不讨好，不说空话。\n`,
+    "IDENTITY.md": `# 身份\n\n- 名字：${name}\n- 形态：没有固定的形体，主人在哪里找你（桌上的设备、手机、网页、聊天软件），你就在哪里\n`,
     "USER.md": "# 主人\n\n（主人的稳定偏好写在这里，例如称呼、作息、口味。）\n",
     "AGENTS.md": SHARED_TEMPLATES["AGENTS.md"],
     "TOOLS.md": "# 工具备注\n\n",
@@ -192,7 +200,7 @@ export class AgentRegistry {
   }
 
   private bootstrap(roles: RoleDef[] | null) {
-    const defs = roles && roles.length ? roles : [{ id: "", name: "神乐", agent: "main", per: 111, aliases: [] }];
+    const defs = roles && roles.length ? roles : [{ id: "", name: DEFAULT_AGENT_NAME, agent: "main", per: 111, aliases: [] }];
     const ids = defs.map((r) => String(r.agent || "main"));
     defs.forEach((r, i) => {
       const id = ids[i];
@@ -244,6 +252,14 @@ export class AgentRegistry {
     }
     const { id: _id, ...rest } = conf;
     fs.writeFileSync(path.join(dir, "agent.json"), JSON.stringify(rest, null, 2));
+    // 改了名字：还没动过的人设模板（SOUL / IDENTITY 一字没改）换成新名字，不然改完名字她还自称旧名字。改过的不碰
+    if (patch.name !== undefined && conf.name !== cur.name) {
+      const oldT = templates(cur.name), newT = templates(conf.name);
+      for (const f of ["SOUL.md", "IDENTITY.md"]) {
+        const p = path.join(newWs, f);
+        try { if (fs.readFileSync(p, "utf8") === oldT[f]) fs.writeFileSync(p, newT[f]); } catch { /* 没有这个文件 */ }
+      }
+    }
     const info = this.read(id);
     this.agents.set(id, info);
     return info;

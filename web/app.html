@@ -1025,6 +1025,7 @@ function tab(name) {
     $(page).classList.toggle("hidden", name !== n);
     $(btn).classList.toggle("hidden", name === n);
   }
+  if (name !== "home" && S.me && !(S.me.devices || []).length) $("tabHome").classList.add("hidden");
   if (name === "home") { loadMe().then(refreshHome); } else stopLive();
   if (name === "look") { lookRole = S.role; renderLooks(); }
 }
@@ -1044,6 +1045,8 @@ async function loadMe() {
   const me = await apiJson("/client/me");
   S.me = me; S.roles = me.roles || []; S.role = me.role || "";
   renderRoles();
+  // 「看家」是远程看家里的硬件设备：一台都没有就不显示这个按钮
+  $("tabHome").classList.toggle("hidden", !(me.devices || []).length);
   renderPush();
   return me;
 }

@@ -2,6 +2,7 @@
 import { useEffect, useState } from "preact/hooks";
 import { api, chars, enc, go } from "../api.ts";
 import { Btn, Card, Empty, Err, Field, Input, Select, Split, Tabs, TextArea, Toggle, confirmDo, toast, toastErr, useLoad } from "../ui.tsx";
+import { DeliveryPicker } from "./jobs.tsx";
 
 type Tab = "basic" | "soul" | "tools" | "heartbeat" | "a2a";
 
@@ -344,7 +345,7 @@ function HeartbeatTab({ a, save }: { a: any; save: (p: any) => Promise<void> }) 
         <Field label="开关" wide><Toggle checked={h.enabled} onChange={(v) => set({ ...h, enabled: v })} label="启用" /></Field>
         <Field label="间隔（分钟）"><Input type="number" value={h.every_minutes} onInput={(v) => set({ ...h, every_minutes: v })} /></Field>
         <Field label="活跃时段" hint="如 08:00-23:00，留空为全天"><Input value={h.active_hours} onInput={(v) => set({ ...h, active_hours: v })} /></Field>
-        <Field label="投递到" hint="device:<设备id> / feishu:<账号>:<聊天id> / none"><Input value={h.delivery} onInput={(v) => set({ ...h, delivery: v })} /></Field>
+        <Field label="投递到"><DeliveryPicker value={h.delivery} onChange={(v) => set({ ...h, delivery: v })} /></Field>
       </div>
       <div class="row"><Btn kind="primary" onClick={() => save({ heartbeat: { ...h, every_minutes: Number(h.every_minutes) } })}>保存</Btn>
         <a href={`#/jobs/hb-${a.id}`}>查看运行记录 →</a></div>

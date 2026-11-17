@@ -25,7 +25,7 @@ Priority: optional
 Architecture: amd64
 Maintainer: Kagura Voice <noreply@example.com>
 Description: Kagura 语音服务端
- CoreS3 语音助手的服务端：设备接口、内置 MQTT、内置 agent 系统、IM 渠道与本机管理界面。
+ 中文 AI 伙伴的服务端：内置 agent 系统、网页 / 手机 / 飞书 / QQ 对话、可选的硬件语音设备（CoreS3）接入与本机管理界面。
  单文件可执行，不依赖系统里的 Node / Python。
 CTRL
 cat > "$D/DEBIAN/postinst" <<'POST'

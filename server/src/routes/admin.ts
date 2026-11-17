@@ -7,7 +7,7 @@ import path from "node:path";
 import { json, viaProxy, type Req, type Res, type Router } from "../http/router.ts";
 import type { Ctx } from "../ctx.ts";
 import type { AgentSystem } from "../agent/system.ts";
-import { SOUL_FILES, templates } from "../agent/registry.ts";
+import { DEFAULT_AGENT_NAME, SOUL_FILES, templates } from "../agent/registry.ts";
 import { health } from "../agent/health.ts";
 import { logFilePath } from "../util/logfile.ts";
 import { SHARED_FILES, SHARED_TEMPLATES, isShared, ownExtra, sharedDir, sharedPath } from "../agent/persona.ts";
@@ -89,8 +89,9 @@ export function registerAdmin(r: Router, ctx: Ctx, sys: AgentSystem) {
   };
 
   /**
-   * 上手清单（设置 →「快速开始」）：模型、语音、设备、图片、手机，每步做没做完。
-   * 前三步是必需的（没有就说不了话），后两步可选
+   * 上手清单（设置 →「快速开始」）：名字、模型、语音，然后是「怎么和她说话」的几种方式，每步做没做完。
+   * 必需的只有模型（网页聊天随时能用）；语音在接了硬件设备或手机之后才算必需。硬件设备、手机、飞书 / QQ、图片、名字都是可选的——
+   * 不假定主人有哪种设备（以前把 CoreS3 当成必选，没有它的人永远「还差一步」）
    */
   const setupStatus = () => {
     const sp = ctx.cfg.speech, b = ctx.cfg.baidu;
@@ -107,12 +108,18 @@ export function registerAdmin(r: Router, ctx: Ctx, sys: AgentSystem) {
       try { for (const e of fs.readdirSync(dir, { withFileTypes: true })) n += e.isDirectory() ? countJpg(path.join(dir, e.name)) : /\.(jpe?g|png|webp)$/i.test(e.name) ? 1 : 0; } catch { /* 还没传过 */ }
       return n;
     };
+    const first = registry.list()[0];
+    const ims = sys.channels.status().filter((c) => c.enabled);
+    const voiceNeeded = devs.length > 0 || phones.size > 0;
     const steps = {
+      // 名字：首次启动的默认 agent 叫「小助手」，起个名字就算做完（不想改也不影响用）
+      name: { done: !!first && first.name !== DEFAULT_AGENT_NAME, optional: true, agent: first?.id ?? "", name: first?.name ?? "" },
       model: { done: !!models.defaultRef(), ref: models.defaultRef() },
-      voice: { done: ready(sp.asr, "asr") && ready(sp.tts, "tts"), asr: ready(sp.asr, "asr"), tts: ready(sp.tts, "tts"), asr_provider: sp.asr, tts_provider: sp.tts },
-      device: { done: devs.length > 0, devices: devs },
-      images: { done: countJpg(path.join(ctx.cfg.dataDir, "device_files", "resource")) + countJpg(path.join(ctx.cfg.dataDir, "app_images")) > 0, optional: true },
+      voice: { done: ready(sp.asr, "asr") && ready(sp.tts, "tts"), optional: !voiceNeeded, asr: ready(sp.asr, "asr"), tts: ready(sp.tts, "tts"), asr_provider: sp.asr, tts_provider: sp.tts },
+      device: { done: devs.length > 0, optional: true, devices: devs },
       phone: { done: phones.size > 0, optional: true },
+      im: { done: ims.length > 0, optional: true, channels: ims.map((c) => ({ kind: c.kind, name: c.name, state: c.state })) },
+      images: { done: countJpg(path.join(ctx.cfg.dataDir, "device_files", "resource")) + countJpg(path.join(ctx.cfg.dataDir, "app_images")) > 0, optional: true, relevant: voiceNeeded },
     };
     return { steps, left: Object.values(steps).filter((s: any) => !s.done && !s.optional).length, brain: ctx.brain.kind, version: VERSION };
   };

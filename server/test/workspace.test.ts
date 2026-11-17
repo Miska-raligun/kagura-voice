@@ -5,6 +5,7 @@ import path from "node:path";
 import { tmpdir } from "./helpers.ts";
 import { AgentRegistry } from "../src/agent/registry.ts";
 import { exportBackup, stageImport, applyPending } from "../src/backup.ts";
+import { DEFAULT_AGENT_NAME } from "../src/agent/registry.ts";
 
 function reg() {
   const data = tmpdir("ws-data");
@@ -30,7 +31,7 @@ describe("自定义工作目录", () => {
     const r2 = new AgentRegistry(path.dirname(r.get("main")!.dir));
     r2.load(null);
     expect(r2.get("main")!.workspace).toBe(target);
-    expect(r2.readFile("main", "SOUL.md")).toContain("神乐");
+    expect(r2.readFile("main", "SOUL.md")).toContain(DEFAULT_AGENT_NAME);
   });
 
   it("指向已有的工作区：里面的人设不覆盖，只补缺的", () => {

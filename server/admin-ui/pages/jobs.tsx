@@ -93,14 +93,15 @@ function ImportOpenClaw({ done }: { done: () => void }) {
   );
 }
 
-/** 投递目标：设备 + 已接入的 IM 聊天（绑定过或者手填） */
-function DeliveryPicker({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+/** 投递目标：自动 / 设备 + 已接入的 IM 聊天（绑定过或者手填） */
+export function DeliveryPicker({ value, onChange }: { value: string; onChange: (v: string) => void }) {
   const [devs] = useLoad(() => api<any[]>("/devices"));
-  const opts: [string, string][] = [["none", "不投递（只记录）"], ["webchat", "网页聊天"], ...(devs ?? []).map((d) => [`device:${d.id}`, `设备 ${d.id}`] as [string, string])];
+  const opts: [string, string][] = [["auto", "自动（在线的设备或手机，都不在就发手机通知）"], ["none", "不投递（只记录）"], ["webchat", "网页聊天"],
+    ...(devs ?? []).map((d) => [`device:${d.id}`, `${d.kind === "phone" ? "手机" : "设备"} ${d.name || d.id}`] as [string, string])];
   const custom = !opts.some((o) => o[0] === value);
   return (
     <div class="row">
-      <Select value={custom ? "__custom" : value} onChange={(v) => onChange(v === "__custom" ? "device:cores3" : v)} options={[...opts, ["__custom", "其它（手填）"]]} />
+      <Select value={custom ? "__custom" : value} onChange={(v) => onChange(v === "__custom" ? "" : v)} options={[...opts, ["__custom", "其它（手填）"]]} />
       {custom && <Input value={value} onInput={onChange} placeholder="device:<id> / feishu:<账号>:<聊天id>" />}
     </div>
   );

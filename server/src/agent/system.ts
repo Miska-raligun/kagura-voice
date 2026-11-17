@@ -241,12 +241,13 @@ export function attachAgentSystem(sys: AgentSystem, ctx: Ctx) {
   const scheduler = new Scheduler(ctx.dirs.systemDb, runtime, registry, {
     async deliver(agentId, delivery, text, meta) {
       const tag = meta?.source || "定时任务";
-      if (delivery.startsWith("device:")) {
-        // 只投设备：按策略不播记为「静音」、角色不对记为「留言」，都不算失败
-        const r = await outbox.say({ text, agentId, device: delivery.slice("device:".length), source: "job" });
+      if (delivery.startsWith("device:") || delivery === "auto") {
+        // 只投设备（auto = 出口自己挑哪台）：按策略不播记为「静音」、角色不对记为「留言」，都不算失败
+        const dev = delivery === "auto" ? undefined : delivery.slice("device:".length);
+        const r = await outbox.say({ text, agentId, device: dev, source: "job" });
         // 播出去（或留了言）的话记进那台设备的会话：主人对着设备接话时上一句就在历史里
-        if (r.played || r.held) void runtime.note(agentId, runtime.sessionKey(agentId, "device", r.device || delivery.slice("device:".length)), tag, text, meta?.ref);
-        return r.played ? `device:${r.device}` : r.held ? `held:${r.device}` : r.reason === "away" || r.reason === "policy" ? `muted:${r.reason}` : "";
+        if ((r.played || r.held) && (r.device || dev)) void runtime.note(agentId, runtime.sessionKey(agentId, "device", (r.device || dev)!), tag, text, meta?.ref);
+        return r.played ? `device:${r.device}` : r.held ? `held:${r.device}` : r.notified ? "notified" : r.reason === "away" || r.reason === "policy" ? `muted:${r.reason}` : "";
       }
       const ok = delivery === "webchat" || (await sys.channels.deliver(delivery, text));   // webchat：运行记录里就是投递内容
       if (ok) {
@@ -273,11 +274,12 @@ export function attachAgentSystem(sys: AgentSystem, ctx: Ctx) {
   // 待办：夜间静默时段一件件做，早上按来源汇报
   const report = async (agentId: string, origin: string, text: string, refs: string[] = [], tag = "待办汇报"): Promise<string> => {
     const ref = refs.join(" ");
-    if (origin.startsWith("device:")) {
+    if (origin.startsWith("device:") || origin === "auto") {
+      const dev = origin === "auto" ? undefined : origin.slice("device:".length);
       const said = await runtime.spoken(agentId, text).catch(() => text);
-      const r = await outbox.say({ text: said || text, agentId, device: origin.slice("device:".length), source: "task" });
-      if (r.played || r.held) void runtime.note(agentId, runtime.sessionKey(agentId, "device", r.device || origin.slice("device:".length)), tag, text, ref);
-      return r.played ? origin : r.held ? `held:${r.device}` : r.reason ? `muted:${r.reason}` : "";
+      const r = await outbox.say({ text: said || text, agentId, device: dev, source: "task" });
+      if ((r.played || r.held) && (r.device || dev)) void runtime.note(agentId, runtime.sessionKey(agentId, "device", (r.device || dev)!), tag, text, ref);
+      return r.played ? `device:${r.device}` : r.held ? `held:${r.device}` : r.notified ? "notified" : r.reason ? `muted:${r.reason}` : "";
     }
     if (/^(feishu|qq|onebot):/.test(origin)) {
       const ok = await sys.channels.deliver(origin, text);

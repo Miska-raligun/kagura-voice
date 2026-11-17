@@ -58,40 +58,56 @@ export function Settings({ arg }: { arg: string }) {
   );
 }
 
-/** 上手清单：每一步做没做完、去哪做、能不能当场试 */
+/**
+ * 上手清单：每一步做没做完、去哪做、能不能当场试。
+ * 不假定主人有哪种设备：网页聊天随时能用，硬件设备 / 手机 / 飞书·QQ 都是可选的，有一种就能跟她说话
+ */
 function Checklist({ s, reload }: { s: any; reload: () => void }) {
   useInterval(reload, 5_000);                         // 设备第一次连上来、手机扫完码，这里自己打勾
   const [busy, setBusy] = useState(false);
   const st = s.steps;
+  const [name, setName] = useState<string>(st.name.name || "");
   const tryVoice = async () => {
     setBusy(true);
     try {
-      const r = await fetch("/api/admin/tts", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text: "你好，能听到我说话吗？" }) });
+      const r = await fetch("/api/admin/tts", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text: `你好，我是${st.name.name || "你的助手"}，能听到我说话吗？` }) });
       if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `HTTP ${r.status}`);
       await new Audio(URL.createObjectURL(await r.blob())).play();
     } catch (e) { toastErr(e); }
     setBusy(false);
   };
-  const row = (n: number, x: any, title: string, sub: ComponentChildren, act: ComponentChildren) => (
+  const saveName = async () => {
+    try { await api(`/agents/${encodeURIComponent(st.name.agent)}`, { method: "PATCH", body: { name: name.trim() } }); toast("好的"); reload(); } catch (e) { toastErr(e); }
+  };
+  let n = 0;
+  const row = (x: any, title: string, sub: ComponentChildren, act: ComponentChildren) => (
     <div class={`step${x.done ? " done" : ""}`}>
-      <span class="num">{x.done ? "✓" : n}</span>
+      <span class="num">{x.done ? "✓" : ++n}</span>
       <div class="body"><b>{title}</b>{x.optional && !x.done ? <small class="muted">　可选</small> : null}<div class="muted">{sub}</div></div>
       <div class="act">{act}</div>
     </div>
   );
   const devs: any[] = st.device.devices;
+  const ims: any[] = st.im.channels;
   return (
-    <Card title={s.left ? `快速开始（还差 ${s.left} 步）` : "快速开始：都设置好了"}>
+    <Card title={s.left ? `快速开始（还差 ${s.left} 步）` : "快速开始"}>
       <div class="steps">
-        {row(1, st.model, "模型", st.model.done ? st.model.ref : "她用哪个模型思考：在下面填服务商地址、模型名和 Key", st.model.done ? <Btn small onClick={() => go("settings", "models")}>改</Btn> : null)}
-        {row(2, st.voice, "语音", st.voice.done ? `识别：${st.voice.asr_provider}　合成：${st.voice.tts_provider}`
+        {st.name.agent && row(st.name, "给她起个名字", <div class="row"><Input value={name} onInput={setName} placeholder="比如：小澪" /></div>,
+          <Btn small kind={st.name.done ? undefined : "primary"} onClick={saveName} disabled={!name.trim() || name.trim() === st.name.name}>保存</Btn>)}
+        {row(st.model, "模型", st.model.done ? st.model.ref : "她用哪个模型思考：在下面填服务商地址、模型名和 Key", st.model.done ? <Btn small onClick={() => go("settings", "models")}>改</Btn> : null)}
+        {row(st.voice, "语音", st.voice.done ? `识别：${st.voice.asr_provider}　合成：${st.voice.tts_provider}`
+          : st.voice.optional ? "只打字聊天用不着；接了硬件设备或手机、要说话时再填"
           : `${st.voice.asr ? "" : "语音识别"}${!st.voice.asr && !st.voice.tts ? "和" : ""}${st.voice.tts ? "" : "语音合成"}还没填 Key`,
-          <>{st.voice.tts && <Btn small onClick={tryVoice} disabled={busy}>试听</Btn>}<Btn small kind={st.voice.done ? undefined : "primary"} onClick={() => go("settings", "voice")}>{st.voice.done ? "改" : "去填"}</Btn></>)}
-        {row(3, st.device, "硬件设备", devs.length ? devs.map((d) => `${d.id}${d.online ? "（在线）" : "（离线）"}`).join("、")
-          : "按固件包里的「烧录说明」把代码传到设备上，连上同一个 WiFi，它会自己找到这台电脑；连上后这里自动打勾",
-          <Btn small onClick={() => go("devices")}>{devs.length ? "看设备" : "设备页"}</Btn>)}
-        {row(4, st.images, "角色图片", st.images.done ? "已经传过图" : "待机、在听、在想、在说各一张；不传就用纯色背景", <Btn small onClick={() => go("devicefiles")}>传图</Btn>)}
-        {row(5, st.phone, "手机 / 平板", st.phone.done ? "已配对" : "扫码把手机变成另一台设备：打字、说话、远程看家", <Btn small onClick={() => go("devices")}>添加手机</Btn>)}
+          <>{st.voice.tts && <Btn small onClick={tryVoice} disabled={busy}>试听</Btn>}<Btn small kind={st.voice.done || st.voice.optional ? undefined : "primary"} onClick={() => go("settings", "voice")}>{st.voice.done ? "改" : "去填"}</Btn></>)}
+      </div>
+      <p class="muted" style={{ margin: "14px 0 4px" }}>怎么和她说话（网页聊天随时能用，下面这些有一样就行）：</p>
+      <div class="steps">
+        {row({ done: true }, "网页聊天", "在「会话」里直接打字", <Btn small onClick={() => go("sessions")}>去聊</Btn>)}
+        {row(st.phone, "手机 / 平板", st.phone.done ? "已配对" : "扫码把手机变成一台设备：打字、说话、收通知", <Btn small onClick={() => go("devices")}>添加手机</Btn>)}
+        {row(st.im, "飞书 / QQ", st.im.done ? ims.map((c) => `${c.name || c.kind}（${c.state === "online" ? "在线" : c.state}）`).join("、") : "在常用的聊天软件里找她", <Btn small onClick={() => go("channels")}>接入</Btn>)}
+        {row(st.device, "硬件设备", devs.length ? devs.map((d) => `${d.id}${d.online ? "（在线）" : "（离线）"}`).join("、")
+          : "有桌面语音设备（如 M5Stack CoreS3）的话：按固件包里的「烧录说明」刷好，连上同一个 WiFi 会自己找到这台电脑", <Btn small onClick={() => go("devices")}>设备页</Btn>)}
+        {st.images.relevant && row(st.images, "她的形象", st.images.done ? "已经传过图" : "设备和手机上显示的角色图：待机、在听、在想、在说；不传就用纯色背景", <Btn small onClick={() => go("devices", "files")}>传图</Btn>)}
       </div>
     </Card>
   );

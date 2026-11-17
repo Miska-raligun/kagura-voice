@@ -37,7 +37,7 @@ export const STREAM_POLL_WAIT = 3.0;
 
 export const ASR_EMPTY_REPLY = "没听清，能再说一遍吗？";
 export const CONT_EXIT_REPLY = "好的，有事再叫我。";
-export const PHOTO_ONLY_PROMPT = "我用 CoreS3 摄像头拍了一张照片给你看，看看这是什么吧";
+export const PHOTO_ONLY_PROMPT = "我拍了一张照片给你看，看看这是什么吧";
 export const DEFAULT_PHOTO_PROMPT = "看看这张照片，跟我说说吧。";
 // 播报由服务端负责，必须拦住 agent 自己再调 cores3-speak，否则设备会念两遍
 export const SPEAK_HINT = "\n\n[你的文字回复会由服务端合成语音播报出来。请只回复要说的那句话本身，不要调用 cores3-speak skill，不要加任何前后缀。]";

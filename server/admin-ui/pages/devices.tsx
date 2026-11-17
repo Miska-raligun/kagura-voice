@@ -5,10 +5,11 @@ import { api, ago, enc, fmtTime } from "../api.ts";
 import { DeviceFiles } from "./devicefiles.tsx";
 import { Badge, Btn, Card, Empty, Err, Field, Input, Select, Tabs, toast, useInterval, useLoad } from "../ui.tsx";
 
-export function Devices() {
+export function Devices({ arg }: { arg?: string } = {}) {
   const [devs, reload, err] = useLoad(() => api<any[]>("/devices"));
   const [roles] = useLoad(() => api<any[]>("/roles"));
-  const [tab, setTab] = useState<"list" | "files" | "monitor" | "crash">("list");
+  // #/devices/files 之类直接打开对应标签（上手清单里的「传图」）
+  const [tab, setTab] = useState<"list" | "files" | "monitor" | "crash">(["files", "monitor", "crash"].includes(arg ?? "") ? (arg as any) : "list");
   const [adding, setAdding] = useState(false);
   const [sel, setSel] = useState("");
   useInterval(reload, 10_000);

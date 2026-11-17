@@ -55,7 +55,7 @@ export function cronTools(sched: Scheduler) {
           + "改代码、整理资料、写长文档这类「干活」、不在乎具体几点的，用 task_add 记成待办（夜里排队做、早上汇报），别用一次性定时任务凑。"
           + "kind=at（一次性，value 如 +20m、08:00、2026-10-24 08:00）/ every（间隔，value 如 30m、2h）/ cron（5 段表达式，如 0 8 * * *）。"
           + "message 是到点时交给你执行的指令（写清楚要做什么）。session=isolated（默认，每次全新上下文）或 main。"
-          + "delivery 默认投递到当前设备（device:<id>），none 表示不投递。",
+          + "delivery 默认投递到当前设备（device:<id>）；auto = 系统挑在线的设备或手机；none 表示不投递。",
         parameters: Type.Object({
           name: Type.String(), kind: Type.Union([Type.Literal("at"), Type.Literal("every"), Type.Literal("cron")]), value: Type.String(),
           message: Type.String(), session: Type.Optional(Type.Union([Type.Literal("isolated"), Type.Literal("main")])),

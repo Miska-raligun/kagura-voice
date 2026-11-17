@@ -206,7 +206,7 @@ export function registerDevice(r: Router, ctx: Ctx) {
     if (!desc) return json({ error: "unknown touch kind" }, 400);
     const detail = touchPhrases(req.header("X-Touch-Detail"));
     const extra = detail.length ? "（" + detail.join("；") + "）" : "";
-    const body = `${desc}${extra}。她现在就在你面前的 CoreS3 设备旁。`
+    const body = `${desc}${extra}。她现在就在你面前的设备旁。`
       + "这是身体接触，不是提问——用一句话回应被碰到的感觉就好，别开启新话题，"
       + "也别追问她想干什么。";
     background(dev, `🖐️  touch/${kind}`, pi() ? `[设备事件] ${body}（你的回复会直接播出来）` : body + SPEAK_REQ_OC("话"), req.header("X-Local-Time"), ctx.deviceTrusted(req, dev));

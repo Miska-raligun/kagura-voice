@@ -975,3 +975,41 @@ def test_bundled_build123d_mcp(a):
         assert "没找到 Python" in _transcript_text(a)
     finally:
         a.request("PUT", "/api/admin/mcp", json={"config": json.dumps({"mcpServers": {}})})
+
+
+def test_job_auto_delivery_picks_online_device(a):
+    """投递目标 auto：不写死设备 id，出口挑一台在线的（新 agent 的 heartbeat 默认就是 auto）"""
+    d = Device(a, "auto1")
+    try:
+        assert a.post("/heartbeat", json={"device_id": "auto1"}).status_code == 200
+        a.fake_llm("该喝水了")
+        j = a.post("/api/admin/jobs", json={"agent": "main", "name": "喝水", "schedule_kind": "at", "schedule_value": "+1s",
+                                            "message": "提醒喝水", "delivery": "auto"}).json()
+        assert j["delivery"] == "auto"
+        # 这个测试服务端里前面的用例还留着别的在线设备：auto 挑哪台都行，只要推到了一台在线设备上
+        deadline = time.time() + 10
+        runs = []
+        while time.time() < deadline and not runs:
+            runs = a.get(f"/api/admin/jobs/{j['id']}/runs").json()
+            time.sleep(0.3)
+        assert runs and runs[0]["status"] == "ok", runs
+        assert runs[0]["delivered"].startswith("device:"), runs[0]
+    finally:
+        d.close()
+
+
+def test_setup_checklist_does_not_require_hardware(a):
+    """上手清单：硬件设备、手机、飞书 / QQ 都是可选的；起了名字就打勾"""
+    st = a.get("/api/admin/setup").json()
+    steps = st["steps"]
+    assert steps["device"]["optional"] and steps["phone"]["optional"] and steps["im"]["optional"]
+    assert steps["model"]["done"]
+    agent = steps["name"]["agent"]
+    old = steps["name"]["name"]
+    try:
+        assert a.request("PATCH", f"/api/admin/agents/{agent}", json={"name": "小助手"}).status_code == 200
+        assert a.get("/api/admin/setup").json()["steps"]["name"]["done"] is False
+        assert a.request("PATCH", f"/api/admin/agents/{agent}", json={"name": "阿澪"}).status_code == 200
+        assert a.get("/api/admin/setup").json()["steps"]["name"]["done"] is True
+    finally:
+        a.request("PATCH", f"/api/admin/agents/{agent}", json={"name": old})
