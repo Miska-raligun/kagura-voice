@@ -98,6 +98,9 @@ jobs:
         run: |
           exe=server/dist/kagura; [ -f ../server/dist/kagura.exe ] && exe=server/dist/kagura.exe
           KAGURA_SERVER_CMD="$exe" python -m pytest -q
+      - name: 设备固件 × 真服务端（设备代码打桩硬件，对着打包好的程序跑对话）
+        if: runner.os == 'Linux'
+        run: KAGURA_SERVER_CMD=server/dist/kagura python tools/device_e2e.py
       - name: Server logs on failure
         if: failure()
         shell: bash

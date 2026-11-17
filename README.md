@@ -107,6 +107,7 @@ npx tsc --noEmit -p . && npx tsc --noEmit -p admin-ui && npx vitest run   # 类�
 node scripts/build.mjs && node dist/kagura.cjs                              # 构建并运行
 cd ../contract-tests && KAGURA_SERVER_CMD="node server/dist/kagura.cjs" python -m pytest -q
 python3 tools/check_split.py && python3 tools/import_sim.py                # 固件静态检查
+KAGURA_SERVER_CMD="node server/dist/kagura.cjs" python3 tools/device_e2e.py   # 固件代码（硬件打桩）对着真服务端跑对话
 ```
 
 发布：打 `v*` tag，或者改 `server/packaging/release-version.txt` 里的版本号并推送（工作流会在该提交上建 tag）。
