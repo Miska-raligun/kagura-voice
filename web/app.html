@@ -599,7 +599,13 @@ async function converse({ wav, text, image }) {
       for (;;) {
         if (S.cancelled) break;
         const g = await fetch(`/chat/reply/${S.replyId}?wait=20`, { headers: devH() });
-        if (g.status === 204) { if (g.headers.get("X-Reply-Done")) break; continue; }
+        if (g.status === 204) {
+          if (g.headers.get("X-Reply-Done")) break;
+          // 还在想：服务端顺带说她在干什么（在搜网页…），显示在状态条上
+          const doing = b64text(g.headers.get("X-Reply-Status"));
+          setState(doing ? `她${doing}…` : "她在想…", "点一下取消", "busy", "processing");
+          continue;
+        }
         if (!g.ok) throw new Error("取回复失败 HTTP " + g.status);
         ({ needPhoto, lastText } = await playSegment(g, needPhoto));
       }

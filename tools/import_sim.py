@@ -716,8 +716,14 @@ def _sp(r):
 chat.snd.stream_play = _sp
 
 # ① 202 → 两次「还在想」→ 第一段（还有更多）→ 后续：再等一次 → 第二段 → 取完
-_script[:] = [_R(204, {"X-Reply-Wait": "1"}), _R(204, {"X-Reply-Wait": "1"}), _R(200, {"X-Reply-Text": "seg1", "X-Reply-More": "1"})]
+import ubinascii as _ub
+_notes = []
+_saved_ds = chat.ui.draw_state
+chat.ui.draw_state = lambda st, *a_, **k_: _notes.append((st, chat.ui._note))
+_script[:] = [_R(204, {"X-Reply-Wait": "1", "X-Reply-Status": _ub.b2a_base64("在搜网页".encode()).decode().strip()}), _R(204, {"X-Reply-Wait": "1"}), _R(200, {"X-Reply-Text": "seg1", "X-Reply-More": "1"})]
 r, rid, why = chat._start_reply(_R(202, {"X-Reply-Id": "abc", "X-User-Text": ""}))
+chat.ui.draw_state = _saved_ds
+assert ("processing", "在搜网页") in _notes and _notes[-1] == ("processing", "") and chat.ui._note == "", _notes
 assert rid == "abc" and why == "ok" and r.headers["X-Reply-Text"] == "seg1", (rid, why)
 assert _pumps[0] == 3 and all("/chat/reply/abc?wait=" in u for k, u in _calls if k == "get"), "每次轮询之间都要泵 MQTT"
 assert cfg.St.awaiting is False, "等完要复位 awaiting"
@@ -797,6 +803,6 @@ cfg.BARGE_IN = True
 print("  插话（点停后直接听）        = 再听一轮且少等 ✓ 没接话安静回待机 ✓ 被点停不拍照 ✓ 开关可关 ✓")
 (chat.urequests, chat.netsvc.mqtt_check, chat.netsvc.mqtt_ping, chat.snd._touched, chat.snd.stream_play, chat.time.sleep) = _saved_async
 (chat.hw.drain_touch, chat.hw.touch_reset) = _saved_drain
-print("  长轮询 / 分段 / 取消 / 推送  = 轮询间泵 MQTT ✓ 分段接着播 ✓ 按住取消 ✓ 点停取消 ✓ 等待中推送入队 ✓ 同步回复兼容 ✓")
+print("  长轮询 / 分段 / 取消 / 推送  = 轮询间泵 MQTT ✓ 显示她在干什么 ✓ 分段接着播 ✓ 按住取消 ✓ 点停取消 ✓ 等待中推送入队 ✓ 同步回复兼容 ✓")
 
 print("\n✅ 全部模块 import 成功，行为验证通过")

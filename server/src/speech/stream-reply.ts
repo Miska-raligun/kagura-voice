@@ -9,7 +9,7 @@
 // 它带的工具也都执行完了。X-Reply-Text 只放首句（加 X-Reply-Partial: 1），全文设备播完后 GET /chat/last 取。
 import type http from "node:http";
 import fs from "node:fs";
-import { SentenceSplitter, wavPcm } from "./sentences.ts";
+import { SentenceSplitter, wavPcm, endsSentence, LONG_SENTENCE } from "./sentences.ts";
 import { wavHeader } from "../util/wav.ts";
 import { b64Header } from "../util/text.ts";
 import type { AgentStreamEvent } from "../agent/runtime.ts";
@@ -39,11 +39,14 @@ const LOOKAHEAD = 2;
 
 export async function streamReply(res: http.ServerResponse, o: StreamReplyOpts): Promise<void> {
   const t0 = Date.now();
-  const split = new SentenceSplitter();
+  const split = new SentenceSplitter({ eagerFirst: true });
   const items: { text: string; wav?: Promise<string | null> }[] = [];
   const meta: { needPhoto?: boolean; volume?: string } = {};
   let first: string | null = null;
   let textAfterFirst = false;
+  /** 第一句说完了没有。首句会在逗号处先切一段去合成（早点出声），但「后面又来了字」要从整句说完算起——
+   *  不然「我看看桌上有什么，稍等。」+ take_photo 会在逗号后就发头，X-Need-Photo 丢了 */
+  let firstClosed = false, firstLen = 0;
   let lastMsgEnded = false, pendingTools = 0, toolsDone = 0;
   /** 最后一条助手消息结束了、而且没调工具：这就是最终回复（整轮马上结束），头里按完整回复写 */
   let finalMsg = false;
@@ -53,17 +56,19 @@ export async function streamReply(res: http.ServerResponse, o: StreamReplyOpts):
   const waitChange = () => new Promise<void>((r) => { wake = r; });
 
   const enqueue = (s: string) => {
-    if (first === null) first = s; else textAfterFirst = true;
+    if (first === null) first = s; else if (firstClosed) textAfterFirst = true;
+    if (!firstClosed) { firstLen += s.length; firstClosed = endsSentence(s) || firstLen >= LONG_SENTENCE; }
     items.push({ text: s });
   };
   const onEvent = (e: AgentStreamEvent) => {
     if (e.type === "text") {
-      if (first !== null && e.delta.trim()) textAfterFirst = true;
       lastMsgEnded = false; finalMsg = false;
       for (const s of split.push(e.delta)) enqueue(s);
+      if (first !== null && firstClosed && split.pending) textAfterFirst = true;
     } else if (e.type === "message_end") {
       // 一条助手消息结束就是句子边界：「我查一下。」之后它去跑工具了，别把这句压在缓冲里
       for (const s of split.flush()) enqueue(s);
+      if (first !== null) firstClosed = true;
       lastMsgEnded = true; finalMsg = e.toolCalls === 0; pendingTools += e.toolNames.filter((n) => HEADER_TOOLS.has(n)).length; }
     else if (e.type === "tool_end" && HEADER_TOOLS.has(e.name)) toolsDone++;
     notify();
@@ -84,7 +89,7 @@ export async function streamReply(res: http.ServerResponse, o: StreamReplyOpts):
   const sendHeaders = () => {
     const complete = done || finalMsg;
     const partial = !complete;
-    const reply = done ? (finalText || items.map((x) => x.text).join("")) : complete ? items.map((x) => x.text).join("") : (first ?? "");
+    const reply = done ? (finalText || items.map((x) => x.text).join("")) : items.map((x) => x.text).join("");
     const h: Record<string, string> = {
       ...o.headers, "Content-Type": "audio/wav", Connection: "close",
       "X-User-Text": b64Header(o.userText), "X-Reply-Text": b64Header(reply),

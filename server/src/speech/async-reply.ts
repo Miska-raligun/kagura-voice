@@ -12,7 +12,7 @@
 import type http from "node:http";
 import fs from "node:fs";
 import crypto from "node:crypto";
-import { SentenceSplitter, wavPcm } from "./sentences.ts";
+import { SentenceSplitter, wavPcm, endsSentence, LONG_SENTENCE } from "./sentences.ts";
 import { HEADER_TOOLS } from "./stream-reply.ts";
 import { wavHeader } from "../util/wav.ts";
 import { b64Header } from "../util/text.ts";
@@ -33,6 +33,22 @@ export interface PendingOpts {
 
 /** 预合成的句子数 */
 const LOOKAHEAD = 2;
+/** 「还在想」的回应里带的状态变了就提前回，但两次之间至少隔这么久（设备每次轮询是一次 HTTP 往返） */
+const STATUS_MIN_MS = 1500;
+
+/** 她正在用的工具 → 设备屏幕上显示的一句话（「思考中」太久没动静时，让人知道她在干什么） */
+const ACTIVITY: [RegExp, string][] = [
+  [/^web_search$/, "在搜网页"], [/^web_fetch$/, "在看网页"], [/^exec/, "在跑命令"],
+  [/^(read_file|search_files|list_files)$/, "在看文件"], [/^(edit_file|write_file)$/, "在改文件"],
+  [/^memory_/, "在翻记忆"], [/^read_ref$/, "在翻之前的对话"], [/^take_photo$/, "要拍照"],
+  [/^sessions_/, "在找别的 agent"], [/^(cron_|task_|photo_schedule_)/, "在安排事情"], [/^skill_read$/, "在看技能说明"],
+  [/^tools_load$/, "在拿工具"], [/^send_file$/, "在发文件"], [/^announce$/, "在跟家里说"],
+];
+export function toolActivity(name: string): string {
+  for (const [re, s] of ACTIVITY) if (re.test(name)) return s;
+  const mcp = /^mcp__([^_]+(?:_[^_]+)*?)__/.exec(name);
+  return mcp ? `在用 ${mcp[1]}` : "在用工具";
+}
 /** 一段写完后等新句子的时长：超过就先结束这一段（设备那头的单次读超时是 60 秒） */
 export const SEG_IDLE_MS = 15_000;
 /** 长轮询最长等多久（设备每次最多阻塞这么久） */
@@ -44,12 +60,18 @@ export class PendingReply {
   readonly id = crypto.randomBytes(6).toString("hex");
   readonly created = Date.now();
   finishedAt = 0;
-  private split = new SentenceSplitter();
+  private split = new SentenceSplitter({ eagerFirst: true });
+  /** 她现在在干什么（正在执行的工具）；空 = 在想。随「还在想」的回应带给设备（X-Reply-Status） */
+  private activity = "";
+  private reported = "";
   private items: { text: string; wav?: Promise<string | null> }[] = [];
   private cursor = 0;
   private meta: { needPhoto?: boolean; volume?: string } = {};
   private first: string | null = null;
   private textAfterFirst = false;
+  /** 第一句说完了没有（首句在逗号处先切出来的半句不算，见 stream-reply） */
+  private firstClosed = false;
+  private firstLen = 0;
   private lastMsgEnded = false;
   /** 最后一条助手消息结束了、而且没调工具：这就是最终回复 */
   private finalMsg = false;
@@ -67,17 +89,24 @@ export class PendingReply {
 
   constructor(private o: PendingOpts) {
     const enqueue = (s: string) => {
-      if (this.first === null) this.first = s; else this.textAfterFirst = true;
-      this.items.push({ text: s });
+      if (this.first === null) this.first = s; else if (this.firstClosed) this.textAfterFirst = true;
+      if (!this.firstClosed) { this.firstLen += s.length; this.firstClosed = endsSentence(s) || this.firstLen >= LONG_SENTENCE; }
+      const it: { text: string; wav?: Promise<string | null> } = { text: s };
+      // 头两句一出来就去合成，不等设备来取、也不等「能发响应头了」（首句后面跟着工具时，合成和工具一起跑）
+      if (this.items.length < LOOKAHEAD) it.wav = this.o.voice.synthesize(s, this.o.per).catch(() => null);
+      this.items.push(it);
     };
     const onEvent = (e: AgentStreamEvent) => {
+      if (e.type === "tool_start") this.activity = toolActivity(e.name);
+      else if (e.type === "tool_end" || (e.type === "text" && e.delta.trim())) this.activity = "";
       if (e.type === "text") {
-        if (this.first !== null && e.delta.trim()) this.textAfterFirst = true;
         this.lastMsgEnded = false; this.finalMsg = false;
         for (const s of this.split.push(e.delta)) enqueue(s);
+        if (this.first !== null && this.firstClosed && this.split.pending) this.textAfterFirst = true;
       } else if (e.type === "message_end") {
         // 一条助手消息结束就是句子边界：「我查一下。」之后它去跑工具了，别把这句压在缓冲里
         for (const s of this.split.flush()) enqueue(s);
+        if (this.first !== null) this.firstClosed = true;
         this.lastMsgEnded = true; this.finalMsg = e.toolCalls === 0; this.pendingTools += e.toolNames.filter((n) => HEADER_TOOLS.has(n)).length; }
       else if (e.type === "tool_end" && HEADER_TOOLS.has(e.name)) this.toolsDone++;
       this.notify();
@@ -113,10 +142,27 @@ export class PendingReply {
   async serve(res: http.ServerResponse, waitMs: number, segIdleMs = SEG_IDLE_MS) {
     segIdleMs = Math.min(SEG_IDLE_MS, Math.max(100, segIdleMs));
     const deadline = Date.now() + Math.min(MAX_WAIT_MS, Math.max(0, waitMs));
-    const empty = (h: Record<string, string>) => { res.writeHead(204, { ...h, "X-Reply-Id": this.id, Connection: "close" }).end(); };
+    const t0 = Date.now();
+    const empty = (h: Record<string, string>) => {
+      // 还在想：顺带说一句她在干什么（设备显示在屏幕上）
+      if (h["X-Reply-Wait"] && !this.done) { this.reported = this.activity; if (this.activity) h["X-Reply-Status"] = b64Header(this.activity); }
+      res.writeHead(204, { ...h, "X-Reply-Id": this.id, Connection: "close" }).end();
+    };
+    /** 等到 ready() 或到点；她在干的事变了也提前回去（让设备换一行字），但别回得太勤 */
+    const waitFor = async (ready: () => boolean) => {
+      while (!ready() && Date.now() < deadline) {
+        if (this.activity !== this.reported) {
+          const hold = t0 + STATUS_MIN_MS - Date.now();
+          if (hold <= 0) return;
+          await this.waitChange(Math.min(hold, deadline - Date.now()));
+          continue;
+        }
+        await this.waitChange(deadline - Date.now());
+      }
+    };
     if (this.serving) return empty({ "X-Reply-Wait": "1" });
     if (!this.headersSent) {
-      while (!this.canStart() && Date.now() < deadline) await this.waitChange(deadline - Date.now());
+      await waitFor(() => this.canStart());
       if (!this.canStart()) return empty({ "X-Reply-Wait": "1" });
       if (this.done && !this.items.length) {
         if (this.error && !this.ctl.signal.aborted) {
@@ -126,7 +172,7 @@ export class PendingReply {
         return empty({ "X-Reply-Done": "1" });
       }
     } else {
-      while (this.cursor >= this.items.length && !this.done && Date.now() < deadline) await this.waitChange(deadline - Date.now());
+      await waitFor(() => this.cursor < this.items.length || this.done);
       if (this.cursor >= this.items.length) return empty(this.done ? { "X-Reply-Done": "1" } : { "X-Reply-Wait": "1" });
     }
 
@@ -136,7 +182,7 @@ export class PendingReply {
       const complete = this.done || this.finalMsg;
       const partial = !complete;
       const all = () => this.items.map((x) => x.text).join("");
-      const shown = firstSeg ? (this.done ? this.reply() : complete ? all() : (this.first ?? "")) : complete ? all() : this.items.slice(0, this.cursor + 1).map((x) => x.text).join("");
+      const shown = firstSeg ? (this.done ? this.reply() : all()) : complete ? all() : this.items.slice(0, this.cursor + 1).map((x) => x.text).join("");
       const h: Record<string, string> = {
         ...(firstSeg ? this.o.headers : {}), "Content-Type": "audio/wav", Connection: "close", "X-Reply-Id": this.id,
         "X-User-Text": b64Header(this.o.userText), "X-Reply-Text": b64Header(shown),

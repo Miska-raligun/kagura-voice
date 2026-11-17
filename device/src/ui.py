@@ -46,6 +46,23 @@ def _update_chat_text(user_b64, reply_b64):
         print("[ui] chat text decode err:", e)
 
 
+_note = ""          # 思考时屏幕上多显示的一行：她正在干什么（服务端 X-Reply-Status）
+
+
+def set_note(text_b64):
+    """设置 / 清掉（传空）思考时的那一行字。只改变量，下一次 draw_state("processing") 才画。"""
+    global _note
+    if not text_b64:
+        _note = ""
+        return
+    if not cfg.SHOW_CHAT_TEXT:
+        return
+    try:
+        _note = ubinascii.a2b_base64(text_b64).decode("utf-8")
+    except Exception as e:
+        print("[ui] note decode err:", e)
+
+
 _ring_rects = []
 
 
@@ -361,8 +378,10 @@ def draw_state(state, force=False):
     show_chat = (state == "idle" and cfg.SHOW_CHAT_TEXT and _FONT_CN
                  and _last_reply_text)
     chat_key = (_last_user_text[:18], _last_reply_text[:19]) if show_chat else None
+    # 思考时她在干什么（"在搜网页"…）。进了 key：换了一句才重画，同一句反复轮询不闪
+    note = _note[:19] if (state == "processing" and _FONT_CN and _note) else None
 
-    key = (bg_path, cm_color, wm_color, right_str, color, face, status, chat_key)
+    key = (bg_path, cm_color, wm_color, right_str, color, face, status, chat_key, note)
     if not force and key == _drawn_key:
         return
     _drawn_key = key
@@ -440,6 +459,12 @@ def draw_state(state, force=False):
         tgt.drawString("> " + _last_user_text[:18], 8, 160)
         tgt.setTextColor(0xcccccc, 0xcccccc)
         tgt.drawString(_last_reply_text[:19], 8, 184)
+        tgt.setFont(_FONT_16)
+
+    if note:
+        tgt.setFont(_FONT_CN)
+        tgt.setTextColor(0xcccccc, 0xcccccc)
+        tgt.drawString(note, max(0, (320 - len(note) * 16) // 2), 190)
         tgt.setFont(_FONT_16)
 
     # ── 6：一次性推屏。到这里为止屏幕一个像素都没变过，push 完整屏同时更新 ──

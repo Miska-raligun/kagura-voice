@@ -145,13 +145,18 @@ def _poll_reply(rid):
                 return r, "ok"
             done = r.headers.get("X-Reply-Done", "") == "1"
             code = r.status_code
+            note = r.headers.get("X-Reply-Status", "")
             r.close()
             if code == 204 and not done:
+                # 还在想：把她正在干的事（"在搜网页"…）显示出来，没有就清掉。内容没变不会重画
+                ui.set_note(note)
+                ui.draw_state("processing")
                 continue
             return None, ("done" if code == 204 else "error")
         return None, "timeout"
     finally:
         cfg.St.awaiting = False
+        ui.set_note("")
 
 
 def _start_reply(resp):
