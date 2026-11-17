@@ -1,5 +1,6 @@
 // 设置：模型服务商与 Key、默认/便宜模型、嵌入接口、语音推送、百度 Key、端口、token、更新、备份。
 // 不预设任何模型——首次向导只给常见服务商的接口地址做参考，模型名和 Key 由用户自己填。
+import type { ComponentChildren } from "preact";
 import { useEffect, useRef, useState } from "preact/hooks";
 import { api, go } from "../api.ts";
 
@@ -29,8 +30,9 @@ export function Settings({ arg }: { arg: string }) {
   useEffect(() => { if (TABS.some(([t]) => t === arg)) setTab(arg); }, [arg]);   // #/settings/update 等直接打开对应标签
   if (!d) return <Err msg={err} />;
   const cfg = d.config;
-  // 已经配过模型就不再显示「快速开始」（直接打开 #/settings/wizard 仍可用）
-  const configured = (cfg.models?.providers ?? []).length > 0;
+  // 必需的几步（模型、语音、设备）都做完就不再显示「快速开始」（直接打开 #/settings/wizard 仍可用）
+  const [setup, reloadSetup] = useLoad(() => api<any>("/setup"));
+  const configured = (cfg.models?.providers ?? []).length > 0 && setup?.left === 0;
   const tabs = TABS.filter(([t]) => t !== "wizard" || !configured || tab === "wizard");
   const save = async (patch: any) => {
     const r = await api("/config", { method: "PUT", body: patch });
@@ -42,7 +44,10 @@ export function Settings({ arg }: { arg: string }) {
       {d.fake && <div class="notebox">测试模式：模型设置不生效。</div>}
       {cfg.brain === "openclaw" || (!cfg.brain && !(cfg.models?.providers ?? []).length) ? <div class="notebox">当前大脑为 OpenClaw。切换到内置 agent 并重启后，以下设置才生效。</div> : null}
       <Tabs value={tab} onChange={(t) => go("settings", t)} tabs={tabs} />
-      {tab === "wizard" && <Wizard cfg={cfg} save={save} done={() => { setTab("models"); go("overview"); }} />}
+      {tab === "wizard" && <>
+        {setup && <Checklist s={setup} reload={reloadSetup} />}
+        {(!setup || !setup.steps.model.done) && <Wizard cfg={cfg} save={async (p) => { await save(p); reloadSetup(); }} done={() => reloadSetup()} />}
+      </>}
       {tab === "models" && <Models cfg={cfg} save={save} />}
       {tab === "tools" && <Tools cfg={cfg} save={save} />}
       {tab === "voice" && <Voice cfg={cfg} save={save} />}
@@ -50,6 +55,45 @@ export function Settings({ arg }: { arg: string }) {
       {tab === "update" && <Update />}
       {tab === "backup" && <Backup />}
     </>
+  );
+}
+
+/** 上手清单：每一步做没做完、去哪做、能不能当场试 */
+function Checklist({ s, reload }: { s: any; reload: () => void }) {
+  useInterval(reload, 5_000);                         // 设备第一次连上来、手机扫完码，这里自己打勾
+  const [busy, setBusy] = useState(false);
+  const st = s.steps;
+  const tryVoice = async () => {
+    setBusy(true);
+    try {
+      const r = await fetch("/api/admin/tts", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text: "你好，能听到我说话吗？" }) });
+      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `HTTP ${r.status}`);
+      await new Audio(URL.createObjectURL(await r.blob())).play();
+    } catch (e) { toastErr(e); }
+    setBusy(false);
+  };
+  const row = (n: number, x: any, title: string, sub: ComponentChildren, act: ComponentChildren) => (
+    <div class={`step${x.done ? " done" : ""}`}>
+      <span class="num">{x.done ? "✓" : n}</span>
+      <div class="body"><b>{title}</b>{x.optional && !x.done ? <small class="muted">　可选</small> : null}<div class="muted">{sub}</div></div>
+      <div class="act">{act}</div>
+    </div>
+  );
+  const devs: any[] = st.device.devices;
+  return (
+    <Card title={s.left ? `快速开始（还差 ${s.left} 步）` : "快速开始：都设置好了"}>
+      <div class="steps">
+        {row(1, st.model, "模型", st.model.done ? st.model.ref : "她用哪个模型思考：在下面填服务商地址、模型名和 Key", st.model.done ? <Btn small onClick={() => go("settings", "models")}>改</Btn> : null)}
+        {row(2, st.voice, "语音", st.voice.done ? `识别：${st.voice.asr_provider}　合成：${st.voice.tts_provider}`
+          : `${st.voice.asr ? "" : "语音识别"}${!st.voice.asr && !st.voice.tts ? "和" : ""}${st.voice.tts ? "" : "语音合成"}还没填 Key`,
+          <>{st.voice.tts && <Btn small onClick={tryVoice} disabled={busy}>试听</Btn>}<Btn small kind={st.voice.done ? undefined : "primary"} onClick={() => go("settings", "voice")}>{st.voice.done ? "改" : "去填"}</Btn></>)}
+        {row(3, st.device, "硬件设备", devs.length ? devs.map((d) => `${d.id}${d.online ? "（在线）" : "（离线）"}`).join("、")
+          : "按固件包里的「烧录说明」把代码传到设备上，连上同一个 WiFi，它会自己找到这台电脑；连上后这里自动打勾",
+          <Btn small onClick={() => go("devices")}>{devs.length ? "看设备" : "设备页"}</Btn>)}
+        {row(4, st.images, "角色图片", st.images.done ? "已经传过图" : "待机、在听、在想、在说各一张；不传就用纯色背景", <Btn small onClick={() => go("devicefiles")}>传图</Btn>)}
+        {row(5, st.phone, "手机 / 平板", st.phone.done ? "已配对" : "扫码把手机变成另一台设备：打字、说话、远程看家", <Btn small onClick={() => go("devices")}>添加手机</Btn>)}
+      </div>
+    </Card>
   );
 }
 

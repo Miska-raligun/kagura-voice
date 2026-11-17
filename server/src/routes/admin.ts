@@ -87,6 +87,36 @@ export function registerAdmin(r: Router, ctx: Ctx, sys: AgentSystem) {
     sched().syncHeartbeats();
   };
 
+  /**
+   * 上手清单（设置 →「快速开始」）：模型、语音、设备、图片、手机，每步做没做完。
+   * 前三步是必需的（没有就说不了话），后两步可选
+   */
+  const setupStatus = () => {
+    const sp = ctx.cfg.speech, b = ctx.cfg.baidu;
+    const ready = (id: string, what: "asr" | "tts") => {
+      const p = sp.providers.find((x) => x.id === id);
+      if (!p) return false;
+      return p.kind === "baidu" ? !!(what === "asr" ? b.asrKey && b.asrSecret : b.ttsKey && b.ttsSecret) : !!(p.base_url || p.api_key);
+    };
+    const t = Date.now() / 1000;
+    const phones = new Set((ctx.clients?.list() ?? []).map((c) => c.id));
+    const devs = [...ctx.hb.devices.entries()].filter(([id]) => !phones.has(id)).map(([id, rec]) => ({ id, online: t - rec.ts < 180 }));
+    const countJpg = (dir: string): number => {
+      let n = 0;
+      try { for (const e of fs.readdirSync(dir, { withFileTypes: true })) n += e.isDirectory() ? countJpg(path.join(dir, e.name)) : /\.(jpe?g|png|webp)$/i.test(e.name) ? 1 : 0; } catch { /* 还没传过 */ }
+      return n;
+    };
+    const steps = {
+      model: { done: !!models.defaultRef(), ref: models.defaultRef() },
+      voice: { done: ready(sp.asr, "asr") && ready(sp.tts, "tts"), asr: ready(sp.asr, "asr"), tts: ready(sp.tts, "tts"), asr_provider: sp.asr, tts_provider: sp.tts },
+      device: { done: devs.length > 0, devices: devs },
+      images: { done: countJpg(path.join(ctx.cfg.dataDir, "device_files", "resource")) + countJpg(path.join(ctx.cfg.dataDir, "app_images")) > 0, optional: true },
+      phone: { done: phones.size > 0, optional: true },
+    };
+    return { steps, left: Object.values(steps).filter((s: any) => !s.done && !s.optional).length, brain: ctx.brain.kind, version: VERSION };
+  };
+  get("/api/admin/setup", () => json(setupStatus()));
+
   // ── 总览 ──
   get("/api/admin/overview", () => {
     const today = new Date().toISOString().slice(0, 10);
@@ -99,7 +129,7 @@ export function registerAdmin(r: Router, ctx: Ctx, sys: AgentSystem) {
       failing_jobs: sched().list().filter((j) => j.last_status === "error"),
       heartbeats: sched().list().filter((j) => j.kind === "heartbeat").map((j) => ({ agent: j.agent, enabled: j.enabled, last_status: j.last_status, last_run: j.last_run })),
       models: models.list(),
-      setup_needed: !models.defaultRef(),
+      setup_needed: !models.defaultRef(), setup_left: setupStatus().left,
       version: VERSION, update: ctx.updates?.info ?? null,
       channels: sys.channels.status(),
       runs: runtime.activeRuns(),

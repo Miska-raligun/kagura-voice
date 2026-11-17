@@ -50,10 +50,14 @@ export function Overview() {
           <div class="row"><button class="btn primary" onClick={() => go("settings", "update")}>更新</button><a href={d.update.url} target="_blank">发布页 ↗</a></div>
         </Card>
       )}
-      {d.setup_needed && (
+      {d.setup_needed ? (
         <Card title="未配置模型" class="warn">
           <p class="muted">内置 agent 需要一个 OpenAI 兼容的模型服务商。</p>
           <button class="btn primary" onClick={() => go("settings", "wizard")}>开始设置</button>
+        </Card>
+      ) : d.setup_left > 0 && (
+        <Card title={`还差 ${d.setup_left} 步就能用了`} class="warn">
+          <button class="btn primary" onClick={() => go("settings", "wizard")}>继续设置</button>
         </Card>
       )}
       <div class="stats">
