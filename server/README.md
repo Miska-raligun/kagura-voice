@@ -432,7 +432,7 @@ KAGURA_BRAIN=pi KAGURA_SERVER_CMD=server/dist/kagura python -m pytest -q
 | `src/jobs/` | 提醒、每日定时拍照 |
 | `src/voice/` | 语音服务商（`hub.ts`：百度 / OpenAI 兼容 / MiniMax，按 agent 选、失败退回默认、统一转 16k）；百度 ASR/TTS（缓存 key 与 Python 版逐字节一致，旧 `tts_cache/` 可直接复用） |
 | `src/brain/` | 大脑接口；`pi.ts` = 内置 agent，`openclaw.ts` = OpenClaw CLI 适配器 |
-| `src/agent/` | 内置 agent 系统：`registry`（agent 目录）、`runtime`（每轮运行/串行/压缩）、`soul`（系统提示组装）、`models`、`memory`、`scheduler` + `cron`、`a2a`、`skills`、`tools/*` |
+| `src/agent/` | 内置 agent 系统：`registry`（agent 目录）、`runtime`（每轮运行；串行在 `locks`、压缩在 `compact`、上下文预算在 `context`、单轮上限在 `turnguard`、近况在 `recent`）、`soul`（系统提示组装）、`models`、`memory`、`scheduler` + `cron`、`a2a`、`skills`、`tools/*` |
 | `src/routes/admin.ts` / `admin-ui.ts` | 管理接口 `/api/admin/*` 与 `/admin` 页面（只许本机） |
 | `src/devicefiles.ts` + `routes/devicefiles.ts` | 设备文件同步：角色图片、设备代码（内置一份 `device/src`，构建时打进来）；设备端见 `device/src/ota.py` |
 | `src/channels/` | IM 渠道：`manager`（配对/绑定/路由/投递）、`store`、`feishu`、`qq`、`onebot` |
