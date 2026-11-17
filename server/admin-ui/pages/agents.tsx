@@ -180,18 +180,40 @@ function ResetBtns({ agent, path, shared, refresh }: { agent: string; path: stri
 function TidyBtn({ id, scope, refresh }: { id: string; scope: "memory" | "docs"; refresh: () => void }) {
   const [busy, setBusy] = useState(false);
   const [st, reload] = useLoad(() => api<any>("/memory-tidy"));
+  const run = st?.running?.[id];
+  const [, tick] = useState(0);
+  // 整理在后台跑：每 2 秒看一眼做到哪了，做完弹出结果
+  useEffect(() => {
+    if (!run) return;
+    const t = setInterval(async () => {
+      tick((x) => x + 1);
+      try {
+        const s = await api<any>("/memory-tidy");
+        if (!s.running?.[id]) {
+          const r = s.last?.[id];
+          if (busy && r) toast(r.text || ({ done: "整理好了", nochange: "看过了，没什么要改的", skipped: `先没动：${r.why}`, failed: `没整理成：${r.why}` } as any)[r.status] || r.status, r.status === "failed" ? "err" : undefined);
+          setBusy(false); refresh();
+        }
+        reload();
+      } catch { /* 下次再看 */ }
+    }, 2000);
+    return () => clearInterval(t);
+  }, [!!run, busy]);
+  const secs = (t: number) => { const s = Math.max(0, Math.round((Date.now() - t) / 1000)); return s >= 60 ? `${Math.floor(s / 60)} 分 ${s % 60} 秒` : `${s} 秒`; };
   const last = st?.last?.[id];
   const when = last ? new Date(last.at * 1000).toLocaleString("zh-CN", { hour12: false, month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "";
   return <>
-    {last && <span class="muted" title={last.why || last.summary || ""}>上次整理 {when}（{({ done: "改了", nochange: "没改", skipped: "没动", failed: "失败" } as any)[last.status] ?? last.status}）</span>}
-    <Btn small kind="ghost" disabled={busy} onClick={confirmDo(scope === "memory"
-      ? "现在整理一遍这个 agent 的记忆（USER.md 自动记录 + MEMORY.md）？会先备份，删掉的放进 MEMORY.archive.md。要一两分钟。"
+    {run ? <span class="muted">整理中：{run.stage}（{secs(run.since)}，共 {secs(run.started)}）</span>
+      : last && <span class="muted" title={last.why || last.summary || ""}>上次整理 {when}（{({ done: "改了", nochange: "没改", skipped: "没动", failed: "失败" } as any)[last.status] ?? last.status}）</span>}
+    <Btn small kind="ghost" disabled={busy || !!run} onClick={confirmDo(scope === "memory"
+      ? "现在整理一遍这个 agent 的记忆（USER.md 自动记录 + MEMORY.md + 主题页）？会先备份，删掉的放进 MEMORY.archive.md。记忆多的要几分钟，这里会显示进度。"
       : "现在整理一遍守则文件（AGENTS / TOOLS / HEARTBEAT，共享的和这个 agent 自己的）？合并重复、删掉过时的；会先备份，删掉的放进 PERSONA.archive.md。要一两分钟。", async () => {
-      setBusy(true);
-      try { const r = await api<any>(`/agents/${enc(id)}/memory-tidy`, { method: "POST", body: { scope } }); toast(r.text); refresh(); reload(); }
-      catch (e) { toastErr(e); }
-      finally { setBusy(false); }
-    })}>{busy ? "整理中…" : scope === "memory" ? "整理记忆" : "整理守则"}</Btn>
+      try {
+        const r = await api<any>(`/agents/${enc(id)}/memory-tidy`, { method: "POST", body: { scope, background: true } });
+        if (r.running) toast("已经在整理了");
+        setBusy(true); reload();
+      } catch (e) { toastErr(e); }
+    })}>{busy || run ? "整理中…" : scope === "memory" ? "整理记忆" : "整理守则"}</Btn>
   </>;
 }
 

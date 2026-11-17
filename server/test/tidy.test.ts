@@ -21,34 +21,34 @@ const json = (o: any) => JSON.stringify(o);
 describe("记忆整理", () => {
   it("合并重复、删掉过时、挪进 USER；手写部分一字不动；改之前备份、删掉的进归档；结果说清楚", async () => {
     const { ws, t, fake } = setup();
+    // 按编号改：MEMORY.md 里 [1] 猫 [2] heartbeat 流水 [3] 吉他课 [4] Postgres
     fake.queue.push("```json\n" + json({
-      user: ["女儿叫朵朵，今年五岁", "每周日晚上上吉他课"],
-      memory_md: "# 长期记忆\n- 家里的猫叫团子\n- 项目 A 用 Postgres",
-      removed: [{ text: "明天周日去看球", why: "过时" }, { text: "2026-11-01 22:14 heartbeat 没事", why: "流水" }],
+      user: ["女儿叫朵朵，今年五岁"],
+      ops: [{ op: "delete", n: 2, why: "流水" }, { op: "to_user", n: 3 }],
       summary: "合并了女儿的两条，吉他课挪进 USER",
     }) + "\n```");
     const r = await t.run("main", "manual");
     expect(r.status).toBe("done");
     const user = fs.readFileSync(path.join(ws, "USER.md"), "utf8");
     expect(user.startsWith("# 主人\n叫小明，手写的\n\n")).toBe(true);
-    expect(user).toContain(`${USER_AUTO_HEAD}\n- 女儿叫朵朵，今年五岁\n- 每周日晚上上吉他课\n`);
+    expect(user).toContain(`${USER_AUTO_HEAD}\n- 女儿叫朵朵，今年五岁\n- 主人每周日晚上上吉他课\n`);
     expect(fs.readFileSync(path.join(ws, "MEMORY.md"), "utf8")).toBe("# 长期记忆\n- 家里的猫叫团子\n- 项目 A 用 Postgres\n");
     const arch = fs.readFileSync(path.join(ws, ARCHIVE_FILE), "utf8");
-    expect(arch).toContain("- 明天周日去看球（过时）");
+    expect(arch).toContain("- 2026-11-01 22:14 heartbeat 没事（流水）");
     expect(r.backups!.length).toBe(2);
     expect(fs.readFileSync(r.backups!.find((b) => b.endsWith("MEMORY.md"))!, "utf8")).toContain("heartbeat 没事");
     const text = describeTidy(r);
     expect(text).toContain("MEMORY.md 4 → 2 条");
-    expect(text).toContain(`移出了 2 条（放在 ${ARCHIVE_FILE}，没真删）`);
-    // 整理时用的提示里有今天的日期、两部分内容
-    expect(fake.calls.at(-1).full).toContain("家里的猫叫团子");
+    expect(text).toContain(`移出了 1 条（放在 ${ARCHIVE_FILE}，没真删）`);
+    // 交给模型看的是带编号的条目
+    expect(fake.calls.at(-1).full).toContain("[1] 家里的猫叫团子");
   });
 
   it("删得太多、格式不对、被截断：一律不写，文件原样；USER 里超长的放回 MEMORY", async () => {
     const { ws, t, fake } = setup();
     const before = [fs.readFileSync(path.join(ws, "USER.md"), "utf8"), fs.readFileSync(path.join(ws, "MEMORY.md"), "utf8")];
     const same = () => expect([fs.readFileSync(path.join(ws, "USER.md"), "utf8"), fs.readFileSync(path.join(ws, "MEMORY.md"), "utf8")]).toEqual(before);
-    fake.queue.push(json({ user: [], memory_md: "# 长期记忆\n- 猫叫团子", removed: [], summary: "" }));
+    fake.queue.push(json({ user: [], ops: [1, 2, 3].map((n) => ({ op: "delete", n })), summary: "" }));
     const r1 = await t.run("main", "manual");
     expect(r1.status).toBe("skipped");
     expect(r1.why).toContain("删得太多");
@@ -57,11 +57,11 @@ describe("记忆整理", () => {
     expect((await t.run("main", "manual")).status).toBe("failed");
     same();
     const long = "主人".repeat(50);
-    fake.queue.push(json({ user: ["女儿叫朵朵，今年五岁", long, "明天周日去看球"], memory_md: "# 长期记忆\n- 家里的猫叫团子\n- 2026-11-01 22:14 heartbeat 没事\n- 主人每周日晚上上吉他课\n- 项目 A 用 Postgres", removed: [], summary: "" }));
+    fake.queue.push(json({ user: ["女儿叫朵朵，今年五岁", long, "明天周日去看球"], ops: [], summary: "" }));
     expect((await t.run("main", "manual")).status).toBe("done");
     expect(fs.readFileSync(path.join(ws, "USER.md"), "utf8")).not.toContain(long);
     expect(fs.readFileSync(path.join(ws, "MEMORY.md"), "utf8")).toContain(`- ${long}`);
-    expect(parseTidy('{"user": "不是数组", "memory_md": ""}')).toBeNull();
+    expect(parseTidy('{"user": "不是数组"}')).toBeNull();
   });
 
   it("定期：到期、在时段内、她不忙才做，做完告诉主人；没到期不做；失败的第二天再试；周期 0 = 不自动做", async () => {

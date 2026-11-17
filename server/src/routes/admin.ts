@@ -269,13 +269,25 @@ export function registerAdmin(r: Router, ctx: Ctx, sys: AgentSystem) {
     return json({ status: "ok", path: rel, chars: Array.from(content).length });
   });
   // 记忆整理（agent/tidy.ts）：看上次结果、立即整理一次
-  get("/api/admin/memory-tidy", () => json({ every_days: ctx.cfg.memoryTidy?.everyDays ?? 7, last: sys.tidy?.all() ?? {} }));
+  // running：正在整理的 agent → { stage 做到哪一步, since 这一步开始的时刻, started 整趟开始的时刻 }，页面据此显示进度
+  get("/api/admin/memory-tidy", async () => {
+    const { describe } = await import("../agent/tidy.ts");
+    const last = Object.fromEntries(Object.entries(sys.tidy?.all() ?? {}).map(([k, r]) => [k, { ...r, text: describe(r) }]));
+    return json({ every_days: ctx.cfg.memoryTidy?.everyDays ?? 7, last, running: sys.tidy?.progress() ?? {} });
+  });
   post("/api/admin/agents/<id>/memory-tidy", async (req) => {
     const a = agentOr404(req.params.id);
     if (!sys.tidy) return json({ error: "记忆整理只在内置 agent 模式下可用" }, 400);
     const { describe } = await import("../agent/tidy.ts");
-    const scope = (req.json() ?? {}).scope;
-    const r = await sys.tidy.run(a.id, "manual", Date.now(), scope === "memory" || scope === "docs" ? scope : "all");
+    const body = req.json() ?? {};
+    const scope = body.scope === "memory" || body.scope === "docs" ? body.scope : "all";
+    // background：马上返回，页面轮询 GET /api/admin/memory-tidy 看进度和结果（记忆多的要好几分钟，干等着浏览器看不出在干什么）
+    if (body.background) {
+      if (sys.tidy.progress()[a.id]) return json({ started: false, running: true });
+      void sys.tidy.run(a.id, "manual", Date.now(), scope).catch((e) => console.log(`[tidy] ⚠️  ${a.id} 整理出错: ${e?.message ?? e}`));
+      return json({ started: true });
+    }
+    const r = await sys.tidy.run(a.id, "manual", Date.now(), scope);
     return json({ ...r, text: describe(r) });
   });
   /** 改之前先把原文件留一份：<目录>/.persona-backup-<时间>/<文件> */

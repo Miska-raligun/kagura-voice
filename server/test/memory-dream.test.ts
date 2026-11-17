@@ -91,8 +91,8 @@ describe("整理：对照原文核对、常用、主题页、并发", () => {
     const asked: string[][] = [];
     const env = setup({ sources: (_a: any, refs: string[]) => { asked.push(refs); return "[#m5 主人] 我妈生日是 3 月 6 号，不是 5 号"; } });
     seed(env, "# 长期记忆\n- 主人的妈妈生日是 3 月 5 日 <!-- 出处 m5；主人说的 -->\n- 没有出处的一条\n");
-    env.fake.queue.push(json({ user: ["主人叫小明"], memory_md: "# 长期记忆\n- 主人的妈妈生日是 3 月 6 日〔又：母亲、老妈〕 <!-- 出处 m5；主人说的 -->\n- 没有出处的一条",
-      topics: {}, corrected: [{ text: "主人的妈妈生日是 3 月 6 日", why: "原文说是 6 号" }], removed: [], summary: "改了一条" }));
+    env.fake.queue.push(json({ user: ["主人叫小明"], summary: "改了一条",
+      ops: [{ op: "correct", n: 1, text: "主人的妈妈生日是 3 月 6 日", why: "原文说是 6 号" }, { op: "alias", n: 1, words: "母亲、老妈" }] }));
     const r = await env.tidy.run("main", "manual");
     expect(r.status).toBe("done");
     expect(asked).toEqual([["m5"]]);
@@ -102,34 +102,37 @@ describe("整理：对照原文核对、常用、主题页、并发", () => {
     expect(fs.readFileSync(path.join(env.ws, "MEMORY.md"), "utf8")).toContain("3 月 6 日〔又：母亲、老妈〕 <!-- 出处 m5；主人说的 -->");
     expect(describeTidy(r)).toContain("对照当时的对话改了 1 条");
     // 再整理一次：刚核对过的不再要原文
-    env.fake.queue.push(json({ user: ["主人叫小明"], memory_md: fs.readFileSync(path.join(env.ws, "MEMORY.md"), "utf8").trim(), topics: {}, corrected: [], removed: [], summary: "" }));
+    env.fake.queue.push(json({ user: ["主人叫小明"], ops: [], summary: "" }));
     await env.tidy.run("main", "manual");
     expect(asked).toHaveLength(1);
     expect(env.fake.calls.at(-1).full).not.toContain("C. 出处原文");
   });
 
-  it("使用情况交给模型；拆出主题页（挪过去、MEMORY.md 留索引）；抄了两份 / 编东西变多的不写", async () => {
+  it("使用情况交给模型；拆出主题页（挪过去、MEMORY.md 留索引）；编东西变多的不写", async () => {
     const env = setup();
     const lines = Array.from({ length: 6 }, (_, i) => `- 打印机第 ${i} 条：拓竹 P2S 的一个设置，写长一点让 MEMORY.md 超过拆主题页的门槛。`.repeat(8));
     seed(env, "# 长期记忆\n" + lines.join("\n") + "\n- 主人爱喝无糖乌龙茶\n");
     const idx = env.mem.of("main");
     await idx.sync();
     for (let i = 0; i < 3; i++) { idx.noteRecalled(["- 主人爱喝无糖乌龙茶"]); idx.noteUsed(["- 主人爱喝无糖乌龙茶"], "泡茶", "给你泡无糖乌龙茶"); }
-    env.fake.queue.push(json({ user: ["主人叫小明"], memory_md: "# 长期记忆\n## 常用\n- 主人爱喝无糖乌龙茶\n\n## 其它\n- 打印机：拓竹 P2S 的设置 → topics/打印机.md",
-      topics: { "打印机": "# 打印机\n" + lines.join("\n") }, corrected: [], removed: [], summary: "拆了主题页" }));
+    env.fake.queue.push(json({ user: ["主人叫小明"], summary: "拆了主题页", topic_index: { "打印机": "拓竹 P2S 的设置" },
+      ops: [{ op: "pin", n: 7 }, ...[1, 2, 3, 4, 5, 6].map((n) => ({ op: "topic", n, name: "打印机" }))] }));
     const r = await env.tidy.run("main", "manual");
-    expect(env.fake.calls.at(-1).full).toContain("经常用上：\n- 主人爱喝无糖乌龙茶（想起 3 次，用上 3 次）");
+    expect(env.fake.calls.at(-1).full).toContain("[7] 想起 3 次，用上 3 次（经常用上）");
     expect(r.status).toBe("done");
     expect(r.topics).toEqual(["打印机"]);
     expect(fs.readFileSync(path.join(env.ws, "topics", "打印机.md"), "utf8")).toContain("打印机第 5 条");
-    expect(pinnedOf(fs.readFileSync(path.join(env.ws, "MEMORY.md"), "utf8"))).toBe("- 主人爱喝无糖乌龙茶");
-    // 主题页把内容抄了一份、MEMORY.md 里也还留着：变多了，不写
-    const before = fs.readFileSync(path.join(env.ws, "MEMORY.md"), "utf8");
-    env.fake.queue.push(json({ user: ["主人叫小明"], memory_md: before.trim() + "\n" + lines.join("\n"), topics: { "打印机2": "# 打印机2\n" + lines.join("\n") }, corrected: [], removed: [], summary: "" }));
+    const memNow = fs.readFileSync(path.join(env.ws, "MEMORY.md"), "utf8");
+    expect(pinnedOf(memNow)).toBe("- 主人爱喝无糖乌龙茶");
+    expect(memNow).toContain("- 打印机：拓竹 P2S 的设置 → topics/打印机.md");
+    expect(memNow).not.toContain("打印机第 0 条");
+    // 改写时编了一大堆原来没有的东西：变多了，不写
+    const before = memNow;
+    env.fake.queue.push(json({ user: ["主人叫小明"], ops: [{ op: "edit", n: 1, text: "编出来的内容".repeat(600) }], summary: "" }));
     const r2 = await env.tidy.run("main", "manual");
     expect(r2.status).toBe("skipped");
     expect(r2.why).toContain("多了很多");
-    expect(fs.existsSync(path.join(env.ws, "topics", "打印机2.md"))).toBe(false);
+    expect(fs.readFileSync(path.join(env.ws, "MEMORY.md"), "utf8")).toBe(before);
   });
 
   it("整理期间新记的不丢（接到结果后面）；原来的条目被改 / 删了就不写", async () => {
@@ -138,7 +141,7 @@ describe("整理：对照原文核对、常用、主题页、并发", () => {
     seed(env, "# 长期记忆\n- 猫叫团子 <!-- 出处 m1 -->\n- 狗叫豆豆\n- 鱼叫泡泡\n");
     const memFile = path.join(env.ws, "MEMORY.md");
     during = () => fs.appendFileSync(memFile, "- 主人下个月去日本 <!-- 出处 m9 -->\n");
-    env.fake.queue.push(json({ user: ["主人叫小明"], memory_md: "# 长期记忆\n- 猫叫团子〔又：猫咪〕 <!-- 出处 m1 -->\n- 狗叫豆豆\n- 鱼叫泡泡", topics: {}, corrected: [], removed: [], summary: "" }));
+    env.fake.queue.push(json({ user: ["主人叫小明"], ops: [{ op: "alias", n: 1, words: "猫咪" }], summary: "" }));
     expect((await env.tidy.run("main", "manual")).status).toBe("done");
     const after = fs.readFileSync(memFile, "utf8");
     expect(after).toContain("猫叫团子〔又：猫咪〕");
@@ -146,7 +149,7 @@ describe("整理：对照原文核对、常用、主题页、并发", () => {
     // 主人在管理界面删了一条：不写
     during = () => fs.writeFileSync(memFile, fs.readFileSync(memFile, "utf8").replace("- 鱼叫泡泡\n", ""));
     const snap = () => fs.readFileSync(memFile, "utf8");
-    env.fake.queue.push(json({ user: ["主人叫小明"], memory_md: "# 长期记忆\n- 猫叫团子 <!-- 出处 m1 -->\n- 狗叫豆豆〔又：狗狗〕\n- 鱼叫泡泡\n- 主人下个月去日本 <!-- 出处 m9 -->", topics: {}, corrected: [], removed: [], summary: "" }));
+    env.fake.queue.push(json({ user: ["主人叫小明"], ops: [{ op: "alias", n: 2, words: "狗狗" }], summary: "" }));
     // 让它去核对一下（这样 sources 才会被调到）：把核对记录清掉
     (env.tidy as any).verified = {};
     const r = await env.tidy.run("main", "manual");
@@ -223,8 +226,7 @@ describe("老版本升级上来", () => {
     const env = setup();
     fs.writeFileSync(path.join(env.ws, "USER.md"), `# 主人\n\n${USER_AUTO_HEAD}\n- 主人叫小明\n`);
     fs.writeFileSync(path.join(env.ws, "MEMORY.md"), OLD);
-    const withAlias = OLD.trim().split("\n").map((l) => (l.startsWith("- ") ? `${l}〔又：别称一、别称二〕` : l)).join("\n");
-    env.fake.queue.push(json({ user: ["主人叫小明"], memory_md: withAlias, topics: {}, corrected: [], removed: [], summary: "补了别称" }));
+    env.fake.queue.push(json({ user: ["主人叫小明"], ops: Array.from({ length: 10 }, (_, i) => ({ op: "alias", n: i + 1, words: "别称一、别称二" })), summary: "补了别称" }));
     const r = await env.tidy.run("main", "manual");
     expect(r.status).toBe("done");
     expect(fs.readFileSync(path.join(env.ws, "MEMORY.md"), "utf8")).toContain("- 猫叫团子〔又：别称一、别称二〕");
@@ -236,5 +238,33 @@ describe("老版本升级上来", () => {
     fs.writeFileSync(f, JSON.stringify({ agents: { main: { agent: "main", at: 1, trigger: "auto", status: "done" } }, docs: {} }));
     const t = new MemoryTidy(env.reg, env.models, { everyDays: () => 7, window: () => "00:00-23:59", busy: () => false, report: async () => {} }, f);
     expect(t.last("main")?.status).toBe("done");
+  });
+});
+
+describe("记忆很多时的整理", () => {
+  it("近 3 万字：分段整理、每段只输出几条操作；没提到的一条不少；整理时能看到进度", async () => {
+    const stages: any[] = [];
+    let tidyRef: any = null;
+    const env = setup({ usage: () => { stages.push(tidyRef?.progress()); return new Map(); } });
+    tidyRef = env.tidy;
+    const sec = (h: string, n: number) => `## ${h}\n` + Array.from({ length: n }, (_, i) => `- ${h}的第 ${i} 条记忆，写得长一些凑够字数，看看分段整理对不对。`).join("\n");
+    const text = "# 长期记忆\n" + ["家人", "工作", "打印机", "饮食", "爱好", "健康"].map((h) => sec(h, 140)).join("\n\n") + "\n";
+    expect(Array.from(text).length).toBeGreaterThan(25_000);
+    fs.writeFileSync(path.join(env.ws, "USER.md"), `# 主人\n\n${USER_AUTO_HEAD}\n- 主人叫小明\n`);
+    fs.writeFileSync(path.join(env.ws, "MEMORY.md"), text);
+    // 每段删掉一条（编号按段给），其余不动
+    const { parseFiles, batches } = await import("../src/agent/tidy-ops.ts");
+    const groups = batches(parseFiles([{ file: "MEMORY.md", text }]), 12_000);
+    for (const g of groups) env.fake.queue.push(json({ user: ["主人叫小明"], ops: [{ op: "delete", n: [...g][0], why: "重复" }], summary: "删了一条" }));
+    const before = env.fake.calls.length;
+    const r = await env.tidy.run("main", "manual");
+    expect(r.status).toBe("done");
+    expect(env.fake.calls.length - before).toBe(groups.length);
+    expect(groups.length).toBeGreaterThanOrEqual(3);
+    const after = fs.readFileSync(path.join(env.ws, "MEMORY.md"), "utf8");
+    expect(after.split("\n").filter((l) => l.startsWith("- ")).length).toBe(140 * 6 - groups.length);
+    expect(r.removed).toHaveLength(groups.length);
+    expect(stages[0]).toMatchObject({ main: { stage: "读取记忆" } });
+    expect(env.tidy.progress()).toEqual({});                     // 整理完进度就清掉
   });
 });
