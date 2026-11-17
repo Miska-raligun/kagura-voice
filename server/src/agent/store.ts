@@ -220,6 +220,7 @@ export function usageScene(purpose: string, session: string): string {
   if (purpose === "voice") return "朗读兜底";
   if (purpose === "flush") return "记忆冲刷";
   if (session.endsWith(":heartbeat") || purpose === "heartbeat") return "heartbeat";
+  if (session.includes(":mcp:")) return "MCP 叫醒";
   if (session.includes(":cron:") || purpose === "cron") return "定时任务";
   if (session.includes(":task:") || purpose === "task") return "待办";
   if (session.includes(":sub:") || purpose === "spawn") return "子任务";

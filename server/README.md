@@ -252,6 +252,8 @@ Blender 不在默认位置（Windows 的 `C:\Program Files\Blender Foundation\` 
 
 **用打印机的摄像头拍照**：她会用 `printer_snapshot` 拍一张机内的照片（看进度、看成品），要给你看就发过来。需要这台电脑上装 ffmpeg（Windows：命令行运行 `winget install ffmpeg`），装在别处就在 env 里填 `BAMBU_FFMPEG`。拍不到的话，在打印机的网络设置里打开「局域网模式直播」（LAN Only Liveview）。
 
+**看护打印（可选）**：配置里加 `"wake": true`，env 里把 `BAMBU_WATCH_MINUTES` 设成间隔（分钟，最少 3）。打印期间每隔这么久系统叫她看一眼：她调 `printer_check`（状态 + 一张机内照片 + 检查要点），正常就什么都不说；看到明显打坏了（炒面、脱板、喷嘴裹料、空打）就告诉你，`BAMBU_CONTROL` 是 1 时还会先用 `printer_pause` 暂停（她在这种后台场景里只能暂停，继续 / 停止仍要你发话）。每次是一轮模型调用加一张图：模型要能看图、电脑上要有 ffmpeg；一个 2 小时的打印按 10 分钟一次是 12 轮。管理界面 MCP 表里的「叫她看一眼」可以手动试一次。判断靠模型看照片，会漏也会误报——拿不准时她不会暂停，只告诉你。
+
 **型号**：`BAMBU_MODEL` 写 Bambu Studio 里打印机名去掉「Bambu Lab」和喷嘴的那段（`P2S`、`P1S`、`X1 Carbon`、`A1 mini`…），不填默认 `P2S`。切片按它选配置，发打印前按它核对文件。
 
 **脱离 Kagura 单独用**：它是一个独立进程（Kagura 用 `kagura mcp bambu-printer` 拉起，走标准输入输出的 MCP 协议），任何支持 MCP 的客户端（Claude Desktop、Cursor、pi…）都能用，

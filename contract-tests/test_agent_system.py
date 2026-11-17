@@ -841,7 +841,7 @@ def test_bundled_printer_mcp_and_notify(a):
         assert r.status_code == 200, r.text
         srv = r.json()["servers"][0]
         assert srv["state"] == "connected" and srv["notify"] is True, srv
-        assert [t["name"] for t in srv["tools"]] == ["printer_status", "printer_snapshot", "printer_retrust"]      # 没开 BAMBU_CONTROL：只看（拍照不用开发者模式）
+        assert [t["name"] for t in srv["tools"]] == ["printer_status", "printer_snapshot", "printer_check", "printer_retrust"]      # 没开 BAMBU_CONTROL：只看（拍照不用开发者模式）
         a.fake_llm(tool("mcp__printer__printer_status", "打印机现在连不上"))
         assert a.post("/api/admin/chat", json={"agent": "main", "text": "打印到哪了"}).json()["reply"] == "打印机现在连不上"
         assert "P2S：连不上" in _transcript_text(a)
@@ -855,10 +855,27 @@ def test_bundled_printer_mcp_and_notify(a):
         cfg["mcpServers"]["printer"]["env"]["BAMBU_CONTROL"] = "1"
         cfg["mcpServers"]["printer"]["ownerOnly"] = ["printer_print", "printer_control"]
         srv = a.request("PUT", "/api/admin/mcp", json={"config": json.dumps(cfg)}).json()["servers"][0]
-        assert [t["name"] for t in srv["tools"]] == ["printer_status", "printer_snapshot", "printer_retrust", "printer_control", "printer_files", "printer_print", "printer_ams_dry", "printer_slice"]
+        assert [t["name"] for t in srv["tools"]] == ["printer_status", "printer_snapshot", "printer_check", "printer_retrust", "printer_pause", "printer_control", "printer_files", "printer_print", "printer_ams_dry", "printer_slice"]
         a.fake_llm(tool("mcp__printer__printer_control", "连不上，停不了", action="stop"))
         assert a.post("/api/admin/chat", json={"agent": "main", "text": "把打印停了"}).json()["reply"] == "连不上，停不了"
         assert "P2S 现在连不上" in _transcript_text(a)
+        # 叫醒：没开 wake 不给叫；开了就让她跑一轮——后台场景，没有 ownerOnly 的工具；回 NO_REPLY 什么都不发，有话说按通知的投递目标送
+        assert a.post("/api/admin/mcp/printer/test-wake", json={}).status_code == 400
+        cfg["mcpServers"]["printer"]["wake"] = True
+        srv = a.request("PUT", "/api/admin/mcp", json={"config": json.dumps(cfg)}).json()["servers"][0]
+        assert srv["wake"] is True
+        d.push.clear()
+        a.fake_reset()
+        a.fake_llm(tool("mcp__printer__printer_check", "NO_REPLY"))
+        assert a.post("/api/admin/mcp/printer/test-wake", json={"text": "例行看护：调 printer_check 看一眼"}, timeout=60).json()["said"] == ""
+        call = a.fake_log()["llm"][0]
+        assert "[系统事件：printer]" in call["message"] and call["purpose"] == "cron"
+        time.sleep(0.5)
+        assert not d.push, "没话说就不该推"
+        a.fake_llm(tool("mcp__printer__printer_pause", "热床上一团乱丝，我先暂停了。", reason="炒面"))
+        r = a.post("/api/admin/mcp/printer/test-wake", json={"text": "例行看护"}, timeout=60).json()
+        assert r["said"] == "热床上一团乱丝，我先暂停了。"
+        assert d.wait("push", timeout=8)["type"] == "push"
         # 没开通知的服务器不给发
         cfg["mcpServers"]["printer"].pop("notify")
         a.request("PUT", "/api/admin/mcp", json={"config": json.dumps(cfg)})

@@ -62,14 +62,46 @@ const TOOLS = [
     inputSchema: { type: "object", properties: {} },
   },
   {
+    name: "printer_check", title: "看一眼打印得怎么样",
+    description: "打印中途检查用：一次给你现在的状态（进度、层数、温度、报错）和机内摄像头刚拍的一张，对着返回的检查要点看有没有打坏。"
+      + "系统定时叫你看护打印时调这个（比分别调 printer_status 和 printer_snapshot 省一趟）。",
+    inputSchema: { type: "object", properties: {} },
+  },
+  {
     name: "printer_retrust", title: "重新信任打印机",
     description: "打印机的证书和上次不一样时连接会被拒绝。只有主人明确说打印机恢复过出厂设置 / 换过机器、让你重新信任时才调；别自己决定调。",
     inputSchema: { type: "object", properties: {} },
   },
 ];
 
+const NO_FFMPEG = "这台电脑上没找到 ffmpeg（拍照要用它把摄像头的视频解成图片）。让主人装一个：Windows 在命令行运行 winget install ffmpeg（macOS：brew install ffmpeg），装完不用重启 Kagura；装在别处的话在 MCP 配置的 env 里填 BAMBU_FFMPEG（ffmpeg.exe 的完整路径）。";
+
+/** 只有暂停的工具（BAMBU_CONTROL=1 才有）：看护打印时发现打坏了用。暂停随时能继续，所以不像 printer_control 那样只给主人本人的对话 */
+const PAUSE_TOOL = {
+  name: "printer_pause", title: "暂停打印",
+  description: "把正在打的任务暂停（只能暂停，不能停止 / 继续）。看护打印时看到明显打坏了（见 printer_check 的检查要点）才用；暂停后一定要告诉主人你看到了什么。"
+    + "拿不准就别暂停，把情况告诉主人让他自己看。主人让你暂停 / 继续 / 停止时用 printer_control。",
+  inputSchema: { type: "object", properties: { reason: { type: "string", description: "看到了什么（一句话，记进日志）" } }, required: ["reason"] },
+};
+
+/** printer_check 附的检查要点：摄像头是俯视 / 侧视热床，判断只看得见的东西 */
+export const CHECK_POINTS = "检查要点（看照片）：① 炒面——喷嘴周围 / 热床上一团乱丝，没在成形；② 脱板——零件歪了、倒了、被喷嘴拖着走，或者热床上本该有东西却是空的；"
+  + "③ 喷嘴裹料——喷嘴上包着一大坨料；④ 空打——层数在涨但照片里没有新料出来；⑤ 严重翘边——底边翘起一大截。"
+  + "轻微拉丝、表面小瑕疵、支撑看着乱不算。照片太暗 / 看不清 / 拿不准，都算正常，别暂停。";
+
+/** 看护打印时叫醒 agent 的话（Kagura 扩展：logger = kagura.wake 的日志通知，服务器配置 "wake": true 时让 agent 跑一轮；别的客户端只当一行日志） */
+export function watchPrompt(name: string, s: PrinterStatus, canPause: boolean): string {
+  const at = [s.percent !== null ? `${s.percent}%` : "", s.layer !== null && s.layers ? `第 ${s.layer}/${s.layers} 层` : ""].filter(Boolean).join("，");
+  return `${name} 正在打印${s.job ? `「${s.job}」` : ""}${at ? `（${at}）` : ""}，例行看护：调 printer_check 看一眼。`
+    + `一切正常就只回 NO_REPLY（不要汇报「一切正常」）。`
+    + (canPause ? `明显打坏了就调 printer_pause 暂停，然后用一两句话告诉主人你看到了什么、已经暂停了。` : `明显打坏了就用一两句话告诉主人你看到了什么，让他去暂停（你这边暂停不了）。`)
+    + `拿不准的不要暂停；拍不到照片也只回 NO_REPLY。`;
+}
+/** 看护间隔的下限（分钟）：每次一张图 + 一轮模型调用 */
+export const WATCH_MIN_MINUTES = 3;
+
 /** 启动服务器（读 input、写 output）；返回关闭函数 */
-export function startBambuMcp(o: BambuMcpOpts): { close(): void; printer: BambuPrinter | null } {
+export function startBambuMcp(o: BambuMcpOpts): { close(): void; printer: BambuPrinter | null; /** 看护的一次检查（测试用：传入当前时刻） */ watchTick(now?: number): boolean } {
   const log = o.log ?? ((l: string) => { process.stderr.write(l + "\n"); });
   const send = (m: unknown) => { try { o.output.write(JSON.stringify(m) + "\n"); } catch { /* 对方关了 */ } };
   const env = (k: string) => String(o.env[k] ?? "").trim();
@@ -143,7 +175,7 @@ export function startBambuMcp(o: BambuMcpOpts): { close(): void; printer: BambuP
       timeoutMs: (Number(env("BAMBU_SLICE_TIMEOUT")) || 540) * 1000,
     },
   });
-  const tools = controlOn ? [...TOOLS, ...CONTROL_TOOLS]
+  const tools = controlOn ? [...TOOLS, PAUSE_TOOL, ...CONTROL_TOOLS]
     : TOOLS.map((t) => (t.name === "printer_status" ? { ...t, description: t.description + "只能看，不能控制（暂停 / 停止 / 开始打印要主人自己在打印机或官方软件上操作）。" } : t));
 
   const statusText = (raw: boolean): string => {
@@ -158,6 +190,38 @@ export function startBambuMcp(o: BambuMcpOpts): { close(): void; printer: BambuP
     const s = p.status;
     return `${name}：${describeStatus(s)}${controlOn && s.devMode === false ? "（打印机没开开发者模式：现在只能看，暂停 / 停止 / 开始打印发不出去）" : ""}`;
   };
+
+  /** 拍一张（先核对摄像头端口的证书）。没装 ffmpeg / 拍不到都抛带说明的错 */
+  const snap = async (): Promise<string> => {
+    const ffmpeg = findFfmpeg(o.env);
+    if (!ffmpeg || !fs.existsSync(ffmpeg)) throw new Error(NO_FFMPEG);
+    const t0 = Date.now();
+    const camPort = Number(env("BAMBU_CAMERA_PORT")) || CAMERA_PORT;
+    try {
+      await checkCameraCert(camPort);
+      const file = await takeSnapshot({ ffmpeg, host, code, port: camPort, dir: path.join(stateDir, "snapshots"), name });
+      log(`[${name}] 📷 拍了一张（${Math.round((Date.now() - t0) / 1000)} 秒）→ ${file}`);
+      return file;
+    } catch (e: any) { log(`[${name}] 📷 没拍到：${String(e?.message ?? e).split("\n")[0]}`); throw e; }
+  };
+
+  // 看护打印（BAMBU_WATCH_MINUTES > 0）：打印期间每隔这么久叫醒 agent 看一眼。暂停 / 没在打就不叫
+  const watchMin = Number(env("BAMBU_WATCH_MINUTES")) > 0 ? Math.max(WATCH_MIN_MINUTES, Number(env("BAMBU_WATCH_MINUTES"))) : 0;
+  let printingSince = 0, lastWatch = 0;
+  const watchTick = (now = Date.now()) => {
+    const p = printer;
+    const printing = !!p && p.conn === "online" && p.ready && p.status.state === "printing";
+    if (!printing) { printingSince = 0; return false; }
+    if (!printingSince) { printingSince = now; lastWatch = now; return false; }       // 刚开始打：等满一个间隔再看
+    if (now - lastWatch < watchMin * 60_000) return false;
+    lastWatch = now;
+    const text = watchPrompt(name, p!.status, controlOn);
+    log(`[${name}] 👀 叫她看一眼（${p!.status.percent ?? "?"}%）`);
+    send({ jsonrpc: "2.0", method: "notifications/message", params: { level: "notice", logger: "kagura.wake", data: text } });
+    return true;
+  };
+  const watchTimer = watchMin && !missing.length ? setInterval(() => watchTick(), 30_000) : null;
+  watchTimer?.unref?.();
 
   const rl = readline.createInterface({ input: o.input });
   rl.on("line", (line) => {
@@ -178,19 +242,23 @@ export function startBambuMcp(o: BambuMcpOpts): { close(): void; printer: BambuP
       case "tools/call": {
         const tool = m.params?.name, args = m.params?.arguments ?? {};
         if (tool === "printer_status") return text(statusText(args.raw === true));
+        if (tool === "printer_check") {
+          if (missing.length) return text(statusText(false), true);
+          const st = statusText(false);
+          snap().then((file) => ok({ content: [{ type: "image", data: fs.readFileSync(file).toString("base64"), mimeType: "image/jpeg" }, { type: "text", text: `${st}\n照片：${file}\n${CHECK_POINTS}` }] }))
+            .catch((e) => text(`${st}\n没拍到照片（${String(e?.message ?? e).split("\n")[0]}）：只能按上面的状态判断，看不出问题就当正常。`));
+          return;
+        }
+        if (controlOn && tool === "printer_pause") {
+          if (missing.length) return text(statusText(false), true);
+          log(`[${name}] ⏸  她要暂停：${String(args.reason ?? "").slice(0, 200)}`);
+          control.control({ action: "pause" }).then((r) => text(r.text, r.isError === true)).catch((e) => text(`出错了：${e?.message ?? e}`, true));
+          return;
+        }
         if (tool === "printer_snapshot") {
           if (missing.length) return text(statusText(false), true);
-          const ffmpeg = findFfmpeg(o.env);
-          if (!ffmpeg || !fs.existsSync(ffmpeg)) return text("这台电脑上没找到 ffmpeg（拍照要用它把摄像头的视频解成图片）。让主人装一个：Windows 在命令行运行 winget install ffmpeg（macOS：brew install ffmpeg），装完不用重启 Kagura；装在别处的话在 MCP 配置的 env 里填 BAMBU_FFMPEG（ffmpeg.exe 的完整路径）。", true);
-          const t0 = Date.now();
-          const camPort = Number(env("BAMBU_CAMERA_PORT")) || CAMERA_PORT;
-          checkCameraCert(camPort)
-            .then(() => takeSnapshot({ ffmpeg, host, code, port: camPort, dir: path.join(stateDir, "snapshots"), name }))
-            .then((file) => {
-              log(`[${name}] 📷 拍了一张（${Math.round((Date.now() - t0) / 1000)} 秒）→ ${file}`);
-              ok({ content: [{ type: "image", data: fs.readFileSync(file).toString("base64"), mimeType: "image/jpeg" }, { type: "text", text: `${name} 机内摄像头刚拍的：${file}（要给主人看就用 send_file 发这个路径；之后想再看一眼用 read_file 读它）` }] });
-            })
-            .catch((e) => { log(`[${name}] 📷 没拍到：${String(e?.message ?? e).split("\n")[0]}`); text(String(e?.message ?? e), true); });
+          snap().then((file) => ok({ content: [{ type: "image", data: fs.readFileSync(file).toString("base64"), mimeType: "image/jpeg" }, { type: "text", text: `${name} 机内摄像头刚拍的：${file}（要给主人看就用 send_file 发这个路径；之后想再看一眼用 read_file 读它）` }] }))
+            .catch((e) => text(String(e?.message ?? e), true));
           return;
         }
         if (tool === "printer_retrust") {
@@ -214,9 +282,10 @@ export function startBambuMcp(o: BambuMcpOpts): { close(): void; printer: BambuP
       default: return send({ jsonrpc: "2.0", id: m.id, error: { code: -32601, message: `不支持 ${m.method}` } });
     }
   });
-  const close = () => { printer?.stop(); rl.close(); };
-  rl.on("close", () => printer?.stop());
-  return { close, get printer() { return printer; } };
+  const stop = () => { printer?.stop(); if (watchTimer) clearInterval(watchTimer); };
+  const close = () => { stop(); rl.close(); };
+  rl.on("close", stop);
+  return { close, get printer() { return printer; }, watchTick };
 }
 
 /** `kagura mcp bambu-printer`：标准输入输出上跑，输入关了（Kagura 断开）就退出 */

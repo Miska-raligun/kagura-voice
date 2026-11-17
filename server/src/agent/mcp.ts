@@ -38,6 +38,12 @@ export interface McpServerConfig {
   allowUntrusted?: boolean;
   /** Kagura 扩展：这个服务器主动发来的通知原话送给主人。true，或 { agent: 谁来说, delivery: 送到哪（device:… / feishu:…）}；不写 = 跟默认 agent 的 heartbeat 投递目标 */
   notify?: boolean | { agent?: string; delivery?: string };
+  /**
+   * Kagura 扩展：这个服务器可以叫醒 agent 跑一轮（它发 logger = "kagura.wake" 的日志通知，内容是要她做的事）——
+   * 比如打印期间每隔几分钟让她看一眼摄像头。和 notify 的区别：notify 是原话送给主人、不过模型；wake 是让她自己看了再决定说不说。
+   * 每次叫醒是一轮模型调用，所以要显式打开。true，或 { agent: 谁来看 }；她要说的话按 notify 的投递目标送
+   */
+  wake?: boolean | { agent?: string };
   /** Kagura 扩展：这些工具（名字，可带 *）只在主人本人的对话里有；后台场景（heartbeat / 定时任务 / 待办 / 子任务 / agent 间）不给——开始打印这类没人看着不该做的事 */
   ownerOnly?: string[];
   /** Kagura 扩展：按需加载（toolgroups.ts）。true = 平时收着、她要用时才调出来；false = 一直摆着；不写 = 工具定义多（超过 AUTO_LAZY_TOKENS）才收 */
@@ -62,12 +68,18 @@ interface Server {
   retryMs?: number;
   retry?: ReturnType<typeof setTimeout> | null;
   sent?: number[];
+  /** 上一次叫醒 agent 的时刻 */
+  lastWake?: number;
 }
 
 /** MCP 日志级别，从低到高；notice 及以上才当通知 */
 const LEVELS = ["debug", "info", "notice", "warning", "error", "critical", "alert", "emergency"];
 /** 一个服务器 NOTIFY_WINDOW_MS 内最多送 NOTIFY_MAX 条（服务器写坏了也别刷屏） */
 export const NOTIFY_MAX = 6;
+/** 叫醒 agent 的日志通知用的 logger 名 */
+export const WAKE_LOGGER = "kagura.wake";
+/** 同一个服务器两次叫醒至少隔这么久（服务器写坏了也别连着烧额度） */
+export const WAKE_MIN_MS = 2 * 60_000;
 const NOTIFY_WINDOW_MS = 10 * 60_000;
 const NOTIFY_TEXT_MAX = 500;
 /** command 写这个 = 这个程序自己（自带的 MCP 服务器） */
@@ -147,6 +159,8 @@ export class McpManager {
 
   /** 服务器主动发来、要送给主人的话（system.ts 接上） */
   onNotify?: (server: string, text: string) => void;
+  /** 服务器要叫醒 agent（配置了 "wake" 才会到这）：system.ts 接上，跑一轮 */
+  onWake?: (server: string, text: string) => void;
 
   constructor(readonly file: string, private opts: { fetch?: typeof fetch; cwd: string; clientName?: string; version?: string; /** 测试用：自带服务器怎么起 */ self?: string[]; /** 单独更新的组件放哪（告诉自带服务器，见 components.ts） */ componentsDir?: string }) {}
 
@@ -161,8 +175,25 @@ export class McpManager {
     return n ? (typeof n === "object" ? n : {}) : null;
   }
 
+  /** 被这个服务器叫醒时由谁来看（没开 wake = null） */
+  wakeConfig(name: string): { agent?: string } | null {
+    const w = this.servers.get(name)?.cfg.wake;
+    return w ? (typeof w === "object" ? w : {}) : null;
+  }
+
   private onMessage(s: Server, p: any) {
-    if (!s.cfg.notify || this.servers.get(s.name) !== s) return;
+    if (this.servers.get(s.name) !== s) return;
+    if (p?.logger === WAKE_LOGGER) {
+      // 叫醒的话是给 agent 的指示，不是给主人的：没开 wake 就整个不理（也别当通知念出来）
+      const text = String(typeof p?.data === "string" ? p.data : "").trim();
+      if (!s.cfg.wake || !text) return;
+      const now = Date.now();
+      if (now - (s.lastWake ?? 0) < WAKE_MIN_MS) { console.log(`[mcp] 🔇 ${s.name} 叫得太勤，这次不理`); return; }
+      s.lastWake = now;
+      this.onWake?.(s.name, Array.from(text).slice(0, 1000).join(""));
+      return;
+    }
+    if (!s.cfg.notify) return;
     if (LEVELS.indexOf(String(p?.level ?? "")) < LEVELS.indexOf("notice")) return;
     const d = p?.data;
     const text = String(typeof d === "string" ? d : d?.text ?? d?.message ?? "").trim();
@@ -176,7 +207,7 @@ export class McpManager {
 
   /** 主动通知的服务器要一直连着：连不上 / 断了过一阵再试（10 秒起，翻倍到 5 分钟） */
   private retryLater(s: Server) {
-    if (!s.cfg.notify || s.cfg.enabled === false || this.servers.get(s.name) !== s || s.retry) return;
+    if (!(s.cfg.notify || s.cfg.wake) || s.cfg.enabled === false || this.servers.get(s.name) !== s || s.retry) return;
     const ms = s.retryMs ?? 10_000;
     s.retryMs = Math.min(5 * 60_000, ms * 2);
     s.retry = setTimeout(() => { s.retry = null; if (this.servers.get(s.name) === s && !s.client) void this.connect(s); }, ms);
@@ -268,7 +299,7 @@ export class McpManager {
         client.onClose(() => {
           if (s.client !== client) return;
           s.client = null;
-          if (s.state === "connected") { s.state = "error"; s.error = s.cfg.notify ? "连接断开了（稍后自动重连）" : "连接断开了（下次调用时重连）"; }
+          if (s.state === "connected") { s.state = "error"; s.error = s.cfg.notify || s.cfg.wake ? "连接断开了（稍后自动重连）" : "连接断开了（下次调用时重连）"; }
           this.retryLater(s);
         });
         s.state = "connected";
@@ -337,11 +368,11 @@ export class McpManager {
       transport: s.cfg.command ? "stdio" : "http", target: s.cfg.command ? [s.cfg.command, ...(s.cfg.args ?? [])].join(" ") : s.cfg.url,
       description: describe(s),
       allowUntrusted: !!s.cfg.allowUntrusted,
-      notify: !!s.cfg.notify,
+      notify: !!s.cfg.notify, wake: !!s.cfg.wake,
       // 工具定义每轮占多少（估算）、是不是按需加载
       ...sizeOf(s),
       tools: s.tools.map((t) => ({ name: t.name, tool: toolName(s.name, t.name), description: t.description ?? "", exposure: exposureOf(s.cfg, t.name) })),
-    })).concat(this.configErrors.map((e) => ({ name: e.name, source: "mcp.json", state: "error" as ServerState, error: e.error, stderr: "", transport: "", target: "", description: "", allowUntrusted: false, notify: false, tokens: 0, lazy: false, tools: [] })));
+    })).concat(this.configErrors.map((e) => ({ name: e.name, source: "mcp.json", state: "error" as ServerState, error: e.error, stderr: "", transport: "", target: "", description: "", allowUntrusted: false, notify: false, wake: false, tokens: 0, lazy: false, tools: [] })));
   }
 
   /** 给运行时的工具提供者 */

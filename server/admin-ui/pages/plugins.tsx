@@ -127,11 +127,13 @@ const MCP_EXAMPLE = `{
 
 /** 自带的拓竹打印机 MCP 服务器（command 写 kagura = 用这个程序自己） */
 const PRINTER_TEMPLATE = {
-  command: "kagura", args: ["mcp", "bambu-printer"], notify: true, timeout: 600,
+  command: "kagura", args: ["mcp", "bambu-printer"], notify: true, wake: true, timeout: 600,
   description: "家里的拓竹 3D 打印机",
   // BAMBU_CONTROL：0 = 只看；1 = 还能暂停 / 停止 / 发文件去打印（打印机要开「仅局域网模式」+「开发者模式」）
+  // BAMBU_WATCH_MINUTES：打印期间每隔几分钟让她看一眼摄像头（最少 3，0 = 不看）。每次是一轮模型调用 + 一张图，要模型能看图、电脑上有 ffmpeg；
+  //   发现明显打坏了会告诉你，BAMBU_CONTROL 是 1 时还会先暂停（只能暂停，继续 / 停止仍要你发话）。配合上面的 "wake": true 才生效
   // BAMBU_PLATE：打印机上放的打印板（textured 纹理 PEI / smooth 光面 PEI / cool 低温板 / engineering 工程板 / supertack），切片按它切
-  env: { BAMBU_NAME: "P2S", BAMBU_MODEL: "P2S", BAMBU_HOST: "打印机的 IP", BAMBU_SERIAL: "序列号", BAMBU_ACCESS_CODE: "访问码", BAMBU_CONTROL: "0", BAMBU_PLATE: "textured" },
+  env: { BAMBU_NAME: "P2S", BAMBU_MODEL: "P2S", BAMBU_HOST: "打印机的 IP", BAMBU_SERIAL: "序列号", BAMBU_ACCESS_CODE: "访问码", BAMBU_CONTROL: "0", BAMBU_WATCH_MINUTES: "0", BAMBU_PLATE: "textured" },
   ownerOnly: ["printer_print", "printer_control", "printer_slice"],
 };
 /** 自带的 Blender 建模 MCP 服务器（后台运行，不用开着 Blender） */
@@ -166,7 +168,7 @@ function Mcp() {
         {d.servers.length ? <table><thead><tr><th>名字</th><th>状态</th><th>工具</th><th /></tr></thead><tbody>
           {d.servers.map((s: any) => (
             <tr>
-              <td><b>{s.name}</b>{s.allowUntrusted ? <small class="muted">（对不可信会话开放）</small> : null}{s.notify ? <small class="muted">（会主动通知）</small> : null}<br /><small class="muted">{s.transport} · {s.target}{s.source !== "mcp.json" ? ` · 来自${s.source}` : ""}</small>
+              <td><b>{s.name}</b>{s.allowUntrusted ? <small class="muted">（对不可信会话开放）</small> : null}{s.notify ? <small class="muted">（会主动通知）</small> : null}{s.wake ? <small class="muted">（能叫她看一眼）</small> : null}<br /><small class="muted">{s.transport} · {s.target}{s.source !== "mcp.json" ? ` · 来自${s.source}` : ""}</small>
                 {s.description ? <><br /><small class="muted">{s.description}</small></> : null}</td>
               <td><Badge s={s.state === "connected" ? "ok" : s.state === "connecting" ? "connecting" : s.state === "disabled" ? "stopped" : "error"}
                 text={{ connected: "已连接", connecting: "连接中", disabled: "已停用", error: "出错" }[s.state as string] ?? s.state} />
@@ -174,6 +176,7 @@ function Mcp() {
               <td>{s.tools.length ? <details><summary>{s.tools.length} 个{s.tokens ? <small class="muted"> · 约 {s.tokens} token · {s.lazy ? "按需加载" : "一直带着"}</small> : null}</summary><ul>{s.tools.map((t: any) => (
                 <li><code>{t.tool}</code>{t.exposure === "hidden" ? <small class="muted">（已隐藏）</small> : null}<br /><small class="muted">{t.description.slice(0, 160)}</small></li>))}</ul></details> : "—"}</td>
               <td>{s.state !== "disabled" && s.transport ? <Btn small onClick={async () => { await api(`/mcp/${enc(s.name)}/reconnect`, { body: {} }); toast("已重连"); reload(); }}>重连</Btn> : null}
+                {s.wake ? <>{" "}<Btn small title="平时由它自己叫（比如打印期间每隔几分钟）；这里手动叫她看一次" onClick={async () => { try { toast("叫她看了，稍等…"); const r = await api<any>(`/mcp/${enc(s.name)}/test-wake`, { body: {} }); toast(r.said ? `她说：${r.said}` : "她看了，没什么要说的"); } catch (e) { toastErr(e); } }}>叫她看一眼</Btn></> : null}
                 {s.notify ? <>{" "}<Btn small onClick={async () => { try { toast(delivered((await api(`/mcp/${enc(s.name)}/test-notify`, { body: {} })).delivered)); } catch (e) { toastErr(e); } }}>测试通知</Btn></> : null}</td>
             </tr>))}
         </tbody></table> : <Empty>暂无 MCP 服务器</Empty>}

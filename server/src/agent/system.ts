@@ -12,7 +12,7 @@ import { Runtime } from "./runtime.ts";
 import { deviceTools } from "./tools/device.ts";
 import { Memories } from "./tools/memory.ts";
 import { OpenAIEmbedder } from "./memory.ts";
-import { Scheduler } from "./scheduler.ts";
+import { Scheduler, SILENT_RE, HEARTBEAT_KEEP } from "./scheduler.ts";
 import { cronTools } from "./tools/cron.ts";
 import { A2A } from "./a2a.ts";
 import { Skills } from "./skills.ts";
@@ -49,6 +49,8 @@ export interface AgentSystem {
   tidy?: MemoryTidy;
   /** MCP 服务器主动发来的通知送给主人（管理界面「发一条测试通知」也用它），返回送到了哪 */
   notifyOwner?: (server: string, text: string) => Promise<string>;
+  /** MCP 服务器叫醒 agent 跑一轮（返回她要说的话，没话说是空） */
+  wakeAgent?: (server: string, text: string) => Promise<string>;
   a2a: A2A;
   skills: Skills;
   channels: ChannelManager;
@@ -289,6 +291,35 @@ export function attachAgentSystem(sys: AgentSystem, ctx: Ctx) {
     return to;
   };
   sys.notifyOwner = notifyOwner;
+  // MCP 服务器叫醒 agent（服务器配置 "wake": true，见 mcp.ts）：让她自己看了再决定说不说——比如打印期间每隔几分钟看一眼摄像头。
+  // 每个服务器一个小会话（<agent>:mcp:<服务器>，只留最近几条，同 heartbeat），按定时任务的场景跑：后台、没有 ownerOnly 的工具。
+  // 上一次还没看完就不叠着跑；她回 NO_REPLY 就什么都不发、也不进历史；有话说按这个服务器 notify 的投递目标送给主人
+  const waking = new Set<string>();
+  const wakeAgent = async (server: string, text: string): Promise<string> => {
+    const agentId = registry.get(sys.mcp.wakeConfig(server)?.agent ?? "")?.id ?? registry.default().id;
+    const key = `${agentId}:mcp:${server}`;
+    if (waking.has(key)) { console.log(`[mcp] 👀 ${server} 又叫了一次，上一次还没看完，跳过`); return ""; }
+    waking.add(key);
+    const t0 = Date.now();
+    try {
+      runtime.store(agentId).keepLast(key, HEARTBEAT_KEEP);
+      const r = await runtime.run({
+        agentId, sessionKey: key, kind: "isolated", channel: "system", purpose: "cron", trusted: true,
+        text: `[系统事件：${server}] ${text}`, keepIf: (t) => !SILENT_RE.test(t) && !!t,
+      });
+      const said = SILENT_RE.test(r.text) ? "" : r.text.trim();
+      health.record({ kind: "mcp_wake", ok: true, agent: agentId, session: key, ms: Date.now() - t0, detail: { server, spoke: !!said, tools: r.toolCalls } });
+      console.log(`[mcp] 👀 ${server} 叫 ${agentId} 看了一眼（${((Date.now() - t0) / 1000).toFixed(1)}s，${r.toolCalls.join("、") || "没调工具"}）：${said ? said.slice(0, 60) : "没什么要说的"}`);
+      if (said) await notifyOwner(server, said);
+      return said;
+    } catch (e: any) {
+      health.record({ kind: "mcp_wake", ok: false, agent: agentId, session: key, ms: Date.now() - t0, detail: { server, error: String(e?.message ?? e).slice(0, 200) } });
+      console.log(`[mcp] ⚠️  ${server} 叫 ${agentId} 没叫成: ${e?.message ?? e}`);
+      return "";
+    } finally { waking.delete(key); }
+  };
+  sys.wakeAgent = wakeAgent;
+  sys.mcp.onWake = (server, text) => { void wakeAgent(server, text); };
   sys.mcp.onNotify = (server, text) => { void notifyOwner(server, text); };
   const tasks = new TaskQueue(ctx.dirs.systemDb, registry, { run: (req) => runtime.run(req), report, reset: (a, k) => runtime.store(a).reset(k) });
   sys.tasks = tasks;

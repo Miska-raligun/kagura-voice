@@ -392,7 +392,7 @@ const a = process.argv.slice(2); if (process.env.MODE === "hang") setInterval(()
     closers.push(s.close, fp.close);
     const init = (await s.rpc("initialize", { protocolVersion: "2025-06-18" })).result;
     expect(init).toMatchObject({ protocolVersion: "2025-06-18", capabilities: { tools: {}, logging: {} }, serverInfo: { name: "kagura-bambu-printer" } });
-    expect((await s.rpc("tools/list")).result.tools.map((t: any) => t.name)).toEqual(["printer_status", "printer_snapshot", "printer_retrust"]);
+    expect((await s.rpc("tools/list")).result.tools.map((t: any) => t.name)).toEqual(["printer_status", "printer_snapshot", "printer_check", "printer_retrust"]);
     expect((await s.rpc("nope")).error.code).toBe(-32601);
     await until(() => s.srv.printer?.conn === "online");
     expect((await s.call("printer_status")).content[0].text).toBe("P2S：刚连上，还没收到状态，过几秒再问。");
@@ -571,7 +571,7 @@ describe("控制（BAMBU_CONTROL=1）", () => {
   const DEV = "3EC18FFF9CFF", NODEV = "3EC1AFFF9CFF";
   const closers: (() => any)[] = [];
   afterEach(async () => { for (const c of closers.splice(0)) await c(); });
-  async function setup(first: any, files: Record<string, Buffer> = {}, studioBin?: string) {
+  async function setup(first: any, files: Record<string, Buffer> = {}, studioBin?: string, extraEnv: Record<string, string> = {}) {
     const fp = await fakePrinter();
     const ftp = await fakeFtp(files);
     const input = new PassThrough(), output = new PassThrough();
@@ -580,7 +580,7 @@ describe("控制（BAMBU_CONTROL=1）", () => {
     const notes: any[] = [];
     output.on("data", (d) => { buf += d.toString(); for (let i; (i = buf.indexOf("\n")) >= 0;) { const m = JSON.parse(buf.slice(0, i)); buf = buf.slice(i + 1); if (m.id !== undefined) waiting.get(m.id)?.(m); else notes.push(m); } });
     const srv = startBambuMcp({ input, output, stateDir: tmpdir("bambu-state"), dial: plainDial(), ftpDial: plainFtp(), settleMs: 10, ackMs: 1200, log: () => {},
-      env: { BAMBU_NAME: "P2S", BAMBU_STUDIO: studioBin ?? "", BAMBU_HOST: "127.0.0.1", BAMBU_PORT: String(fp.port), BAMBU_FTP_PORT: String(ftp.port), BAMBU_SERIAL: SERIAL, BAMBU_ACCESS_CODE: CODE, BAMBU_CONTROL: "1" } });
+      env: { BAMBU_NAME: "P2S", BAMBU_STUDIO: studioBin ?? "", BAMBU_HOST: "127.0.0.1", BAMBU_PORT: String(fp.port), BAMBU_FTP_PORT: String(ftp.port), BAMBU_SERIAL: SERIAL, BAMBU_ACCESS_CODE: CODE, BAMBU_CONTROL: "1", ...extraEnv } });
     closers.push(() => { srv.close(); input.end(); }, fp.close, ftp.close);
     const rpc = (method: string, params: any = {}) => new Promise<any>((r) => { const n = ++id; waiting.set(n, r); input.write(JSON.stringify({ jsonrpc: "2.0", id: n, method, params }) + "\n"); });
     const call = async (name: string, args: any = {}) => { const r = (await rpc("tools/call", { name, arguments: args })).result; return { text: r.content[0].text as string, isError: !!r.isError }; };
@@ -593,13 +593,38 @@ describe("控制（BAMBU_CONTROL=1）", () => {
 
   it("多出三个控制工具；没开开发者模式时不发指令、说清楚怎么开", async () => {
     const s = await setup({ ...FULL, fun: NODEV });
-    expect((await s.rpc("tools/list")).result.tools.map((t: any) => t.name)).toEqual(["printer_status", "printer_snapshot", "printer_retrust", "printer_control", "printer_files", "printer_print", "printer_ams_dry", "printer_slice"]);
+    expect((await s.rpc("tools/list")).result.tools.map((t: any) => t.name)).toEqual(["printer_status", "printer_snapshot", "printer_check", "printer_retrust", "printer_pause", "printer_control", "printer_files", "printer_print", "printer_ams_dry", "printer_slice"]);
     expect((await s.call("printer_status")).text).toContain("打印机没开开发者模式：现在只能看");
     const r = await s.call("printer_control", { action: "pause" });
     expect(r).toMatchObject({ isError: true });
     expect(r.text).toContain("开发者模式");
     expect((await s.call("printer_print", { file: "x.gcode.3mf" })).text).toContain("开发者模式");
     expect(s.sent()).toEqual([]);
+  });
+
+  it("看护打印：打印满一个间隔才叫醒一次（kagura.wake），暂停 / 打完不叫；printer_pause 只发暂停；printer_check 拍不到也给状态", async () => {
+    const s = await setup({ ...FULL, fun: DEV }, {}, undefined, { BAMBU_WATCH_MINUTES: "5", BAMBU_FFMPEG: "/nope/ffmpeg" });
+    const wakes = () => s.notes.filter((n) => n.params?.logger === "kagura.wake");
+    const t = Date.now();
+    expect(s.srv.watchTick(t)).toBe(false);                     // 刚看到在打：从现在起算
+    expect(s.srv.watchTick(t + 4 * 60_000)).toBe(false);
+    expect(s.srv.watchTick(t + 5 * 60_000)).toBe(true);
+    expect(s.srv.watchTick(t + 6 * 60_000)).toBe(false);        // 一个间隔只叫一次
+    await until(() => wakes().length === 1);
+    expect(wakes()[0].params.data).toContain("P2S 正在打印「Benchy」（63%，第 120/190 层）");
+    expect(wakes()[0].params.data).toContain("printer_pause");
+    expect(wakes()[0].params.data).toContain("NO_REPLY");
+    const chk = await s.call("printer_check");
+    expect(chk.text).toContain("Benchy");
+    expect(chk.text).toContain("没拍到照片");
+    expect(chk.isError).toBe(false);
+    expect((await s.call("printer_pause", { reason: "一团乱丝" })).text).toContain("已经让它暂停了");
+    expect(s.sent()).toHaveLength(1);
+    expect(s.sent()[0]).toMatchObject({ print: { command: "pause" } });
+    await s.fp.push({ command: "push_status", gcode_state: "PAUSE" });
+    await until(() => s.srv.printer!.status.state === "paused");
+    expect(s.srv.watchTick(t + 20 * 60_000)).toBe(false);       // 暂停了不叫
+    expect(wakes()).toHaveLength(1);
   });
 
   it("暂停 / 继续 / 停止 / 灯 / 速度：状态不对不发；发的是带回执的指令；被拒绝、没回应都照实说", async () => {

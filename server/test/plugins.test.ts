@@ -88,6 +88,26 @@ describe("MCP 管理（真起一个 stdio 服务器）", () => {
     expect(got.filter((g) => g[0] === "picky")).toHaveLength(NOTIFY_MAX);
   });
 
+  it("叫醒 agent：开了 wake 的服务器发 kagura.wake 才交出去；没开的不理、也不当通知念；两次之间有最短间隔", async () => {
+    const dir = tmpdir("mcp");
+    mgr = new McpManager(path.join(dir, "mcp.json"), { cwd: dir });
+    const woke: [string, string][] = [], said: [string, string][] = [];
+    mgr.onWake = (server, text) => woke.push([server, text]);
+    mgr.onNotify = (server, text) => said.push([server, text]);
+    const base = { command: process.execPath, args: [FIXTURE] };
+    await mgr.writeConfigText(JSON.stringify({ mcpServers: { watch: { ...base, wake: { agent: "mio" } }, loud: { ...base, notify: true } } }));
+    expect(mgr.wakeConfig("watch")).toEqual({ agent: "mio" });
+    expect(mgr.wakeConfig("loud")).toBe(null);
+    const echo = (server: string, text: string) => mgr!.tools()(scopeOf(true), {} as any).find((t) => t.name === `mcp__${server}__echo`)!.execute("1", { text });
+    await echo("watch", "wake:看一眼打印机");
+    await echo("watch", "wake:马上又叫");
+    await echo("loud", "wake:没开 wake 的服务器");
+    await echo("watch", "notify:没开 notify 的普通通知");
+    await new Promise((r) => setTimeout(r, 50));
+    expect(woke).toEqual([["watch", "看一眼打印机"]]);
+    expect(said).toEqual([]);
+  });
+
   it("ownerOnly：这些工具只在主人本人的对话里有，待办 / 定时任务 / heartbeat / 子任务里没有", async () => {
     const dir = tmpdir("mcp");
     mgr = new McpManager(path.join(dir, "mcp.json"), { cwd: dir });

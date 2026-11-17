@@ -86,6 +86,13 @@ export function registerAdminPlugins(r: Router, sys: AgentSystem) {
     if (!sys.notifyOwner) return json({ error: "还没准备好" }, 503);
     return json({ delivered: await sys.notifyOwner(req.params.name, `这是 ${req.params.name} 的测试通知：它有事要告诉你的时候，我会这样说。`) });
   }));
+  // 叫她看一眼：开了 "wake" 的服务器平时自己叫（比如打印期间每隔几分钟），这里手动叫一次看效果。返回她要告诉主人的话（没话说是空）
+  r.add("POST", "/api/admin/mcp/<name>/test-wake", guard(async (req) => {
+    if (!mcp.wakeConfig(req.params.name)) return json({ error: "这个服务器没开叫醒（配置里加 \"wake\": true）" }, 400);
+    if (!sys.wakeAgent) return json({ error: "还没准备好" }, 503);
+    const text = String(req.json()?.text ?? "").trim() || `这是主人手动叫的一次：用 ${req.params.name} 的工具看一眼现在的情况，用一两句话告诉主人。`;
+    return json({ said: await sys.wakeAgent(req.params.name, text) });
+  }));
   /** 从 pi / Claude Desktop / Cursor 的配置里把 mcpServers 合并过来（同名的不覆盖） */
   r.add("POST", "/api/admin/mcp/import", guard(async (req) => {
     const src = mcpImportSources().find((s) => s.id === String((req.json() ?? {}).from));

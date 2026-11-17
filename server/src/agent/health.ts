@@ -5,6 +5,7 @@ import { DatabaseSync } from "node:sqlite";
 
 export type HealthKind =
   | "turn"            // 一轮结束：ok = 成功；否则 detail.error 是失败类别
+  | "mcp_wake"        // MCP 服务器叫醒 agent 看了一眼（detail.spoke = 有没有话要告诉主人）
   | "empty_retry"     // 空回复，压一压重试
   | "nudge"           // 想完了没说话，催一句（detail.ok = 催完说话了没）
   | "overflow"        // 服务商报上下文超长，狠压一次重试
