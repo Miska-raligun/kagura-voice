@@ -127,6 +127,8 @@ main { position:relative; z-index:1; flex:1; min-height:0; }
 .shots img { width:100%; aspect-ratio:4/3; object-fit:cover; border-radius:8px; background:var(--panel2); }
 .photo { margin-top:10px; } .photo img { width:100%; border-radius:12px; }
 
+.pushrow { display:flex; align-items:center; justify-content:space-between; gap:12px; font-size:13.5px; color:var(--muted); }
+.pill { flex:none; height:32px; padding:0 16px; border-radius:16px; background:var(--accent); color:var(--accent-fg); font-weight:600; font-size:13.5px; }
 /* ── 形象：手机显示用的角色图（和 CoreS3 那套分开） ── */
 #lookPage { background:rgba(17,17,19,.9); }
 .looks { display:grid; grid-template-columns:repeat(2, 1fr); gap:10px; }
@@ -237,6 +239,10 @@ main { position:relative; z-index:1; flex:1; min-height:0; }
         <div class="card">
           <h3>形象<select id="lookRole" aria-label="角色"></select></h3>
           <div class="looks" id="looks"></div>
+        </div>
+        <div class="card">
+          <h3>通知</h3>
+          <div class="pushrow"><span id="pushHint">页面关着时，她找你会发一条通知</span><button id="pushBtn" class="pill">开启</button></div>
         </div>
       </div>
     </section>
@@ -1038,8 +1044,48 @@ async function loadMe() {
   const me = await apiJson("/client/me");
   S.me = me; S.roles = me.roles || []; S.role = me.role || "";
   renderRoles();
+  renderPush();
   return me;
 }
+// ── 通知（Web Push）：页面关着时她主动说的话变成一条系统通知。浏览器只在 https 下给；iOS 要先「添加到主屏幕」──
+const pushOk = () => "serviceWorker" in navigator && "PushManager" in window && "Notification" in window && window.isSecureContext;
+async function pushSub() {
+  if (!pushOk()) return null;
+  const reg = await navigator.serviceWorker.getRegistration("/app");
+  return reg ? reg.pushManager.getSubscription() : null;
+}
+async function renderPush() {
+  const btn = $("pushBtn"), hint = $("pushHint");
+  if (!pushOk()) {
+    const ios = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+    hint.textContent = !window.isSecureContext ? "要用 https 地址打开才能开通知" : ios ? "先在分享菜单里「添加到主屏幕」，从主屏幕图标打开再开" : "这个浏览器不支持通知";
+    btn.classList.add("hidden");
+    return;
+  }
+  const on = !!(await pushSub().catch(() => null)) && Notification.permission === "granted";
+  btn.textContent = on ? "关闭" : "开启";
+  btn.dataset.on = on ? "1" : "";
+  hint.textContent = on ? "已开启：页面关着时，她找你会发一条通知" : "页面关着时，她找你会发一条通知";
+}
+$("pushBtn").onclick = async () => {
+  const btn = $("pushBtn");
+  btn.disabled = true;
+  try {
+    if (btn.dataset.on) {
+      const sub = await pushSub();
+      if (sub) { await api("/client/push-unsubscribe", { method: "POST", json: { endpoint: sub.endpoint } }); await sub.unsubscribe(); }
+    } else {
+      if ((await Notification.requestPermission()) !== "granted") { $("pushHint").textContent = "通知权限没给：到浏览器 / 系统设置里允许后再点"; return; }
+      const reg = await navigator.serviceWorker.register("/app/sw.js", { scope: "/app" });
+      await navigator.serviceWorker.ready;
+      const { key } = await apiJson("/client/push-key");
+      const sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: Uint8Array.from(atob(key.replace(/-/g, "+").replace(/_/g, "/")), (c) => c.charCodeAt(0)) });
+      await api("/client/push-subscribe", { method: "POST", json: { subscription: sub.toJSON() } });
+    }
+    await renderPush();
+  } catch (e) { $("pushHint").textContent = "没开成：" + (e.message || e); }
+  finally { btn.disabled = false; }
+};
 // ── 摇一摇（同 CoreS3 的彩蛋：换 img_shake 那张图，她主动找你聊几句，回复走推送）──
 // 浏览器只在 https 下给动作传感器；iOS 还要在一次点击里申请权限（第一次点屏幕时问）。
 const SHAKE = { th: 13, count: 3, win: 700, cool: 20000 };   // 去掉重力后的加速度 m/s²；700ms 内 3 下；冷却 20 秒

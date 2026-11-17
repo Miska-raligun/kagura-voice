@@ -6,6 +6,7 @@ import os from "node:os";
 import fs from "node:fs";
 import path from "node:path";
 import type { AgentRegistry } from "../agent/registry.ts";
+import type { WebPush } from "../webpush.ts";
 import { resolveInside } from "../agent/paths.ts";
 import { json, bytes, type Req, type Res, type Router } from "../http/router.ts";
 import type { Ctx } from "../ctx.ts";
@@ -16,7 +17,23 @@ import APP_HTML from "../../../web/app.html";
 
 const ICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><rect width="512" height="512" rx="112" fill="#0d1f24"/><circle cx="256" cy="232" r="132" fill="#2dd4bf"/><circle cx="208" cy="214" r="18" fill="#0d1f24"/><circle cx="304" cy="214" r="18" fill="#0d1f24"/><path d="M206 280q50 40 100 0" stroke="#0d1f24" stroke-width="16" fill="none" stroke-linecap="round"/><rect x="176" y="392" width="160" height="28" rx="14" fill="#2dd4bf" opacity=".6"/></svg>`;
 
-export function registerClient(r: Router, ctx: Ctx, clients: Clients, agents?: AgentRegistry) {
+/** 通知用的 service worker：收到推送弹一条系统通知，点了就回到 / 打开 /app */
+const SW_JS = `self.addEventListener("install", () => self.skipWaiting());
+self.addEventListener("activate", (e) => e.waitUntil(self.clients.claim()));
+self.addEventListener("push", (e) => {
+  let d = {}; try { d = e.data.json(); } catch {}
+  e.waitUntil(self.registration.showNotification(d.title || "Kagura", { body: d.body || "", tag: d.tag || "kagura", icon: "/app/icon.svg" }));
+});
+self.addEventListener("notificationclick", (e) => {
+  e.notification.close();
+  e.waitUntil(self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((ws) => {
+    for (const w of ws) if (new URL(w.url).pathname === "/app") return w.focus();
+    return self.clients.openWindow("/app");
+  }));
+});
+`;
+
+export function registerClient(r: Router, ctx: Ctx, clients: Clients, agents?: AgentRegistry, webpush?: WebPush) {
   const guard = (h: (req: Req) => Res | Promise<Res>) => async (req: Req): Promise<Res> => {
     if (!isLocal(req)) return json({ error: "管理接口只允许本机访问" }, 403);
     try { return await h(req); } catch (e: any) { return json({ error: String(e.message || e) }, e.status ?? 400); }
@@ -30,6 +47,8 @@ export function registerClient(r: Router, ctx: Ctx, clients: Clients, agents?: A
     background_color: "#111113", theme_color: "#111113",
     icons: [{ src: "/app/icon.svg", sizes: "any", type: "image/svg+xml", purpose: "any maskable" }],
   }));
+  // 放在 /app/ 下的脚本默认只管 /app/…，页面本身是 /app：用这个头把范围放宽到 /app
+  r.get("/app/sw.js", () => bytes(Buffer.from(SW_JS), "text/javascript; charset=utf-8", { "Cache-Control": "no-cache", "Service-Worker-Allowed": "/app" }));
   r.get("/app/icon.svg", () => bytes(Buffer.from(ICON_SVG), "image/svg+xml", { "Cache-Control": "max-age=86400" }));
 
   // ── 配对后的手机 ──
@@ -43,8 +62,28 @@ export function registerClient(r: Router, ctx: Ctx, clients: Clients, agents?: A
     return json({
       id: c.id, name: c.name, version: VERSION, brain: ctx.brain.kind,
       role: cur.id, roles: ctx.roles.all().map((x) => ({ id: x.id, name: x.name })),
-      devices, auth_required: !!ctx.cfg.apiToken,
+      devices, auth_required: !!ctx.cfg.apiToken, push: !!webpush?.has(c.id),
     });
+  });
+
+  // ── 通知（Web Push，见 webpush.ts）：页面关着时她主动说的话变成系统通知 ──
+  r.get("/client/push-key", (req) => {
+    if (!clients.fromReq(req)) return unauthorized();
+    return webpush ? json({ key: webpush.publicKey() }) : json({ error: "这个服务端没开通知" }, 404);
+  });
+  r.add("POST", "/client/push-subscribe", (req) => {
+    const c = clients.fromReq(req);
+    if (!c) return unauthorized();
+    if (!webpush) return json({ error: "这个服务端没开通知" }, 404);
+    try { webpush.subscribe(c.id, req.json()?.subscription); } catch (e: any) { return json({ error: String(e.message) }, 400); }
+    console.log(`[client] 🔔 ${c.name}（${c.id}）开了通知`);
+    return json({ ok: true });
+  });
+  r.add("POST", "/client/push-unsubscribe", (req) => {
+    const c = clients.fromReq(req);
+    if (!c) return unauthorized();
+    webpush?.unsubscribe(c.id, String(req.json()?.endpoint ?? "") || undefined);
+    return json({ ok: true });
   });
 
   /** 推送通道：服务端发给这台手机的 push / cmd（同 MQTT 的 kagura/push|cmd/<id>）。EventSource 设不了头，令牌放 ?ct= */
@@ -90,5 +129,5 @@ export function registerClient(r: Router, ctx: Ctx, clients: Clients, agents?: A
     return json({ client: { id: client.id, name: client.name }, token, link: `${base}/app#pair=${token}` });
   }));
   r.add("POST", "/api/admin/clients/<id>/rename", guard((req) => (clients.rename(req.params.id, String(req.json()?.name ?? "")) ? json({ ok: true }) : json({ error: "没有这台" }, 404))));
-  r.add("DELETE", "/api/admin/clients/<id>", guard((req) => { clients.revoke(req.params.id); console.log(`[client] 📱 已吊销 ${req.params.id}`); return json({ ok: true }); }));
+  r.add("DELETE", "/api/admin/clients/<id>", guard((req) => { clients.revoke(req.params.id); webpush?.unsubscribe(req.params.id); console.log(`[client] 📱 已吊销 ${req.params.id}`); return json({ ok: true }); }));
 }

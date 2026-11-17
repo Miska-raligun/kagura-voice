@@ -28,7 +28,7 @@ export interface Say {
   /** 主人让传话给家里人（announce 工具）：不看主人在不在家，角色对不上也立即播（用说话角色的形象）；never 仍不播 */
   relay?: boolean;
 }
-export interface SayResult { played: boolean; held?: boolean; device?: string; reason?: "policy" | "away" | "no-device" | "role" | "failed" }
+export interface SayResult { played: boolean; held?: boolean; /** 没处播，改发了手机通知 */ notified?: boolean; device?: string; reason?: "policy" | "away" | "no-device" | "role" | "failed" }
 export interface Held { dev: string; agentId: string; text: string; at: number; source: string }
 
 export interface OutboxDeps {
@@ -47,6 +47,8 @@ export interface OutboxDeps {
   busy(dev: string): boolean;
   /** agentId = null 时用设备当前角色的声音和图 */
   push(text: string, dev: string, agentId: string | null): Promise<boolean>;
+  /** 没有能播的设备时，给开了通知的手机发一条系统通知（Web Push）。返回发出去没有 */
+  notify?(text: string, agentId: string | null): Promise<boolean>;
 }
 
 const HOLD_MAX = 30;
@@ -107,12 +109,15 @@ export class Outbox {
     }
     const dev = this.target(s);
     if (!dev) {
-      // 不在家、手机也没开着页面
+      // 没处播（不在家、手机页面也没开着，或者一台在线的都没有）：主动说的话改发手机通知。
+      // 顺带朗读的（文字已经在 IM / 网页里）和传话（说给家里人听的）不发
+      const notified = !s.relay && !s.mirror && !!this.d.notify && await this.d.notify(text, s.agentId).catch(() => false);
+      if (notified) console.log(`[outbox] 🔔 没处播，发了手机通知：${text.slice(0, 40)}`);
       if (!s.relay && !this.allowed()) {
-        console.log(`[outbox] 🔇 不播（主人不在家，也没有开着的手机页面）：${text.slice(0, 40)}`);
-        return { played: false, reason: "away" };
+        if (!notified) console.log(`[outbox] 🔇 不播（主人不在家，也没有开着的手机页面）：${text.slice(0, 40)}`);
+        return { played: false, reason: "away", ...(notified ? { notified } : {}) };
       }
-      return { played: false, reason: "no-device" };
+      return { played: false, reason: "no-device", ...(notified ? { notified } : {}) };
     }
     const other = !!s.agentId && this.d.roleAgent(dev) !== s.agentId && this.d.hasRole(s.agentId);
     if (other && !s.relay && this.d.rolePush() === "hold") {

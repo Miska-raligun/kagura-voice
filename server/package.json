@@ -35,6 +35,7 @@
     "@types/semver": "^7.8.0",
     "@types/ws": "^8.18.2",
     "esbuild": "^0.28.2",
+    "http_ece": "^1.2.1",
     "postject": "^1.0.0-alpha.6",
     "typescript": "^7.0.2",
     "vitest": "^5.0.5"

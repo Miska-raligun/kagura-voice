@@ -102,7 +102,7 @@ function filesOf(dataDir: string, id: string): { files: string[]; sqlite: string
       const up = recs.filter((r) => r.kind === "upload").flatMap((r) => dir(`packages/${r.id}`));
       return { files: [...file("packages.json"), ...up], sqlite: [] };
     }
-    case "channels": return { files: [...file("channels.json"), ...file("clients.json")], sqlite: [] };
+    case "channels": return { files: [...file("channels.json"), ...file("clients.json"), ...file("webpush.json")], sqlite: [] };
     case "jobs": return { files: [...file("reminders.json"), ...file("photo_schedules.json")], sqlite: file("system.sqlite") };
     case "shared": return { files: dir("shared_persona"), sqlite: [] };
     case "device": return { files: [...dir("device_files"), ...dir("app_images")], sqlite: [] };
@@ -184,6 +184,8 @@ export function exportBackup(dataDir: string, ids: string[], opts: { secrets: bo
     const { files, sqlite } = filesOf(dataDir, id);
     let bytes = 0;
     for (const f of files) {
+      // 通知的订阅绑着服务端私钥：不带密钥导出时整个不带（换台机器手机上重新点一下「开启」就行）
+      if (!opts.secrets && f === "webpush.json") continue;
       let data: Buffer = fs.readFileSync(realPath(dataDir, f));
       if (!opts.secrets && ["config.json", "channels.json", "mcp.json"].includes(f)) data = stripFile(f, data);
       entries.push({ name: `data/${f}`, data });
@@ -228,7 +230,7 @@ export function itemOf(rel: string): string | null {
   const top = rel.split("/")[0];
   const map: Record<string, string> = {
     "config.json": "settings", "roles_state.json": "settings", "minimax_voices.json": "settings", skills: "skills", extensions: "extensions", "mcp.json": "extensions",
-    "packages.json": "packages", packages: "packages", "channels.json": "channels", "clients.json": "channels", "system.sqlite": "jobs", "reminders.json": "jobs",
+    "packages.json": "packages", packages: "packages", "channels.json": "channels", "clients.json": "channels", "webpush.json": "channels", "system.sqlite": "jobs", "reminders.json": "jobs",
     "photo_schedules.json": "jobs", device_files: "device", app_images: "device", snapshots: "snapshots", shared_persona: "shared",
   };
   return map[top] ?? null;

@@ -16,6 +16,7 @@ import { registerDevice } from "./routes/device.ts";
 import { registerMonitor } from "./routes/monitor.ts";
 import { registerClient } from "./routes/client.ts";
 import { Clients } from "./clients.ts";
+import { WebPush } from "./webpush.ts";
 import { registerAdmin } from "./routes/admin.ts";
 import { registerAdminUi } from "./routes/admin-ui.ts";
 import { registerDeviceFiles } from "./routes/devicefiles.ts";
@@ -139,7 +140,9 @@ async function main() {
   const clients = new Clients(path.join(cfg.dataDir, "clients.json"));
   ctx.clients = clients;
   mqtt.taps.push((t, p) => clients.onPublish(t, p));
-  registerClient(r, ctx, clients, sys.registry);
+  const webpush = new WebPush(path.join(cfg.dataDir, "webpush.json"), { fetch: proxiedFetch });
+  ctx.webpush = webpush;
+  registerClient(r, ctx, clients, sys.registry, webpush);
   // 她在手机对话里用 send_file 发的文件：走发给设备的命令通道（手机经 SSE 收到），页面凭配对令牌来取
   if (brain instanceof PiBrain) {
     brain.onFiles = (dev, agent, files) => {

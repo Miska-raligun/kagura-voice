@@ -172,6 +172,15 @@ export function attachAgentSystem(sys: AgentSystem, ctx: Ctx) {
     presence, onlineDevices: online,
     knownDevices: () => [...ctx.hb.devices.keys(), ...(ctx.clients?.list() ?? []).map((c) => c.id)],
     portable: (dev) => sys.isPhone(dev),
+    // 页面关着的手机：开了通知的发一条系统通知（标题是说话的那个 agent）
+    notify: async (text, agentId) => {
+      const wp = ctx.webpush;
+      if (!wp) return false;
+      const title = (agentId && registry.get(agentId)?.name) || "Kagura";
+      let sent = 0;
+      for (const id of wp.clients()) if (!ctx.clients?.online(id)) sent += await wp.send(id, { title, body: Array.from(text).slice(0, 300).join("") });
+      return sent > 0;
+    },
     roleAgent: (dev) => ctx.roles.get(dev).agent,
     hasRole: (agentId) => ctx.roles.all().some((r) => r.agent === agentId),
     busy: (dev) => (ctx.activeChats.get(dev) ?? 0) > 0,

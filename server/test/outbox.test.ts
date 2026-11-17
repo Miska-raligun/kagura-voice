@@ -119,3 +119,27 @@ describe("出口：手机（页面开着才算在线）", () => {
     expect(st.pushed).toEqual([]);
   });
 });
+
+describe("出口：没处播时发手机通知", () => {
+  const withNotify = (o: Parameters<typeof setup>[0]) => {
+    const x = setup(o);
+    const notes: string[] = [];
+    (x.box as any).d.notify = async (text: string) => { notes.push(text); return true; };
+    return { ...x, notes };
+  };
+  it("不在家、手机页面没开：主动说的话改发通知；顺带朗读和传话不发", async () => {
+    const { box, notes, st } = withNotify({ presence: "away", phones: ["phone-1"] });
+    expect(await box.say({ text: "该吃药了", agentId: "main", source: "job" })).toEqual({ played: false, reason: "away", notified: true });
+    await box.say({ text: "聊天回复", agentId: "main", mirror: true, source: "webchat" });
+    await box.say({ text: "跟家里说一声", agentId: "main", relay: true, source: "announce" });
+    expect(notes).toEqual(["该吃药了"]);
+    expect(st.pushed.map((p) => p.text)).toEqual(["跟家里说一声"]);      // 传话照旧在家里的设备上播
+  });
+  it("有设备能播就不发通知；关了语音推送（never）也不发", async () => {
+    const { box, notes, st } = withNotify({});
+    await box.say({ text: "早上好", agentId: "main", source: "job" });
+    st.policy = "never";
+    await box.say({ text: "b", agentId: "main", source: "job" });
+    expect(notes).toEqual([]);
+  });
+});

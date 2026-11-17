@@ -91,6 +91,8 @@ export class Ctx {
 
   /** 手机 / 平板客户端（配对令牌 + SSE 推送），main 里建好 */
   clients: import("./clients.ts").Clients | null = null;
+  /** 网页推送：手机页面关着时发系统通知（main 里接上） */
+  webpush: import("./webpush.ts").WebPush | null = null;
 
   /** API_TOKEN 未设置时永远放行；设置后校验 X-Api-Token 头。配对过的手机凭令牌也放行（看家页要用监控接口） */
   tokenOk(req: Req) {
