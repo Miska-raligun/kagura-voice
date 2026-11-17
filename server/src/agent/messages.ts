@@ -88,5 +88,45 @@ export function silentMsg(m: any): boolean {
 }
 export const NUDGE_TEXT = "[系统] 你刚才只在心里想了，没有说出来，主人什么都没收到。现在直接把要对主人说的话写出来（不用再想，也不要再调工具）。";
 
+/**
+ * 回复写到一半撞上输出上限（借鉴 deepseek-ai/chat-demo 的「继续生成」，2026-11）：最后一条助手消息 stopReason = length、
+ * 写了正文、没调工具。以前这半截原样交出去，主人收到的话断在半句上。现在在同一轮里让她从断开处接着写，最多 CONTINUE_MAX 次，
+ * 接上的正文并回那条消息（催的那句不进历史）。chat-demo 用的是 Anthropic 接口的「末尾助手消息 = 续写前缀」，
+ * OpenAI 兼容接口各家不一（DeepSeek 要 beta 地址 + prefix 字段），所以这里用一句系统提示，哪家都能用。
+ * 调工具时被截断的不接（工具参数写了一半，接不上）。
+ */
+export const CONTINUE_MAX = 2;
+export function truncatedMsg(m: any): boolean {
+  if (m?.role !== "assistant" || m.stopReason !== "length") return false;
+  const c = m.content ?? [];
+  return !c.some((x: any) => x.type === "toolCall") && c.some((x: any) => x.type === "text" && String(x.text).trim());
+}
+export function continueText(m: any): string {
+  const text = (m?.content ?? []).filter((x: any) => x.type === "text").map((x: any) => x.text).join("");
+  const tail = Array.from(text.trimEnd()).slice(-30).join("");
+  return `[系统] 你上一条回复写到输出长度上限被截断了，最后几个字是「${tail}」。从断开的地方直接接着写，别重复已经写过的、别解释、别打招呼（不用再想，也不要调工具）。`;
+}
+function addUsage(a: any, b: any): any {
+  if (!a || !b) return a ?? b;
+  const n = (k: string) => (a[k] ?? 0) + (b[k] ?? 0);
+  const cost: any = {};
+  for (const k of new Set([...Object.keys(a.cost ?? {}), ...Object.keys(b.cost ?? {})])) cost[k] = (a.cost?.[k] ?? 0) + (b.cost?.[k] ?? 0);
+  return { ...a, input: n("input"), output: n("output"), cacheRead: n("cacheRead"), cacheWrite: n("cacheWrite"), totalTokens: n("totalTokens"), cost };
+}
+/** 截断的那条 + 「接着写」+ 接上的那条 → 一条（接上的又调了工具就不并，那句提示照常留在历史里） */
+export function mergeContinued(msgs: Message[]): Message[] {
+  const out = [...msgs];
+  for (let i = out.findIndex((m: any) => m.kcont); i >= 0; i = out.findIndex((m: any) => m.kcont)) {
+    const prev: any = out[i - 1], next: any = out[i + 1];
+    const { kcont, ...plain } = out[i] as any;
+    if (prev?.role === "assistant" && next?.role === "assistant" && !(next.content ?? []).some((c: any) => c.type === "toolCall")) {
+      const merged = { ...prev, content: [...prev.content, ...(next.content ?? []).filter((c: any) => c.type === "text")], stopReason: next.stopReason, usage: addUsage(prev.usage, next.usage) };
+      out.splice(i - 1, 3, merged);
+    } else if (next) out[i] = plain as Message;
+    else out.splice(i, 1);
+  }
+  return out;
+}
+
 /** 模型正常结束却一个字没说、也没调工具（上下文快满时有的服务商会这样直接收尾）：execute 抛这个，run 压一压再试一次 */
 export const EMPTY_RE = /^空回复：/;

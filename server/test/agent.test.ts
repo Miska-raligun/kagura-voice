@@ -4,7 +4,7 @@ import path from "node:path";
 import { describe, it, expect } from "vitest";
 import { makeRuntime } from "./helpers.ts";
 import { deviceTools } from "../src/agent/tools/device.ts";
-import { Runtime } from "../src/agent/runtime.ts";
+import { Runtime, truncatedMsg } from "../src/agent/runtime.ts";
 import { AgentRegistry } from "../src/agent/registry.ts";
 import { Memories } from "../src/agent/tools/memory.ts";
 import { buildSystemPrompt, clip, applyBudgets, BUDGETS, applyLoadout, LOADOUT, DEFAULT_LOADOUT, sceneOf } from "../src/agent/soul.ts";
@@ -580,5 +580,34 @@ describe("想完了没说话", () => {
     expect(h).not.toContain("没有说出来");
     const roles = rt.store("main").history("main:main").map((x) => (x.msg as any).role);
     expect(roles).toEqual(["user", "assistant", "toolResult", "assistant"]);
+  });
+});
+
+describe("回复被输出上限截断", () => {
+  it("同一轮里接着写，接上的正文并回同一条消息；催的那句不进历史，边生成边播不在半句上断开", async () => {
+    const { rt, fake } = makeRuntime();
+    fake.queue.push({ text: "第一点是早睡，第二点是", stop: "length" }, "多喝水。");
+    const events: any[] = [];
+    const r = await rt.run({ ...dev, agentId: "main", sessionKey: "main:main", text: "给点建议", onEvent: (e) => events.push(e) });
+    expect(r.text).toBe("第一点是早睡，第二点是多喝水。");
+    expect(r.stopReason).not.toBe("length");
+    expect(fake.calls.at(-1).message).toContain("被截断");
+    expect(fake.calls.at(-1).message).toContain("第二点是");
+    // 截断的那条不发 message_end：句子缓冲不会在「第二点是」处被切开
+    expect(events.filter((e) => e.type === "message_end").length).toBe(1);
+    const h = rt.store("main").history("main:main").map((x) => x.msg as any);
+    expect(h.map((m) => m.role)).toEqual(["user", "assistant"]);
+    expect(JSON.stringify(h)).not.toContain("被截断");
+  });
+
+  it("最多接 CONTINUE_MAX 次；调工具时被截断的不接", async () => {
+    const { rt, fake } = makeRuntime();
+    fake.queue.push({ text: "一", stop: "length" }, { text: "二", stop: "length" }, { text: "三", stop: "length" }, "不该用到");
+    const r = await rt.run({ ...dev, agentId: "main", sessionKey: "main:main", text: "数数" });
+    expect(r.text).toBe("一二三");
+    expect(r.stopReason).toBe("length");
+    expect(fake.queue.length).toBe(1);
+    expect(truncatedMsg({ role: "assistant", stopReason: "length", content: [{ type: "text", text: "我查一下" }, { type: "toolCall", name: "x" }] })).toBe(false);
+    expect(truncatedMsg({ role: "assistant", stopReason: "length", content: [{ type: "thinking", thinking: "想" }] })).toBe(false);
   });
 });

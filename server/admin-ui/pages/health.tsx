@@ -7,6 +7,8 @@ import { Badge, Btn, Card, Empty, Err, Input, Tabs, Toggle, useInterval, useLoad
 export const KIND_LABEL: Record<string, string> = {
   nudge: "想完没说话，催了一句",
   nudge_fail: "催了也没说话",
+  continue: "回复被截断，接着写完",
+  continue_fail: "回复被截断，接着写也没写完",
   empty_retry: "空回复，压一压重试",
   overflow: "上下文超长，重压后重试",
   guard: "单轮上限叫停",
@@ -80,11 +82,11 @@ function Events() {
   useInterval(reload, 10_000);
   const list = d?.recent ?? [];
   const [page, pager] = usePage(list, 30);
-  const label = (e: any) => e.kind === "turn" ? "这一轮失败" : e.kind === "nudge" && !e.ok ? KIND_LABEL.nudge_fail : e.kind === "voice" ? KIND_LABEL["voice:cut"] : KIND_LABEL[e.kind] ?? e.kind;
+  const label = (e: any) => e.kind === "turn" ? "这一轮失败" : (e.kind === "nudge" || e.kind === "continue") && !e.ok ? KIND_LABEL[`${e.kind}_fail`] : e.kind === "voice" ? KIND_LABEL["voice:cut"] : KIND_LABEL[e.kind] ?? e.kind;
   return (
     <>
       <Err msg={err} />
-      <div class="chips">{[["", "全部"], ["turn", "失败的轮次"], ["nudge", "催说话"], ["empty_retry", "空回复"], ["overflow", "超长"], ["guard", "单轮叫停"], ["compact", "压缩"], ["recall", "翻原文没找到"], ["voice", "朗读"], ["tts_failed", "合成失败"], ["unclean_exit", "异常退出"]]
+      <div class="chips">{[["", "全部"], ["turn", "失败的轮次"], ["nudge", "催说话"], ["continue", "截断续写"], ["empty_retry", "空回复"], ["overflow", "超长"], ["guard", "单轮叫停"], ["compact", "压缩"], ["recall", "翻原文没找到"], ["voice", "朗读"], ["tts_failed", "合成失败"], ["unclean_exit", "异常退出"]]
         .map(([k, l]) => <a class={k === kind ? "on" : ""} onClick={() => setKind(k)}>{l}</a>)}</div>
       {list.length ? <>
         <table><thead><tr><th>时间</th><th>Agent / 会话</th><th>发生了什么</th><th>详情</th></tr></thead>

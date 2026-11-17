@@ -8,6 +8,7 @@ export type HealthKind =
   | "mcp_wake"        // MCP 服务器叫醒 agent 看了一眼（detail.spoke = 有没有话要告诉主人）
   | "empty_retry"     // 空回复，压一压重试
   | "nudge"           // 想完了没说话，催一句（detail.ok = 催完说话了没）
+  | "continue"        // 回复写到输出上限被截断，接着写（ok = 接完了；detail.n = 接了几次）
   | "overflow"        // 服务商报上下文超长，狠压一次重试
   | "guard"           // 单轮上限叫停
   | "compact"         // 压缩（detail.failed = 没总结成的段数）
@@ -93,7 +94,7 @@ class Health {
           if (refs > 0) { x.recall.cited++; x.recall.refs += refs; }
           if (r.ok) continue;          // 顺利的压缩不算兜底（以前也计进「压缩有段没总结成」，首页数字虚高）
         }
-        const k = r.kind === "voice" ? `voice:${(r.detail && JSON.parse(r.detail).via) || "?"}` : r.ok || r.kind !== "nudge" ? r.kind : "nudge_fail";
+        const k = r.kind === "voice" ? `voice:${(r.detail && JSON.parse(r.detail).via) || "?"}` : r.ok || (r.kind !== "nudge" && r.kind !== "continue") ? r.kind : `${r.kind}_fail`;
         x.events[k] = (x.events[k] ?? 0) + 1;
       }
     }

@@ -24,7 +24,7 @@ export const FAKE_MODEL = "fake/fake";
 export type FakeStep =
   | string
   | { error: string }
-  | { text?: string; tool_calls?: { name: string; args?: Record<string, any> }[]; then?: FakeStep; /** 逐字输出速度（token/秒），测边生成边播用 */ tps?: number };
+  | { text?: string; tool_calls?: { name: string; args?: Record<string, any> }[]; then?: FakeStep; /** 逐字输出速度（token/秒），测边生成边播用 */ tps?: number; /** 结束原因（测输出上限截断用："length"） */ stop?: "length" };
 
 /** 假模型的控制面：脚本队列 + 调用日志。FakeProviders 实现它 */
 export interface FakeLlm {
@@ -164,7 +164,7 @@ export class ModelRegistry {
       for (const t of step.tool_calls ?? []) blocks.push(fauxToolCall(t.name, t.args ?? {}));
       // 工具结果回来之后的那一轮续写用 then；没给就沉默结束（文本已在第一轮里）
       if (scope) scope.fakeAfterTool = step.then ?? "";
-      reply = fauxAssistantMessage(blocks.length ? blocks : "", { stopReason: step.tool_calls?.length ? "toolUse" : "stop" });
+      reply = fauxAssistantMessage(blocks.length ? blocks : "", { stopReason: step.stop ?? (step.tool_calls?.length ? "toolUse" : "stop") });
     } else reply = fauxAssistantMessage(step);
     core.setResponses([reply]);
     return core.streamSimple(m, ctx, opts);
