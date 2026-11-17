@@ -20,7 +20,7 @@ import { health, errorClass } from "./health.ts";
 import { LazyTools, LOADED_TTL_MS } from "./toolgroups.ts";
 import { estimateTokens, toolTokens, msgTokens, pruneToolResults, repairHistory, DEFAULT_CONTEXT_WINDOW, OVERFLOW_RE } from "./context.ts";
 import { TurnGuard, DEFAULT_MAX_TOOL_CALLS, DEFAULT_MAX_TURN_TOKENS, GUARD_STOP } from "./turnguard.ts";
-import { stripRecall, stripImages, flattenUser, silentMsg, RECALL_TAG, RECALL_WAIT_MS, TURN_NOTE_TAG, NUDGE_TEXT, EMPTY_RE } from "./messages.ts";
+import { plainOf, stripRecall, stripImages, flattenUser, silentMsg, RECALL_TAG, RECALL_WAIT_MS, TURN_NOTE_TAG, NUDGE_TEXT, EMPTY_RE } from "./messages.ts";
 import { VoiceTap, voicePrompt, unvoice, stripVoice } from "./voicetap.ts";
 import { LiveHub, liveMessage, type LiveRun, type LiveEvent } from "./live.ts";
 import { Semaphore, SessionLocks } from "./locks.ts";
@@ -178,7 +178,9 @@ export class Runtime {
   /** 压缩时顺手挑出来的要记住的事（长期 → MEMORY.md，今天 → 当天笔记）。以前压缩前要用整段上下文另跑一轮「记忆冲刷」，很费 */
   remember: ((agent: AgentInfo, target: "long" | "daily" | "user", text: string, tag?: string) => void) | null = null;
   /** 自动回忆（memory 模块注入）：按这句话检索长期记忆，返回要附上的几条（「路径：内容」）。skip = 已整篇在提示里的文件 */
-  recall: ((agent: AgentInfo, text: string) => Promise<{ line: string; why: string }[]>) | null = null;
+  recall: ((agent: AgentInfo, text: string, context?: string) => Promise<{ line: string; why: string; raw?: string }[]>) | null = null;
+  /** 回复出来以后告诉记忆模块：这一轮附上的那几条（raw）用上了没有，由它自己判断、记进使用统计 */
+  recallUsed: ((agent: AgentInfo, raw: string[], query: string, reply: string) => void) | null = null;
   /** 回复后在后台预先压缩（测试里关掉，免得和假模型的回复队列抢） */
   backgroundCompact = true;
   /** 工具按需加载（toolgroups.ts）：用得少的几组工具先不摆出来。false = 像以前一样全给 */
@@ -478,7 +480,9 @@ export class Runtime {
       if (model.input.includes("image")) content.push(...req.images);
       else content.push({ type: "text", text: "[用户发来了图片，但当前模型不支持看图，请如实告诉用户]" });
     }
-    const recalled = await this.recallFor(agent, scope, req);
+    // 追问（「那个呢」）本身没有内容词：把上一句主人的话和她的回答交给检索当前文
+    const lastOf = (role: string) => { for (let i = history.length - 1; i >= 0; i--) if (history[i].role === role) return plainOf(history[i]); return ""; };
+    const recalled = await this.recallFor(agent, scope, req, `${lastOf("user").slice(-150)} ${lastOf("assistant").slice(0, 150)}`.trim());
     if (recalled.text) content.push({ type: "text", text: recalled.text });
     const notes = this.turnNotes.map((f) => { try { return f(scope); } catch { return ""; } }).filter(Boolean);
     if (notes.length) content.push({ type: "text", text: `${TURN_NOTE_TAG}\n${notes.join("\n")}` });
@@ -676,6 +680,7 @@ export class Runtime {
     const textOf = (a: AssistantMessage) => stripVoice(a.content.filter((c: any) => c.type === "text").map((c: any) => c.text).join("")).trim();
     // 只写了 <voice> 没写正文：朗读版本身就当回复
     const text = textOf(last) || assistants.map(textOf).filter(Boolean).join("\n") || (tap?.fired ?? "");
+    if (recalled.raw.length && text) { try { this.recallUsed?.(agent, recalled.raw, req.text, text); } catch { /* 统计记不下不影响回复 */ } }
     // 一个字没说也没调工具：不落盘（库里不留空的助手消息），交给 run 压一压重试。调过工具的不重试——会把工具再执行一遍
     if (!text && !toolCalls.length) throw new Error(`空回复：模型没说话就结束了（${last.stopReason}，输出 ${last.usage?.output ?? "?"} token）`);
     if (persist && (!req.keepIf || req.keepIf(text))) {
@@ -710,8 +715,8 @@ export class Runtime {
    * 附在消息里而不是系统提示里：系统提示不变，服务商的前缀缓存才命中；落盘前去掉（stripRecall），历史里不留、也不重复占地方。
    * 只给可信、场景里没整篇加载 MEMORY.md 的轮次；检索本地几毫秒，配了嵌入接口时多一次嵌入请求，最多等 RECALL_WAIT_MS。
    */
-  private async recallFor(agent: AgentInfo, scope: RunScope, req: RunRequest): Promise<{ text: string; hits: string[]; ms: number; why: string }> {
-    const none = (why: string) => ({ text: "", hits: [], ms: 0, why });
+  private async recallFor(agent: AgentInfo, scope: RunScope, req: RunRequest, context = ""): Promise<{ text: string; hits: string[]; raw: string[]; ms: number; why: string }> {
+    const none = (why: string) => ({ text: "", hits: [] as string[], raw: [] as string[], ms: 0, why });
     if (!this.recall || !scope.trusted || req.noTurnContext || !req.text?.trim()) return none(!scope.trusted ? "群聊 / 陌生人不检索" : "");
     const scene = sceneOf(scope);
     if (scene === "guest") return none("群聊 / 陌生人不检索");
@@ -720,12 +725,12 @@ export class Runtime {
     let late = false;
     try {
       const hits = await Promise.race([
-        this.recall(agent, req.text),
-        new Promise<{ line: string; why: string }[]>((r) => setTimeout(() => { late = true; r([]); }, RECALL_WAIT_MS).unref?.()),
+        this.recall(agent, req.text, context),
+        new Promise<{ line: string; why: string; raw?: string }[]>((r) => setTimeout(() => { late = true; r([]); }, RECALL_WAIT_MS).unref?.()),
       ]);
       const ms = Date.now() - t0;
       // 发给模型的只有记忆本身；会话页 ⓘ 里多显示一句是哪些词让它被挑中的
-      return { text: hits.length ? `${RECALL_TAG}\n${hits.map((h) => `- ${h.line}`).join("\n")}` : "", hits: hits.map((h) => h.why ? `${h.line}（命中：${h.why}）` : h.line), ms, why: late ? `超过 ${RECALL_WAIT_MS / 1000} 秒没检索完，这轮不附` : hits.length ? "" : "没有相关的" };
+      return { text: hits.length ? `${RECALL_TAG}\n${hits.map((h) => `- ${h.line}`).join("\n")}` : "", hits: hits.map((h) => h.why ? `${h.line}（命中：${h.why}）` : h.line), raw: hits.map((h) => h.raw ?? "").filter(Boolean), ms, why: late ? `超过 ${RECALL_WAIT_MS / 1000} 秒没检索完，这轮不附` : hits.length ? "" : "没有相关的" };
     } catch (e: any) {
       console.log(`[agent] ⚠️  ${agent.id} 自动回忆失败（这轮不附）: ${e.message}`);
       return { ...none(`检索失败：${e.message}`), ms: Date.now() - t0 };

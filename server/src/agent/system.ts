@@ -90,8 +90,13 @@ export function createAgentSystem(cfg: Config, dirs: Dirs, fake: FakeLlm | null)
   // 压缩时摘要模型顺手挑出要记住的事直接写进记忆。以前是压缩前用整段上下文另跑一轮「记忆冲刷」（一次就是几万 token）
   runtime.remember = (agent, target, text, tag) => { memories.of(agent.id).write(target, text, new Date(), tag ?? ""); };
   // 长期记忆不整篇放进提示：每轮按主人这句话检索，相关的几条附在消息上（见 Runtime.recallFor）
-  runtime.recall = async (agent, text) => (await memories.of(agent.id).recall(text))
-    .map((h) => ({ line: `${h.text.replace(/\s*\n\s*/g, " ")}`, why: h.terms?.length ? h.terms.join("、") : h.via === "keyword" ? "" : "意思相近" }));
+  runtime.recall = async (agent, text, context) => {
+    const idx = memories.of(agent.id);
+    const hits = await idx.recall(text, { context });
+    idx.noteRecalled(hits.map((h) => h.text));
+    return hits.map((h) => ({ line: `${h.text.replace(/\s*\n\s*/g, " ")}`, raw: h.text, why: h.terms?.length ? h.terms.join("、") : h.via === "keyword" ? "" : "意思相近" }));
+  };
+  runtime.recallUsed = (agent, raw, query, reply) => { memories.of(agent.id).noteUsed(raw, query, reply); };
   const skills = new Skills(dirs.skills);
   runtime.skillCatalog = (a) => skills.catalog(a);
   runtime.addTools(skills.tools());

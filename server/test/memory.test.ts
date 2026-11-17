@@ -190,7 +190,7 @@ describe("自动回忆不再随机", () => {
     const idx = mem.of("main");
     const r1 = await idx.recall("帮我泡杯乌龙茶吧");
     expect(r1.map((h) => h.text)).toEqual(["- 主人爱喝无糖乌龙茶"]);          // 以前整串五条一起附上
-    expect(r1[0].terms).toEqual(expect.arrayContaining(["乌龙", "龙茶"]));
+    expect(r1[0].terms).toEqual(["乌龙茶"]);
     expect(await idx.recall("主人今天有点累")).toEqual([]);                    // 只撞上常用词
     expect((await idx.recall("团子在干嘛呢")).map((h) => h.text)).toEqual(["- 家里的猫叫团子"]);
   });
@@ -208,5 +208,89 @@ describe("long 不收流水", () => {
     expect(fs.existsSync(path.join(a.workspace, "MEMORY.md")) ? fs.readFileSync(path.join(a.workspace, "MEMORY.md"), "utf8") : "").not.toContain("22:14");
     expect(idx.write("long", "- 主人的项目代码在 D 盘\n- 改完要跑测试")).toBe("MEMORY.md");
     expect(fs.readFileSync(path.join(a.workspace, "MEMORY.md"), "utf8")).toContain("- 主人的项目代码在 D 盘；改完要跑测试\n");
+  });
+});
+
+describe("自动回忆：按词切、借前文、名次合并、使用反馈、评测", () => {
+  const MEM = "# 长期记忆\n- 主人爱喝无糖乌龙茶\n- 家里的猫叫团子，三岁，有点胖\n- 打印机是拓竹 P2S，放在书房〔又：3D 打印机〕\n- 主人的妈妈生日是 3 月 5 日〔又：母亲、老妈〕\n- 每周五晚上和朋友打羽毛球\n";
+
+  it("按词切：不切出跨词的假词；词典里没有的名字拼回来；词 + 单字连上", async () => {
+    const { recallTerms } = await import("../src/agent/memory.ts");
+    expect(recallTerms("主人今天要去超市买牛奶")).toEqual(expect.arrayContaining(["超市", "牛奶"]));
+    expect(recallTerms("主人今天要去超市买牛奶")).not.toContain("人今");
+    expect(recallTerms("团子今天吃药了吗")).toContain("团子");
+    expect(recallTerms("你记得打印机的访问码吗")).toEqual(expect.arrayContaining(["打印机", "访问"]));
+  });
+
+  it("别称（整理时补的〔又：…〕）让换了说法的问题也能命中", async () => {
+    const { mem, a } = setup();
+    fs.writeFileSync(path.join(a.workspace, "MEMORY.md"), MEM);
+    const idx = mem.of("main");
+    expect((await idx.recall("我老妈哪天过生日来着")).map((h) => h.text)).toEqual(["- 主人的妈妈生日是 3 月 5 日〔又：母亲、老妈〕"]);
+  });
+
+  it("追问本身没有内容词：借前文检索；这句话自己有内容就不借", async () => {
+    const { mem, a } = setup();
+    fs.writeFileSync(path.join(a.workspace, "MEMORY.md"), MEM);
+    const idx = mem.of("main");
+    expect(await idx.recall("那它几岁了呀")).toEqual([]);
+    expect((await idx.recall("那它几岁了呀", { context: "团子最近怎么样 团子挺好的，在睡觉" })).map((h) => h.text)).toEqual(["- 家里的猫叫团子，三岁，有点胖"]);
+    // 这句话自己说的是乌龙茶：前文里的团子不该混进来
+    expect((await idx.recall("帮我泡杯乌龙茶吧", { context: "团子最近怎么样" })).map((h) => h.text)).toEqual(["- 主人爱喝无糖乌龙茶"]);
+  });
+
+  it("向量：按名次合并，靠「比平均高多少」判相关——不同嵌入模型余弦普遍偏高也不会什么都附", async () => {
+    // 假嵌入：所有句子的余弦都在 0.8 上下（有的嵌入模型就是这样），只有说羽毛球的明显更高
+    const vec = (t: string) => { const v = new Float32Array(8).fill(1); if (/羽毛球|运动|锻炼/.test(t)) v[0] = 6; v[1] = (t.length % 5) * 0.3; return v; };
+    const { mem, a } = setup({ embed: async (ts) => ts.map(vec) });
+    fs.writeFileSync(path.join(a.workspace, "MEMORY.md"), MEM + "- 喜欢看科幻电影\n- 不吃香菜\n- 早上七点起床\n");
+    const idx = mem.of("main");
+    const hits = await idx.recall("最近想多锻炼一下身体");
+    expect(hits.map((h) => h.text)).toEqual(["- 每周五晚上和朋友打羽毛球"]);
+    expect(hits[0].vecZ).toBeGreaterThan(2.5);
+    expect(await idx.recall("随便聊聊天气怎么样")).toEqual([]);              // 余弦都是 0.8 多，可没有一条比平均突出
+  });
+
+  it("使用反馈：附上却从没用上的条目攒够次数后要更强的匹配；回复里用到了就算用上", async () => {
+    const { mem, a } = setup();
+    fs.writeFileSync(path.join(a.workspace, "MEMORY.md"), MEM);
+    const idx = mem.of("main");
+    const { STALE_RECALLS } = await import("../src/agent/memory.ts");
+    const tea = "- 主人爱喝无糖乌龙茶";
+    // 回复里说到了「无糖」（主人没提）：算用上
+    idx.noteRecalled([tea]);
+    expect(idx.noteUsed([tea], "帮我泡杯乌龙茶", "好，给你泡无糖乌龙茶。")).toBe(1);
+    // 团子那条：附了很多次，回复从来没提到
+    const cat = "- 家里的猫叫团子，三岁，有点胖";
+    for (let i = 0; i < STALE_RECALLS; i++) { idx.noteRecalled([cat]); idx.noteUsed([cat], "团子呢", "不知道哦。"); }
+    expect(await idx.recall("团子呢在哪")).toEqual([]);                         // 只中一个词，不够了
+    expect((await idx.recall("家里的团子三岁了吧")).map((h) => h.text)).toEqual([cat]);   // 中得多还是附
+    const st = idx.recallStats();
+    expect(st.stale.map((s) => s.text)).toEqual([cat]);
+    expect(st.used).toBe(1);
+  });
+
+  it("评测：用例跑一遍给出召回率和「不该附的没乱附」；从会话里挖出她自己去搜记忆的那几轮", async () => {
+    const { mem, a, rt } = setup();
+    fs.writeFileSync(path.join(a.workspace, "MEMORY.md"), MEM);
+    const { saveCases, loadCases, runCases, mineCandidates } = await import("../src/agent/recall-eval.ts");
+    saveCases(a.dir, [{ q: "我老妈生日是哪天", expect: "3 月 5 日" }, { q: "帮我泡杯乌龙茶", expect: "乌龙茶" }, { q: "今天有点累", expect: "" }, { q: "书房那台机器", expect: "P2S" }]);
+    expect(loadCases(a.dir)).toHaveLength(4);
+    const r = await runCases(mem.of("main"), loadCases(a.dir));
+    expect(r.summary).toMatchObject({ total: 4, quiet: 1 });
+    expect(r.results.find((x) => x.q === "我老妈生日是哪天")!.ok).toBe(true);
+    // 挖候选：主人问了一句，她自己调了 memory_search
+    const store = rt.store("main");
+    store.touchSession("main:main", "main", "webchat");
+    store.append("main:main", [
+      { role: "user", content: [{ type: "text", text: "[时间 10:00]" }, { type: "text", text: "上次说的那家餐厅叫什么" }], timestamp: 1 } as any,
+      { role: "assistant", content: [{ type: "toolCall", id: "c1", name: "memory_search", arguments: { query: "餐厅" } }], kctx: { recall: { hits: [] } }, timestamp: 2 } as any,
+      { role: "toolResult", toolCallId: "c1", toolName: "memory_search", content: [{ type: "text", text: "无" }], timestamp: 3 } as any,
+      { role: "assistant", content: [{ type: "text", text: "没找到呢" }], timestamp: 4 } as any,
+      { role: "user", content: [{ type: "text", text: "[heartbeat] 看看有什么事" }], timestamp: 5 } as any,
+    ]);
+    const c = mineCandidates(store);
+    expect(c).toHaveLength(1);
+    expect(c[0]).toMatchObject({ q: "上次说的那家餐厅叫什么", searched: ["餐厅"], attached: [] });
   });
 });

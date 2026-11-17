@@ -51,3 +51,15 @@
   整理后不到原来 `DOC_MIN_KEEP`（50%，按真正多出来的部分算）不写；删掉的进同目录 `PERSONA.archive.md`。结果在 `TidyResult.docs`，`memStatus` 是记忆那部分，`status` 是整趟的。
   自动整理的结果按 heartbeat 投递目标告诉主人（同待办汇报），没做成的第二天再试；状态 `memory_tidy.json`（`{agents, docs}`）。入口：她的 `memory_tidy` 工具（`scope` = all / memory / docs，可信、非子任务）、
   管理界面人设文件页 MEMORY / USER 的「整理记忆」、AGENTS / TOOLS / HEARTBEAT 的「整理守则」（`POST /api/admin/agents/<id>/memory-tidy {scope}`）。日志 `🧹`，health `memory_tidy`。
+- **自动回忆的检索（`memory.ts` 的 `recallTerms` / `recall` / `search`、`recall-eval.ts`，2026-11）**：六处改动，改之前先在「记忆」页的评测里跑一遍记下分数。
+  ① **按词切**（`recallTerms`，Node 自带 `Intl.Segmenter("zh")`）：两字滑切会切出「人今」这种跨词假词。词典里没有的名字（团子、神乐）被切成单字，连着的单字取相邻两字（三个字的整个也取），
+  `FUNC_CHARS`（的了吗…）处断开；拼出来的假词在记忆里搜不到，被出现频率那道筛掉。三个字以上的词算两个命中（以前两字滑切时「乌龙茶」本来就是两个）。没有分词器的运行环境退回两字滑切。
+  FTS 索引本身没动（仍是逐字切 + 两字短语查询），只是「算不算相关」的判断改了。
+  ② **借前文**：这句话自己有信息量的词不到 2 个（「那它几岁了」）时，把上一句主人的话 + 她的回答（`runtime.ts` 里从 history 取）一起检索；够了就不借，免得前文的话题混进来。
+  ③ **别称**：记忆整理（`tidy.ts` 的 PROMPT 第 6 条）给 MEMORY.md 的条目补「〔又：…〕」——主人以后多半换个说法问（记的是「妈妈」，问的是「老妈」）。它就写在条目里，检索、阅读都看得到；别把它当噪声删掉。
+  ④ **名次合并（RRF）**：以前 0.4×关键词 + 0.6×向量，两边分数没有可比性。现在两路各排名次后合并；向量是否「够相关」看 `vecZ`（比这次查询在全部记忆上的平均余弦高几个标准差，≥ 2.5 且余弦 ≥ 0.3），
+  不同嵌入模型余弦普遍偏高 / 偏低时也稳；记忆少于 8 块时 `vecZ` 没意义，退回绝对值 0.5。
+  ⑤ **使用反馈**（`mem_recall` 表，按条目内容的哈希记）：每次附上记 `recalled`；回复里出现了这条记忆里、主人这句话没提到的词记 `used`（`noteUsed`，判得粗）。
+  附了 `STALE_RECALLS`（6）次一次都没用上的，之后要多中一个词（或向量也强）才附——只降权，不删。改了条目的字就是新的一条，计数从零开始。
+  ⑥ **评测**（`recall_eval.json`，在 agent 目录、进导出的「记忆」项；`GET/PUT /api/admin/agents/<id>/recall-eval`、`POST …/run`）：用例 = 一句话（+ 前文）→ 应该附上的记忆原文片段（空 = 不该附）；
+  跑出「该附的附上了多少 / 不该附的有多少没乱附」。候选（`mineCandidates`）从最近的会话里挖：主人说了一句，她这一轮自己调了 memory_search / memory_get——多半是自动回忆漏了。

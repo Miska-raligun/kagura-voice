@@ -82,7 +82,7 @@ function filesOf(dataDir: string, id: string): { files: string[]; sqlite: string
     const topMd = isDir(ws) ? fs.readdirSync(ws).filter((f) => f.endsWith(".md") && f !== "MEMORY.md" && fs.statSync(path.join(ws, f)).isFile()) : [];
     switch (part as AgentPart) {
       case "profile": return { files: [...file(`${base}/agent.json`), ...topMd.map((f) => `${base}/workspace/${f}`)], sqlite: [] };
-      case "memory": return { files: [...file(`${base}/workspace/MEMORY.md`), ...wsDir("memory")], sqlite: [] };
+      case "memory": return { files: [...file(`${base}/workspace/MEMORY.md`), ...wsDir("memory"), ...file(`${base}/recall_eval.json`)], sqlite: [] };
       case "skills": return { files: [...wsDir("skills"), ...wsDir("extensions")], sqlite: [] };
       case "sessions": return { files: [], sqlite: file(`${base}/agent.sqlite`) };
       case "files": return {

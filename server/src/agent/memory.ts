@@ -1,10 +1,11 @@
 // 记忆（§6.4）：MEMORY.md（精炼长期记忆）+ memory/YYYY-MM-DD.md（每日笔记），纯 markdown。
 //
 // 检索 = 关键词（SQLite FTS5，CJK 逐字切开）+ 向量（可选，用户配的嵌入接口，余弦在 JS 里算）。
-// 两路分数各自归一化后加权合并；没配嵌入就只用关键词。
+// 两路各自排名后按名次合并（RRF）；没配嵌入就只用关键词。
 // 索引按文件 mtime/size 增量更新：每次检索前同步一次，管理 UI 手改文件也能马上搜到。
 import fs from "node:fs";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import type { AgentInfo } from "./registry.ts";
 import { dailyNotePath } from "./soul.ts";
@@ -65,7 +66,60 @@ const CHUNKER_VERSION = "2";
  */
 const STOP_TERMS = new Set(("主人 我们 你们 他们 她们 今天 明天 昨天 现在 时候 一下 一个 一些 这个 那个 这样 那样 什么 怎么 为什么 "
   + "可以 就是 还是 没有 不是 知道 觉得 有点 一点 如果 因为 所以 但是 然后 已经 还有 自己 大家 东西 事情 的话 帮我 给我 告诉 "
-  + "一起 看看 好的 好吧 嗯嗯 哈哈 谢谢 记得 记住 说过 一直 喜欢 想要 需要 应该 不要 不会 可能").split(" "));
+  + "一起 看看 好的 好吧 嗯嗯 哈哈 谢谢 记得 记住 说过 一直 喜欢 想要 需要 应该 不要 不会 可能 来着 一下子 是不是 有没有 什么样").split(" "));
+
+/** 单个出现时不带信息的字：按词切完剩下的单字里，遇到它们就断开（不然「吃药了吗」会拼出「药了」「了吗」） */
+const FUNC_CHARS = new Set(Array.from("的了吗呢吧啊呀哦嗯哈你我他她它是在有和就都也还要去来着哪这那很不没被把给跟对到个几"));
+let segmenter: Intl.Segmenter | null | undefined;
+const wordSegmenter = () => {
+  if (segmenter === undefined) { try { segmenter = new Intl.Segmenter("zh", { granularity: "word" }); } catch { segmenter = null; } }
+  return segmenter;
+};
+
+/**
+ * 自动回忆用的「有信息量的词」（2026-11）：以前是相邻两字滑着切，「主人今天」会切出「人今」这种跨词的假词，正好撞上别的记忆。
+ * 现在按词切（Node 自带的 Intl.Segmenter）；词典里没有的名字（「团子」「神乐」）会被切成单字——连着的单字拼回去再取相邻两字；
+ * 词后面跟着的单字连上也算一个词（「打印」+「机」）。常用词（STOP_TERMS）不算。运行环境没有分词器就退回两字滑切。
+ */
+export function recallTerms(q: string): string[] {
+  const out = new Set<string>();
+  const text = q.toLowerCase();
+  const seg = wordSegmenter();
+  if (!seg) {
+    for (const t of ftsQuery(text).split(" OR ").map((t) => t.replace(/"/g, "").replace(/ /g, ""))) if (t) out.add(t);
+  } else {
+    let run: string[] = [], prevWord = "";
+    // 连着的单字：相邻两字都取（「爱喝无糖」→ 爱喝、喝无、无糖），三个字的整个也取（多半是个名字）。
+    // 拼出来的假词（「喝无」）在记忆里搜不到，会被出现频率那道筛掉，不碍事
+    const flushRun = () => {
+      for (let i = 0; i + 1 < run.length; i++) out.add(run[i] + run[i + 1]);
+      if (run.length === 3) out.add(run.join(""));
+      run = [];
+    };
+    for (const s of seg.segment(text)) {
+      const w = s.segment;
+      const chars = Array.from(w);
+      const cjk = CJK.test(w);
+      if (!s.isWordLike) { flushRun(); prevWord = ""; continue; }
+      if (cjk && chars.length === 1) {
+        if (FUNC_CHARS.has(w)) { flushRun(); prevWord = ""; continue; }
+        if (prevWord && !run.length) out.add(prevWord + w);
+        run.push(w);
+        continue;
+      }
+      flushRun();
+      if (cjk ? chars.length >= 2 : /^[a-z0-9_]{2,}$/.test(w)) out.add(w);
+      prevWord = cjk ? w : "";
+    }
+    flushRun();
+  }
+  return [...out].filter((t) => !STOP_TERMS.has(t)).slice(0, 32);
+}
+
+/** 两路排名合并（RRF）的常数：越大越看重「两路都靠前」而不是某一路的第一名 */
+const RRF_K = 20;
+/** 一条记忆被自动附上这么多次、却一次都没帮上忙（回复里没用到），之后要更强的匹配才附 */
+export const STALE_RECALLS = 6;
 
 export function chunkMarkdown(text: string, max = 400): { start: number; end: number; text: string }[] {
   const lines = text.split(/\r?\n/);
@@ -114,7 +168,9 @@ export function looksLikeLog(t: string): boolean {
 export const USER_ITEM_MAX = 80;
 export const USER_AUTO_MAX = 1500;
 
-export interface MemoryHit { path: string; start: number; end: number; text: string; score: number; via: string; terms?: string[] }
+export interface MemoryHit { path: string; start: number; end: number; text: string; score: number; via: string; terms?: string[]; /** 向量相似度（原始余弦）和它比这次查询的平均水平高几个标准差 */ vec?: number; vecZ?: number }
+/** 一条记忆在使用统计里的键：按内容算，改了字就是新的一条 */
+const recallKey = (text: string) => createHash("sha1").update(text.trim()).digest("hex").slice(0, 16);
 
 export class MemoryIndex {
   constructor(private agent: AgentInfo, private db: DatabaseSync, private embedder: Embedder | null) {
@@ -124,6 +180,7 @@ export class MemoryIndex {
       CREATE INDEX IF NOT EXISTS mem_chunks_path ON mem_chunks(path);
       CREATE VIRTUAL TABLE IF NOT EXISTS mem_fts USING fts5(body, chunk_id UNINDEXED, tokenize='unicode61');
       CREATE TABLE IF NOT EXISTS mem_meta (key TEXT PRIMARY KEY, value TEXT);
+      CREATE TABLE IF NOT EXISTS mem_recall (key TEXT PRIMARY KEY, recalled INTEGER NOT NULL DEFAULT 0, used INTEGER NOT NULL DEFAULT 0, last REAL);
     `);
     // 切块算法变了：旧索引整个清掉，下次检索按新算法重建
     const v = (db.prepare("SELECT value FROM mem_meta WHERE key = 'chunker'").get() as any)?.value;
@@ -192,75 +249,99 @@ export class MemoryIndex {
     return this.sync();
   }
 
-  /** paths = 只在这些文件里找（自动回忆只看 MEMORY.md）；不给 = 全部 */
+  /**
+   * paths = 只在这些文件里找（自动回忆只看 MEMORY.md）；不给 = 全部。
+   * 两路各自排名，按名次合并（RRF，2026-11）：以前是分数加权（0.4 关键词 + 0.6 向量），可关键词分是相对第一名归一化的、向量分随嵌入模型高低不一，
+   * 加在一起没有可比性。每条带 vec（原始余弦）和 vecZ（比这次查询在全部记忆上的平均相似度高几个标准差）——不同嵌入模型的余弦范围差很多，
+   * 「够不够相关」看相对值比看绝对值稳
+   */
   async search(query: string, k = 6, paths?: string[]): Promise<MemoryHit[]> {
     await this.sync();
-    const scores = new Map<number, { kw: number; vec: number }>();
+    const scores = new Map<number, { kw: number; kwRank: number; vec: number; vecRank: number; vecZ: number }>();
+    const blank = () => ({ kw: 0, kwRank: 0, vec: 0, vecRank: 0, vecZ: 0 });
     const q = ftsQuery(query);
     const inPaths = paths ? ` AND c.path IN (${paths.map(() => "?").join(",")})` : "";
     if (q) {
       const rows = this.db.prepare(`SELECT f.chunk_id, bm25(mem_fts) AS s FROM mem_fts f JOIN mem_chunks c ON c.id = f.chunk_id WHERE mem_fts MATCH ?${inPaths} ORDER BY s LIMIT 30`).all(q, ...(paths ?? [])) as any[];
       const best = rows.length ? -rows[0].s : 0;
-      for (const r of rows) scores.set(r.chunk_id, { kw: best > 0 ? -r.s / best : 1, vec: 0 });
+      rows.forEach((r, i) => scores.set(r.chunk_id, { ...blank(), kw: best > 0 ? -r.s / best : 1, kwRank: i + 1 }));
     }
     let usedVec = false;
     if (this.embedder) {
       try {
         const [qv] = await this.embedder.embed([query]);
         const rows = this.db.prepare(`SELECT c.id, c.embedding FROM mem_chunks c WHERE c.embedding IS NOT NULL${inPaths}`).all(...(paths ?? [])) as any[];
-        const sims = rows.map((r) => ({ id: r.id, s: cosine(qv, new Float32Array(new Uint8Array(r.embedding).buffer)) }))
-          .sort((a, b) => b.s - a.s).slice(0, 30);
-        for (const { id, s } of sims) {
-          if (s <= 0.2) continue;
-          const cur = scores.get(id) ?? { kw: 0, vec: 0 };
-          cur.vec = s;
+        const all = rows.map((r) => ({ id: r.id, s: cosine(qv, new Float32Array(new Uint8Array(r.embedding).buffer)) })).sort((a, b) => b.s - a.s);
+        const mean = all.reduce((n, x) => n + x.s, 0) / Math.max(1, all.length);
+        const sd = Math.sqrt(all.reduce((n, x) => n + (x.s - mean) ** 2, 0) / Math.max(1, all.length));
+        all.slice(0, 30).forEach(({ id, s }, i) => {
+          if (s <= 0.2) return;
+          const cur = scores.get(id) ?? blank();
+          cur.vec = s; cur.vecRank = i + 1;
+          // 记忆太少时标准差没意义，留 0，由调用方退回看绝对值
+          cur.vecZ = all.length >= 8 && sd > 1e-6 ? (s - mean) / sd : 0;
           scores.set(id, cur);
-        }
+        });
         usedVec = rows.length > 0;
       } catch (e: any) { console.log(`[memory] ⚠️  查询向量失败（只用关键词）: ${e.message}`); }
     }
     const get = this.db.prepare("SELECT * FROM mem_chunks WHERE id = ?");
+    const rrf = (rank: number) => (rank ? 1 / (RRF_K + rank) : 0);
+    const top = 1 / (RRF_K + 1);
     return [...scores.entries()]
-      .map(([id, s]) => ({ id, score: usedVec ? 0.4 * s.kw + 0.6 * s.vec : s.kw, via: s.kw && s.vec ? "both" : s.kw ? "keyword" : "vector" }))
+      // 没用向量时照旧按关键词分；用了就按名次合并，归一到「两路都是第一名 = 1」
+      .map(([id, s]) => ({ id, s, score: usedVec ? (rrf(s.kwRank) + rrf(s.vecRank)) / (2 * top) : s.kw, via: s.kwRank && s.vecRank ? "both" : s.kwRank ? "keyword" : "vector" }))
       .sort((a, b) => b.score - a.score).slice(0, k)
-      .map(({ id, score, via }) => {
+      .map(({ id, s, score, via }) => {
         const c = get.get(id) as any;
-        return { path: c.path, start: c.start_line, end: c.end_line, text: c.text, score: Math.round(score * 1000) / 1000, via };
+        return { path: c.path, start: c.start_line, end: c.end_line, text: c.text, score: Math.round(score * 1000) / 1000, via,
+          ...(s.vecRank ? { vec: Math.round(s.vec * 1000) / 1000, vecZ: Math.round(s.vecZ * 100) / 100 } : {}) };
       });
   }
 
   /**
-   * 自动回忆：拿主人这句话检索，挑真正相关的几条（附在这一轮消息上）。关键词分数是相对最高分归一化的，
-   * 最好的那条永远是 1，所以另按「命中了几个不同的词」卡一道：两字词至少中 2 个（「今天」这种常见词单独命中不算），
-   * 向量相似度够高的直接算。
+   * 自动回忆：拿主人这句话检索，挑真正相关的几条（附在这一轮消息上）。
+   * 关键词这一路按「命中了几个有信息量的词」卡：至少中 2 个，或中 1 个很少见的（「团子在干嘛」里的「团子」）；
+   * 向量这一路要明显高出这次查询的平均水平（vecZ，记忆太少时退回绝对值 0.5）。
+   * context = 前一两句对话（2026-11）：「那个呢」「然后呢」这种追问本身没有内容词，以前必然什么都找不到；
+   * 这句话自己有信息量的词不到 2 个时，把前文的词也算上。
    * 只看 MEMORY.md（LRN 2026-10-30）：每日笔记记的是「当时」的事（「今天有点累」「下午去超市」），检索出来混在消息里，
    * 模型分不清是哪天的，容易当成现在的情况；旧笔记要查让 agent 自己 memory_search（结果带文件名 = 日期）。
    */
-  async recall(query: string, o: { k?: number; maxChars?: number; paths?: string[] } = {}): Promise<MemoryHit[]> {
+  async recall(query: string, o: { k?: number; maxChars?: number; paths?: string[]; context?: string } = {}): Promise<MemoryHit[]> {
     const paths = o.paths ?? ["MEMORY.md"];
-    const q = query.replace(/^\[[^\]]*\]\s*/, "").trim();
-    if (Array.from(q.replace(/[\s\p{P}]/gu, "")).length < 4) return [];
-    // 先把常用词从这句话里抠掉再切词：不然「主人今天」会拼出「人今」这种跨词的两字，正好撞上「主人今天…」的记忆
-    let qq = q.toLowerCase();
-    for (const w of STOP_TERMS) qq = qq.split(w).join(" ");
-    if (!ftsQuery(qq)) return [];
-    const hits0 = await this.search(qq, 12, paths);
-    // 有信息量的词：去掉常用词，再去掉在记忆里到处都是的（出现在超过 15% 的块里）
+    const strip = (t: string) => t.replace(/^\[[^\]]*\]\s*/, "").trim();
+    const q = strip(query);
+    const own = recallTerms(q);
+    // 这句话自己撑不起一次检索：借前文
+    const ctx = own.length < 2 && o.context ? strip(o.context).slice(-300) : "";
+    if (!ctx && Array.from(q.replace(/[\s\p{P}]/gu, "")).length < 4) return [];
+    const full = ctx ? `${ctx} ${q}` : q;
+    if (!ftsQuery(full)) return [];
+    const hits0 = await this.search(full, 12, paths);
+    // 有信息量的词：再去掉在记忆里到处都是的（出现在超过 15% 的块里）
     const inPaths = `path IN (${paths.map(() => "?").join(",")})`;
     const total = Math.max(1, (this.db.prepare(`SELECT COUNT(*) AS n FROM mem_chunks WHERE ${inPaths}`).get(...paths) as any).n);
     const dfStmt = this.db.prepare(`SELECT COUNT(*) AS n FROM mem_chunks WHERE ${inPaths} AND instr(lower(text), ?) > 0`);
     const df = new Map<string, number>();
-    const terms = ftsQuery(qq).split(" OR ").map((t) => t.replace(/"/g, "").replace(/ /g, "")).filter((t) => t && !STOP_TERMS.has(t))
-      .filter((t) => { const n = (dfStmt.get(...paths, t) as any).n; df.set(t, n); return n <= Math.max(3, total * 0.15); });
+    const terms = [...new Set([...own, ...(ctx ? recallTerms(ctx) : [])])]
+      .filter((t) => { const n = (dfStmt.get(...paths, t) as any).n; df.set(t, n); return n > 0 && n <= Math.max(3, total * 0.15); });
+    const stat = this.db.prepare("SELECT recalled, used FROM mem_recall WHERE key = ?");
     const out: MemoryHit[] = [];
     let size = 0;
     for (const h of hits0) {
       const body = h.text.toLowerCase();
-      const hit = terms.filter((t) => body.includes(t));
-      const strongVec = h.via !== "keyword" && h.score >= 0.5;
-      // 中两个有信息量的词；或者中了一个很少见的词（「团子在干嘛」里的「团子」）
-      const ok = hit.length >= 2 || (hit.length === 1 && (df.get(hit[0]) ?? 99) <= 2);
-      if (!strongVec && !ok) continue;
+      // 「打印」「打印机」这种一个包着另一个的只算一个
+      const hit = terms.filter((t) => body.includes(t)).filter((t, _i, a) => !a.some((u) => u !== t && u.includes(t)));
+      const strongVec = h.vec !== undefined && (h.vecZ ? h.vecZ >= 2.5 && h.vec >= 0.3 : h.vec >= 0.5);
+      // 中两个有信息量的词（三个字以上的词顶两个：以前两字滑切时「乌龙茶」本来就算两个）；或者中了一个很少见的词
+      const weight = hit.reduce((n, t) => n + (Array.from(t).length >= 3 ? 2 : 1), 0);
+      let ok = weight >= 2 || (hit.length === 1 && (df.get(hit[0]) ?? 99) <= 2);
+      // 老被附上却从没帮上忙的（见 noteRecalled / noteUsed）：要更强的匹配才附，免得每轮白占地方
+      const st = stat.get(recallKey(h.text)) as any;
+      if (st && st.recalled >= STALE_RECALLS && !st.used) ok = weight >= 3 || (ok && strongVec);
+      else if (strongVec) ok = true;
+      if (!ok) continue;
       h.terms = hit;
       const n = Array.from(h.text).length;
       if (out.length && size + n > (o.maxChars ?? 1200)) break;
@@ -268,6 +349,40 @@ export class MemoryIndex {
       if (out.length >= (o.k ?? 5)) break;
     }
     return out;
+  }
+
+  /** 这几条记忆被自动附上了一次 */
+  noteRecalled(texts: string[]) {
+    const up = this.db.prepare("INSERT INTO mem_recall(key, recalled, used, last) VALUES (?, 1, 0, ?) ON CONFLICT(key) DO UPDATE SET recalled = recalled + 1, last = excluded.last");
+    for (const t of texts) up.run(recallKey(t), Date.now() / 1000);
+  }
+
+  /**
+   * 回复出来以后看附上的记忆用上了没有：回复里出现了这条记忆里、主人这句话没提到的词就算用上了（「泡无糖乌龙茶」里的「无糖」）。
+   * 判得粗，只拿来给「老被附上却从没用上」的降权，不拿来删东西。返回用上的条数
+   */
+  noteUsed(texts: string[], query: string, reply: string): number {
+    const asked = new Set(recallTerms(query));
+    const said = reply.toLowerCase();
+    const up = this.db.prepare("UPDATE mem_recall SET used = used + 1 WHERE key = ?");
+    let n = 0;
+    for (const t of texts) {
+      const own = recallTerms(t).filter((w) => !asked.has(w) && said.includes(w));
+      if (own.length) { up.run(recallKey(t)); n++; }
+    }
+    return n;
+  }
+
+  /** 自动回忆的使用情况（评测页显示）：附上过几条、多少条用上过、哪些老附却没用 */
+  recallStats() {
+    const rows = this.db.prepare("SELECT key, recalled, used, last FROM mem_recall ORDER BY recalled DESC").all() as any[];
+    const text = new Map((this.db.prepare("SELECT text FROM mem_chunks WHERE path = 'MEMORY.md'").all() as any[]).map((r) => [recallKey(r.text), r.text as string]));
+    const live = rows.filter((r) => text.has(r.key));
+    return {
+      items: live.length, recalled: live.reduce((n, r) => n + r.recalled, 0), used: live.reduce((n, r) => n + r.used, 0),
+      stale: live.filter((r) => r.recalled >= STALE_RECALLS && !r.used).map((r) => ({ text: text.get(r.key)!, recalled: r.recalled })),
+      top: live.slice(0, 10).map((r) => ({ text: text.get(r.key)!, recalled: r.recalled, used: r.used })),
+    };
   }
 
   /**

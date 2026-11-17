@@ -35,6 +35,7 @@ import { runShell, shellFor, clipOutput } from "../agent/tools/exec.ts";
 import { ModelRegistry } from "../agent/models.ts";
 import { gracefulExit } from "../util/shutdown.ts";
 import { OpenAIEmbedder } from "../agent/memory.ts";
+import { loadCases, saveCases, runCases, mineCandidates } from "../agent/recall-eval.ts";
 
 const LOCAL = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"]);
 const LOCAL_HOST = /^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i;
@@ -341,6 +342,17 @@ export function registerAdmin(r: Router, ctx: Ctx, sys: AgentSystem) {
     agentOr404(req.params.id);
     const d = req.json() ?? {};
     return json(await memories.of(req.params.id).search(String(d.query ?? ""), Number(d.k ?? 8)));
+  });
+  // 自动回忆的评测（agent/recall-eval.ts）：用例、从会话里挖的候选、使用统计；POST run 跑一遍（可以带还没保存的用例）
+  get("/api/admin/agents/<id>/recall-eval", (req) => {
+    const a = agentOr404(req.params.id);
+    return json({ cases: loadCases(a.dir), candidates: mineCandidates(runtime.store(a.id)), stats: memories.of(a.id).recallStats() });
+  });
+  r.add("PUT", "/api/admin/agents/<id>/recall-eval", guard((req) => json({ cases: saveCases(agentOr404(req.params.id).dir, req.json()?.cases) })));
+  post("/api/admin/agents/<id>/recall-eval/run", async (req) => {
+    const a = agentOr404(req.params.id);
+    const draft = req.json()?.cases;
+    return json(await runCases(memories.of(a.id), Array.isArray(draft) ? draft : loadCases(a.dir)));
   });
   post("/api/admin/agents/<id>/memory/reindex", async (req) => { agentOr404(req.params.id); return json(await memories.of(req.params.id).rebuild()); });
 
