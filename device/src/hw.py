@@ -171,7 +171,7 @@ def _deadman_check():
     全都够不着。而 _wdt_feed() 是**唯一一个在每个这种循环里都还在转**的
     函数，把判据放进来，以后再冒出新的"喂狗死循环"也自动被兜住。
 
-    判据仍是 CLAUDE.md 那条铁律：只认"服务端还认不认得我"，
+    判据仍是 docs/lrn/device-reliability.md 那条铁律：只认"服务端还认不认得我"，
     不看设备自己觉得健康不健康。
 
     **必须用 ticks_ms 而不是 time.time()**：开机后 clock.sync_rtc() 会把

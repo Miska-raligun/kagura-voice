@@ -46,7 +46,7 @@ export async function streamReply(res: http.ServerResponse, o: StreamReplyOpts):
   let textAfterFirst = false;
   /** 第一句说完了没有。首句会在逗号处先切一段去合成（早点出声），但「后面又来了字」要从整句说完算起——
    *  不然「我看看桌上有什么，稍等。」+ take_photo 会在逗号后就发头，X-Need-Photo 丢了 */
-  let firstClosed = false, firstLen = 0;
+  let firstClosed = false, firstLen = 0, firstText = "";      // firstText = 整个第一句（半句们拼起来），屏显用
   let lastMsgEnded = false, pendingTools = 0, toolsDone = 0;
   /** 最后一条助手消息结束了、而且没调工具：这就是最终回复（整轮马上结束），头里按完整回复写 */
   let finalMsg = false;
@@ -57,7 +57,7 @@ export async function streamReply(res: http.ServerResponse, o: StreamReplyOpts):
 
   const enqueue = (s: string) => {
     if (first === null) first = s; else if (firstClosed) textAfterFirst = true;
-    if (!firstClosed) { firstLen += s.length; firstClosed = endsSentence(s) || firstLen >= LONG_SENTENCE; }
+    if (!firstClosed) { firstLen += s.length; firstText += s; firstClosed = endsSentence(s) || firstLen >= LONG_SENTENCE; }
     items.push({ text: s });
   };
   const onEvent = (e: AgentStreamEvent) => {
@@ -89,7 +89,7 @@ export async function streamReply(res: http.ServerResponse, o: StreamReplyOpts):
   const sendHeaders = () => {
     const complete = done || finalMsg;
     const partial = !complete;
-    const reply = done ? (finalText || items.map((x) => x.text).join("")) : items.map((x) => x.text).join("");
+    const reply = done ? (finalText || items.map((x) => x.text).join("")) : complete ? items.map((x) => x.text).join("") : firstText;
     const h: Record<string, string> = {
       ...o.headers, "Content-Type": "audio/wav", Connection: "close",
       "X-User-Text": b64Header(o.userText), "X-Reply-Text": b64Header(reply),

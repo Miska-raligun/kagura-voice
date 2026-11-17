@@ -72,6 +72,8 @@ export class PendingReply {
   /** 第一句说完了没有（首句在逗号处先切出来的半句不算，见 stream-reply） */
   private firstClosed = false;
   private firstLen = 0;
+  /** 整个第一句（在逗号处先切出来的半句们拼起来），首段没说完时屏显用 */
+  private firstText = "";
   private lastMsgEnded = false;
   /** 最后一条助手消息结束了、而且没调工具：这就是最终回复 */
   private finalMsg = false;
@@ -90,7 +92,7 @@ export class PendingReply {
   constructor(private o: PendingOpts) {
     const enqueue = (s: string) => {
       if (this.first === null) this.first = s; else if (this.firstClosed) this.textAfterFirst = true;
-      if (!this.firstClosed) { this.firstLen += s.length; this.firstClosed = endsSentence(s) || this.firstLen >= LONG_SENTENCE; }
+      if (!this.firstClosed) { this.firstLen += s.length; this.firstText += s; this.firstClosed = endsSentence(s) || this.firstLen >= LONG_SENTENCE; }
       const it: { text: string; wav?: Promise<string | null> } = { text: s };
       // 头两句一出来就去合成，不等设备来取、也不等「能发响应头了」（首句后面跟着工具时，合成和工具一起跑）
       if (this.items.length < LOOKAHEAD) it.wav = this.o.voice.synthesize(s, this.o.per).catch(() => null);
@@ -182,7 +184,7 @@ export class PendingReply {
       const complete = this.done || this.finalMsg;
       const partial = !complete;
       const all = () => this.items.map((x) => x.text).join("");
-      const shown = firstSeg ? (this.done ? this.reply() : all()) : complete ? all() : this.items.slice(0, this.cursor + 1).map((x) => x.text).join("");
+      const shown = firstSeg ? (this.done ? this.reply() : complete ? all() : this.firstText) : complete ? all() : this.items.slice(0, this.cursor + 1).map((x) => x.text).join("");
       const h: Record<string, string> = {
         ...(firstSeg ? this.o.headers : {}), "Content-Type": "audio/wav", Connection: "close", "X-Reply-Id": this.id,
         "X-User-Text": b64Header(this.o.userText), "X-Reply-Text": b64Header(shown),

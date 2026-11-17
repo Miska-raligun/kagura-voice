@@ -97,7 +97,7 @@ Windows 安装包会自动放行；Linux 如果开了防火墙需要手动放行
 | `contract-tests/` | 黑盒契约测试：只走 HTTP/MQTT/UDP/TCP，对打包好的服务端跑 |
 | `docs/` | [开发计划](docs/plan-kagura-agent.md)、[设备使用指南](docs/device.md)、[从旧版迁移](docs/migrate-from-wsl.md) |
 | `openclaw-startup.ps1`、`discovery_relay.ps1` | 只给「服务端跑在 WSL 里」的用法：Windows 侧端口转发与 UDP 发现中继 |
-| `CLAUDE.md` | 架构与踩坑记录（开发必读） |
+| `CLAUDE.md`、`docs/lrn/` | 架构总览 + 按子系统分的踩坑记录（开发必读：动哪块先读哪份） |
 
 ## 开发
 
