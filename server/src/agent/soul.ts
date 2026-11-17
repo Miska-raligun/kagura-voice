@@ -5,6 +5,7 @@ import path from "node:path";
 import type { AgentInfo } from "./registry.ts";
 import { parseLocalTime, strftime } from "../util/time.ts";
 import { personaText } from "./persona.ts";
+import { pinnedOf, PINNED_MAX } from "./memfmt.ts";
 
 /** 每个文件注入的字数上限（字符数，中文一个字算一个） */
 // 每个人设文件最多注入多少字（超出部分截掉，文件本身不动）。默认与 OpenClaw 的 bootstrapMaxChars 一致：每个文件 2 万字。
@@ -193,6 +194,8 @@ export interface PromptTrace {
   daily: number;
   /** 今昨两天的笔记一共多少字（带进提示的只是最近的一部分） */
   dailyTotal?: number;
+  /** MEMORY.md「常用」节带了多少字 */
+  pinned?: number;
   skills: number;
   peers: number;
   summary: number;
@@ -227,7 +230,8 @@ export function toolGuide(tools: string[]): string {
   if (has("take_photo")) g.push("要看东西（「这是什么」「帮我看看」）就 take_photo，别凭空猜。");
   if (has("send_file")) g.push("主人要文件、或者你做出来的东西本身就是文件（表格、图、文档、压缩包）时，用 send_file 把文件发过去，别只报一个路径让主人自己去找；回复里说一句发的是什么。");
   if (has("set_volume")) g.push("主人嫌声音大 / 小就 set_volume。");
-  if (has("memory_write")) g.push("记事用 memory_write，按「过几天再读到它还成立吗」选：当天发生的、做了什么、heartbeat / 定时任务的记录记 daily；以后还成立的事实、约定、偏好、结论记 long；只有主人本人的稳定信息（称呼、家人、作息、口味习惯）才记 user。");
+  // 只讲记忆是干什么用的（2026-11，Anthropic「The components of agent memory」：固定的「怎么记」规则反而让强模型记得更差）；写到哪的兜底在 memory.write 里
+  if (has("memory_write")) g.push("记忆是留给以后的你的：值得记的是主人说过的偏好和约定、试过管用 / 不管用的做法、查证过的结论、没做完的事；随时查得到的状态不用记。");
   if (has("memory_search")) g.push("涉及以前的事、约定、主人的偏好，拿不准先 memory_search 再答。");
   if (has("cron_add")) g.push("到点要做的事（提醒、「每天 / 每周 / 几点」做什么）用 cron_add 建定时任务，别口头答应了就算。");
   if (has("photo_schedule_add")) g.push("「每天几点拍一张看看」这类用 photo_schedule_add。");
@@ -242,7 +246,7 @@ export function toolGuide(tools: string[]): string {
   if (has("exec_jobs")) g.push("估计要跑一两分钟以上的命令用 exec 的 background=true 放到后台，先回复主人；跑完结果会作为新消息交回给你。");
   if (has("sessions_steer")) g.push("子任务还在跑时主人追加了要求、或者你发现交代错了，用 sessions_steer 直接告诉它，别等它做完再重派。");
   if (has("memory_tidy")) g.push("主人让你整理记忆 / 守则，或者你发现记忆、AGENTS / TOOLS / HEARTBEAT 里重复、过时的很多，用 memory_tidy（会备份、删掉的进归档），别自己用文件工具去大改这些文件。");
-  if (has("read_ref")) g.push("看到截短的工具结果、摘要里的 #m 出处、近况里的 session:、记下的 task: / job: / a2a: 编号，要细节就 read_ref 按编号读原文，别重跑工具、别凭印象猜；只记得大概就用它的 query 在这个会话里搜。");
+  if (has("read_ref")) g.push("看到截短的工具结果、摘要里的 #m 出处、近况里的 session:、记下的 task: / job: / a2a: 编号，要细节就 read_ref 按编号读原文，别重跑工具、别凭印象猜；只记得大概就用它的 query 在这个会话里搜，别的对话里说过的加 all_sessions=true。");
   if (has("skill_read")) g.push("<skills> 里有对口的技能就先 skill_read 读全文再照做。");
   return g.length ? `<how_to>\n${g.map((x) => `- ${x}`).join("\n")}\n</how_to>` : "";
 }
@@ -286,8 +290,14 @@ export function buildSystemPrompt(o: SoulOpts): string {
   }
   // 长期记忆不在提示里：告诉她系统会按每句话自动附上相关的几条，不够再自己搜
   if (o.scene !== "guest" && !want.has("MEMORY.md") && fs.existsSync(path.join(ws, "MEMORY.md"))) {
+    // 「常用」那节（整理按使用统计挪进来的）每轮都带着，不靠检索
+    let pinned = "";
+    try { pinned = pinnedOf(fs.readFileSync(path.join(ws, "MEMORY.md"), "utf8")); } catch { /* 读不到就不带 */ }
+    if (pinned) pinned = Array.from(pinned).slice(0, PINNED_MAX).join("");
+    if (o.trace && pinned) o.trace.pinned = Array.from(pinned).length;
     parts.push("<memory>\n长期记忆（MEMORY.md）不全文放在这里：系统会按主人每句话自动检索，相关的几条附在那条消息前的 [相关记忆] 里。"
-      + "没附上不代表没有——涉及以前的事、约定、主人的偏好时，拿不准就 memory_search 搜一下再答（每日笔记只能这样查，文件名就是那天的日期，那是当时的情况、不一定是现在）。\n</memory>");
+      + "没附上不代表没有——涉及以前的事、约定、主人的偏好时，拿不准就 memory_search 搜一下再答（每日笔记只能这样查，文件名就是那天的日期，那是当时的情况、不一定是现在）。"
+      + (pinned ? `\n常用的几条（经常用到，所以一直带着）：\n${pinned}` : "") + "\n</memory>");
   }
   if (o.trace) {
     o.trace.notLoaded = o.scene === "guest" ? [] : [...skipped, ...(want.has("daily") ? [] : ["daily"])];

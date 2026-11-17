@@ -82,11 +82,11 @@ function filesOf(dataDir: string, id: string): { files: string[]; sqlite: string
     const topMd = isDir(ws) ? fs.readdirSync(ws).filter((f) => f.endsWith(".md") && f !== "MEMORY.md" && fs.statSync(path.join(ws, f)).isFile()) : [];
     switch (part as AgentPart) {
       case "profile": return { files: [...file(`${base}/agent.json`), ...topMd.map((f) => `${base}/workspace/${f}`)], sqlite: [] };
-      case "memory": return { files: [...file(`${base}/workspace/MEMORY.md`), ...wsDir("memory"), ...file(`${base}/recall_eval.json`)], sqlite: [] };
+      case "memory": return { files: [...file(`${base}/workspace/MEMORY.md`), ...wsDir("memory"), ...wsDir("topics"), ...file(`${base}/recall_eval.json`)], sqlite: [] };
       case "skills": return { files: [...wsDir("skills"), ...wsDir("extensions")], sqlite: [] };
       case "sessions": return { files: [], sqlite: file(`${base}/agent.sqlite`) };
       case "files": return {
-        files: wsDir("", (r) => /^(memory|skills|extensions)(\/|$)/.test(r) || (!r.includes("/") && r.endsWith(".md"))),
+        files: wsDir("", (r) => /^(memory|topics|skills|extensions)(\/|$)/.test(r) || (!r.includes("/") && r.endsWith(".md"))),
         sqlite: [],
       };
     }
@@ -222,7 +222,7 @@ export function itemOf(rel: string): string | null {
   if (m) {
     const [, aid, rest] = m;
     const part = rest === "agent.json" || /^workspace\/[^/]+\.md$/.test(rest) && rest !== "workspace/MEMORY.md" ? "profile"
-      : rest === "workspace/MEMORY.md" || rest.startsWith("workspace/memory/") ? "memory"
+      : rest === "workspace/MEMORY.md" || rest.startsWith("workspace/memory/") || rest.startsWith("workspace/topics/") || rest === "recall_eval.json" ? "memory"
       : rest.startsWith("workspace/skills/") || rest.startsWith("workspace/extensions/") ? "skills"
       : rest === "agent.sqlite" ? "sessions" : "files";
     return `agent:${aid}:${part}`;
@@ -313,7 +313,7 @@ export function applyPending(dataDir: string, log: (s: string) => void = console
     const mine = staged.filter((f) => itemOf(f) === id);
     const m = /^agent:([^:]+):(\w+)$/.exec(id);
     // 整块替换的目录：先把本机的挪进备份，再放进来
-    const dirs = m ? ({ memory: [`agents/${m[1]}/workspace/memory`], skills: [`agents/${m[1]}/workspace/skills`, `agents/${m[1]}/workspace/extensions`] } as Record<string, string[]>)[m[2]] ?? []
+    const dirs = m ? ({ memory: [`agents/${m[1]}/workspace/memory`, `agents/${m[1]}/workspace/topics`], skills: [`agents/${m[1]}/workspace/skills`, `agents/${m[1]}/workspace/extensions`] } as Record<string, string[]>)[m[2]] ?? []
       : ({ skills: ["skills"], extensions: ["extensions"], device: ["device_files", "app_images"] } as Record<string, string[]>)[id] ?? [];
     for (const d of dirs) moveAway(d);
     for (const f of mine) {

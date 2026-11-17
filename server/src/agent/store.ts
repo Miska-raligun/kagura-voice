@@ -98,6 +98,22 @@ export class AgentStore {
     const after = (this.db.prepare("SELECT id FROM messages WHERE session = ? AND id > ? ORDER BY id LIMIT ?").all(session, id, n) as any[]).at(-1)?.id ?? id;
     return this.range(session, before, after, 2 * n + 1);
   }
+  /** 这个会话最后一条消息的编号（还没有消息是 0） */
+  lastId(session: string): number {
+    return (this.db.prepare("SELECT MAX(id) AS id FROM messages WHERE session = ?").get(session) as any)?.id ?? 0;
+  }
+  /**
+   * 跨会话按关键词找（read_ref 的 all_sessions）：只在主人参与的会话里找（同近况：主会话、设备、网页、主人私聊），
+   * 陌生人、群聊的对话不给翻。新的在前
+   */
+  searchOwner(words: string[], limit = 10): { id: number; session: string; ts: number; role: string; compacted: number; msg: Message }[] {
+    if (!words.length) return [];
+    const where = words.map(() => "instr(m.data, ?) > 0").join(" AND ");
+    return (this.db.prepare(`SELECT m.* FROM messages m JOIN sessions s ON s.key = m.session
+      WHERE (s.owner = 1 OR s.key LIKE '%:main' OR s.channel IN ('device', 'webchat')) AND m.role IN ('user', 'assistant') AND ${where}
+      ORDER BY m.id DESC LIMIT ?`).all(...words, limit) as any[])
+      .map((r) => ({ id: r.id, session: r.session, ts: r.ts, role: r.role, compacted: r.compacted, msg: JSON.parse(r.data) }));
+  }
   /** 按工具调用编号找那条工具结果（原文，没截短的） */
   toolResult(session: string, callId: string): { id: number; msg: Message } | undefined {
     const rows = this.db.prepare("SELECT id, data FROM messages WHERE session = ? AND role = 'toolResult' AND instr(data, ?) > 0 ORDER BY id DESC LIMIT 5")

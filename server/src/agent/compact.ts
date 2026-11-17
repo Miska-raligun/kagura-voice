@@ -185,7 +185,8 @@ export class Compactor {
           console.log(`[agent] ⚠️  ${agent.id} 摘要第 ${i + 1}/${chunks.length} 段只有【记住】没有正文，拿记住的 ${parsed.remembered.length} 条当摘要`);
           text = parsed.remembered.map((r) => `- ${r.split("\n")[1]}`).join("\n");
         }
-        if (text || attempt >= 1) { remembered.push(...parsed.remembered); break; }
+        // 记下这段对话的编号范围当出处（整理时据此回原文核对）
+        if (text || attempt >= 1) { const ids = chunk.map((l) => l.match(/^\[#m(\d+)\]/)?.[1]).filter(Boolean); remembered.push(...parsed.remembered.map((r) => `${r}\n${ids.length ? `m${ids[0]}-m${ids.at(-1)}` : ""}`)); break; }
         console.log(`[agent] ⚠️  ${agent.id} 摘要第 ${i + 1}/${chunks.length} 段为空（${res.stopReason}），再要一次`);
         }
         if (!text) throw new Error("摘要为空（两次都没写出正文）");
@@ -204,12 +205,12 @@ export class Compactor {
     store.compact(key, old.at(-1)!.id, summary);
     const wrote: { target: string; text: string }[] = [];
     for (const r of remembered.slice(0, 20)) {
-      const [t, text] = r.split("\n");
+      const [t, text, ref = ""] = r.split("\n");
       const target = t === "主人" ? "user" : t === "长期" ? "long" : "daily";
       wrote.push({ target, text });
       // 后台会话（heartbeat / 定时任务 / 待办）压缩时记下的「今天：」带上标记，聊天时不进系统提示
       const tag = key.endsWith(":heartbeat") ? "heartbeat" : key.includes(":cron:") ? "定时任务" : key.includes(":task:") ? "待办" : "";
-      try { this.rt.remember?.(agent, target, text, tag); } catch (e: any) { console.log(`[agent] ⚠️  ${agent.id} 记忆写入失败: ${e.message}`); }
+      try { this.rt.remember?.(agent, target, text, tag, ref ? { ref, how: "压缩时从对话里挑出来的" } : undefined); } catch (e: any) { console.log(`[agent] ⚠️  ${agent.id} 记忆写入失败: ${e.message}`); }
     }
     console.log(`[agent] 🗜️  ${agent.id} ${key} 压缩 ${old.length} 条（${chunks.length} 段${failed ? `，${failed} 段没总结成` : ""}）→ 摘要 ${Array.from(summary).length} 字${remembered.length ? `，记下 ${remembered.length} 条` : ""}`);
     // 摘要里带了几处出处编号（#m123）：没带的话她以后只能靠关键词搜原文（运行状况里看得到比例）

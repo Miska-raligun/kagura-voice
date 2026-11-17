@@ -41,7 +41,7 @@ export class Memories {
   /** 只允许人设文件（MEMORY.md、USER.md……）和 memory/ 下的 .md：memory_get 不是通用读文件工具 */
   static memoryPath(agent: AgentInfo, rel: string) {
     const norm = rel.replace(/\\/g, "/").replace(/^\.\//, "");
-    if (!(SOUL_FILES as readonly string[]).includes(norm) && !/^memory\/[^/]+\.md$/.test(norm)) throw new Error("只能读人设文件（MEMORY.md、USER.md 等）或 memory/ 下的笔记");
+    if (!(SOUL_FILES as readonly string[]).includes(norm) && !/^(memory|topics)\/[^/]+\.md$/.test(norm)) throw new Error("只能读人设文件（MEMORY.md、USER.md 等）、memory/ 下的笔记或 topics/ 下的主题页");
     return resolveInside(agent.workspace, norm);
   }
 
@@ -50,7 +50,7 @@ export class Memories {
     return (scope: RunScope, agent: AgentInfo): AgentTool<any>[] => !scope.trusted ? [] : [
       {
         name: "memory_search", label: "搜索记忆",
-        description: "在你的长期记忆（MEMORY.md）和每日笔记里搜索。系统每轮会自动附上几条相关的，没附上的、拿不准的（以前的事、约定、主人的偏好）自己搜一下。",
+        description: "在你的长期记忆（MEMORY.md、topics/ 主题页）和每日笔记里搜索。系统每轮会自动附上几条相关的，没附上的、拿不准的（以前的事、约定、主人的偏好）自己搜一下。",
         parameters: Type.Object({ query: Type.String(), k: Type.Optional(Type.Number({ minimum: 1, maximum: 20 })) }),
         execute: async (_id, p: any) => {
           const hits = await this.of(agent.id).search(String(p.query), p.k ?? 6);
@@ -60,7 +60,7 @@ export class Memories {
       },
       {
         name: "memory_get", label: "读取记忆",
-        description: "读取记忆或人设文件（MEMORY.md、USER.md、SOUL.md 等，或 memory/YYYY-MM-DD.md），可指定起始行与行数。",
+        description: "读取记忆或人设文件（MEMORY.md、USER.md、SOUL.md 等，memory/YYYY-MM-DD.md，或 topics/<主题>.md），可指定起始行与行数。",
         parameters: Type.Object({ path: Type.String(), from: Type.Optional(Type.Number()), lines: Type.Optional(Type.Number()) }),
         execute: async (_id, p: any) => {
           try {
@@ -78,14 +78,19 @@ export class Memories {
       },
       {
         name: "memory_write", label: "写入记忆",
-        description: "记下一件事，一次一条、简洁。target 怎么选（唯一的判据：过几天再读到，它还成立吗？）："
-          + "daily → 今天的笔记：今天发生了什么、做了什么、查到了什么、heartbeat / 定时任务的记录——拿不准就用它；"
-          + "long → MEMORY.md：以后还成立的事实、约定、偏好、计划、项目的结论——聊到相关话题时系统会自动想起，所以别放流水（带时刻、「今天…」开头的会被改记进今天的笔记）；"
-          + "user → USER.md：**只放主人本人的稳定个人信息**（称呼、家人、生日、长期作息、口味与忌口、习惯和喜好），每次聊天都常驻，所以要少而精。",
-        parameters: Type.Object({ target: Type.Union([Type.Literal("daily"), Type.Literal("long"), Type.Literal("user")]), text: Type.String() }),
+        // 只讲记忆是干什么用的，不规定怎么用（2026-11，Anthropic「The components of agent memory」：给强模型加「只记失败」这类固定规则，记忆带来的提升反而掉了一截）。
+        // 写到哪、什么算流水、字数这些兜底留在代码里（write），不用她背
+        description: "记下以后用得上的事——记忆是留给以后的你的：主人说过的偏好和约定、试过管用 / 不管用的做法、查证过的结论、还没做完的事。"
+          + "随时查得到的（设备 / 打印机现在的状态、主人在不在家、天气）不用记。target：user = 关于主人本人的稳定信息（每次都带着，要少）；long = 其它以后还成立的；daily = 今天的经过。"
+          + "how 写一句怎么知道的（主人说的 / 查过 / 推测），以后整理时据此核对。",
+        parameters: Type.Object({ target: Type.Union([Type.Literal("daily"), Type.Literal("long"), Type.Literal("user")]), text: Type.String(),
+          how: Type.Optional(Type.String({ description: "怎么知道的：主人说的 / 查过 / 推测" })) }),
         execute: async (_id, p: any) => {
           if (scope.kind === "sub") return fail("子任务不能写记忆，把要记的事写进结果里交给发起方");
-          try { return ok(`已记到 ${this.of(agent.id).write(p.target, String(p.text), new Date(), BG_NOTE_TAGS[scope.purpose] ?? "")}`); }
+          // 出处：这一轮还没落盘，记下这个会话目前最后一条的编号——read_ref 读它会连带后面两条，正好是这一轮
+          let ref = "";
+          try { const last = this.rt.store(agent.id).lastId(scope.sessionKey); ref = last ? `m${last}` : `session:${scope.sessionKey}`; } catch { /* 没有就不带 */ }
+          try { return ok(`已记到 ${this.of(agent.id).write(p.target, String(p.text), new Date(), BG_NOTE_TAGS[scope.purpose] ?? "", { ref, how: String(p.how ?? "") })}`); }
           catch (e: any) { return fail(e.message); }
         },
       },

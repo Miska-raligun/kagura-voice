@@ -11,6 +11,7 @@ import type { AgentInfo } from "./registry.ts";
 import { dailyNotePath } from "./soul.ts";
 import { strftime } from "../util/time.ts";
 import { isShared, personaText, sharedPath } from "./persona.ts";
+import { stripProv, provTag, pinnedOf, TOPICS_DIR, type Prov } from "./memfmt.ts";
 
 export interface Embedder {
   embed(texts: string[]): Promise<Float32Array[]>;
@@ -168,6 +169,8 @@ export function looksLikeLog(t: string): boolean {
 export const USER_ITEM_MAX = 80;
 export const USER_AUTO_MAX = 1500;
 
+export * from "./memfmt.ts";
+
 export interface MemoryHit { path: string; start: number; end: number; text: string; score: number; via: string; terms?: string[]; /** 向量相似度（原始余弦）和它比这次查询的平均水平高几个标准差 */ vec?: number; vecZ?: number }
 /** 一条记忆在使用统计里的键：按内容算，改了字就是新的一条 */
 const recallKey = (text: string) => createHash("sha1").update(text.trim()).digest("hex").slice(0, 16);
@@ -194,6 +197,8 @@ export class MemoryIndex {
   files(): string[] {
     const ws = this.agent.workspace;
     const out = fs.existsSync(path.join(ws, "MEMORY.md")) ? ["MEMORY.md"] : [];
+    const tdir = path.join(ws, TOPICS_DIR);
+    if (fs.existsSync(tdir)) for (const f of fs.readdirSync(tdir).sort()) if (f.endsWith(".md")) out.push(`${TOPICS_DIR}/${f}`);
     const dir = path.join(ws, "memory");
     if (fs.existsSync(dir)) {
       for (const f of fs.readdirSync(dir).sort()) if (f.endsWith(".md")) out.push(`memory/${f}`);
@@ -216,7 +221,7 @@ export class MemoryIndex {
       const fts = this.db.prepare("INSERT INTO mem_fts(body, chunk_id) VALUES (?, ?)");
       for (const c of chunkMarkdown(fs.readFileSync(path.join(ws, rel), "utf8"))) {
         const r = ins.run(rel, c.start, c.end, c.text);
-        fts.run(segment(c.text.toLowerCase()), Number(r.lastInsertRowid));
+        fts.run(segment(stripProv(c.text).toLowerCase()), Number(r.lastInsertRowid));
       }
       this.db.prepare("INSERT OR REPLACE INTO mem_files(path, mtime, size) VALUES (?, ?, ?)").run(rel, st.mtimeMs, st.size);
       changed++;
@@ -226,7 +231,7 @@ export class MemoryIndex {
       const todo = this.db.prepare("SELECT id, text FROM mem_chunks WHERE embedding IS NULL LIMIT 256").all() as any[];
       if (todo.length) {
         try {
-          const vecs = await this.embedder.embed(todo.map((t) => t.text));
+          const vecs = await this.embedder.embed(todo.map((t) => stripProv(t.text) || t.text));
           const up = this.db.prepare("UPDATE mem_chunks SET embedding = ? WHERE id = ?");
           todo.forEach((t, i) => up.run(Buffer.from(vecs[i].buffer), t.id));
         } catch (e: any) { console.log(`[memory] ⚠️  ${this.agent.id} 向量计算失败（先只用关键词）: ${e.message}`); }
@@ -309,7 +314,7 @@ export class MemoryIndex {
    * 模型分不清是哪天的，容易当成现在的情况；旧笔记要查让 agent 自己 memory_search（结果带文件名 = 日期）。
    */
   async recall(query: string, o: { k?: number; maxChars?: number; paths?: string[]; context?: string } = {}): Promise<MemoryHit[]> {
-    const paths = o.paths ?? ["MEMORY.md"];
+    const paths = o.paths ?? this.recallPaths();
     const strip = (t: string) => t.replace(/^\[[^\]]*\]\s*/, "").trim();
     const q = strip(query);
     const own = recallTerms(q);
@@ -327,10 +332,14 @@ export class MemoryIndex {
     const terms = [...new Set([...own, ...(ctx ? recallTerms(ctx) : [])])]
       .filter((t) => { const n = (dfStmt.get(...paths, t) as any).n; df.set(t, n); return n > 0 && n <= Math.max(3, total * 0.15); });
     const stat = this.db.prepare("SELECT recalled, used FROM mem_recall WHERE key = ?");
+    // 「常用」那节每轮都在系统提示里，别再附一遍
+    const pinned = pinnedOf(this.readMem());
     const out: MemoryHit[] = [];
     let size = 0;
     for (const h of hits0) {
-      const body = h.text.toLowerCase();
+      const body = stripProv(h.text).toLowerCase();
+      if (!body || (pinned && pinned.includes(stripProv(h.text)))) continue;
+      if (/^#{1,6}\s/.test(body) && !body.includes("\n")) continue;          // 只是个标题
       // 「打印」「打印机」这种一个包着另一个的只算一个
       const hit = terms.filter((t) => body.includes(t)).filter((t, _i, a) => !a.some((u) => u !== t && u.includes(t)));
       const strongVec = h.vec !== undefined && (h.vecZ ? h.vecZ >= 2.5 && h.vec >= 0.3 : h.vec >= 0.5);
@@ -351,6 +360,24 @@ export class MemoryIndex {
     return out;
   }
 
+  /** 自动回忆检索哪些文件：MEMORY.md + 主题页 */
+  recallPaths(): string[] { return this.files().filter((f) => f === "MEMORY.md" || f.startsWith(`${TOPICS_DIR}/`)); }
+  private readMem(): string { try { return fs.readFileSync(path.join(this.agent.workspace, "MEMORY.md"), "utf8"); } catch { return ""; } }
+
+  /**
+   * 使用统计按条目原文（去掉出处）对到 MEMORY.md / 主题页的每一条上：整理时据此挑「常用」、挑先核对哪些。
+   * 返回 原文 → { recalled, used }
+   */
+  usageByText(): Map<string, { recalled: number; used: number }> {
+    const rows = new Map((this.db.prepare("SELECT key, recalled, used FROM mem_recall").all() as any[]).map((r) => [r.key, r]));
+    const out = new Map<string, { recalled: number; used: number }>();
+    for (const c of this.db.prepare(`SELECT text FROM mem_chunks WHERE path = 'MEMORY.md' OR path LIKE '${TOPICS_DIR}/%'`).all() as any[]) {
+      const r = rows.get(recallKey(c.text));
+      if (r) out.set(stripProv(c.text).replace(/^[-*•]\s+/, ""), { recalled: r.recalled, used: r.used });
+    }
+    return out;
+  }
+
   /** 这几条记忆被自动附上了一次 */
   noteRecalled(texts: string[]) {
     const up = this.db.prepare("INSERT INTO mem_recall(key, recalled, used, last) VALUES (?, 1, 0, ?) ON CONFLICT(key) DO UPDATE SET recalled = recalled + 1, last = excluded.last");
@@ -367,7 +394,7 @@ export class MemoryIndex {
     const up = this.db.prepare("UPDATE mem_recall SET used = used + 1 WHERE key = ?");
     let n = 0;
     for (const t of texts) {
-      const own = recallTerms(t).filter((w) => !asked.has(w) && said.includes(w));
+      const own = recallTerms(stripProv(t)).filter((w) => !asked.has(w) && said.includes(w));
       if (own.length) { up.run(recallKey(t)); n++; }
     }
     return n;
@@ -376,7 +403,7 @@ export class MemoryIndex {
   /** 自动回忆的使用情况（评测页显示）：附上过几条、多少条用上过、哪些老附却没用 */
   recallStats() {
     const rows = this.db.prepare("SELECT key, recalled, used, last FROM mem_recall ORDER BY recalled DESC").all() as any[];
-    const text = new Map((this.db.prepare("SELECT text FROM mem_chunks WHERE path = 'MEMORY.md'").all() as any[]).map((r) => [recallKey(r.text), r.text as string]));
+    const text = new Map((this.db.prepare(`SELECT text FROM mem_chunks WHERE path = 'MEMORY.md' OR path LIKE '${TOPICS_DIR}/%'`).all() as any[]).map((r) => [recallKey(r.text), stripProv(r.text)]));
     const live = rows.filter((r) => text.has(r.key));
     return {
       items: live.length, recalled: live.reduce((n, r) => n + r.recalled, 0), used: live.reduce((n, r) => n + r.used, 0),
@@ -389,10 +416,10 @@ export class MemoryIndex {
    * 追加一条记忆。target = daily（今天的笔记）| long（MEMORY.md）| user（USER.md 末尾的「自动记录」一节：关于主人本人的稳定信息，
    * 每轮常驻）。自动记录有上限 USER_AUTO_MAX，满了改记进 MEMORY.md 并提示去整理——不碰主人手写的部分。
    */
-  write(target: string, text: string, now = new Date(), tag = ""): string {
+  write(target: string, text: string, now = new Date(), tag = "", prov: Prov = {}): string {
     const ws = this.agent.workspace;
-    // 多行压成一行（清单一项一块）用「；」接，别挤成一串；开头自带的「- 」去掉（不然写出来是「- - …」）
-    const t = text.trim().split(/\n+/).map((l) => l.trim().replace(/^([-*•]\s+)+/, "")).filter(Boolean).join("；");
+    // 多行压成一行（清单一项一块）用「；」接，别挤成一串；开头自带的「- 」去掉（不然写出来是「- - …」）；她自己写的出处注释去掉，由系统加
+    const t = stripProv(text).trim().split(/\n+/).map((l) => l.trim().replace(/^([-*•]\s+)+/, "")).filter(Boolean).join("；");
     if (!t) throw new Error("内容为空");
     // 长期记忆只放以后还成立的事：带时刻 / 日期开头、「今天…」「刚才…」这种当天的流水，改记进今天的笔记（LRN 2026-11-01）
     if (target === "long" && looksLikeLog(t)) {
@@ -403,7 +430,7 @@ export class MemoryIndex {
     if (target === "user") {
       // 关于主人的一条稳定信息是一句短话；长的多半是事情经过 / 进展，改记长期记忆（USER.md 每轮常驻，要少而精）
       // 改记别处时把原因说清楚（LRN 2026-11-07，症状「她说 memory_write 说要写 USER.md、结果落到了 MEMORY.md，工具说一套做一套」：以前只回「已记到 MEMORY.md」）
-      if (Array.from(t).length > USER_ITEM_MAX) return `${this.write("long", t, now, tag)}（没记进 USER.md：超过 ${USER_ITEM_MAX} 字，不像一句关于主人的稳定信息，记进了长期记忆）`;
+      if (Array.from(t).length > USER_ITEM_MAX) return `${this.write("long", t, now, tag, prov)}（没记进 USER.md：超过 ${USER_ITEM_MAX} 字，不像一句关于主人的稳定信息，记进了长期记忆）`;
       // 有共享人设就记进共享的 USER.md：谁记的全家 agent 都知道
       const p = sharedPath("USER.md") || path.join(ws, "USER.md");
       const cur = fs.existsSync(p) ? fs.readFileSync(p, "utf8") : "";
@@ -412,7 +439,7 @@ export class MemoryIndex {
       if (auto.includes(t) || personaText(ws, "USER.md").includes(t)) return "USER.md";
       if (Array.from(auto).length + Array.from(t).length > USER_AUTO_MAX) {
         console.log(`[memory] ⚠️  ${this.agent.id} USER.md 的「自动记录」满了（${USER_AUTO_MAX} 字），这条改记进 MEMORY.md——到管理界面整理一下 USER.md`);
-        return `${this.write("long", t, now, tag)}（没记进 USER.md：USER.md 的「自动记录」已满 ${USER_AUTO_MAX} 字，先记进了长期记忆；告诉主人到管理界面整理一下 USER.md，别自己去改文件）`;
+        return `${this.write("long", t, now, tag, prov)}（没记进 USER.md：USER.md 的「自动记录」已满 ${USER_AUTO_MAX} 字，先记进了长期记忆；告诉主人到管理界面整理一下 USER.md，别自己去改文件）`;
       }
       const base = at >= 0 ? cur.replace(/\n*$/, "\n") : cur.replace(/\n*$/, cur.trim() ? "\n\n" : "") + USER_AUTO_HEAD + "\n";
       fs.writeFileSync(p, base + `- ${t}\n`);
@@ -421,7 +448,9 @@ export class MemoryIndex {
     if (target === "long") {
       const p = path.join(ws, "MEMORY.md");
       const cur = fs.existsSync(p) ? fs.readFileSync(p, "utf8") : "# 长期记忆\n";
-      fs.writeFileSync(p, cur.replace(/\n*$/, "\n") + `- ${t}\n`);
+      // 已经有一模一样的就不重复记（出处不同也算同一条）
+      if (cur.split("\n").some((l) => stripProv(l).replace(/^[-*•]\s+/, "") === t)) return "MEMORY.md";
+      fs.writeFileSync(p, cur.replace(/\n*$/, "\n") + `- ${t}${provTag(prov.ref ?? "", prov.how ?? "")}\n`);
       return "MEMORY.md";
     }
     const p = dailyNotePath(ws, now);

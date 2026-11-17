@@ -227,6 +227,9 @@ export function registerAdmin(r: Router, ctx: Ctx, sys: AgentSystem) {
       return { path: f as string, size, shared: true, extra: Array.from(extra).length };
     });
     for (const f of fs.readdirSync(path.join(a.workspace, "memory")).sort().reverse()) if (f.endsWith(".md")) list.push({ path: `memory/${f}`, size: fs.statSync(path.join(a.workspace, "memory", f)).size });
+    // 主题页（整理时从 MEMORY.md 拆出来的）
+    const td = path.join(a.workspace, "topics");
+    if (fs.existsSync(td)) for (const f of fs.readdirSync(td).sort()) if (f.endsWith(".md")) list.push({ path: `topics/${f}`, size: fs.statSync(path.join(td, f)).size });
     return json(list);
   });
   get("/api/admin/agents/<id>/file", (req) => {

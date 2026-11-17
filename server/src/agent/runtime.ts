@@ -176,7 +176,7 @@ export class Runtime {
   /** 压缩前的记忆冲刷（memory 模块注入） */
   beforeCompact: ((agent: AgentInfo, sessionKey: string) => Promise<void>) | null = null;
   /** 压缩时顺手挑出来的要记住的事（长期 → MEMORY.md，今天 → 当天笔记）。以前压缩前要用整段上下文另跑一轮「记忆冲刷」，很费 */
-  remember: ((agent: AgentInfo, target: "long" | "daily" | "user", text: string, tag?: string) => void) | null = null;
+  remember: ((agent: AgentInfo, target: "long" | "daily" | "user", text: string, tag?: string, prov?: { ref?: string; how?: string }) => void) | null = null;
   /** 自动回忆（memory 模块注入）：按这句话检索长期记忆，返回要附上的几条（「路径：内容」）。skip = 已整篇在提示里的文件 */
   recall: ((agent: AgentInfo, text: string, context?: string) => Promise<{ line: string; why: string; raw?: string }[]>) | null = null;
   /** 回复出来以后告诉记忆模块：这一轮附上的那几条（raw）用上了没有，由它自己判断、记进使用统计 */

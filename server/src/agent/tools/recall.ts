@@ -17,7 +17,7 @@ import { health } from "../health.ts";
 
 /** 这次读的是哪种编号（运行状况里按种类统计） */
 export function refType(p: any): string {
-  if (String(p?.query ?? "").trim()) return "query";
+  if (String(p?.query ?? "").trim()) return p?.all_sessions === true ? "query_all" : "query";
   const ref = String(p?.ref ?? "").trim().replace(/^#/, "");
   if (ref.startsWith(TOOL_REF)) return "tool";
   if (/^m\d+\s*-/.test(ref)) return "range";
@@ -54,10 +54,12 @@ export function recallTools(rt: Runtime, agents: AgentRegistry) {
     return [{
       name: "read_ref", label: "按编号读原文",
       description: "按编号读原文：截短的工具结果（tool:…）、摘要里注的出处（#m123 或 m123，连带前后几条；m100-m130 读一段）、"
-        + "近况里的会话（session:…）、系统记下的事（task:… / job:… / a2a:…）。只记得大概、编号又找不到时，用 query 在这个会话的全部记录（含已压缩的）里按关键词找。",
+        + "近况里的会话（session:…）、系统记下的事（task:… / job:… / a2a:…）、记忆条目注释里的出处。只记得大概、编号又找不到时，用 query 在这个会话的全部记录（含已压缩的）里按关键词找；"
+        + "是在别的对话里说的（「上次在飞书说的」「前几天提过的」）、记忆里又没有，加 all_sessions=true 在你和主人的所有对话里找——对话原文比记忆更全、更准。",
       parameters: Type.Object({
         ref: Type.Optional(Type.String({ description: "编号，如 tool:call_1、m123、m100-m130、session:main:main、task:abc" })),
         query: Type.Optional(Type.String({ description: "关键词（空格分开，都要出现），在当前会话的全部记录里找" })),
+        all_sessions: Type.Optional(Type.Boolean({ description: "true = 在你和主人的所有对话里找（只有主人参与的对话，群聊 / 陌生人的不算）" })),
         offset: Type.Optional(Type.Number({ description: "长原文从第几个字接着读" })),
       }),
       // 每次都记一条（LRN 2026-11-10：以前看不出链式召回有没有在起作用，只能一个个会话翻）：日志一行 + 运行状况里按天统计读了几次、几次没找到
@@ -76,6 +78,13 @@ export function recallTools(rt: Runtime, agents: AgentRegistry) {
         const store = rt.store(agent.id);
         const offset = Math.max(0, Number(p.offset) || 0);
         const q = String(p.query ?? "").trim();
+        if (q && p.all_sessions === true) {
+          // 跨会话（2026-11，借鉴 Anthropic「The components of agent memory」：对话记录是记忆的地基，记忆没记下的，原文里多半有）
+          const words = q.split(/\s+/).filter(Boolean).slice(0, 5);
+          const hits = store.searchOwner(words, 10);
+          if (!hits.length) return ok(`你和主人的对话里没找到同时含「${words.join("」「")}」的话，换个说法、少几个词再试`, { found: false });
+          return ok(hits.reverse().map((h) => `${line(h, 300)}${h.compacted ? "（已压缩）" : ""}　〔session:${h.session}〕`).join("\n") + "\n要前后文就读 ref=m<编号>");
+        }
         if (q) {
           const words = q.split(/\s+/).filter(Boolean).slice(0, 5);
           const hits = store.search(scope.sessionKey, words);

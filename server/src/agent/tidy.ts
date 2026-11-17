@@ -12,15 +12,24 @@ import path from "node:path";
 import type { AgentInfo, AgentRegistry } from "./registry.ts";
 import type { ModelRegistry } from "./models.ts";
 import { stripThinkText } from "./models.ts";
-import { USER_AUTO_HEAD, USER_AUTO_MAX, USER_ITEM_MAX } from "./memory.ts";
+import { USER_AUTO_HEAD, USER_AUTO_MAX, USER_ITEM_MAX, STALE_RECALLS } from "./memory.ts";
+import { stripProv, provOf, pinnedOf, PINNED_HEAD, PINNED_MAX, TOPICS_DIR, topicName } from "./memfmt.ts";
 import { ownExtra, sharedPath } from "./persona.ts";
 import { inActiveHours } from "./cron.ts";
 import { health } from "./health.ts";
 
 /** 整理后条目总字数至少是原来的这么多，否则当成模型删过头、不写 */
 export const MIN_KEEP = 0.4;
-/** MEMORY.md 超过这么多字就不整理（一次交给模型太多容易截断），报告让主人先看看 */
+/** MEMORY.md（连同主题页）超过这么多字就不整理（一次交给模型太多容易截断），报告让主人先看看 */
 export const TIDY_MAX_CHARS = 30_000;
+/** 整理后条目总字数最多是原来的这么多倍（补别称会多一点；再多就是在编，或者主题页把内容抄了两份） */
+export const MAX_GROW = 1.3;
+/** 一次最多拿多少条记忆去对照原文核对（每条带几段原文，太多会撑爆这次调用） */
+export const VERIFY_MAX = 20;
+/** 核对过的条目（按出处）多少天内不再核对 */
+export const VERIFY_DAYS = 30;
+/** MEMORY.md + 主题页超过这么多字，才考虑把同一件事的条目挪进主题页 */
+export const TOPIC_SPLIT_CHARS = 2500;
 export const ARCHIVE_FILE = "MEMORY.archive.md";
 /** 一起整理的守则类文件（SOUL / IDENTITY 是主人写的设定，不动） */
 export const DOC_FILES = ["AGENTS.md", "TOOLS.md", "HEARTBEAT.md"] as const;
@@ -76,6 +85,14 @@ export interface TidyResult {
   user?: { before: number; after: number };
   memory?: { before: number; after: number };
   removed?: { text: string; why: string }[];
+  /** 对照原文改过的条目 */
+  corrected?: { text: string; why: string }[];
+  /** 这次拿原文核对了几条 */
+  verified?: number;
+  /** 「常用」一节多少字 */
+  pinned?: number;
+  /** 这次新建 / 改过的主题页 */
+  topics?: string[];
   summary?: string;
   backups?: string[];
 }
@@ -92,37 +109,75 @@ function backup(file: string, stamp: string): string {
   return path.join(dir, path.basename(file));
 }
 
-const PROMPT = `你在帮一个 AI 助手整理它的长期记忆。给你两部分：
+const PROMPT = `你在帮一个 AI 助手整理它的长期记忆。给你几部分：
 A. USER.md 的「自动记录」：关于主人本人的稳定信息（称呼、家人、生日、作息、口味、习惯、喜好），每轮都会常驻在它的上下文里，所以要少而精。
-B. MEMORY.md：其它长期记忆（事实、约定、项目结论、计划、偏好），按需检索。
+B. MEMORY.md：其它长期记忆（事实、约定、项目结论、计划、偏好），按需检索。开头可能有「${PINNED_HEAD}」一节：这一节每轮都带着。
+T. 主题页（topics/ 下，可能没有）：某件事的条目多了，从 B 挪出去单独一页，B 里留一行索引。
+C. 出处原文（可能没有）：部分条目当初是从哪段对话里记下的，按条目编号给出原文节选。
+U. 使用情况（可能没有）：哪些条目经常被用上、哪些老被想起却从来没用上。
 
 请整理：
 1. 合并重复、意思相同的条目，保留信息更全、更新的说法；前后矛盾的以更新的为准（看不出先后就都留着）。
-2. 删掉已经过时的：已经过去的一次性安排、「明天 / 下周」之类已经过期的、某天发生了什么的流水账（带时刻、日期的记录）、明显的临时状态。今天是 {TODAY}。
+2. 删掉已经过时的：已经过去的一次性安排、「明天 / 下周」之类已经过期的、某天发生了什么的流水账（带时刻、日期的记录）、明显的临时状态。
+   随时能查到的状态（设备 / 打印机现在怎样、主人在不在家、天气、音量）也删掉——记下来只会过时。今天是 {TODAY}。
 3. 关于主人本人的稳定信息放进 A，其它放进 B；A 每条一句短话（不超过 ${USER_ITEM_MAX} 字），A 总共不超过 ${Math.floor(USER_AUTO_MAX * 0.8)} 字。
-4. 拿不准的就留着。别编造、别改写意思，只做合并、删除、挪动和必要的精简措辞。
+4. 拿不准的就留着。别编造、别改写意思，只做合并、删除、挪动、按原文更正和必要的精简措辞。
 5. MEMORY.md 原有的标题层次尽量保留。
 6. B 是靠主人说话时的用词检索出来的：主人以后提起这件事时多半会换个说法（记的是「妈妈」，问的是「我母亲」「老妈」；记的是「P2S」，问的是「打印机」）。
-   这种条目在句末加一个「〔又：…〕」，写 1~4 个主人可能用的别称 / 同义词，用顿号隔开；原文里已经有的词不用重复，想不出就不加。已有的「〔又：…〕」保留、可以补充，别动条目本身的意思。只给 B 加，A 不加。
+   这种条目在正文末尾（出处注释之前）加一个「〔又：…〕」，写 1~4 个主人可能用的别称 / 同义词，用顿号隔开；原文里已经有的词不用重复，想不出就不加。已有的「〔又：…〕」保留、可以补充，别动条目本身的意思。只给 B 和 T 加，A 不加。
+7. 条目末尾的 <!-- 出处 … --> 是它从哪段对话来的，原样保留；两条合并时把两个出处的编号都留下（<!-- 出处 m12、m80-m95；… -->）。A 里的条目不带出处。
+8. 对照 C 核对：条目和原文对不上（记错了数字 / 日期 / 名字、把主人的话理解反了、主人后来改口了）就照原文改，写进 corrected；
+   原文显示这条只是它自己的推测、主人没确认过，就在出处注释的分号后写「推测」。原文看不出问题就不动。没给原文的条目不用核对。
+9. 按 U 调「${PINNED_HEAD}」：经常被用上、又不是关于主人本人的（那种进 A），挪进 B 开头的「${PINNED_HEAD}」一节（最多 8 条、${PINNED_MAX} 字以内）；
+   「${PINNED_HEAD}」里已经很久用不上的挪回下面。老被想起却从来没用上的，看看是不是过时了，过时就删，没过时就留着。
+10. 只有 B 加 T 很长（超过 ${TOPIC_SPLIT_CHARS} 字）时才考虑主题页：同一件事（一个人、一台设备、一个项目）有 5 条以上，就挪进一个主题页，B 里那几条换成一行索引「- <主题>：<一句话概括>〔又：…〕 → topics/<主题>.md」。
+   主题页是挪过去，不是抄一份：条目原样（带出处）挪过去，别展开、别加原来没有的内容。已有的主题页同样按上面几条整理；没改的主题页可以不输出。
 
 只输出一个 JSON，不要别的文字：
-{"user": ["A 的每一条"], "memory_md": "整理后 MEMORY.md 的完整内容（Markdown，条目用「- 」开头）", "removed": [{"text": "删掉的原文", "why": "为什么删（过时 / 重复 / 流水）"}], "summary": "一句话说做了什么"}
-没什么要改的就原样输出，removed 留空。`;
+{"user": ["A 的每一条"], "memory_md": "整理后 MEMORY.md 的完整内容（Markdown，条目用「- 」开头）", "topics": {"主题名": "这个主题页整理后的完整内容（# 主题名 开头，条目用「- 」开头）"},
+ "corrected": [{"text": "更正后的条目", "why": "原文怎么说的"}], "removed": [{"text": "删掉的原文", "why": "为什么删（过时 / 重复 / 流水 / 随时查得到）"}], "summary": "一句话说做了什么"}
+没什么要改的就原样输出，topics / corrected / removed 留空。`;
 
-export function parseTidy(raw: string): { user: string[]; memory_md: string; removed: { text: string; why: string }[]; summary: string } | null {
+export interface TidyOut {
+  user: string[]; memory_md: string; topics: Record<string, string>;
+  corrected: { text: string; why: string }[]; removed: { text: string; why: string }[]; summary: string;
+}
+export function parseTidy(raw: string): TidyOut | null {
   const t = stripThinkText(raw).trim();
   const a = t.indexOf("{"), b = t.lastIndexOf("}");
   if (a < 0 || b <= a) return null;
   try {
     const o = JSON.parse(t.slice(a, b + 1));
     if (!Array.isArray(o.user) || typeof o.memory_md !== "string") return null;
+    const pairs = (x: any) => (Array.isArray(x) ? x.map((r: any) => ({ text: String(r?.text ?? "").trim(), why: String(r?.why ?? "").trim() })).filter((r: any) => r.text) : []);
+    const topics: Record<string, string> = {};
+    if (o.topics && typeof o.topics === "object" && !Array.isArray(o.topics)) {
+      for (const [k, v] of Object.entries(o.topics)) { const n = topicName(String(k)); if (n && typeof v === "string" && v.trim()) topics[n] = v.trim(); }
+    }
     return {
-      user: o.user.map((x: any) => String(x).trim().replace(/^[-*•]\s+/, "")).filter(Boolean),
-      memory_md: o.memory_md,
-      removed: Array.isArray(o.removed) ? o.removed.map((r: any) => ({ text: String(r?.text ?? "").trim(), why: String(r?.why ?? "").trim() })).filter((r: any) => r.text) : [],
+      user: o.user.map((x: any) => stripProv(String(x)).trim().replace(/^[-*•]\s+/, "")).filter(Boolean),
+      memory_md: o.memory_md, topics, corrected: pairs(o.corrected), removed: pairs(o.removed),
       summary: String(o.summary ?? "").trim(),
     };
   } catch { return null; }
+}
+
+/** 「常用」一节超过上限：多出来的条目挪回这一节后面（别让每轮常驻的部分越长越大） */
+export function capPinned(md: string): string {
+  const lines = md.split("\n");
+  const at = lines.findIndex((l) => l.trim() === PINNED_HEAD);
+  if (at < 0) return md;
+  let end = at + 1;
+  while (end < lines.length && !/^#{1,6}\s/.test(lines[end])) end++;
+  const keep: string[] = [], over: string[] = [];
+  let used = 0;
+  for (const l of lines.slice(at + 1, end)) {
+    if (!/^[-*•]\s+/.test(l.trim())) { keep.push(l); continue; }
+    const n = Array.from(stripProv(l)).length;
+    if (used + n <= PINNED_MAX && keep.filter((x) => /^[-*•]\s+/.test(x.trim())).length < 8) { keep.push(l); used += n; } else over.push(l);
+  }
+  if (!over.length) return md;
+  return [...lines.slice(0, at + 1), ...keep, ...lines.slice(end), ...over].join("\n");
 }
 
 const DOC_PROMPT = `你在帮一个 AI 助手整理它的一份设定文件 {FILE}——{DESC}。
@@ -165,6 +220,10 @@ export interface TidyHost {
   report(agentId: string, text: string): Promise<void>;
   /** 系统每轮自动告诉她的用法守则（soul.toolGuide）：守则文件里和它重复的可以删 */
   guide?(agent: AgentInfo): string;
+  /** 按出处编号取对话原文节选（挑和这条记忆相关的几句）；取不到是空 */
+  sources?(agent: AgentInfo, refs: string[], text: string): string;
+  /** 自动回忆的使用统计：条目原文（去掉出处）→ 附上过几次、用上过几次 */
+  usage?(agent: AgentInfo): Map<string, { recalled: number; used: number }>;
 }
 
 const sha = (s: string) => createHash("sha1").update(s).digest("hex");
@@ -176,12 +235,14 @@ export class MemoryTidy {
   private state: Record<string, TidyResult> = {};
   /** 守则文件上次整理完的内容指纹（文件路径 → sha1）：没变过就不再看 */
   private docHash: Record<string, string> = {};
+  /** 核对过原文的出处（agent|出处编号 → 时刻）：VERIFY_DAYS 天内不再核对 */
+  private verified: Record<string, number> = {};
   private running = new Set<string>();
   private timer: ReturnType<typeof setInterval> | null = null;
 
   constructor(private reg: AgentRegistry, private models: ModelRegistry, private host: TidyHost, private stateFile: string | null = null) {
     try {
-      if (stateFile) { const j = JSON.parse(fs.readFileSync(stateFile, "utf8")); this.state = j.agents ?? {}; this.docHash = j.docs ?? {}; }
+      if (stateFile) { const j = JSON.parse(fs.readFileSync(stateFile, "utf8")); this.state = j.agents ?? {}; this.docHash = j.docs ?? {}; this.verified = j.verified ?? {}; }
     } catch { /* 还没有 */ }
   }
 
@@ -232,7 +293,7 @@ export class MemoryTidy {
       r.status = worst([...(r.memStatus ? [r.memStatus] : []), ...(r.docs ?? []).map((d) => d.status)]);
     } finally { this.running.delete(agentId); }
     this.state[agentId] = r;
-    if (this.stateFile) { try { fs.writeFileSync(this.stateFile, JSON.stringify({ agents: this.state, docs: this.docHash }, null, 1)); } catch { /* 存不下就算了 */ } }
+    if (this.stateFile) { try { fs.writeFileSync(this.stateFile, JSON.stringify({ agents: this.state, docs: this.docHash, verified: this.verified }, null, 1)); } catch { /* 存不下就算了 */ } }
     console.log(`[tidy] 🧹 ${agentId}（${trigger}）${describe(r).split("\n").join("｜").slice(0, 300)}`);
     health.record({ kind: "memory_tidy", ok: r.status === "done" || r.status === "nochange", agent: agentId,
       detail: { status: r.status, why: r.why, removed: (r.removed?.length ?? 0) + (r.docs ?? []).reduce((n, d) => n + (d.removed?.length ?? 0), 0), docs: (r.docs ?? []).map((d) => `${d.scope === "shared" ? "共享 " : ""}${d.file}:${d.status}`) } });
@@ -250,18 +311,54 @@ export class MemoryTidy {
   private async tidyMemory(agent: AgentInfo, trigger: string, now: number): Promise<Omit<TidyResult, "agent" | "at" | "trigger">> {
     const userFile = sharedPath("USER.md") || path.join(agent.workspace, "USER.md");
     const memFile = path.join(agent.workspace, "MEMORY.md");
-    const userText = fs.existsSync(userFile) ? fs.readFileSync(userFile, "utf8") : "";
-    const memText = fs.existsSync(memFile) ? fs.readFileSync(memFile, "utf8") : "";
+    const topicDir = path.join(agent.workspace, TOPICS_DIR);
+    const read = (f: string) => { try { return fs.readFileSync(f, "utf8"); } catch { return ""; } };
+    const userText = read(userFile);
+    const memText = read(memFile);
+    const topicFiles = (() => { try { return fs.readdirSync(topicDir).filter((f) => f.endsWith(".md")).sort(); } catch { return []; } })();
+    const topicText = new Map(topicFiles.map((f) => [f.slice(0, -3), read(path.join(topicDir, f))]));
     const at = userText.indexOf(USER_AUTO_HEAD);
     const hand = at >= 0 ? userText.slice(0, at) : userText;
     const autoItems = at >= 0 ? items(userText.slice(at + USER_AUTO_HEAD.length)) : [];
     const memItems = items(memText);
-    const before = chars(autoItems) + chars(memItems);
-    if (!autoItems.length && !memItems.length) return { status: "nochange", why: "没有要整理的记忆" };
-    if (Array.from(memText).length > TIDY_MAX_CHARS) return { status: "skipped", why: `MEMORY.md 太长（超过 ${TIDY_MAX_CHARS} 字），一次整理不了，先在管理界面手动删一些` };
+    const topicItems = [...topicText.values()].flatMap(items);
+    const plain = (a: string[]) => a.map(stripProv);
+    const before = chars(autoItems) + chars(plain(memItems)) + chars(plain(topicItems));
+    if (!autoItems.length && !memItems.length && !topicItems.length) return { status: "nochange", why: "没有要整理的记忆" };
+    const total = Array.from(memText).length + [...topicText.values()].reduce((n, t) => n + Array.from(t).length, 0);
+    if (total > TIDY_MAX_CHARS) return { status: "skipped", why: `MEMORY.md 和主题页太长（超过 ${TIDY_MAX_CHARS} 字），一次整理不了，先在管理界面手动删一些` };
 
-    const res = await this.ask(agent, PROMPT.replace("{TODAY}", dayOf(now)),
-      `A. USER.md 的「自动记录」：\n${autoItems.map((x) => `- ${x}`).join("\n") || "（空）"}\n\nB. MEMORY.md：\n${memText.trim() || "（空）"}`, now);
+    // C：拿出处去读原文核对。先核对常用的、再核对新的（越靠后越新），核对过的 VERIFY_DAYS 天内不再核对
+    const usage = (() => { try { return this.host.usage?.(agent) ?? new Map(); } catch { return new Map(); } })();
+    const use = (x: string) => usage.get(stripProv(x)) ?? { recalled: 0, used: 0 };
+    const vkey = (refs: string[]) => `${agent.id}|${refs.join("、")}`;
+    const all = [...memItems, ...topicItems];
+    const toCheck = all.map((x, i) => ({ x, i, refs: provOf(x).refs }))
+      .filter((c) => c.refs.length && now / 1000 - (this.verified[vkey(c.refs)] ?? 0) > VERIFY_DAYS * 86400)
+      .sort((p, q) => use(q.x).recalled - use(p.x).recalled || q.i - p.i).slice(0, VERIFY_MAX);
+    const checked: string[] = [];
+    const src: string[] = [];
+    for (const c of toCheck) {
+      let ex = "";
+      try { ex = this.host.sources?.(agent, c.refs, stripProv(c.x)) ?? ""; } catch { /* 取不到就不核对这条 */ }
+      if (!ex.trim()) continue;
+      src.push(`【${stripProv(c.x).slice(0, 80)}】\n${ex.trim()}`);
+      checked.push(vkey(c.refs));
+    }
+    // U：使用情况
+    const freq = all.filter((x) => use(x).used >= 2).sort((p, q) => use(q).used - use(p).used).slice(0, 12)
+      .map((x) => `- ${stripProv(x)}（想起 ${use(x).recalled} 次，用上 ${use(x).used} 次）`);
+    const idle = all.filter((x) => use(x).recalled >= STALE_RECALLS && !use(x).used).slice(0, 12)
+      .map((x) => `- ${stripProv(x)}（想起 ${use(x).recalled} 次，一次都没用上）`);
+
+    const input = [
+      `A. USER.md 的「自动记录」：\n${autoItems.map((x) => `- ${x}`).join("\n") || "（空）"}`,
+      `B. MEMORY.md：\n${memText.trim() || "（空）"}`,
+      topicText.size ? `T. 主题页：\n${[...topicText].map(([n, t]) => `=== topics/${n}.md ===\n${t.trim()}`).join("\n\n")}` : "",
+      src.length ? `C. 出处原文（对照核对这些条目）：\n${src.join("\n\n")}` : "",
+      freq.length || idle.length ? `U. 使用情况：\n${freq.length ? `经常用上：\n${freq.join("\n")}\n` : ""}${idle.length ? `老被想起、从没用上：\n${idle.join("\n")}` : ""}` : "",
+    ].filter(Boolean).join("\n\n");
+    const res = await this.ask(agent, PROMPT.replace("{TODAY}", dayOf(now)), input, now);
     if (res.cut) return { status: "failed", why: "模型输出被截断了（记忆太多），没写入" };
     const out = parseTidy(res.text);
     if (!out) return { status: "failed", why: "模型没按格式输出，没写入" };
@@ -272,23 +369,50 @@ export class MemoryTidy {
     while (user.length && chars(user) > USER_AUTO_MAX) overflow.push(user.pop()!);
     let memOut = out.memory_md.trim();
     if (overflow.length) memOut += "\n" + overflow.map((x) => `- ${x}`).join("\n");
+    memOut = capPinned(memOut);
+    // 主题页：输出里有的换成新的，没输出的原样留着
+    const topicsOut = new Map(topicText);
+    for (const [n, t] of Object.entries(out.topics)) topicsOut.set(n, t.startsWith("#") ? t : `# ${n}\n\n${t}`);
     const memNew = items(memOut);
-    const after = chars(user) + chars(memNew);
-    const result = { user: { before: chars(autoItems), after: chars(user) }, memory: { before: memItems.length, after: memNew.length } };
+    const topicNew = [...topicsOut.values()].flatMap(items);
+    const after = chars(user) + chars(plain(memNew)) + chars(plain(topicNew));
+    const result = { user: { before: chars(autoItems), after: chars(user) }, memory: { before: memItems.length + topicItems.length, after: memNew.length + topicNew.length } };
     if (before > 0 && after < before * MIN_KEEP) return { ...result, status: "skipped", removed: out.removed, why: `一次删得太多（整理后只剩原来的 ${Math.round((after / before) * 100)}%），没写入，先看看是不是删错了` };
-    const same = JSON.stringify(user) === JSON.stringify(autoItems) && memOut === memText.trim();
+    if (before > 0 && after > before * MAX_GROW + 200) return { ...result, status: "skipped", why: `整理后反而多了很多（原来的 ${Math.round((after / before) * 100)}%），多半是把内容抄了两份或者编了东西，没写入` };
+    const changedTopics = [...topicsOut].filter(([n, t]) => (topicText.get(n) ?? "").trim() !== t.trim());
+    const same = JSON.stringify(user) === JSON.stringify(autoItems) && memOut === memText.trim() && !changedTopics.length;
+    for (const k of checked) this.verified[k] = now / 1000;
     if (same) return { ...result, status: "nochange", summary: out.summary || "看过了，不用改" };
 
+    // 整理要一两分钟：这期间她可能又记了几条（memory_write 是直接追加的），或者主人在管理界面改过。
+    // 写回之前再读一遍：原来的条目都还在、只是多了新的 → 把新的接到整理结果后面；原来的被删 / 改了 → 不写，下次再整理（别把别人的改动盖掉）
+    const userNow = read(userFile), memNow = read(memFile);
+    const autoNow = (() => { const i = userNow.indexOf(USER_AUTO_HEAD); return i >= 0 ? items(userNow.slice(i + USER_AUTO_HEAD.length)) : []; })();
+    const memItemsNow = items(memNow);
+    const handNow = (() => { const i = userNow.indexOf(USER_AUTO_HEAD); return i >= 0 ? userNow.slice(0, i) : userNow; })();
+    const lost = (a: string[], b: string[]) => a.some((x) => !b.includes(x));
+    const topicsMoved = topicFiles.some((f) => read(path.join(topicDir, f)) !== topicText.get(f.slice(0, -3)));
+    if (lost(autoItems, autoNow) || lost(memItems, memItemsNow) || handNow !== hand || topicsMoved) {
+      return { ...result, status: "skipped", why: "整理期间记忆被改过（管理界面或者别的 agent），没写入，下次再整理" };
+    }
+    const addedUser = autoNow.filter((x) => !autoItems.includes(x));
+    const addedMem = memItemsNow.filter((x) => !memItems.includes(x));
+    const userFinal = [...user, ...addedUser.filter((x) => !user.includes(x))];
+    if (addedMem.length) memOut += "\n" + addedMem.map((x) => `- ${x}`).join("\n");
+
     const stamp = stampOf(new Date(now));
-    const backups = [backup(userFile, stamp), backup(memFile, stamp)].filter(Boolean);
-    fs.writeFileSync(userFile, hand.replace(/\n*$/, hand.trim() ? "\n\n" : "") + USER_AUTO_HEAD + "\n" + user.map((x) => `- ${x}`).join("\n") + (user.length ? "\n" : ""));
+    const backups = [backup(userFile, stamp), backup(memFile, stamp), ...changedTopics.map(([n]) => backup(path.join(topicDir, `${n}.md`), stamp))].filter(Boolean);
+    fs.writeFileSync(userFile, hand.replace(/\n*$/, hand.trim() ? "\n\n" : "") + USER_AUTO_HEAD + "\n" + userFinal.map((x) => `- ${x}`).join("\n") + (userFinal.length ? "\n" : ""));
     fs.writeFileSync(memFile, memOut + "\n");
+    if (changedTopics.length) fs.mkdirSync(topicDir, { recursive: true });
+    for (const [n, t] of changedTopics) fs.writeFileSync(path.join(topicDir, `${n}.md`), t.trim() + "\n");
     if (out.removed.length) {
       const arch = path.join(agent.workspace, ARCHIVE_FILE);
       const head = fs.existsSync(arch) ? "" : "# 整理时移出长期记忆的条目（不会注入、不会自动想起；需要时可以翻）\n";
       fs.appendFileSync(arch, `${head}\n## ${new Date(now).toLocaleString("zh-CN", { hour12: false })}（${trigger}）\n${out.removed.map((r) => `- ${r.text}${r.why ? `（${r.why}）` : ""}`).join("\n")}\n`);
     }
-    return { ...result, status: "done", removed: out.removed, summary: out.summary, backups };
+    return { ...result, status: "done", removed: out.removed, corrected: out.corrected, verified: checked.length,
+      pinned: Array.from(pinnedOf(memOut)).length, topics: changedTopics.map(([n]) => n), summary: out.summary, backups };
   }
 
   /**
@@ -359,6 +483,9 @@ export function describe(r: TidyResult): string {
   else if (r.memStatus === "nochange") lines.push(`整理了一遍记忆，没什么要改的${r.summary && r.summary !== "看过了，不用改" ? `（${r.summary}）` : ""}`);
   else if (r.memStatus === "done") {
     lines.push(`整理了一遍记忆：${r.summary || ""}`.trim(), `MEMORY.md ${r.memory?.before} → ${r.memory?.after} 条，USER.md 自动记录 ${r.user?.before} → ${r.user?.after} 字`);
+    if (r.corrected?.length) lines.push(`对照当时的对话改了 ${r.corrected.length} 条：`, ...listRemoved(r.corrected, 5));
+    else if (r.verified) lines.push(`对照当时的对话核对了 ${r.verified} 条，没发现记错的`);
+    if (r.topics?.length) lines.push(`整理出主题页：${r.topics.map((n) => `topics/${n}.md`).join("、")}`);
     if (r.removed?.length) lines.push(`移出了 ${r.removed.length} 条（放在 ${ARCHIVE_FILE}，没真删）：`, ...listRemoved(r.removed, 8));
   }
   const name = (d: DocResult) => `${d.scope === "shared" ? "共享的 " : ""}${d.file}`;

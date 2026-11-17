@@ -63,3 +63,16 @@
   附了 `STALE_RECALLS`（6）次一次都没用上的，之后要多中一个词（或向量也强）才附——只降权，不删。改了条目的字就是新的一条，计数从零开始。
   ⑥ **评测**（`recall_eval.json`，在 agent 目录、进导出的「记忆」项；`GET/PUT /api/admin/agents/<id>/recall-eval`、`POST …/run`）：用例 = 一句话（+ 前文）→ 应该附上的记忆原文片段（空 = 不该附）；
   跑出「该附的附上了多少 / 不该附的有多少没乱附」。候选（`mineCandidates`）从最近的会话里挖：主人说了一句，她这一轮自己调了 memory_search / memory_get——多半是自动回忆漏了。
+- **借鉴 Anthropic「The components of agent memory」（2026-11，`memfmt.ts`、`tidy.ts`、`tools/memory.ts`、`tools/recall.ts`）**：文章把记忆分成对话原文 → 当场记的笔记 → 离线整理出的主题页 → 每轮常驻的一小块，
+  离线整理（「做梦」）拿原文核对笔记。对应到我们：
+  ① **出处**：MEMORY.md / 主题页的条目末尾 `<!-- 出处 m120；主人说的 -->`（`provTag` / `provOf` / `stripProv`）。`memory_write` 带这个会话最后一条的编号（这一轮还没落盘，`read_ref` 读它会连带后两条）和 `how`；
+  压缩挑出的带那段对话的范围 `m12-m80`。USER.md、每日笔记不带。**任何拿条目文字去比、去检索、去显示的地方先 `stripProv`**（FTS、向量、自动回忆、使用统计、系统提示都是），不然编号会被当成词。
+  ② **整理时对照原文核对**：有出处的条目（先常用的、再新的，一次最多 `VERIFY_MAX`）经 `host.sources` 取原文节选（只挑沾边的几句，900 字内）交给模型，记错的照原文改（`corrected`）、只是推测的标「推测」；
+  核对过的出处 `VERIFY_DAYS`（30）天内不再核对（`memory_tidy.json` 的 `verified`）。
+  ③ **只讲目的**：`memory_write` 和守则里只说记忆是干什么用的（偏好、约定、试过的做法、查证过的结论、没做完的事；随时查得到的不记）。文章的数据：给强模型加「只记失败」这类固定规则，提升掉了 0.15~0.23。
+  写到哪、流水改记当天笔记、字数这些兜底留在 `memory.write` 里——**别再往说明里加「怎么记」的规则**。
+  ④ **常用**：MEMORY.md 开头 `## 常用` 那节每轮进系统提示（`pinnedOf`，上限 `PINNED_MAX` 字 / 8 条，`capPinned` 把多的挪回下面），自动回忆不再重复附它。由整理按使用统计（`usageByText`：附上了、也用上了）挪进挪出；关于主人本人的进 USER.md 不进这里。
+  ⑤ **主题页** `topics/<主题>.md`：MEMORY.md 加主题页超过 `TOPIC_SPLIT_CHARS` 时，同一件事 5 条以上由整理挪过去、MEMORY.md 留一行索引。自动回忆、memory_search、memory_get、导出都认。
+  文章提醒主题页会越长越大（比原文还大 1.77 倍）：整理后总字数超过原来 `MAX_GROW`（1.3 倍）+ 200 字就不写。
+  ⑥ **整理期间的并发**：整理要一两分钟，这期间 `memory_write` 可能追加、主人可能在管理界面改。写回前重读：原条目都在、只多了新的 → 接到结果后面；原条目被删 / 改、手写部分或主题页变了 → 不写，下次再整理。
+  ⑦ **跨会话搜原文**：`read_ref` 的 `all_sessions=true`（`store.searchOwner`）在主人参与的会话里搜（同近况的口径：`owner = 1`、主会话、设备、网页），**群聊 / 陌生人的对话不给翻**。

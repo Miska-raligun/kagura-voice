@@ -7,7 +7,8 @@ import { FileEditor } from "./agents.tsx";
 
 /** 长期记忆置顶；每日笔记按月分组，新的在前，只展开最近一个月 */
 function memGroups(mem: any[]) {
-  const notes = mem.filter((f) => f.path !== "MEMORY.md").sort((a, b) => (a.path < b.path ? 1 : -1));
+  const notes = mem.filter((f) => f.path.startsWith("memory/")).sort((a, b) => (a.path < b.path ? 1 : -1));
+  const topics = mem.filter((f) => f.path.startsWith("topics/"));
   const months = new Map<string, any[]>();
   for (const f of notes) {
     const m = /^memory\/(\d{4}-\d{2})/.exec(f.path)?.[1] ?? "其它";
@@ -15,6 +16,7 @@ function memGroups(mem: any[]) {
   }
   return [
     { id: "long", items: mem.filter((f) => f.path === "MEMORY.md") },
+    ...(topics.length ? [{ id: "topics", title: "主题页", items: topics }] : []),
     ...[...months].map(([m, items], i) => ({ id: m, title: m === "其它" ? "其它笔记" : `${m} 的笔记`, items, collapsed: i > 0 })),
   ];
 }
@@ -23,7 +25,7 @@ export function Memory({ arg }: { arg: string }) {
   const agent = useAgentId(arg);
   const file = arg.split("|")[1] || "MEMORY.md";
   const [files] = useLoad(() => (agent ? api<any[]>(`/agents/${enc(agent)}/files`) : Promise.resolve([])), [agent]);
-  const mem = (files ?? []).filter((f) => f.path === "MEMORY.md" || f.path.startsWith("memory/"));
+  const mem = (files ?? []).filter((f) => f.path === "MEMORY.md" || f.path.startsWith("memory/") || f.path.startsWith("topics/"));
   return (
     <>
       <AgentPicker page="memory" value={agent} />
@@ -32,7 +34,7 @@ export function Memory({ arg }: { arg: string }) {
           match={(f: any, q) => f.path.toLowerCase().includes(q)}
           render={(f: any) => (
             <li class={`${f.path === file ? "on" : ""} ${f.path === "MEMORY.md" ? "" : "inline"}`} onClick={() => go("memory", `${agent}|${f.path}`)}>
-              <b>{f.path === "MEMORY.md" ? "长期记忆" : f.path.slice(7, -3)}</b><small>{f.size} 字节</small>
+              <b>{f.path === "MEMORY.md" ? "长期记忆" : f.path.startsWith("topics/") ? f.path.slice(7, -3) : f.path.slice(7, -3)}</b><small>{f.size} 字节</small>
             </li>)} />
         <NewNote agent={agent} />
       </>}>

@@ -37,6 +37,8 @@ import { TaskQueue } from "./tasks.ts";
 import { taskTools } from "./tools/tasks.ts";
 import { setSharedDir } from "./persona.ts";
 import { health } from "./health.ts";
+import { recallTerms } from "./memory.ts";
+import { messageText } from "./messages.ts";
 
 export interface AgentSystem {
   registry: AgentRegistry;
@@ -88,7 +90,7 @@ export function createAgentSystem(cfg: Config, dirs: Dirs, fake: FakeLlm | null)
   const memories = new Memories(runtime, cfg.embedding && !fake ? new OpenAIEmbedder(cfg.embedding) : null);
   runtime.addTools(memories.tools());
   // 压缩时摘要模型顺手挑出要记住的事直接写进记忆。以前是压缩前用整段上下文另跑一轮「记忆冲刷」（一次就是几万 token）
-  runtime.remember = (agent, target, text, tag) => { memories.of(agent.id).write(target, text, new Date(), tag ?? ""); };
+  runtime.remember = (agent, target, text, tag, prov) => { memories.of(agent.id).write(target, text, new Date(), tag ?? "", prov ?? {}); };
   // 长期记忆不整篇放进提示：每轮按主人这句话检索，相关的几条附在消息上（见 Runtime.recallFor）
   runtime.recall = async (agent, text, context) => {
     const idx = memories.of(agent.id);
@@ -335,6 +337,29 @@ export function attachAgentSystem(sys: AgentSystem, ctx: Ctx) {
     busy: (id) => runtime.activeRuns().some((r) => r.agent === id),
     report: async (id, text) => { await report(id, "", text); },
     guide: (a) => toolGuide(runtime.allToolNames(a).map((t) => t.name)),
+    usage: (a) => sys.memories.of(a.id).usageByText(),
+    // 出处 → 原文节选：只挑和这条记忆沾边的几句（一段对话几十条，全给太长），每句截短
+    sources: (a, refs, text) => {
+      const store = runtime.store(a.id);
+      const terms = recallTerms(text);
+      const ROLE: Record<string, string> = { user: "主人", assistant: a.name };
+      const pick = (rows: { id: number; role: string; msg: any }[], n: number) => {
+        const talk = rows.filter((r) => r.role === "user" || r.role === "assistant").map((r) => ({ ...r, text: messageText(r.msg).replace(/^\[[^\]]*\]\s*/, "").trim() })).filter((r) => r.text);
+        const scored = talk.map((r) => ({ r, s: terms.filter((t) => r.text.toLowerCase().includes(t)).length }));
+        const best = scored.some((x) => x.s) ? scored.filter((x) => x.s).sort((p, q) => q.s - p.s || p.r.id - q.r.id).slice(0, n).sort((p, q) => p.r.id - q.r.id).map((x) => x.r) : talk.slice(0, n);
+        return best.map((r) => `[#m${r.id} ${ROLE[r.role] ?? r.role}] ${Array.from(r.text).slice(0, 200).join("")}`);
+      };
+      const out: string[] = [];
+      for (const ref of refs.slice(0, 3)) {
+        let m = ref.match(/^m(\d+)-m?(\d+)$/);
+        if (m) { const first = store.message(Number(m[1])); if (first) out.push(...pick(store.range(first.session, Number(m[1]), Number(m[2]), 200), 3)); continue; }
+        m = ref.match(/^m(\d+)$/);
+        // 记的时候这一轮还没落盘：编号是那时会话里最后一条，这一轮在它后面
+        if (m) { const r = store.message(Number(m[1])); if (r) out.push(...pick(store.range(r.session, r.id, r.id + 400, 6), 3)); continue; }
+        if (ref.startsWith("session:")) out.push(...pick(store.transcript(ref.slice(8), 20) as any, 3));
+      }
+      return out.join("\n").slice(0, 900);
+    },
   }, path.join(ctx.cfg.dataDir, "memory_tidy.json"));
   tidy.start();
   sys.tidy = tidy;
