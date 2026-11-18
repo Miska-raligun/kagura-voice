@@ -10,6 +10,10 @@
   **别用 spawn + -EncodedCommand**：实测子进程秒退 code=0、什么都不做；脚本里 `[ref]$created` 前必须先 `$created = $false`，否则 PowerShell 报「无法将 [ref] 应用于不存在的变量」。
   托盘用 `Global\\KaguraTrayMutex` 防重复；定时轮询 `/api/admin/meta`，服务端没了就自己消失。
   隐藏进程设 `KAGURA_NO_PROMPT=1`，preflight 和出错后的「按回车」都不再等待（否则没有窗口时会永久卡住）。
+- **管理界面保存文件要带版本（`routes/admin.ts` 的 `fileVersion` / `staleSave`，2026-11，主人「共享文件是否存在多 agent 的读写并发问题」）**：
+  人设 / 记忆文件的编辑框打开以后，她可能 `memory_write` 了、整理改过、别的 agent 改过共享那份；以前保存是整份覆盖，这些就丢了。
+  `GET …/file` 返回 `version`（内容 sha1 前 16 位），`PUT` 带回 `base`，对不上就 409（`stale: true`），页面提示「打开之后被改过」、给「重新加载」；
+  保存成功返回新的 `version`，页面接着用它（别存完再去 GET 一次——那中间又被改的话就被当成最新的了）。不带 `base` 的老页面照旧直接存。
 - **管理接口与设备信任（`routes/admin.ts` 的 `isLocal`、`ctx.deviceTrusted`，LRN 2026-10-23 安全检查）**：
   ① 管理接口光看「来源是 127.0.0.1」不够——你电脑上任何网页都能让浏览器往 127.0.0.1 发请求（跨站请求伪造），
   DNS 重绑定还能绕过同源。`isLocal` 同时要求 Host 是本机地址、跨站的 Origin / `Sec-Fetch-Site: cross-site` 一律拒绝

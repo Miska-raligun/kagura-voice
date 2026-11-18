@@ -3,6 +3,7 @@
 import { VERSION } from "../cli.ts";
 import fs from "node:fs";
 import os from "node:os";
+import { createHash } from "node:crypto";
 import path from "node:path";
 import { json, viaProxy, type Req, type Res, type Router } from "../http/router.ts";
 import type { Ctx } from "../ctx.ts";
@@ -75,6 +76,14 @@ export function registerAdmin(r: Router, ctx: Ctx, sys: AgentSystem) {
   const put = (p: string, h: H) => r.add("PUT", p, guard(h));
   const patch = (p: string, h: H) => r.add("PATCH", p, guard(h));
   const del = (p: string, h: H) => r.add("DELETE", p, guard(h));
+  // 管理界面编辑人设 / 记忆文件的保存（2026-11，多 agent 共享文件的并发）：页面打开以后，她可能记了新的（memory_write）、整理改过、别的 agent 改过；
+  // 直接保存会把这些盖掉。读的时候给个版本（内容 sha1），存的时候带回来（base），对不上就 409、让主人刷新再改。不带 base 的老页面照旧直接存
+  const fileVersion = (s: string) => createHash("sha1").update(s).digest("hex").slice(0, 16);
+  const staleSave = (p: string, base: unknown): Res | null => {
+    if (typeof base !== "string" || !base) return null;
+    const cur = fs.existsSync(p) ? fs.readFileSync(p, "utf8") : "";
+    return fileVersion(cur) === base ? null : json({ error: "这个文件在你打开之后被改过了（她记了新东西、整理过，或者别的 agent 改过），为了不把那些改动盖掉没有保存。先复制你改的内容，点「重新加载」看最新的再改", stale: true }, 409);
+  };
   const agentOr404 = (id: string) => {
     const a = registry.get(id);
     if (!a) throw Object.assign(new Error(`没有 agent ${id}`), { status: 404 });
@@ -241,15 +250,19 @@ export function registerAdmin(r: Router, ctx: Ctx, sys: AgentSystem) {
   });
   get("/api/admin/agents/<id>/file", (req) => {
     const p = filePath(req.params.id, req.query.get("path") ?? "");
-    return json({ path: req.query.get("path"), content: fs.existsSync(p) ? fs.readFileSync(p, "utf8") : "" });
+    const content = fs.existsSync(p) ? fs.readFileSync(p, "utf8") : "";
+    return json({ path: req.query.get("path"), content, version: fileVersion(content) });
   });
   put("/api/admin/agents/<id>/file", (req) => {
     const rel = req.query.get("path") ?? "";
     const p = filePath(req.params.id, rel);
-    const content = (req.json() ?? {}).content;
+    const body = req.json() ?? {};
+    const content = body.content;
     if (typeof content !== "string") return json({ error: "content 必须是字符串" }, 400);
+    const stale = staleSave(p, body.base);
+    if (stale) return stale;
     fs.writeFileSync(p, content);
-    return json({ status: "ok", path: rel, chars: Array.from(content).length });
+    return json({ status: "ok", path: rel, chars: Array.from(content).length, version: fileVersion(content) });
   });
 
   // ── 共享人设（USER / AGENTS / TOOLS 全家一份，agent 自己的同名文件只写补充）与恢复默认 ──
@@ -258,15 +271,19 @@ export function registerAdmin(r: Router, ctx: Ctx, sys: AgentSystem) {
   get("/api/admin/shared/file", (req) => {
     const rel = req.query.get("path") ?? "";
     const p = sharedFileOr400(rel);
-    return json({ path: rel, content: fs.existsSync(p) ? fs.readFileSync(p, "utf8") : "" });
+    const content = fs.existsSync(p) ? fs.readFileSync(p, "utf8") : "";
+    return json({ path: rel, content, version: fileVersion(content) });
   });
   put("/api/admin/shared/file", (req) => {
     const rel = req.query.get("path") ?? "";
     const p = sharedFileOr400(rel);
-    const content = (req.json() ?? {}).content;
+    const body = req.json() ?? {};
+    const content = body.content;
     if (typeof content !== "string") return json({ error: "content 必须是字符串" }, 400);
+    const stale = staleSave(p, body.base);
+    if (stale) return stale;
     fs.writeFileSync(p, content);
-    return json({ status: "ok", path: rel, chars: Array.from(content).length });
+    return json({ status: "ok", path: rel, chars: Array.from(content).length, version: fileVersion(content) });
   });
   // 记忆整理（agent/tidy.ts）：看上次结果、立即整理一次
   // running：正在整理的 agent → { stage 做到哪一步, since 这一步开始的时刻, started 整趟开始的时刻 }，页面据此显示进度

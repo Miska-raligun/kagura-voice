@@ -108,6 +108,13 @@ def test_admin_agent_crud_updates_roles(a):
     assert a.request("PATCH", "/api/admin/agents/helper", json={"name": "助手"}).json()["name"] == "助手"
     assert a.request("PUT", "/api/admin/agents/helper/file?path=SOUL.md", json={"content": "我是助手"}).status_code == 200
     assert a.get("/api/admin/agents/helper/file?path=SOUL.md").json()["content"] == "我是助手"
+    # 保存带打开时的版本：期间文件被改过（她记了新的、整理过、别的 agent 改过）就 409、不覆盖；不带版本的老页面照旧
+    v = a.get("/api/admin/agents/helper/file?path=SOUL.md").json()["version"]
+    r = a.request("PUT", "/api/admin/agents/helper/file?path=SOUL.md", json={"content": "我是助手。", "base": v})
+    assert r.status_code == 200 and r.json()["version"] != v
+    r = a.request("PUT", "/api/admin/agents/helper/file?path=SOUL.md", json={"content": "被盖掉了", "base": v})
+    assert r.status_code == 409 and r.json()["stale"] is True
+    assert a.get("/api/admin/agents/helper/file?path=SOUL.md").json()["content"] == "我是助手。"
     assert a.request("PUT", "/api/admin/agents/helper/file?path=../agent.json", json={"content": "x"}).status_code == 400
     a.fake_llm("你好，我是助手")
     assert a.post("/api/admin/chat", json={"agent": "helper", "text": "你是谁"}).json()["reply"] == "你好，我是助手"

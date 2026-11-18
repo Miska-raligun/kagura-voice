@@ -26,7 +26,10 @@
 - **文件工具（`server/src/agent/tools/files.ts`，LRN 2026-11-10，症状「她改文件全靠 exec 拼 cat / sed / grep，容易改错也难自查」）**：
   `read_file`（带行号、offset / limit 分段）/ `edit_file`（精确替换、必须唯一或 `replace_all`，返回改完前后几行）/ `write_file` / `search_files`（正则，跳过 node_modules、.git、二进制、>5MB）/ `list_files`（通配，新改的在前）。
   **改已有文件前必须在这个会话里 read_file 读过、且读完没被改过**（按 mtime + 大小记在内存里，重启就清空；她自己 edit / write 后会更新）。
-  权限同 exec：只给可信会话、`tools.exec.enabled` 关了这些也关，`LOCKED_NAMES` 里锁着永远不给群聊。全用异步 fs（别卡住给设备流式播音频的事件循环）。
+  权限同 exec：只给可信会话、`tools.exec.enabled` 关了这些也关，`LOCKED_NAMES` 里锁着永远不给群聊。全用异步 fs（别卡住给设备流式播音频的事件循环）——
+  **例外：`edit_file` / `write_file` 的「查过期 → 读 → 改 → 写」同步做完、中间不 await**（2026-11，主人「共享文件是否存在多 agent 读写并发问题」）：
+  共享的 USER / AGENTS / TOOLS 几个 agent 都会写，中间一让出，别的 agent 的 `memory_write`（同步追加）/ `edit_file` 插进来，就会被这次写回盖掉（丢更新）。
+  所有 agent 在同一个进程里，同步的这一小段就是天然的锁；文本文件读写几毫秒，不碍事。`memory.write` 本来就是同步的，别把它改成异步。
   **图片也走 `read_file`**（`IMAGE_TYPES`，LRN 2026-11-15，症状「让她看自己刚拍的照片，她去开 playwright 浏览器」）：工具结果里的图只在那一轮里，落盘后只剩路径，以前之后再看就没路可走；现在 png / jpg / webp / gif 直接以图片内容返回，模型没勾「图片」就报错说清楚（`fileTools(cfg, canSee)`）。
   守则（`toolGuide`）让她看 / 改文件用这些、别用 exec 拼命令，改完看回显确认。agent 自己设了工具白名单（不是 `*`）的要手动加上。
 - **扩展 / MCP（`server/src/agent/extensions.ts`、`mcp.ts`）**：扩展是 pi 格式（`export default (pi) => pi.registerTool(...)`），

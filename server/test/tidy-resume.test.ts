@@ -206,3 +206,25 @@ it("接着做时 USER.md 自动记录变过：停下期间新记的补上，主�
   expect(user).toContain("- 主人的生日是 3 月 6 日");
   expect(user).not.toContain("小明");
 });
+
+it("几个 agent 同时整理（都会动共享的守则）：排成一队一个个来，后一个看到的是前一个整理完的，不会被「整理期间被改过」挡掉", async () => {
+  const { setSharedDir } = await import("../src/agent/persona.ts");
+  const env = setup();
+  const shared = path.join(env.root, "shared_persona");
+  setSharedDir(shared);
+  try {
+    const rules = "# 守则\n\n## 说话\n" + Array.from({ length: 12 }, (_, i) => `- 第 ${i + 1} 条规矩：${"说话要注意的地方，".repeat(3)}`).join("\n") + "\n";
+    fs.writeFileSync(path.join(shared, "AGENTS.md"), rules);
+    env.fake.queue.push(json({ ops: [{ op: "delete", n: 1, why: "过时" }], summary: "删一条" }), json({ ops: [{ op: "delete", n: 1, why: "也过时" }], summary: "又删一条" }));
+    const p1 = env.t.run("main", "manual", Date.now(), "docs");
+    const p2 = env.t.run("mio", "manual", Date.now(), "docs");
+    expect(env.t.progress().mio.stage).toMatch(/^排队：等 main 整理完/);
+    const [r1, r2] = await Promise.all([p1, p2]);
+    expect(r1.docs!.find((d) => d.scope === "shared")!.status).toBe("done");
+    expect(r2.docs!.find((d) => d.scope === "shared")!.status).toBe("done");
+    const now = fs.readFileSync(path.join(shared, "AGENTS.md"), "utf8");
+    expect(now).not.toContain("第 1 条规矩");
+    expect(now).not.toContain("第 2 条规矩");                 // mio 看到的第 1 块已经是原来的第 2 条
+    expect(now).toContain("第 3 条规矩");
+  } finally { setSharedDir(""); }
+});

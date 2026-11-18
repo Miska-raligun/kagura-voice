@@ -152,14 +152,16 @@ export function fileTools(cfg: ToolsConfig, canSee: (agent: AgentInfo) => boolea
         }),
         async execute(_id, p: any) {
           const abs = where(p.path);
-          let st: fs.Stats;
-          try { st = await fsp.stat(abs); } catch { return fail(`没有这个文件：${show(abs)}（新建用 write_file）`); }
-          const not = mustHaveRead(abs, st);
-          if (not) return fail(not);
           let oldS = String(p.old ?? ""), newS = String(p.new ?? "");
           if (!oldS) return fail("old 不能是空的（要在文件末尾加内容，就把最后几行当 old、带上新内容当 new）");
           if (oldS === newS) return fail("old 和 new 一样，什么都没改");
-          let text = await fsp.readFile(abs, "utf8");
+          // 查过期 → 读 → 改 → 写 中间不 await（2026-11，主人「共享文件是否存在多 agent 读写并发问题」）：
+          // 共享的 USER / AGENTS / TOOLS 几个 agent 都会写，中间一让出，别的 agent 的 memory_write / edit_file 插进来，就会被这次写回盖掉
+          let st: fs.Stats;
+          try { st = fs.statSync(abs); } catch { return fail(`没有这个文件：${show(abs)}（新建用 write_file）`); }
+          const not = mustHaveRead(abs, st);
+          if (not) return fail(not);
+          let text = fs.readFileSync(abs, "utf8");
           // 文件是 Windows 换行（\r\n）、她写的是 \n：按文件的换行来
           if (!text.includes(oldS) && text.includes("\r\n") && oldS.includes("\n")) { oldS = oldS.replace(/\r?\n/g, "\r\n"); newS = newS.replace(/\r?\n/g, "\r\n"); }
           const count = text.split(oldS).length - 1;
@@ -170,8 +172,8 @@ export function fileTools(cfg: ToolsConfig, canSee: (agent: AgentInfo) => boolea
           if (count > 1 && !p.replace_all) return fail(`old 在 ${show(abs)} 里出现了 ${count} 次，多带几行上下文让它唯一，或者用 replace_all=true`);
           const at = text.indexOf(oldS);
           text = p.replace_all ? text.split(oldS).join(newS) : text.slice(0, at) + newS + text.slice(at + oldS.length);
-          await fsp.writeFile(abs, text);
-          remember(scope.sessionKey, abs, await fsp.stat(abs));
+          fs.writeFileSync(abs, text);
+          remember(scope.sessionKey, abs, fs.statSync(abs));
           // 改完那几行（前后各 3 行）给她看：顺手确认，不用再读一遍
           const lines = text.replace(/\r\n/g, "\n").split("\n");
           const first = text.slice(0, at).replace(/\r\n/g, "\n").split("\n").length;
@@ -187,13 +189,15 @@ export function fileTools(cfg: ToolsConfig, canSee: (agent: AgentInfo) => boolea
         parameters: Type.Object({ path: Type.String(), content: Type.String() }),
         async execute(_id, p: any) {
           const abs = where(p.path);
-          const st = await fsp.stat(abs).catch(() => null);
+          // 同 edit_file：查过期到写完中间不 await
+          let st: fs.Stats | null = null;
+          try { st = fs.statSync(abs); } catch { /* 新建 */ }
           if (st?.isDirectory()) return fail(`${show(abs)} 是目录`);
           if (st) { const not = mustHaveRead(abs, st); if (not) return fail(not); }
-          await fsp.mkdir(path.dirname(abs), { recursive: true });
+          fs.mkdirSync(path.dirname(abs), { recursive: true });
           const content = String(p.content ?? "");
-          await fsp.writeFile(abs, content);
-          remember(scope.sessionKey, abs, await fsp.stat(abs));
+          fs.writeFileSync(abs, content);
+          remember(scope.sessionKey, abs, fs.statSync(abs));
           console.log(`[files] ${agent.id} 📝 ${st ? "重写" : "新建"} ${show(abs)}`);
           return ok(`已${st ? "重写" : "新建"} ${show(abs)}（${content.split("\n").length} 行，${Buffer.byteLength(content)} 字节）`, { path: abs });
         },

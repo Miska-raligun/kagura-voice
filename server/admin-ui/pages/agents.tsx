@@ -133,7 +133,10 @@ export function FileEditor({ id, path, budget, budgets, onBudget, src, onSaved, 
   const [text, setText] = useState<string | null>(null);
   const [orig, setOrig] = useState("");
   const [ver, setVer] = useState(0);
-  useEffect(() => { setText(null); api(url).then((r) => { setText(r.content); setOrig(r.content); }); }, [url, ver]);
+  // base：打开时文件的版本，保存时带回去；这期间文件被改过（她记了新的、整理过）服务端就不覆盖（409）
+  const [base, setBase] = useState("");
+  const [stale, setStale] = useState(false);
+  useEffect(() => { setText(null); setStale(false); api(url).then((r) => { setText(r.content); setOrig(r.content); setBase(r.version ?? ""); }); }, [url, ver]);
   if (text === null) return <div class="muted">加载中…</div>;
   const n = chars(text.trim());
   return (
@@ -149,8 +152,15 @@ export function FileEditor({ id, path, budget, budgets, onBudget, src, onSaved, 
         }}>改上限</Btn>}
         {actions?.(() => setVer(ver + 1))}
         <span class="grow" />
-        {text !== orig && <span class="muted">未保存</span>}
-        <Btn kind="primary" disabled={text === orig} onClick={async () => { await api(url, { method: "PUT", body: { content: text } }); setOrig(text); toast("已保存，下一轮对话生效"); onSaved?.(); }}>保存</Btn>
+        {stale ? <span class="over">文件在你打开后被改过，没保存</span> : text !== orig && <span class="muted">未保存</span>}
+        {stale && <Btn small kind="ghost" onClick={() => setVer(ver + 1)}>重新加载</Btn>}
+        <Btn kind="primary" disabled={text === orig} onClick={async () => {
+          try {
+            const r = await api<any>(url, { method: "PUT", body: { content: text, base } });
+            // 存完换成新版本，接着改再存不会被当成过期
+            setOrig(text); setBase(r?.version ?? ""); setStale(false); toast("已保存，下一轮对话生效"); onSaved?.();
+          } catch (e: any) { if (/打开之后被改过/.test(String(e?.message ?? e))) setStale(true); toastErr(e); }
+        }}>保存</Btn>
       </div>
     </>
   );

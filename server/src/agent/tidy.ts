@@ -310,6 +310,14 @@ export class MemoryTidy {
   /** 没做完的整理：mem|<agent> / doc|<文件路径> → 进度 */
   private jobs: Record<string, TidyJob> = {};
   private running = new Set<string>();
+  /**
+   * 所有 agent 的整理排成一队、一次只做一个（2026-11，主人「共享文件是否存在多 agent 的读写并发问题」）：
+   * 共享的 USER.md / AGENTS.md / TOOLS.md 每个 agent 整理时都会动，进度（jobs）也按文件共用一份——两个 agent 同时整理，
+   * 会往同一份进度里各塞一遍操作、后写的被「整理期间被改过」挡掉白做。手动点的、她自己叫的、自动的都排这一个队
+   */
+  private queue: Promise<void> = Promise.resolve();
+  /** 队尾是谁（排队的显示「等 X 整理完」） */
+  private tail = "";
   private timer: ReturnType<typeof setInterval> | null = null;
 
   constructor(private reg: AgentRegistry, private models: ModelRegistry, private host: TidyHost, private stateFile: string | null = null) {
@@ -393,7 +401,14 @@ export class MemoryTidy {
     if (!agent) return { ...base, status: "failed", why: `没有 agent ${agentId}` };
     if (this.running.has(agentId)) return { ...base, status: "skipped", why: "正在整理中" };
     this.running.add(agentId);
-    this.prog.set(agentId, { stage: "开始", since: Date.now(), started: Date.now(), scope });
+    const ahead = this.tail && this.tail !== agentId && this.running.has(this.tail) ? this.tail : "";
+    this.prog.set(agentId, { stage: ahead ? `排队：等 ${ahead} 整理完` : "开始", since: Date.now(), started: Date.now(), scope });
+    this.tail = agentId;
+    const prev = this.queue;
+    let release!: () => void;
+    this.queue = new Promise<void>((res) => { release = res; });
+    try { await prev; } catch { /* 前一个怎么结束的不管 */ }
+    this.stage(agentId, "开始");
     // 主人手动点的：上次卡住的重新开始计数
     if (trigger !== "auto" && trigger !== "resume") for (const j of Object.values(this.jobs)) if (j.agent === agentId) j.fails = 0;
     // 放太久的没做完的整理作废（文件早变了，重新来）
@@ -408,7 +423,7 @@ export class MemoryTidy {
       }
       if (scope !== "memory") r.docs = await this.tidyDocs(agent, trigger, now);
       r.status = worst([...(r.memStatus ? [r.memStatus] : []), ...(r.docs ?? []).map((d) => d.status)]);
-    } finally { this.running.delete(agentId); this.prog.delete(agentId); }
+    } finally { this.running.delete(agentId); this.prog.delete(agentId); if (this.tail === agentId) this.tail = ""; release(); }
     this.state[agentId] = r;
     this.save();
     console.log(`[tidy] 🧹 ${agentId}（${trigger}）${describe(r).split("\n").join("｜").slice(0, 300)}`);
