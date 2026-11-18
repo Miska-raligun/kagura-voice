@@ -21,6 +21,7 @@ export const KIND_LABEL: Record<string, string> = {
   watchdog: "监工叫停（兜圈子）",
   im_merged: "连发消息合成一轮",
   memory_tidy: "记忆整理",
+  tidy_retry: "整理重试",
   recall: "翻原文没找到",
   unclean_exit: "上次没有正常退出",
 };

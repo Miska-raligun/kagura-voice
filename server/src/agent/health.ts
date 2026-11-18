@@ -20,6 +20,7 @@ export type HealthKind =
   | "watchdog"        // 监工判定在兜圈子，叫停（detail.why）
   | "recall"          // 链式召回：她按编号读原文 / 按关键词搜（ok = 找到了；detail.type = tool / msg / range / session / query / task…）
   | "memory_tidy"     // 记忆整理（detail.status = done / nochange / skipped / failed）
+  | "tidy_retry"      // 整理时一段没整理成（超时 / 截断 / 格式不对），切小 / 关思考重试（ok = 重试成了；detail.why）
   | "im_merged"       // 她忙的时候 IM 连发的几条合成一轮（detail.n）
   | "unclean_exit";   // 上次运行没有正常退出
 

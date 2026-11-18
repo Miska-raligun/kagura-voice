@@ -271,9 +271,11 @@ export function registerAdmin(r: Router, ctx: Ctx, sys: AgentSystem) {
   // 记忆整理（agent/tidy.ts）：看上次结果、立即整理一次
   // running：正在整理的 agent → { stage 做到哪一步, since 这一步开始的时刻, started 整趟开始的时刻 }，页面据此显示进度
   get("/api/admin/memory-tidy", async () => {
-    const { describe } = await import("../agent/tidy.ts");
+    const { describe, RESUME_MAX, RESUME_GAP_MS } = await import("../agent/tidy.ts");
     const last = Object.fromEntries(Object.entries(sys.tidy?.all() ?? {}).map(([k, r]) => [k, { ...r, text: describe(r) }]));
-    return json({ every_days: ctx.cfg.memoryTidy?.everyDays ?? 7, last, running: sys.tidy?.progress() ?? {} });
+    // pending：没做完的整理（进度存着，会自动接着做；fails 到上限就停下等主人再点）
+    const pending = Object.fromEntries(registry.list().map((a: any) => [a.id, sys.tidy?.pending(a.id) ?? []]).filter(([, v]) => (v as any[]).length));
+    return json({ every_days: ctx.cfg.memoryTidy?.everyDays ?? 7, last, running: sys.tidy?.progress() ?? {}, pending, resume_max: RESUME_MAX, resume_gap_min: Math.round(RESUME_GAP_MS / 60_000) });
   });
   post("/api/admin/agents/<id>/memory-tidy", async (req) => {
     const a = agentOr404(req.params.id);

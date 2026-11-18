@@ -200,21 +200,44 @@ export class ModelRegistry {
    * 默认会先想一大段，又慢又可能把输出额度用光、正文为空。服务商不认关思考的字段（报错里提到它）就去掉重试一次，之后不再发。
    * 返回的正文去掉了 <think>…</think>。
    */
-  async quick(model: Model<any>, ctx: Parameters<MutableModels["completeSimple"]>[1], opts: { signal?: AbortSignal; maxTokens?: number; think?: boolean } = {}) {
+  /**
+   * idleMs：按「多久没有任何输出」掐，而不是按总时长（2026-11，记忆整理「This operation was aborted」：推理型模型想得久，
+   * 一次调用固定 4~5 分钟的总时限常常不够，可它其实一直在出思考 token）。流式拿结果，每来一个事件就重新计时；
+   * 掐掉的结果 errorMessage 写明是多久没输出。总时长仍然由调用方的 signal 管
+   */
+  private async completeIdle(model: Model<any>, ctx: any, opts: any, idleMs?: number): Promise<any> {
+    if (!idleMs) return this.models.completeSimple(model, ctx, opts);
+    const ac = new AbortController();
+    const outer: AbortSignal | undefined = opts.signal;
+    const onAbort = () => ac.abort(outer?.reason);
+    if (outer?.aborted) ac.abort(outer.reason); else outer?.addEventListener("abort", onAbort, { once: true });
+    let idle = false;
+    const arm = () => setTimeout(() => { idle = true; ac.abort(); }, idleMs);
+    let timer = arm();
+    try {
+      const s = this.models.streamSimple(model, ctx, { ...opts, signal: ac.signal });
+      for await (const _ev of s as any) { clearTimeout(timer); timer = arm(); }
+      const res = await s.result();
+      if (idle && res.stopReason !== "stop" && res.stopReason !== "length") return { ...res, stopReason: "aborted", errorMessage: `模型 ${Math.round(idleMs / 1000)} 秒没有任何输出，掐掉了` };
+      return res;
+    } finally { clearTimeout(timer); outer?.removeEventListener("abort", onAbort); }
+  }
+
+  async quick(model: Model<any>, ctx: Parameters<MutableModels["completeSimple"]>[1], opts: { signal?: AbortSignal; maxTokens?: number; think?: boolean; idleMs?: number } = {}) {
     // think：按这个模型自己设的思考等级跑（朗读兜底：关了思考效果差的模型可以开着想）；没设 / 设成关的照旧关
     const level = opts.think ? this.thinkingOf(model) : "";
     if (level && level !== "off" && model.provider !== "fake") {
       const tp = thinkingParams(model.baseUrl ?? "", level, model.provider, model.id);
-      const res = await this.models.completeSimple(model, ctx, { signal: opts.signal, maxTokens: (opts.maxTokens ?? (model.maxTokens || DEFAULT_MAX_TOKENS)) + THINK_RESERVE[level], ...(tp ? { samplingParams: tp as any } : {}) });
+      const res = await this.completeIdle(model, ctx, { signal: opts.signal, maxTokens: (opts.maxTokens ?? (model.maxTokens || DEFAULT_MAX_TOKENS)) + THINK_RESERVE[level], ...(tp ? { samplingParams: tp as any } : {}) }, opts.idleMs);
       return { ...res, content: res.content.map((c: any) => (c.type === "text" ? { ...c, text: stripThinkText(c.text) } : c)) };
     }
     const extra = this.noThinkingParams(model);
-    const { think: _t, ...base } = opts;
-    let res = await this.models.completeSimple(model, ctx, { ...base, ...(extra ? { samplingParams: extra as any } : {}) });
+    const { think: _t, idleMs, ...base } = opts;
+    let res = await this.completeIdle(model, ctx, { ...base, ...(extra ? { samplingParams: extra as any } : {}) }, idleMs);
     if (extra && res.stopReason === "error" && !opts.signal?.aborted && /think|unrecogni[sz]ed|unknown|not support|extra|invalid param/i.test(res.errorMessage ?? "")) {
       this.noThinkRejected.add(model.provider);
       console.log(`[models] ${model.provider} 不认关思考的参数（${String(res.errorMessage).slice(0, 80)}），之后不再发`);
-      res = await this.models.completeSimple(model, ctx, base);
+      res = await this.completeIdle(model, ctx, base, idleMs);
     }
     return { ...res, content: res.content.map((c: any) => (c.type === "text" ? { ...c, text: stripThinkText(c.text) } : c)) };
   }

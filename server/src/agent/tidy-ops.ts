@@ -240,3 +240,168 @@ export function batches(parsed: { files: MemFile[] }, maxChars: number): Set<num
   push();
   return out;
 }
+
+// ───────────── 守则文件（AGENTS / TOOLS / HEARTBEAT）按编号改 ─────────────
+// 2026-11，主人「共享的 AGENTS.md 没整理成：模型输出被截断了」：守则文件以前也是整份重写再输出，跑了一年的文件几万字，输出必然超限。
+// 现在拆成「块」（清单一项连同它缩进的续行、一段话、一张表、一段代码），每块带编号，模型只说哪块删 / 并 / 改；标题、空行原样保留。
+
+/** 文件里的一段：raw = 标题 / 空行（原样留着），unit = 可以删改的一块 */
+export interface DocSeg { kind: "raw" | "unit"; text: string; n?: number; marker?: string }
+export interface DocParsed { segs: DocSeg[]; units: DocSeg[] }
+
+const HEAD_RE = /^#{1,6}\s/;
+const ITEM_RE = /^(\s*)([-*•+]|\d+[.)])\s+/;
+
+export function parseDocUnits(text: string): DocParsed {
+  const lines = text.replace(/\r\n/g, "\n").replace(/\n+$/, "").split("\n");
+  const segs: DocSeg[] = [];
+  const units: DocSeg[] = [];
+  const unit = (t: string, marker?: string) => { const s: DocSeg = { kind: "unit", text: t, n: units.length + 1, marker }; segs.push(s); units.push(s); };
+  let i = 0;
+  while (i < lines.length) {
+    const l = lines[i];
+    if (!l.trim() || HEAD_RE.test(l)) { segs.push({ kind: "raw", text: l }); i++; continue; }
+    if (/^\s*(```|~~~)/.test(l)) {
+      const fence = l.trim().slice(0, 3);
+      let j = i + 1;
+      while (j < lines.length && !lines[j].trim().startsWith(fence)) j++;
+      unit(lines.slice(i, Math.min(j + 1, lines.length)).join("\n"));
+      i = j + 1; continue;
+    }
+    if (/^\s*\|/.test(l)) {
+      let j = i;
+      while (j < lines.length && /^\s*\|/.test(lines[j])) j++;
+      unit(lines.slice(i, j).join("\n"));
+      i = j; continue;
+    }
+    const m = l.match(ITEM_RE);
+    if (m) {
+      // 清单一项：连同缩进比它深的续行 / 子项
+      const ind = m[1].length;
+      let j = i + 1;
+      while (j < lines.length && lines[j].trim() && !HEAD_RE.test(lines[j]) && (lines[j].match(/^\s*/)![0].length > ind) ) j++;
+      unit(lines.slice(i, j).join("\n"), m[0]);
+      i = j; continue;
+    }
+    // 一段话：到空行 / 标题 / 清单 / 代码 / 表格为止
+    let j = i + 1;
+    while (j < lines.length && lines[j].trim() && !HEAD_RE.test(lines[j]) && !ITEM_RE.test(lines[j]) && !/^\s*(```|~~~|\|)/.test(lines[j])) j++;
+    unit(lines.slice(i, j).join("\n"));
+    i = j;
+  }
+  return { segs, units };
+}
+
+/** 交给模型看：每块前面标 [编号]；only 给了就只标这几块，别的块不显示（标题照留，看得出在哪一节） */
+export function numberedDoc(p: DocParsed, only?: Set<number>): string {
+  const out: string[] = [];
+  for (const s of p.segs) {
+    if (s.kind === "raw") { if (HEAD_RE.test(s.text)) out.push(s.text); else if (!only) out.push(""); continue; }
+    if (only && !only.has(s.n!)) continue;
+    out.push(`[${s.n}] ${s.text.replace(/^\s+/, "")}`);
+  }
+  return out.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+export type DocOp =
+  | { op: "delete"; n: number; why?: string }
+  | { op: "merge"; n: number; into: number; text?: string; why?: string }
+  | { op: "edit"; n: number; text: string; why?: string };
+
+/** valid：这一段里能改的编号；into 可以指向整份文件里的任何一块（重复的常常不在同一节） */
+export function cleanDocOps(raw: unknown, valid: Set<number>, total: number): DocOp[] {
+  if (!Array.isArray(raw)) return [];
+  const out: DocOp[] = [];
+  for (const o of raw as any[]) {
+    const n = Number(o?.n);
+    if (!o || !valid.has(n)) continue;
+    const s = (k: string) => String(o[k] ?? "").trim();
+    if (o.op === "delete") out.push({ op: "delete", n, why: s("why") });
+    else if (o.op === "edit" && s("text")) out.push({ op: "edit", n, text: s("text"), why: s("why") });
+    else if (o.op === "merge") { const into = Number(o.into); if (into >= 1 && into <= total && into !== n) out.push({ op: "merge", n, into, text: s("text") || undefined, why: s("why") }); }
+  }
+  return out;
+}
+
+/** 新写法套回原来的清单符号和缩进（模型常把「- 」丢掉） */
+function withMarker(seg: DocSeg, text: string): string {
+  const t = text.trim();
+  if (!seg.marker) return t;
+  if (ITEM_RE.test(t)) return seg.marker.match(/^\s*/)![0] + t.replace(/^\s+/, "");
+  return seg.marker + t.replace(/^[-*•+]\s+/, "");
+}
+
+export function applyDocOps(p: DocParsed, ops: DocOp[]): { text: string; removed: { text: string; why: string }[]; changed: number } {
+  const st = new Map(p.units.map((u) => [u.n!, { text: u.text, gone: false }]));
+  const removed: { text: string; why: string }[] = [];
+  let changed = 0;
+  const show = (t: string) => t.replace(ITEM_RE, "").replace(/\s*\n\s*/g, " ").trim();
+  for (const o of ops) {
+    const s = st.get(o.n);
+    if (!s || s.gone) continue;
+    const seg = p.units[o.n - 1];
+    if (o.op === "delete") { s.gone = true; removed.push({ text: show(s.text), why: o.why || "" }); changed++; }
+    else if (o.op === "edit") { const t = withMarker(seg, o.text); if (t !== s.text) { s.text = t; changed++; } }
+    else {
+      const t = st.get(o.into);
+      if (!t || t.gone) continue;
+      s.gone = true; changed++;
+      if (o.text) t.text = withMarker(p.units[o.into - 1], o.text);
+      removed.push({ text: show(s.text), why: o.why || `重复，并进第 ${o.into} 块` });
+    }
+  }
+  // 一节里的块全删了：这一节的标题也去掉（本来就是空节的不动）
+  const lvl = (t: string) => t.match(/^(#{1,6})\s/)?.[1].length ?? 0;
+  const dropHead = new Set<number>();
+  p.segs.forEach((seg, i) => {
+    const h = seg.kind === "raw" ? lvl(seg.text) : 0;
+    if (!h) return;
+    let any = 0, live = 0;
+    for (let j = i + 1; j < p.segs.length; j++) {
+      const x = p.segs[j];
+      if (x.kind === "raw" && lvl(x.text) && lvl(x.text) <= h) break;
+      if (x.kind === "unit") { any++; if (!st.get(x.n!)!.gone) live++; }
+    }
+    if (any && !live) dropHead.add(i);
+  });
+  const out: string[] = [];
+  p.segs.forEach((seg, i) => {
+    if (seg.kind === "raw") { if (!dropHead.has(i)) out.push(seg.text); return; }
+    const s = st.get(seg.n!)!;
+    if (!s.gone) out.push(s.text);
+  });
+  return { text: out.join("\n").replace(/\n{3,}/g, "\n\n").trim() + "\n", removed, changed };
+}
+
+/** 守则文件分段：按标题切，一段不超过 maxChars；一节本身超长的按块切 */
+export function docBatches(p: DocParsed, maxChars: number, skip?: Set<number>): Set<number>[] {
+  const groups: DocSeg[][] = [];
+  let cur: DocSeg[] = [];
+  for (const s of p.segs) {
+    if (s.kind === "raw" && HEAD_RE.test(s.text) && cur.length) { groups.push(cur); cur = []; }
+    if (s.kind === "unit" && !skip?.has(s.n!)) cur.push(s);
+  }
+  if (cur.length) groups.push(cur);
+  const size = (a: DocSeg[]) => a.reduce((n, s) => n + Array.from(s.text).length + 6, 0);
+  const out: Set<number>[] = [];
+  let acc: DocSeg[] = [];
+  const push = () => { if (acc.length) out.push(new Set(acc.map((x) => x.n!))); acc = []; };
+  for (const g of groups) {
+    if (size(g) > maxChars) {
+      push();
+      for (const s of g) { if (acc.length && size([...acc, s]) > maxChars) push(); acc.push(s); }
+      push(); continue;
+    }
+    if (acc.length && size([...acc, ...g]) > maxChars) push();
+    acc.push(...g);
+  }
+  push();
+  return out;
+}
+
+/** 一段切成两半（模型超时 / 截断时缩小重试） */
+export function halves(g: Set<number>): [Set<number>, Set<number>] {
+  const a = [...g].sort((x, y) => x - y);
+  const m = Math.ceil(a.length / 2);
+  return [new Set(a.slice(0, m)), new Set(a.slice(m))];
+}

@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { describe, it, expect } from "vitest";
 import { makeRuntime } from "./helpers.ts";
-import { MemoryTidy, tidyTools, describe as describeTidy, ARCHIVE_FILE, DOC_ARCHIVE, parseTidy, parseDoc } from "../src/agent/tidy.ts";
+import { MemoryTidy, tidyTools, describe as describeTidy, ARCHIVE_FILE, DOC_ARCHIVE, parseTidy, parseDocOps, RESUME_MAX } from "../src/agent/tidy.ts";
 import { setSharedDir } from "../src/agent/persona.ts";
 import { USER_AUTO_HEAD } from "../src/agent/memory.ts";
 
@@ -64,22 +64,39 @@ describe("记忆整理", () => {
     expect(parseTidy('{"user": "不是数组"}')).toBeNull();
   });
 
-  it("定期：到期、在时段内、她不忙才做，做完告诉主人；没到期不做；失败的第二天再试；周期 0 = 不自动做", async () => {
+  it("定期：到期、在时段内、她不忙才做，做完告诉主人；没做完的 20 分钟后自动接着做、不吵主人；周期 0 = 不自动做", async () => {
     let busy = true, days = 7;
     const { t, fake, reports } = setup({ busy: () => busy, everyDays: () => days });
     const now = Date.now();
     expect(await t.tick(now)).toEqual([]);                        // 忙
     busy = false;
-    fake.queue.push("乱写的");                                     // 失败
+    fake.queue.push("乱写的", "还是乱写的");                       // 没整理成（关思考重试也不行）：进度存着
     expect(await t.tick(now)).toEqual(["main", "mio"]);              // mio 没有记忆：看一眼就过
-    expect(reports[0]).toContain("记忆整理没做成");
-    expect(await t.tick(now + 3600_000)).toEqual([]);             // 一小时后：还不到一天
-    fake.queue.push(json({ user: ["女儿叫朵朵，今年五岁"], memory_md: "# 长期记忆\n- 家里的猫叫团子\n- 主人每周日晚上上吉他课\n- 项目 A 用 Postgres\n- 女儿叫朵朵", removed: [{ text: "明天周日去看球", why: "过时" }], summary: "整理了" }));
-    expect(await t.tick(now + 25 * 3600_000)).toContain("main");   // 第二天再试
+    expect(reports).toEqual([]);                                  // 会自动接着做的，不吵主人
+    expect(t.pending("main").map((j) => j.kind)).toEqual(["memory"]);
+    expect(await t.tick(now + 5 * 60_000)).toEqual([]);           // 5 分钟后：还没到接着做的时候
+    fake.queue.push(json({ user: ["女儿叫朵朵，今年五岁"], ops: [{ op: "delete", n: 2, why: "流水" }], summary: "整理了" }));
+    expect(await t.tick(now + 25 * 60_000)).toEqual(["main"]);   // 接着做
     expect(t.last("main")!.status).toBe("done");
-    expect(await t.tick(now + 3 * 86400_000)).toEqual([]);        // 成功之后要等满 7 天
+    expect(t.last("main")!.trigger).toBe("resume");
+    expect(reports.at(-1)).toContain("整理了一遍记忆");
+    expect(t.pending("main")).toEqual([]);
+    expect(await t.tick(now + 3 * 86400_000)).toEqual([]);        // 做完之后要等满 7 天
     days = 0;
     expect(await t.tick(now + 30 * 86400_000)).toEqual([]);
+  });
+
+  it("连着没做成：自动接着做到 RESUME_MAX 次就停下、告诉主人一次；主人再点就接着做", async () => {
+    const { t, fake, reports } = setup();
+    const now = Date.now();
+    await t.run("main", "auto", now, "memory");                   // 假模型回「好的。」：没做成
+    for (let i = 1; i < RESUME_MAX; i++) await t.tick(now + i * 25 * 60_000);
+    expect(t.pending("main")[0].fails).toBe(RESUME_MAX);
+    expect(reports).toHaveLength(1);
+    expect(reports[0]).toContain("先停下");
+    expect(await t.tick(now + 100 * 25 * 60_000)).toEqual([]);    // 不再自动试
+    fake.queue.push(json({ user: ["女儿叫朵朵，今年五岁"], ops: [], summary: "" }));
+    expect((await t.run("main", "manual", now, "memory")).status).toBe("done");
   });
 
   it("memory_tidy 工具只给可信会话（子任务也没有），返回给主人看的那段话", async () => {
@@ -128,14 +145,16 @@ const TIDIED = `# 守则
 - 群聊里别提主人的私事，也别透露家里的安排
 - 定时任务的结果只说重点，一两句话
 - 主人在开会（日历上有会议）的时候非紧急的事攒到会后再说`;
-const docOut = (content: string, removed: string[] = [], summary = "合并了重复的") => `<file>\n${content}\n</file>\n<removed>\n${removed.map((r) => `- ${r}`).join("\n")}\n</removed>\n<summary>${summary}</summary>`;
+// RULES 拆成块：[1] 回复要简短 [2] 回答尽量短 [3] 晚安 | [4] 发布会 [5] 改完文件 [6] 写完记忆 [7] 查资料 … [13] 开会
+const TIDY_OPS = [{ op: "merge", n: 2, into: 1, why: "重复" }, { op: "delete", n: 4, why: "过时" }, { op: "merge", n: 6, into: 5, text: "改完文件、写完记忆都要回读确认，不能凭印象说做好了", why: "合并" }];
+const docOut = (ops: any[] = [], summary = "合并了重复的") => JSON.stringify({ ops, summary });
 
 describe("守则文件整理（AGENTS / TOOLS / HEARTBEAT）", () => {
   it("合并重复、删掉过时的；先备份、删掉的进归档；内容很少的不看（不调模型）；SOUL / IDENTITY 不动", async () => {
     const { ws, t, fake } = setup();
     fs.writeFileSync(path.join(ws, "AGENTS.md"), RULES);
     const soul = fs.readFileSync(path.join(ws, "SOUL.md"), "utf8"), ident = fs.readFileSync(path.join(ws, "IDENTITY.md"), "utf8");
-    fake.queue.push(docOut(TIDIED, ["回答尽量短一点，不要太啰嗦（重复）", "2026-10-20 那天的发布会提醒已经发过了，今天别再提（过时）", "写完记忆要回读，确认写到了对的文件里（合并）"]));
+    fake.queue.push(docOut(TIDY_OPS));
     const n = fake.calls.length;
     const r = await t.run("main", "manual", Date.now(), "docs");
     expect(fake.calls.length).toBe(n + 1);                 // TOOLS / HEARTBEAT 还是模板那几行：没调模型
@@ -158,15 +177,17 @@ describe("守则文件整理（AGENTS / TOOLS / HEARTBEAT）", () => {
     const f = path.join(ws, "TOOLS.md");
     fs.writeFileSync(f, RULES.replace("# 守则", "# 工具备注"));
     const before = fs.readFileSync(f, "utf8");
-    fake.queue.push(docOut("# 工具备注\n- 没了", ["全删了（过时）"]));
+    fake.queue.push(docOut(Array.from({ length: 12 }, (_, i) => ({ op: "delete", n: i + 1, why: "过时" }))));
     const r1 = await t.run("main", "manual", Date.now(), "docs");
     expect(r1.docs![0]).toMatchObject({ file: "TOOLS.md", status: "skipped" });
     expect(describeTidy(r1)).toContain("TOOLS.md 先没动：一次删得太多");
-    fake.queue.push("我看了，挺好的");
-    expect((await t.run("main", "manual", Date.now(), "docs")).docs![0].status).toBe("failed");
+    fake.queue.push("我看了，挺好的", "还是挺好的");                // 没按格式：关思考再试一次，还不行就停下、进度存着
+    const r2 = await t.run("main", "manual", Date.now(), "docs");
+    expect(r2.docs![0].status).toBe("failed");
+    expect(r2.docs![0].why).toContain("进度存着");
     expect(fs.readFileSync(f, "utf8")).toBe(before);
     // 看过、不用改：记下指纹，下次自动整理不再调模型；文件变了才再看
-    fake.queue.push(docOut(before.trim(), [], "不用改"));
+    fake.queue.push(docOut([], "不用改"));
     const r3 = await t.run("main", "manual", Date.now(), "docs");
     expect(r3.status).toBe("nochange");
     expect(describeTidy(r3)).toBe("TOOLS.md 看过了，不用改");
@@ -174,11 +195,11 @@ describe("守则文件整理（AGENTS / TOOLS / HEARTBEAT）", () => {
     expect((await t.run("main", "auto", Date.now(), "docs")).docs).toEqual([]);
     expect(fake.calls.length).toBe(n);
     fs.appendFileSync(f, "- 新加的一条：下载东西放到 D 盘的 downloads 目录\n");
-    fake.queue.push(docOut(fs.readFileSync(f, "utf8").trim(), [], "不用改"));
+    fake.queue.push(docOut([], "不用改"));
     expect((await t.run("main", "auto", Date.now(), "docs")).docs!.length).toBe(1);
     // 一起整理：记忆没成（乱写），守则不用改 → 整趟算失败，两边各说各的
     fs.appendFileSync(f, "- 再加一条\n");
-    fake.queue.push("乱写的", docOut(fs.readFileSync(f, "utf8").trim(), [], "不用改"));
+    fake.queue.push("乱写的", "又乱写的", docOut([], "不用改"));
     const r5 = await t.run("main", "manual");
     expect([r5.status, r5.memStatus, r5.docs![0].status]).toEqual(["failed", "failed", "nochange"]);
     expect(describeTidy(r5)).toMatch(/^记忆整理没做成：.*\nTOOLS\.md 看过了，不用改$/);
@@ -195,7 +216,7 @@ describe("守则文件整理（AGENTS / TOOLS / HEARTBEAT）", () => {
       fs.writeFileSync(path.join(ws, "AGENTS.md"), own);
       const t = new MemoryTidy(env.reg, env.models, { everyDays: () => 7, window: () => "00:00-23:59", busy: () => false, report: async () => {}, guide: () => "<how_to>\n- 看文件用 read_file\n</how_to>" });
       const ownTidied = own.trim().replace("\n- 回复要简短，别长篇大论", "");
-      env.fake.queue.push(docOut(TIDIED, ["回答尽量短一点，不要太啰嗦（重复）"]), docOut(ownTidied, ["回复要简短，别长篇大论（共享里有）"], "去掉了共享里已有的"));
+      env.fake.queue.push(docOut(TIDY_OPS), docOut([{ op: "delete", n: 13, why: "共享里有" }], "去掉了共享里已有的"));
       const r = await t.run("main", "manual", Date.now(), "docs");
       expect(r.docs!.map((d) => [d.file, d.scope, d.status])).toEqual([["AGENTS.md", "shared", "done"], ["AGENTS.md", "own", "done"]]);
       expect(fs.readFileSync(path.join(shared, "AGENTS.md"), "utf8")).toBe(TIDIED + "\n");
@@ -208,10 +229,9 @@ describe("守则文件整理（AGENTS / TOOLS / HEARTBEAT）", () => {
     } finally { setSharedDir(""); }
   });
 
-  it("parseDoc：认 <file> / <removed>（原因在括号里）/ <summary>；没有 <file> 就是 null", () => {
-    expect(parseDoc("<think>想</think><file>\n# A\n- x\n</file>\n<removed>\n- 旧的一条（过时）\n- 没写原因的\n</removed><summary>删了两条</summary>"))
-      .toEqual({ content: "# A\n- x", removed: [{ text: "旧的一条", why: "过时" }, { text: "没写原因的", why: "" }], summary: "删了两条" });
-    expect(parseDoc("都挺好")).toBeNull();
+  it("parseDocOps：认 {ops, summary}（前面有思考也行）；没有 ops 数组就是 null", () => {
+    expect(parseDocOps('<think>想</think>{"ops":[{"op":"delete","n":1}],"summary":"删了一条"}')).toEqual({ ops: [{ op: "delete", n: 1 }], summary: "删了一条" });
+    expect(parseDocOps("都挺好")).toBeNull();
   });
 });
 

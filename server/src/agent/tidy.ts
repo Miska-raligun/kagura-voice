@@ -5,6 +5,9 @@
 // SOUL.md / IDENTITY.md 是主人写的设定，不动。守则文件上次整理后没变过、或者内容很少（不到 DOC_MIN_CHARS）就跳过，不调模型。
 // 保底：USER.md 手写部分一个字不动；写之前整份备份（.persona-backup-<时间>/）；删掉的不真删，进 MEMORY.archive.md（不注入、不自动回忆，她能 read_file）；
 // 一次删得太多（剩下的不到原来的 MIN_KEEP）就不写，只报告；输出不是合法 JSON、超长也不写。
+// 记忆和守则文件都「按编号改」：模型只说第几条 / 第几块做什么，输出跟文件多大无关（tidy-ops.ts）；长的分段，一段一次调用。
+// 断点续做（2026-11，主人「跑了一年，人设文件都非常长……中断了要能断点续做、自动接着做」）：一段没整理成就切半、关思考重试；
+// 还不行就停下，进度（看过哪些、拿到哪些操作，按内容指纹）存在 memory_tidy.json 的 jobs，RESUME_GAP_MS 后自动接着做，全看完才一次写进文件。
 import fs from "node:fs";
 import { createHash } from "node:crypto";
 import { Type } from "@earendil-works/pi-ai";
@@ -14,7 +17,7 @@ import type { ModelRegistry } from "./models.ts";
 import { stripThinkText } from "./models.ts";
 import { USER_AUTO_HEAD, USER_AUTO_MAX, USER_ITEM_MAX, STALE_RECALLS } from "./memory.ts";
 import { stripProv, stripAlias, provOf, pinnedOf, PINNED_HEAD, PINNED_MAX, TOPICS_DIR, topicName } from "./memfmt.ts";
-import { parseFiles, numbered, cleanOps, applyOps, batches } from "./tidy-ops.ts";
+import { parseFiles, numbered, cleanOps, applyOps, batches, parseDocUnits, numberedDoc, cleanDocOps, applyDocOps, docBatches, halves } from "./tidy-ops.ts";
 import { ownExtra, sharedPath } from "./persona.ts";
 import { inActiveHours } from "./cron.ts";
 import { health } from "./health.ts";
@@ -25,8 +28,21 @@ export const MIN_KEEP = 0.4;
 export const TIDY_MAX_CHARS = 200_000;
 /** 条目超过这么多字就分段整理（一段一次模型调用），每次给模型看的不至于太长 */
 export const TIDY_BATCH_CHARS = 12_000;
-/** 整理时一次模型调用最多等多久 */
-export const TIDY_CALL_MS = 300_000;
+/**
+ * 整理时一次模型调用多久没有任何输出就掐（推理型模型想得久，但一直在出 token；以前按总时长 4~5 分钟掐，常常「This operation was aborted」）。
+ * 不比以前的总时限短：有的服务商思考时不往回发东西
+ */
+export const TIDY_IDLE_MS = 300_000;
+/** 一次模型调用的总时长上限 */
+export const TIDY_CALL_MS = 20 * 60_000;
+/** 一段整理失败（超时 / 截断 / 格式不对）就切半、关思考重试，切到这么小（字）为止 */
+export const MIN_SPLIT_CHARS = 1_500;
+/** 没做完的整理隔多久自动接着做 */
+export const RESUME_GAP_MS = 20 * 60_000;
+/** 连着这么多次没做成就不再自动接着做，等主人 */
+export const RESUME_MAX = 6;
+/** 没做完的整理放这么多天还没做完就作废、重新来 */
+export const JOB_TTL_DAYS = 14;
 /** 整理后条目总字数最多是原来的这么多倍（补别称会多一点；再多就是在编，或者主题页把内容抄了两份） */
 export const MAX_GROW = 1.3;
 /** 一次最多拿多少条记忆去对照原文核对（每条带几段原文，太多会撑爆这次调用） */
@@ -47,10 +63,16 @@ const DOC_DESC: Record<string, string> = {
 export const DOC_MIN_CHARS = 150;
 /** 守则文件整理后至少留原来的这么多，否则不写（删规矩比删记忆更要小心） */
 export const DOC_MIN_KEEP = 0.5;
-export const DOC_MAX_CHARS = 20_000;
+/** 守则文件一段多少字（一段一次模型调用） */
+export const DOC_BATCH_CHARS = 8_000;
+/** 守则文件不超过这么多字时，分段整理也把整份带上当参考（找别的节里重复的）；更长的只给目录 */
+export const DOC_CONTEXT_CHARS = 30_000;
 /** 守则文件里移出的条目放这里（和文件同一个目录） */
 export const DOC_ARCHIVE = "PERSONA.archive.md";
 export type TidyScope = "all" | "memory" | "docs";
+
+/** memory_tidy 工具在这一轮里最多等多久，等不到就转后台 */
+export const TOOL_WAIT_MS = 90_000;
 
 /** 她自己的工具：主人说「整理一下记忆」时当场跑一次 */
 export function tidyTools(t: MemoryTidy) {
@@ -60,10 +82,19 @@ export function tidyTools(t: MemoryTidy) {
       name: "memory_tidy", label: "整理记忆和守则",
       description: "整理你的记忆和守则文件：memory = USER.md 的自动记录 + MEMORY.md（合并重复、删掉过时和流水账、该常驻的挪进 USER.md）；"
         + "docs = AGENTS.md / TOOLS.md / HEARTBEAT.md（合并重复的规矩、删掉过时的）；all = 都整理（默认）。删掉的进归档文件，不真删；改之前会备份。"
-        + "主人让你整理、或者你发现里面重复 / 过时的很多时用，要一两分钟。系统每周也会自动整理。SOUL.md / IDENTITY.md 不归它管。",
+        + "主人让你整理、或者你发现里面重复 / 过时的很多时用；内容多的分段整理，要一阵子，等不及的会转到后台、做完把结果告诉主人。系统每周也会自动整理，中途断了会自动接着做。SOUL.md / IDENTITY.md 不归它管。",
       parameters: Type.Object({ scope: Type.Optional(Type.Union([Type.Literal("all"), Type.Literal("memory"), Type.Literal("docs")])) }),
-      async execute(_id: string, p: any) {
-        const r = await t.run(agent.id, "agent", Date.now(), p?.scope === "memory" || p?.scope === "docs" ? p.scope : "all");
+      async execute(_id: string, p: any, signal?: AbortSignal) {
+        // 内容多的要整理好一阵：这一轮最多等 TOOL_WAIT_MS，等不到就让它在后台接着做、做完告诉主人（别一直占着会话锁）
+        const job = t.run(agent.id, "agent", Date.now(), p?.scope === "memory" || p?.scope === "docs" ? p.scope : "all");
+        const later = Symbol("later");
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const r = await Promise.race([job, new Promise<typeof later>((res) => { timer = setTimeout(() => res(later), TOOL_WAIT_MS); signal?.addEventListener("abort", () => res(later), { once: true }); })]);
+        clearTimeout(timer);
+        if (r === later) {
+          void job.then((x) => t.notify(agent.id, describe(x))).catch(() => {});
+          return { content: [{ type: "text", text: "内容比较多，整理转到后台接着做了（分段整理，中途断了会自动接着做），做完系统会把结果告诉主人。你先跟主人说一声就行。" }], details: { background: true } };
+        }
         return r.status === "failed" ? { content: [{ type: "text", text: describe(r) }], details: {}, isError: true } : { content: [{ type: "text", text: describe(r) }], details: { status: r.status } };
       },
     } as any];
@@ -77,6 +108,10 @@ export interface DocResult {
   before?: number; after?: number;
   removed?: { text: string; why: string }[];
   summary?: string; backup?: string;
+  /** 没做完：看完了几块 / 一共几块（进度存着，会接着做） */
+  resume?: { done: number; total: number };
+  /** 这次是接着上次没做完的做完的 */
+  resumed?: boolean;
 }
 export interface TidyResult {
   agent: string; at: number; trigger: string;
@@ -100,6 +135,10 @@ export interface TidyResult {
   topics?: string[];
   summary?: string;
   backups?: string[];
+  /** 没做完：看完了几条 / 一共几条（进度存着，会接着做） */
+  resume?: { done: number; total: number };
+  /** 这次是接着上次没做完的做完的 */
+  resumed?: boolean;
 }
 
 const items = (s: string) => s.split("\n").map((l) => l.trim()).filter((l) => /^[-*•]\s+/.test(l)).map((l) => l.replace(/^[-*•]\s+/, "").trim()).filter(Boolean);
@@ -178,31 +217,32 @@ export function capPinned(md: string): string {
 
 const DOC_PROMPT = `你在帮一个 AI 助手整理它的一份设定文件 {FILE}——{DESC}。
 这份文件会放进它的上下文里，所以要准确、不重复、不过时。今天是 {TODAY}。
+文件拆成了一块块（清单的一项、一段话、一张表、一段代码），每块前面有 [编号]；标题没有编号、不用管。
 
-请整理：
-1. 合并重复、意思相同的条目，保留更完整、更新的说法；前后矛盾的以更新的为准（看不出先后就都留着，别猜）。
+你不用重写文件，只输出要对哪几块做什么；没提到的块原样保留。能用的操作：
+- {"op":"delete","n":编号,"why":"原因"}：删掉（不真删，进归档）
+- {"op":"merge","n":编号,"into":另一块编号,"text":"合并后那块的新写法（可省）","why":"原因"}：和另一块重复、意思相同，并进去
+- {"op":"edit","n":编号,"text":"新写法"}：精简措辞、把前后矛盾的改成更新的说法（清单项不用写开头的「- 」）
+
+规则：
+1. 合并重复、意思相同的，保留更完整、更新的说法；前后矛盾的以更新的为准（看不出先后就都留着，别猜）。
 2. 删掉明显过时的：已经过去的一次性安排、只针对某一天的临时说明、明显已经不适用的内容。
 3. 「参考」里已经有的内容（共享那份里写过的、系统每轮自动告诉它的用法），这份文件里不用再写一遍。
-4. 这是规矩和经验，删错了会改变它的行为：拿不准的一律留着。别编造、别加新规矩、别改变意思，只做合并、删除和必要的精简措辞；原有的标题结构尽量保留。
+4. 这是规矩和经验，删错了会改变它的行为：拿不准的一律留着。别编造、别加新规矩、别改变意思。
+5. 只对「要整理的」里出现的编号输出操作。
 
-只按下面的格式输出，不要别的文字：
-<file>
-整理后的完整文件内容
-</file>
-<removed>
-- 删掉或合并掉的原文（原因）
-</removed>
-<summary>一句话说做了什么；没什么要改的就写「不用改」</summary>
-没什么要改的就把原文原样放进 <file>，<removed> 留空。`;
+只输出一个 JSON，不要别的文字：
+{"ops": [ … ], "summary": "一句话说做了什么；没什么要改的就写「不用改」"}`;
 
-export function parseDoc(raw: string): { content: string; removed: { text: string; why: string }[]; summary: string } | null {
-  const t = stripThinkText(raw);
-  const m = t.match(/<file>\r?\n?([\s\S]*?)\r?\n?<\/file>/);
-  if (!m) return null;
-  const removed = (t.match(/<removed>([\s\S]*?)<\/removed>/)?.[1] ?? "").split("\n").map((l) => l.trim()).filter((l) => /^[-*•]\s+/.test(l))
-    .map((l) => { const x = l.replace(/^[-*•]\s+/, ""); const w = x.match(/^(.*)（([^（）]*)）$/); return w ? { text: w[1].trim(), why: w[2].trim() } : { text: x, why: "" }; })
-    .filter((r) => r.text);
-  return { content: m[1].trim(), removed, summary: (t.match(/<summary>([\s\S]*?)<\/summary>/)?.[1] ?? "").trim() };
+export function parseDocOps(raw: string): { ops: unknown[]; summary: string } | null {
+  const t = stripThinkText(raw).trim();
+  const a = t.indexOf("{"), b = t.lastIndexOf("}");
+  if (a < 0 || b <= a) return null;
+  try {
+    const o = JSON.parse(t.slice(a, b + 1));
+    if (!Array.isArray(o.ops)) return null;
+    return { ops: o.ops, summary: String(o.summary ?? "").trim() };
+  } catch { return null; }
 }
 
 export interface TidyHost {
@@ -227,19 +267,60 @@ const len = (s: string) => Array.from(s.replace(/\s+/g, "")).length;
 const dayOf = (now: number) => { const d = new Date(now); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; };
 const worst = (parts: Status[]): Status => parts.includes("done") ? "done" : parts.includes("failed") ? "failed" : parts.includes("skipped") ? "skipped" : "nochange";
 
+/**
+ * 没做完的一趟整理（断点续做，2026-11，主人「系统跑了一年，人设文件都非常长……如果由于模型各种输入输出限制导致中断，需要断点续做和自动恢复续做」）。
+ * 每整理完一段就存一次：哪些条目 / 块看过了、拿到了哪些操作。条目按内容指纹认（不按编号）——中间她又记了新的、主人改过几条，编号会变，
+ * 内容指纹不变；没看过的（新记的、被改过的）下次接着看。全看完了才一次性落到文件上（删太多 / 变太多的保底照旧按整份算）
+ */
+interface TidyJob {
+  kind: "memory" | "doc";
+  agent: string;
+  /** 最初是谁发起的：auto 只在静默时段接着做；手动 / 她自己叫的随时接着做 */
+  trigger: string;
+  file?: string;
+  started: number;
+  /** 上次动手的时刻（秒） */
+  tried: number;
+  /** 连着没做成几次 */
+  fails: number;
+  lastError?: string;
+  /** 看过的条目 / 块（内容指纹） */
+  reviewed: string[];
+  /** 已经拿到的操作：n / into 换成了内容指纹 */
+  ops: any[];
+  /** 记忆：A（USER.md 自动记录）整理过了没有、结果 */
+  userDone?: boolean;
+  user?: string[] | null;
+  /** 整理 A 时 A 原来是什么样（接着做时 A 变过：新加的补上、主人删掉的去掉） */
+  userBase?: string[];
+  topicIndex?: Record<string, string>;
+  /** 记忆：这一趟拿原文核对过的出处（做完才记进 verified） */
+  checked?: string[];
+  summaries: string[];
+}
+const ukey = (t: string) => sha(t.trim()).slice(0, 16);
+const errText = (e: any) => String(e?.message ?? e).slice(0, 200);
+
 export class MemoryTidy {
   private state: Record<string, TidyResult> = {};
   /** 守则文件上次整理完的内容指纹（文件路径 → sha1）：没变过就不再看 */
   private docHash: Record<string, string> = {};
   /** 核对过原文的出处（agent|出处编号 → 时刻）：VERIFY_DAYS 天内不再核对 */
   private verified: Record<string, number> = {};
+  /** 没做完的整理：mem|<agent> / doc|<文件路径> → 进度 */
+  private jobs: Record<string, TidyJob> = {};
   private running = new Set<string>();
   private timer: ReturnType<typeof setInterval> | null = null;
 
   constructor(private reg: AgentRegistry, private models: ModelRegistry, private host: TidyHost, private stateFile: string | null = null) {
     try {
-      if (stateFile) { const j = JSON.parse(fs.readFileSync(stateFile, "utf8")); this.state = j.agents ?? {}; this.docHash = j.docs ?? {}; this.verified = j.verified ?? {}; }
+      if (stateFile) { const j = JSON.parse(fs.readFileSync(stateFile, "utf8")); this.state = j.agents ?? {}; this.docHash = j.docs ?? {}; this.verified = j.verified ?? {}; this.jobs = j.jobs ?? {}; }
     } catch { /* 还没有 */ }
+  }
+
+  private save() {
+    if (!this.stateFile) return;
+    try { fs.writeFileSync(this.stateFile, JSON.stringify({ agents: this.state, docs: this.docHash, verified: this.verified, jobs: this.jobs }, null, 1)); } catch { /* 存不下就算了 */ }
   }
 
   /** 正在整理的 agent → 做到哪一步了（管理界面轮询显示进度） */
@@ -251,28 +332,55 @@ export class MemoryTidy {
   }
 
   last(agentId: string): TidyResult | undefined { return this.state[agentId]; }
+  /** 转到后台的整理做完了：按 heartbeat 的投递方式告诉主人 */
+  async notify(agentId: string, text: string) { await this.host.report(agentId, text).catch((e) => console.log(`[tidy] ⚠️  ${agentId} 整理结果没送出去: ${e.message}`)); }
   all() { return this.state; }
+  /** 这个 agent 没做完的整理（管理界面显示「上次没做完，会接着做」） */
+  pending(agentId: string): { key: string; kind: string; file?: string; reviewed: number; fails: number; lastError?: string; tried: number }[] {
+    return Object.entries(this.jobs).filter(([, j]) => j.agent === agentId)
+      .map(([key, j]) => ({ key, kind: j.kind, file: j.file, reviewed: j.reviewed.length, fails: j.fails, lastError: j.lastError, tried: j.tried }));
+  }
 
   start() {
     if (this.timer) return;
-    this.timer = setInterval(() => { void this.tick(); }, 10 * 60_000);
+    this.timer = setInterval(() => { void this.tick(); }, 5 * 60_000);
     this.timer.unref?.();
   }
   stop() { if (this.timer) clearInterval(this.timer); this.timer = null; }
 
-  /** 到期的 agent 依次整理（一次只整理一个，别一起占模型） */
+  /**
+   * 到期的 agent 依次整理（一次只整理一个，别一起占模型）。
+   * 有没做完的整理：隔 RESUME_GAP_MS 自动接着做（自动发起的只在静默时段；手动发起的随时），连着 RESUME_MAX 次没做成就停下等主人
+   */
   async tick(now = Date.now()): Promise<string[]> {
     const days = this.host.everyDays();
-    if (days <= 0 || !inActiveHours(this.host.window(), now)) return [];
+    const inWindow = inActiveHours(this.host.window(), now);
     const done: string[] = [];
     for (const a of this.reg.list()) {
+      if (this.host.busy(a.id) || this.running.size) continue;
+      const jobs = Object.values(this.jobs).filter((j) => j.agent === a.id);
+      if (jobs.length) {
+        const ready = jobs.filter((j) => j.fails < RESUME_MAX && now - j.tried * 1000 >= RESUME_GAP_MS && (j.trigger !== "auto" || inWindow));
+        if (!ready.length) continue;
+        const hasMem = ready.some((j) => j.kind === "memory"), hasDoc = ready.some((j) => j.kind === "doc");
+        const r = await this.run(a.id, "resume", now, hasMem && hasDoc ? "all" : hasMem ? "memory" : "docs");
+        done.push(a.id);
+        // 接着做完了才告诉主人；还没做完的不吵，接着试——试到上限还不行再说
+        const stuck = Object.values(this.jobs).some((j) => j.agent === a.id && j.fails >= RESUME_MAX);
+        if (r.status === "done" || r.status === "skipped" || (r.status === "failed" && stuck)) {
+          await this.host.report(a.id, describe(r)).catch((e) => console.log(`[tidy] ⚠️  ${a.id} 整理结果没送出去: ${e.message}`));
+        }
+        continue;
+      }
+      if (days <= 0 || !inWindow) continue;
       const prev = this.state[a.id];
-      // 上次没做成（模型出错之类）的第二天再试，别等一整个周期
+      // 上次没做成（又不能接着做）的第二天再试，别等一整个周期
       const gap = (prev?.status === "failed" ? 1 : days) * 86400;
-      if (now / 1000 - (prev?.at ?? 0) < gap || this.host.busy(a.id) || this.running.size) continue;
+      if (now / 1000 - (prev?.at ?? 0) < gap) continue;
       const r = await this.run(a.id, "auto", now);
       done.push(a.id);
-      if (r.status === "done" || r.status === "skipped" || r.status === "failed") {
+      const resumable = Object.values(this.jobs).some((j) => j.agent === a.id);
+      if (r.status === "done" || r.status === "skipped" || (r.status === "failed" && !resumable)) {
         await this.host.report(a.id, describe(r)).catch((e) => console.log(`[tidy] ⚠️  ${a.id} 整理结果没送出去: ${e.message}`));
       }
     }
@@ -286,31 +394,84 @@ export class MemoryTidy {
     if (this.running.has(agentId)) return { ...base, status: "skipped", why: "正在整理中" };
     this.running.add(agentId);
     this.prog.set(agentId, { stage: "开始", since: Date.now(), started: Date.now(), scope });
+    // 主人手动点的：上次卡住的重新开始计数
+    if (trigger !== "auto" && trigger !== "resume") for (const j of Object.values(this.jobs)) if (j.agent === agentId) j.fails = 0;
+    // 放太久的没做完的整理作废（文件早变了，重新来）
+    for (const [k, j] of Object.entries(this.jobs)) if (now / 1000 - j.started > JOB_TTL_DAYS * 86400) delete this.jobs[k];
     let r: TidyResult = { ...base, status: "nochange" };
     try {
       if (scope !== "docs") {
         let m: Omit<TidyResult, "agent" | "at" | "trigger">;
         try { m = await this.tidyMemory(agent, trigger, now); }
-        catch (e: any) { m = { status: "failed", why: String(e?.message ?? e).slice(0, 300) }; }
+        catch (e: any) { m = { status: "failed", why: errText(e) }; }
         r = { ...r, ...m, memStatus: m.status };
       }
       if (scope !== "memory") r.docs = await this.tidyDocs(agent, trigger, now);
       r.status = worst([...(r.memStatus ? [r.memStatus] : []), ...(r.docs ?? []).map((d) => d.status)]);
     } finally { this.running.delete(agentId); this.prog.delete(agentId); }
     this.state[agentId] = r;
-    if (this.stateFile) { try { fs.writeFileSync(this.stateFile, JSON.stringify({ agents: this.state, docs: this.docHash, verified: this.verified }, null, 1)); } catch { /* 存不下就算了 */ } }
+    this.save();
     console.log(`[tidy] 🧹 ${agentId}（${trigger}）${describe(r).split("\n").join("｜").slice(0, 300)}`);
     health.record({ kind: "memory_tidy", ok: r.status === "done" || r.status === "nochange", agent: agentId,
-      detail: { status: r.status, why: r.why, removed: (r.removed?.length ?? 0) + (r.docs ?? []).reduce((n, d) => n + (d.removed?.length ?? 0), 0), docs: (r.docs ?? []).map((d) => `${d.scope === "shared" ? "共享 " : ""}${d.file}:${d.status}`) } });
+      detail: { status: r.status, why: r.why, trigger, removed: (r.removed?.length ?? 0) + (r.docs ?? []).reduce((n, d) => n + (d.removed?.length ?? 0), 0), docs: (r.docs ?? []).map((d) => `${d.scope === "shared" ? "共享 " : ""}${d.file}:${d.status}`) } });
     return r;
   }
 
-  private async ask(agent: AgentInfo, system: string, user: string, now: number, ms = 240_000): Promise<{ text: string; cut: boolean }> {
+  /**
+   * 调一次模型。按「多久没有任何输出」掐（TIDY_IDLE_MS），另有总时长上限 TIDY_CALL_MS；
+   * think = false 时关掉思考（重试时用：推理型模型想得久、又占输出额度，超时和截断多半是它）
+   */
+  private async ask(agent: AgentInfo, system: string, user: string, now: number, think = true): Promise<{ text: string; cut: boolean }> {
     const model = this.models.resolve(agent.model || this.models.defaultRef());
     const res = await this.models.quick(model, { systemPrompt: system, messages: [{ role: "user", content: user, timestamp: now }] } as any,
-      { maxTokens: Math.max(model.maxTokens || 0, 16_000), signal: AbortSignal.timeout(ms), think: true });
-    if (res.stopReason === "error" || res.stopReason === "aborted") throw new Error(res.errorMessage || "模型调用失败");
+      { maxTokens: Math.max(model.maxTokens || 0, 16_000), signal: AbortSignal.timeout(TIDY_CALL_MS), think, idleMs: TIDY_IDLE_MS });
+    if (res.stopReason === "error" || res.stopReason === "aborted") {
+      const m = res.errorMessage || "模型调用失败";
+      throw new Error(/operation was aborted|aborted/i.test(m) && !/秒没有/.test(m) ? `一次调用超过 ${Math.round(TIDY_CALL_MS / 60_000)} 分钟，掐掉了` : m);
+    }
     return { text: res.content.filter((c: any) => c.type === "text").map((c: any) => c.text).join(""), cut: res.stopReason === "length" };
+  }
+
+  /**
+   * 整理一段，带重试：没整理成（超时、截断、格式不对、服务商出错）→ 切成两半、关掉思考再试（输入少一半、不想，快得多，输出也短）；
+   * 切到 MIN_SPLIT_CHARS 以下还不行，关思考原样再试一次；还不行就抛错——前面做完的段都已经存进进度，下次从这里接着
+   */
+  private async solve<T>(agentId: string, g: Set<number>, size: (g: Set<number>) => number, think: boolean,
+    call: (g: Set<number>, think: boolean) => Promise<{ ok: true; out: T } | { ok: false; why: string }>,
+    done: (g: Set<number>, out: T) => void): Promise<void> {
+    let r: { ok: true; out: T } | { ok: false; why: string };
+    try { r = await call(g, think); } catch (e: any) { r = { ok: false, why: errText(e) }; }
+    if (r.ok) { done(g, r.out); return; }
+    const why = r.why;
+    if (g.size > 1 && size(g) > MIN_SPLIT_CHARS) {
+      console.log(`[tidy] ↘️  ${agentId} 一段（${g.size} 块、${size(g)} 字）没整理成：${why}——切成两半、关思考重试`);
+      health.record({ kind: "tidy_retry", ok: true, agent: agentId, detail: { why, how: "split", size: size(g) } });
+      const [a, b] = halves(g);
+      await this.solve(agentId, a, size, false, call, done);
+      await this.solve(agentId, b, size, false, call, done);
+      return;
+    }
+    if (think) {
+      console.log(`[tidy] 🔁 ${agentId} 一段（${size(g)} 字）没整理成：${why}——关思考再试一次`);
+      let r2: { ok: true; out: T } | { ok: false; why: string };
+      try { r2 = await call(g, false); } catch (e: any) { r2 = { ok: false, why: errText(e) }; }
+      health.record({ kind: "tidy_retry", ok: r2.ok, agent: agentId, detail: { why, how: "nothink", size: size(g) } });
+      if (r2.ok) { done(g, r2.out); return; }
+      throw new Error(r2.why);
+    }
+    health.record({ kind: "tidy_retry", ok: false, agent: agentId, detail: { why, size: size(g) } });
+    throw new Error(why);
+  }
+
+  /** 没做成时记进进度，返回给主人看的那句「做到哪了、什么时候接着做」 */
+  private paused(key: string, e: any, now: number, total: number): string {
+    const j = this.jobs[key];
+    j.fails++; j.tried = now / 1000; j.lastError = errText(e);
+    this.save();
+    const when = j.fails >= RESUME_MAX ? `已经连着 ${j.fails} 次没做成，先停下；再点一次「整理」会接着做`
+      : j.trigger === "auto" ? `进度存着，${Math.round(RESUME_GAP_MS / 60_000)} 分钟后（静默时段内）自动接着做`
+      : `进度存着，${Math.round(RESUME_GAP_MS / 60_000)} 分钟后自动接着做（也可以马上再点一次）`;
+    return `${j.lastError}（已经看完 ${j.reviewed.length}/${total} 条，${when}）`;
   }
 
   private async tidyMemory(agent: AgentInfo, trigger: string, now: number): Promise<Omit<TidyResult, "agent" | "at" | "trigger">> {
@@ -330,63 +491,88 @@ export class MemoryTidy {
     const all = parsed.items;
     const plainText = (x: string) => stripAlias(stripProv(x));
     const before = chars(autoItems) + chars(all.map((x) => plainText(x.text)));
-    if (!autoItems.length && !all.length) return { status: "nochange", why: "没有要整理的记忆" };
+    const jkey = `mem|${agent.id}`;
+    if (!autoItems.length && !all.length) { delete this.jobs[jkey]; return { status: "nochange", why: "没有要整理的记忆" }; }
     const total = Array.from(memText).length + [...topicText.values()].reduce((n, t) => n + Array.from(t).length, 0);
     if (total > TIDY_MAX_CHARS) return { status: "skipped", why: `MEMORY.md 和主题页太长（超过 ${TIDY_MAX_CHARS} 字），先在管理界面手动删一些` };
 
-    // C：拿出处去读原文核对。先核对常用的、再核对新的（越靠后越新），核对过的 VERIFY_DAYS 天内不再核对
+    // 进度：接着上次没做完的，或者新开一趟
+    const job: TidyJob = this.jobs[jkey] ??= { kind: "memory", agent: agent.id, trigger, started: now / 1000, tried: now / 1000, fails: 0, reviewed: [], ops: [], summaries: [], topicIndex: {}, checked: [] };
+    const resumed = job.reviewed.length > 0;
+    job.tried = now / 1000;
+    const keyOf = new Map(all.map((it) => [it.n, ukey(it.text)]));
+    const nOf = new Map<string, number>();
+    for (const it of all) if (!nOf.has(keyOf.get(it.n)!)) nOf.set(keyOf.get(it.n)!, it.n);
+    const seen = new Set(job.reviewed);
+    const pendingN = new Set(all.filter((it) => !seen.has(keyOf.get(it.n)!)).map((it) => it.n));
+
+    // C：拿出处去读原文核对（只核对这趟还没看过的）。先核对常用的、再核对新的（越靠后越新），核对过的 VERIFY_DAYS 天内不再核对
     const usage = (() => { try { return this.host.usage?.(agent) ?? new Map(); } catch { return new Map(); } })();
     const use = (x: string) => usage.get(stripProv(x)) ?? { recalled: 0, used: 0 };
     const vkey = (refs: string[]) => `${agent.id}|${refs.join("、")}`;
-    const toCheck = all.map((it) => ({ it, refs: provOf(it.text).refs }))
+    const toCheck = all.filter((it) => pendingN.has(it.n)).map((it) => ({ it, refs: provOf(it.text).refs }))
       .filter((c) => c.refs.length && now / 1000 - (this.verified[vkey(c.refs)] ?? 0) > VERIFY_DAYS * 86400)
       .sort((p, q) => use(q.it.text).recalled - use(p.it.text).recalled || q.it.n - p.it.n).slice(0, VERIFY_MAX);
-    const checked: string[] = [];
-    const src = new Map<number, string>();
+    const src = new Map<number, { ex: string; key: string }>();
     for (const [i, c] of toCheck.entries()) {
       this.stage(agent.id, `对照原文核对（${i + 1}/${toCheck.length}）`);
       let ex = "";
       try { ex = this.host.sources?.(agent, c.refs, plainText(c.it.text)) ?? ""; } catch { /* 取不到就不核对这条 */ }
-      if (!ex.trim()) continue;
-      src.set(c.it.n, ex.trim());
-      checked.push(vkey(c.refs));
+      if (ex.trim()) src.set(c.it.n, { ex: ex.trim(), key: vkey(c.refs) });
     }
 
-    // 分段：条目多的一段一次调用；A（USER.md 自动记录）只在第一段整理
-    const groups = batches(parsed, TIDY_BATCH_CHARS);
-    const ops: unknown[] = [];
-    const topicIndex: Record<string, string> = {};
-    let user: string[] | null = null;
-    const summaries: string[] = [];
-    for (const [gi, g] of groups.entries()) {
-      const part = groups.length > 1 ? `（第 ${gi + 1}/${groups.length} 段）` : "";
+    // 分段：条目多的一段一次调用；A（USER.md 自动记录）只在第一段整理。看过的条目不再看
+    const groups = batches(parsed, TIDY_BATCH_CHARS).map((g) => new Set([...g].filter((n) => pendingN.has(n)))).filter((g) => g.size);
+    const size = (g: Set<number>) => all.filter((it) => g.has(it.n)).reduce((n, it) => n + Array.from(stripProv(it.text)).length + 8, 0);
+    const toKey = (o: any) => ({ ...o, n: keyOf.get(o.n), ...(o.into ? { into: keyOf.get(o.into) } : {}) });
+    let piece = 0;
+    const call = async (g: Set<number>, think: boolean) => {
       const usageLines = all.filter((it) => g.has(it.n)).flatMap((it) => {
         const u = use(it.text);
         return u.used >= 2 ? [`[${it.n}] 想起 ${u.recalled} 次，用上 ${u.used} 次（经常用上）`]
           : u.recalled >= STALE_RECALLS && !u.used ? [`[${it.n}] 想起 ${u.recalled} 次，一次都没用上`] : [];
       });
-      const srcLines = [...src].filter(([n]) => g.has(n)).map(([n, ex]) => `[${n}]\n${ex}`);
+      const srcLines = [...src].filter(([n]) => g.has(n)).map(([n, s]) => `[${n}]\n${s.ex}`);
+      const first = !job.userDone;
       const input = [
-        `A. USER.md 的「自动记录」${gi ? "（只读，整理在第一段做过了；这里只用来判断哪些该 to_user、别重复）" : ""}：\n${autoItems.map((x) => `- ${x}`).join("\n") || "（空）"}`,
-        `B. 长期记忆${part}：\n${parsed.files.map((f) => { const t = numbered(f, g); return t && f.items.some((it) => g.has(it.n)) ? `=== ${f.file} ===\n${t}` : ""; }).filter(Boolean).join("\n\n")}`,
+        `A. USER.md 的「自动记录」${first ? "" : "（只读，整理在第一段做过了；这里只用来判断哪些该 to_user、别重复）"}：\n${autoItems.map((x) => `- ${x}`).join("\n") || "（空）"}`,
+        `B. 长期记忆：\n${parsed.files.map((f) => { const t = numbered(f, g); return t && f.items.some((it) => g.has(it.n)) ? `=== ${f.file} ===\n${t}` : ""; }).filter(Boolean).join("\n\n")}`,
         srcLines.length ? `C. 出处原文（对照核对这些条目）：\n${srcLines.join("\n\n")}` : "",
         usageLines.length ? `U. 使用情况：\n${usageLines.join("\n")}` : "",
       ].filter(Boolean).join("\n\n");
-      const batchNote = groups.length > 1 ? `记忆比较多，分 ${groups.length} 段整理，这是第 ${gi + 1} 段：只对这一段里的编号输出操作。` : "";
+      const batchNote = g.size < all.length ? "记忆比较多，分段整理，这是其中一段：只对这一段里的编号输出操作。" : "";
       const prompt = PROMPT.replace("{TODAY}", dayOf(now)).replace("{BATCH}", batchNote ? `\n${batchNote}\n` : "")
-        .replace("{USER_RULE}", gi ? "这一段不用输出 user（留空数组）。" : "");
-      this.stage(agent.id, `等模型整理${groups.length > 1 ? `第 ${gi + 1}/${groups.length} 段` : ""}`);
-      const res = await this.ask(agent, prompt, input, now, TIDY_CALL_MS);
+        .replace("{USER_RULE}", first ? "" : "这一段不用输出 user（留空数组）。");
+      piece++;
+      this.stage(agent.id, `等模型整理${resumed ? "（接着上次）" : ""}：第 ${piece} 段，已看完 ${job.reviewed.length}/${all.length} 条${think ? "" : "（关思考重试）"}`);
+      const res = await this.ask(agent, prompt, input, now, think);
       const out = parseTidy(res.text);
-      if (!out) return { status: "failed", why: `${res.cut ? "模型输出被截断了" : "模型没按格式输出"}${part}，没写入` };
-      if (!gi && out.user) user = out.user;
-      ops.push(...cleanOps(out.ops, g));
-      Object.assign(topicIndex, out.topicIndex);
-      if (out.summary) summaries.push(out.summary);
-    }
+      return out ? { ok: true as const, out } : { ok: false as const, why: res.cut ? "模型输出被截断了" : "模型没按格式输出" };
+    };
+    const done = (g: Set<number>, out: NonNullable<ReturnType<typeof parseTidy>>) => {
+      if (!job.userDone) { job.user = out.user; job.userBase = autoItems; job.userDone = true; }
+      job.ops.push(...cleanOps(out.ops, g).map(toKey));
+      Object.assign(job.topicIndex!, out.topicIndex);
+      if (out.summary) job.summaries.push(out.summary);
+      for (const n of g) { job.reviewed.push(keyOf.get(n)!); const s = src.get(n); if (s) job.checked!.push(s.key); }
+      job.fails = 0;
+      this.save();
+    };
+    try { for (const g of groups) await this.solve(agent.id, g, size, true, call, done); }
+    catch (e) { return { status: "failed", why: this.paused(jkey, e, now, all.length), resume: { done: job.reviewed.length, total: all.length } }; }
 
+    // 全看完了：把这一趟拿到的操作（按内容指纹）换回现在的编号，一次落到文件上
     this.stage(agent.id, "写入");
-    const applied = applyOps(parsed, ops as any, topicIndex);
+    const valid = new Set(all.map((it) => it.n));
+    const ops = cleanOps(job.ops.map((o) => ({ ...o, n: nOf.get(o.n), ...(o.into ? { into: nOf.get(o.into) } : {}) })), valid);
+    // A 是第一段整理的，可能是好几天前：这期间她又记了关于主人的（新加的补上）、主人删了的（去掉），别把这些弄丢 / 又加回来
+    let user = job.userDone ? job.user ?? null : null;
+    if (user && job.userBase) {
+      const base = job.userBase;
+      user = [...user.filter((x) => !(base.includes(x) && !autoItems.includes(x))), ...autoItems.filter((x) => !base.includes(x) && !user!.includes(x))];
+    }
+    const finish = () => { delete this.jobs[jkey]; };
+    const applied = applyOps(parsed, ops as any, job.topicIndex ?? {});
     // USER：第一段整理过的 A + 各段挪过来的；超长 / 超量的放回 MEMORY，别撑爆常驻的 USER.md
     const userAll = [...(user ?? autoItems)];
     for (const x of applied.toUser) if (!userAll.includes(x)) userAll.push(x);
@@ -403,16 +589,17 @@ export class MemoryTidy {
     const after = chars(userOut) + chars(memNew.map(plainText)) + chars(topicNew.map(plainText));
     const result = { user: { before: chars(autoItems), after: chars(userOut) }, memory: { before: all.length, after: memNew.length + topicNew.length } };
     const removed = applied.removed;
-    if (before > 0 && after < before * MIN_KEEP) return { ...result, status: "skipped", removed, why: `一次删得太多（整理后只剩原来的 ${Math.round((after / before) * 100)}%），没写入，先看看是不是删错了` };
-    if (before > 0 && after > before * MAX_GROW + 200) return { ...result, status: "skipped", why: `整理后反而多了很多（原来的 ${Math.round((after / before) * 100)}%），没写入` };
+    const checked = [...new Set(job.checked ?? [])];
+    const summary = job.summaries.join("；");
+    if (before > 0 && after < before * MIN_KEEP) { finish(); return { ...result, status: "skipped", removed, why: `一次删得太多（整理后只剩原来的 ${Math.round((after / before) * 100)}%），没写入，先看看是不是删错了` }; }
+    if (before > 0 && after > before * MAX_GROW + 200) { finish(); return { ...result, status: "skipped", why: `整理后反而多了很多（原来的 ${Math.round((after / before) * 100)}%），没写入` }; }
     const changedTopics = [...topicsOut].filter(([n, t]) => (topicText.get(n) ?? "").trim() !== t.trim());
     const same = JSON.stringify(userOut) === JSON.stringify(autoItems) && memOut === memText.trim() && !changedTopics.length;
-    for (const k of checked) this.verified[k] = now / 1000;
-    const summary = summaries.join("；");
-    if (same) return { ...result, status: "nochange", summary: summary || "看过了，不用改", verified: checked.length };
+    if (same) { finish(); for (const k of checked) this.verified[k] = now / 1000; return { ...result, status: "nochange", summary: summary || "看过了，不用改", verified: checked.length }; }
 
-    // 整理要好几分钟：这期间她可能又记了几条（memory_write 是直接追加的），或者主人在管理界面改过。
-    // 写回之前再读一遍：原来的条目都还在、只是多了新的 → 把新的接到整理结果后面；原来的被删 / 改了 → 不写，下次再整理（别把别人的改动盖掉）
+    // 整理要好一阵：这期间她可能又记了几条（memory_write 是直接追加的），或者主人在管理界面改过。
+    // 写回之前再读一遍：原来的条目都还在、只是多了新的 → 把新的接到整理结果后面；原来的被删 / 改了 → 不写。
+    // 进度留着：下次只看被改过 / 新加的那几条，看过的不用再问模型
     const userNow = read(userFile), memNow = read(memFile);
     const autoNow = (() => { const i = userNow.indexOf(USER_AUTO_HEAD); return i >= 0 ? items(userNow.slice(i + USER_AUTO_HEAD.length)) : []; })();
     const memItemsNow = items(memNow);
@@ -421,7 +608,9 @@ export class MemoryTidy {
     const lost = (a: string[], b: string[]) => a.some((x) => !b.includes(x));
     const topicsMoved = topicFiles.some((f) => read(path.join(topicDir, f)) !== topicText.get(f.slice(0, -3)));
     if (lost(autoItems, autoNow) || lost(memItems, memItemsNow) || handNow !== hand || topicsMoved) {
-      return { ...result, status: "skipped", why: "整理期间记忆被改过（管理界面或者别的 agent），没写入，下次再整理" };
+      if (lost(autoItems, autoNow) || handNow !== hand) job.userDone = false;
+      this.save();
+      return { ...result, status: "skipped", why: "整理期间记忆被改过（管理界面或者别的 agent），没写入；看过的记着，下次只看改过的那几条" };
     }
     const userFinal = [...userOut, ...autoNow.filter((x) => !autoItems.includes(x) && !userOut.includes(x))];
     const addedMem = memItemsNow.filter((x) => !memItems.includes(x));
@@ -438,13 +627,15 @@ export class MemoryTidy {
       const head = fs.existsSync(arch) ? "" : "# 整理时移出长期记忆的条目（不会注入、不会自动想起；需要时可以翻）\n";
       fs.appendFileSync(arch, `${head}\n## ${new Date(now).toLocaleString("zh-CN", { hour12: false })}（${trigger}）\n${removed.map((r) => `- ${r.text}${r.why ? `（${r.why}）` : ""}`).join("\n")}\n`);
     }
+    finish();
+    for (const k of checked) this.verified[k] = now / 1000;
     return { ...result, status: "done", removed, corrected: applied.corrected, verified: checked.length,
-      pinned: Array.from(pinnedOf(memOut)).length, topics: changedTopics.map(([n]) => n), summary, backups };
+      pinned: Array.from(pinnedOf(memOut)).length, topics: changedTopics.map(([n]) => n), summary, backups, resumed: resumed || undefined };
   }
 
   /**
    * 守则文件：AGENTS / TOOLS 有共享那份时，共享的和这个 agent 自己的补充各整理各的（补充拿共享那份当参考，重复的去掉）；HEARTBEAT 每个 agent 一份。
-   * 自动整理时，上次整理后没变过的不看（共享那份在同一晚也只会被第一个 agent 整理一次）；手动 / 她自己叫的都看
+   * 自动整理时，上次整理后没变过的不看（共享那份在同一晚也只会被第一个 agent 整理一次）；手动 / 她自己叫的都看；没做完的接着做
    */
   private async tidyDocs(agent: AgentInfo, trigger: string, now: number): Promise<DocResult[]> {
     const out: DocResult[] = [];
@@ -457,16 +648,19 @@ export class MemoryTidy {
       for (const t of targets) {
         this.stage(agent.id, `整理守则 ${t.scope === "shared" ? "共享的 " : ""}${file}`);
         let text = "";
-        try { text = fs.readFileSync(t.p, "utf8"); } catch { continue; }
+        try { text = fs.readFileSync(t.p, "utf8"); } catch { delete this.jobs[`doc|${t.p}`]; continue; }
         // 自己那份里和共享重复的行本来就不会给她看两遍，只算真正多出来的
         const sharedText = t.ref ? (() => { try { return fs.readFileSync(t.ref, "utf8"); } catch { return ""; } })() : "";
         const body = t.ref ? ownExtra(sharedText, text) : text;
-        if (len(body) < DOC_MIN_CHARS) continue;
-        if (trigger === "auto" && this.docHash[t.p] === sha(text)) continue;
+        const job = this.jobs[`doc|${t.p}`];
+        if (len(body) < DOC_MIN_CHARS) { if (job) delete this.jobs[`doc|${t.p}`]; continue; }
+        if (!job && (trigger === "auto" || trigger === "resume") && this.docHash[t.p] === sha(text)) continue;
+        // 共享那份：别的 agent 起的进度也接着用（同一个文件）
+        if (job && job.agent !== agent.id && trigger === "resume") continue;
         const base = { file, scope: t.scope, before: len(text) };
         let r: DocResult;
         try { r = { ...base, ...(await this.tidyDoc(agent, file, t, text, sharedText, guide, trigger, now, len(body))) }; }
-        catch (e: any) { r = { ...base, status: "failed", why: String(e?.message ?? e).slice(0, 200) }; }
+        catch (e: any) { r = { ...base, status: "failed", why: errText(e) }; }
         out.push(r);
       }
     }
@@ -474,26 +668,68 @@ export class MemoryTidy {
   }
 
   private async tidyDoc(agent: AgentInfo, file: string, t: { p: string; scope: "shared" | "own" }, text: string, sharedText: string, guide: string, trigger: string, now: number, baseLen: number): Promise<Omit<DocResult, "file" | "scope" | "before">> {
-    if (Array.from(text).length > DOC_MAX_CHARS) return { status: "skipped", why: `太长（超过 ${DOC_MAX_CHARS} 字），一次整理不了，先在管理界面手动删一些` };
+    if (Array.from(text).length > TIDY_MAX_CHARS) return { status: "skipped", why: `太长（超过 ${TIDY_MAX_CHARS} 字），先在管理界面手动删一些` };
+    const jkey = `doc|${t.p}`;
+    const p = parseDocUnits(text);
+    const job: TidyJob = this.jobs[jkey] ??= { kind: "doc", agent: agent.id, trigger, file: t.p, started: now / 1000, tried: now / 1000, fails: 0, reviewed: [], ops: [], summaries: [] };
+    job.tried = now / 1000;
+    const resumed = job.reviewed.length > 0;
+    const keyOf = new Map(p.units.map((u) => [u.n!, ukey(u.text)]));
+    const nOf = new Map<string, number>();
+    for (const u of p.units) if (!nOf.has(keyOf.get(u.n!)!)) nOf.set(keyOf.get(u.n!)!, u.n!);
+    const seen = new Set(job.reviewed);
+    const skip = new Set(p.units.filter((u) => seen.has(keyOf.get(u.n!)!)).map((u) => u.n!));
+    const groups = docBatches(p, DOC_BATCH_CHARS, skip);
+    const size = (g: Set<number>) => p.units.filter((u) => g.has(u.n!)).reduce((n, u) => n + Array.from(u.text).length + 6, 0);
     const refs = [sharedText.trim() ? `共享那份 ${file}（所有 agent 都有，这里是只对这个 agent 的补充）：\n${sharedText.trim()}` : "", guide ? `系统每轮自动告诉它的用法：\n${guide}` : ""].filter(Boolean);
-    const res = await this.ask(agent, DOC_PROMPT.replace("{FILE}", file).replace("{DESC}", DOC_DESC[file] ?? "").replace("{TODAY}", dayOf(now)),
-      `${refs.length ? `参考（只读，别改、别抄进来）：\n${refs.join("\n\n")}\n\n` : ""}要整理的 ${file}：\n${text.trim()}`, now);
-    if (res.cut) return { status: "failed", why: "模型输出被截断了，没写入" };
-    const o = parseDoc(res.text);
-    if (!o) return { status: "failed", why: "模型没按格式输出，没写入" };
-    const after = len(o.content);
-    if (o.content === text.trim()) { this.docHash[t.p] = sha(text); return { status: "nochange", after }; }
+    const whole = Array.from(text).length <= DOC_CONTEXT_CHARS;
+    const label = `${t.scope === "shared" ? "共享的 " : ""}${file}`;
+    let piece = 0;
+    const call = async (g: Set<number>, think: boolean) => {
+      // 文件不太长：整份带编号给它当参考（找别处重复的）；太长：只给目录
+      const context = g.size === p.units.length ? "" : whole
+        ? `整份文件（只读，用来找别处重复的；merge 的 into 可以是这里的任何编号）：\n${numberedDoc(p)}\n\n`
+        : `整份文件的目录（只读）：\n${p.segs.filter((s) => s.kind === "raw" && /^#{1,6}\s/.test(s.text)).map((s) => s.text).join("\n")}\n\n`;
+      const input = `${refs.length ? `参考（只读，别改、别抄进来）：\n${refs.join("\n\n")}\n\n` : ""}${context}要整理的${g.size === p.units.length ? "" : "这一段"}（${file}）：\n${numberedDoc(p, g)}`;
+      piece++;
+      this.stage(agent.id, `整理守则 ${label}${resumed ? "（接着上次）" : ""}：第 ${piece} 段，已看完 ${job.reviewed.length}/${p.units.length} 块${think ? "" : "（关思考重试）"}`);
+      const res = await this.ask(agent, DOC_PROMPT.replace("{FILE}", file).replace("{DESC}", DOC_DESC[file] ?? "").replace("{TODAY}", dayOf(now)), input, now, think);
+      const o = parseDocOps(res.text);
+      return o ? { ok: true as const, out: o } : { ok: false as const, why: res.cut ? "模型输出被截断了" : "模型没按格式输出" };
+    };
+    const done = (g: Set<number>, o: NonNullable<ReturnType<typeof parseDocOps>>) => {
+      job.ops.push(...cleanDocOps(o.ops, g, p.units.length).map((x: any) => ({ ...x, n: keyOf.get(x.n), ...(x.into ? { into: keyOf.get(x.into) } : {}) })));
+      if (o.summary && !/^不用改/.test(o.summary)) job.summaries.push(o.summary);
+      for (const n of g) job.reviewed.push(keyOf.get(n)!);
+      job.fails = 0;
+      this.save();
+    };
+    try { for (const g of groups) await this.solve(agent.id, g, size, true, call, done); }
+    catch (e) { return { status: "failed", why: this.paused(jkey, e, now, p.units.length), resume: { done: job.reviewed.length, total: p.units.length } }; }
+
+    const finish = () => { delete this.jobs[jkey]; };
+    const ops = cleanDocOps(job.ops.map((o) => ({ ...o, n: nOf.get(o.n), ...(o.into ? { into: nOf.get(o.into) } : {}) })), new Set(p.units.map((u) => u.n!)), p.units.length);
+    const applied = applyDocOps(p, ops);
+    const after = len(applied.text);
+    const summary = job.summaries.join("；");
+    if (!applied.changed) { finish(); this.docHash[t.p] = sha(text); return { status: "nochange", after }; }
     // 按真正多出来的那部分算（自己那份里和共享重复的行删掉不算删得多）
-    if (after < baseLen * DOC_MIN_KEEP) return { status: "skipped", after, removed: o.removed, why: `一次删得太多（整理后只剩原来的 ${Math.round((after / Math.max(1, baseLen)) * 100)}%），没写入，先看看是不是删错了` };
+    if (after < baseLen * DOC_MIN_KEEP) { finish(); return { status: "skipped", after, removed: applied.removed, why: `一次删得太多（整理后只剩原来的 ${Math.round((after / Math.max(1, baseLen)) * 100)}%），没写入，先看看是不是删错了` }; }
+    if (after > len(text) * MAX_GROW + 200) { finish(); return { status: "skipped", after, why: `整理后反而多了很多（原来的 ${Math.round((after / Math.max(1, len(text))) * 100)}%），没写入` }; }
+    // 整理期间文件被改过（主人在管理界面改、她自己记了条规矩）：不写，进度留着，下次只看改过的块
+    let cur = "";
+    try { cur = fs.readFileSync(t.p, "utf8"); } catch { /* 被删了 */ }
+    if (cur !== text) { this.save(); return { status: "skipped", why: "整理期间文件被改过，没写入；看过的记着，下次只看改过的部分" }; }
     const bk = backup(t.p, stampOf(new Date(now)));
-    fs.writeFileSync(t.p, o.content + "\n");
-    this.docHash[t.p] = sha(o.content + "\n");
-    if (o.removed.length) {
+    fs.writeFileSync(t.p, applied.text);
+    this.docHash[t.p] = sha(applied.text);
+    if (applied.removed.length) {
       const arch = path.join(path.dirname(t.p), DOC_ARCHIVE);
       const head = fs.existsSync(arch) ? "" : "# 整理时从守则文件里移出的条目（不会注入；需要时可以翻）\n";
-      fs.appendFileSync(arch, `${head}\n## ${new Date(now).toLocaleString("zh-CN", { hour12: false })} ${file}（${trigger}）\n${o.removed.map((r) => `- ${r.text}${r.why ? `（${r.why}）` : ""}`).join("\n")}\n`);
+      fs.appendFileSync(arch, `${head}\n## ${new Date(now).toLocaleString("zh-CN", { hour12: false })} ${file}（${trigger}）\n${applied.removed.map((r) => `- ${r.text}${r.why ? `（${r.why}）` : ""}`).join("\n")}\n`);
     }
-    return { status: "done", after, removed: o.removed, summary: o.summary, backup: bk };
+    finish();
+    return { status: "done", after, removed: applied.removed, summary, backup: bk, resumed: resumed || undefined };
   }
 }
 
@@ -510,7 +746,7 @@ export function describe(r: TidyResult): string {
   else if (r.memStatus === "skipped") lines.push(`记忆整理先没动：${r.why}`);
   else if (r.memStatus === "nochange") lines.push(`整理了一遍记忆，没什么要改的${r.summary && r.summary !== "看过了，不用改" ? `（${r.summary}）` : ""}`);
   else if (r.memStatus === "done") {
-    lines.push(`整理了一遍记忆：${r.summary || ""}`.trim(), `MEMORY.md ${r.memory?.before} → ${r.memory?.after} 条，USER.md 自动记录 ${r.user?.before} → ${r.user?.after} 字`);
+    lines.push(`整理了一遍记忆${r.resumed ? "（接着上次没做完的）" : ""}：${r.summary || ""}`.trim(), `MEMORY.md ${r.memory?.before} → ${r.memory?.after} 条，USER.md 自动记录 ${r.user?.before} → ${r.user?.after} 字`);
     if (r.corrected?.length) lines.push(`对照当时的对话改了 ${r.corrected.length} 条：`, ...listRemoved(r.corrected, 5));
     else if (r.verified) lines.push(`对照当时的对话核对了 ${r.verified} 条，没发现记错的`);
     if (r.topics?.length) lines.push(`整理出主题页：${r.topics.map((n) => `topics/${n}.md`).join("、")}`);
@@ -520,7 +756,7 @@ export function describe(r: TidyResult): string {
   const docs = r.docs ?? [];
   for (const d of docs) {
     if (d.status === "done") {
-      lines.push(`${name(d)} 整理了（${d.before} → ${d.after} 字）${d.summary ? `：${d.summary}` : ""}`);
+      lines.push(`${name(d)} 整理了${d.resumed ? "（接着上次没做完的）" : ""}（${d.before} → ${d.after} 字）${d.summary ? `：${d.summary}` : ""}`);
       if (d.removed?.length) lines.push(`移出了 ${d.removed.length} 条（放在 ${DOC_ARCHIVE}，没真删）：`, ...listRemoved(d.removed, 5));
     } else if (d.status === "failed") lines.push(`${name(d)} 没整理成：${d.why}`);
     else if (d.status === "skipped") lines.push(`${name(d)} 先没动：${d.why}`);

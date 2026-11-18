@@ -201,19 +201,27 @@ function TidyBtn({ id, scope, refresh }: { id: string; scope: "memory" | "docs";
   }, [!!run, busy]);
   const secs = (t: number) => { const s = Math.max(0, Math.round((Date.now() - t) / 1000)); return s >= 60 ? `${Math.floor(s / 60)} 分 ${s % 60} 秒` : `${s} 秒`; };
   const last = st?.last?.[id];
+  // 上次没做完的（进度存着）：显示看到哪了、什么时候自动接着做；按钮变成「接着整理」
+  const pend = (st?.pending?.[id] ?? []).filter((j: any) => (scope === "memory") === (j.kind === "memory"));
+  const pendText = pend.length ? (() => {
+    const seen = pend.reduce((n: number, j: any) => n + j.reviewed, 0);
+    const stuck = pend.some((j: any) => j.fails >= (st?.resume_max ?? 6));
+    return `上次没做完（已看完 ${seen} ${scope === "memory" ? "条" : "块"}，进度存着）${stuck ? "，连着几次没做成，先停下了，点按钮接着做" : `，约 ${st?.resume_gap_min ?? 20} 分钟后自动接着做`}`;
+  })() : "";
   const when = last ? new Date(last.at * 1000).toLocaleString("zh-CN", { hour12: false, month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "";
   return <>
     {run ? <span class="muted">整理中：{run.stage}（{secs(run.since)}，共 {secs(run.started)}）</span>
+      : pendText ? <span class="muted" title={pend.map((j: any) => j.lastError).filter(Boolean).join("\n")}>{pendText}</span>
       : last && <span class="muted" title={last.why || last.summary || ""}>上次整理 {when}（{({ done: "改了", nochange: "没改", skipped: "没动", failed: "失败" } as any)[last.status] ?? last.status}）</span>}
     <Btn small kind="ghost" disabled={busy || !!run} onClick={confirmDo(scope === "memory"
-      ? "现在整理一遍这个 agent 的记忆（USER.md 自动记录 + MEMORY.md + 主题页）？会先备份，删掉的放进 MEMORY.archive.md。记忆多的要几分钟，这里会显示进度。"
-      : "现在整理一遍守则文件（AGENTS / TOOLS / HEARTBEAT，共享的和这个 agent 自己的）？合并重复、删掉过时的；会先备份，删掉的放进 PERSONA.archive.md。要一两分钟。", async () => {
+      ? "现在整理一遍这个 agent 的记忆（USER.md 自动记录 + MEMORY.md + 主题页）？会先备份，删掉的放进 MEMORY.archive.md。记忆多的分段整理、要一阵子，这里会显示进度；中途断了进度会存着、自动接着做。"
+      : "现在整理一遍守则文件（AGENTS / TOOLS / HEARTBEAT，共享的和这个 agent 自己的）？合并重复、删掉过时的；会先备份，删掉的放进 PERSONA.archive.md。文件长的分段整理，中途断了进度会存着、自动接着做。", async () => {
       try {
         const r = await api<any>(`/agents/${enc(id)}/memory-tidy`, { method: "POST", body: { scope, background: true } });
         if (r.running) toast("已经在整理了");
         setBusy(true); reload();
       } catch (e) { toastErr(e); }
-    })}>{busy || run ? "整理中…" : scope === "memory" ? "整理记忆" : "整理守则"}</Btn>
+    })}>{busy || run ? "整理中…" : pend.length ? "接着整理" : scope === "memory" ? "整理记忆" : "整理守则"}</Btn>
   </>;
 }
 
