@@ -705,7 +705,9 @@ export class Runtime {
     // 一个字没说也没调工具：不落盘（库里不留空的助手消息），交给 run 压一压重试。调过工具的不重试——会把工具再执行一遍
     if (!text && !toolCalls.length) throw new Error(`空回复：模型没说话就结束了（${last.stopReason}，输出 ${last.usage?.output ?? "?"} token）`);
     if (persist && (!req.keepIf || req.keepIf(text))) {
-      const out = fresh.map((m) => unvoice(stripImages(stripRecall(m), agent.workspace), tap?.fired));
+      const out = fresh.map((m) => unvoice(stripImages(stripRecall(m), agent.workspace), tap?.fired))
+        // 被单轮上限挡掉的工具调用：结果里那句「不要再调用任何工具」只对这一轮有效，原样留在历史里，下一轮「继续」时她会照着不敢动（2026-11-24）
+        .map((m: any) => m.role === "toolResult" && m.details?.guard ? { ...m, content: [{ type: "text", text: "[系统] 这次调用没执行：当时那一轮到了单轮上限（或者同样的参数调太多次）。现在是新的一轮，需要的话照常调用。" }] } : m);
       // 这一轮的上下文构成（估算）记在最后一条助手消息上：会话页每轮下面显示 token 明细用
       const li = out.map((m) => m.role).lastIndexOf("assistant");
       // 这条消息从哪来（同一个会话里可能混着设备、飞书、网页的消息，比如主会话）：会话页标在「用户」旁边
