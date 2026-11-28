@@ -31,7 +31,9 @@
   共享的 USER / AGENTS / TOOLS 几个 agent 都会写，中间一让出，别的 agent 的 `memory_write`（同步追加）/ `edit_file` 插进来，就会被这次写回盖掉（丢更新）。
   所有 agent 在同一个进程里，同步的这一小段就是天然的锁；文本文件读写几毫秒，不碍事。`memory.write` 本来就是同步的，别把它改成异步。
   **图片也走 `read_file`**（`IMAGE_TYPES`，LRN 2026-11-15，症状「让她看自己刚拍的照片，她去开 playwright 浏览器」）：工具结果里的图只在那一轮里，落盘后只剩路径，以前之后再看就没路可走；现在 png / jpg / webp / gif 直接以图片内容返回，模型没勾「图片」就报错说清楚（`fileTools(cfg, canSee)`）。
-  守则（`toolGuide`）让她看 / 改文件用这些、别用 exec 拼命令，改完看回显确认。agent 自己设了工具白名单（不是 `*`）的要手动加上。
+  守则（`toolGuide`）让她看 / 改文件用这些、别用 exec 拼命令，改完看回显确认；改代码一律 edit_file，别跑自己写的 Python 补丁脚本（换行差一点 assert 就失败）。
+  **Windows 上认 WSL 写法的路径**（`resolvePath`，2026-11-28，同上「头雕待办一周没产出」）：执行命令配成交给 WSL 时她看到、写出的都是 `/mnt/c/…`，以前文件工具在 Windows 上解析成 `C:\mnt\c\…`、找不到，
+  她只好用 exec 跑自己写的补丁脚本（`assert old in text`），文件是 Windows 换行，次次失败、八轮没改动一个字节。现在 `/mnt/<盘>/…` → `<盘>:\…`；`/home/…` 这类 WSL 自己的路径找不到时提示写成 `\\wsl.localhost\<发行版>\…`。agent 自己设了工具白名单（不是 `*`）的要手动加上。
 - **扩展 / MCP（`server/src/agent/extensions.ts`、`mcp.ts`）**：扩展是 pi 格式（`export default (pi) => pi.registerTool(...)`），
   运行时 sucrase 转译 + `vm.compileFunction`，`@earendil-works/pi-ai`/`typebox` 走内置 shim（打包后没有 node_modules）。
   扩展工具、MCP 工具、`extension_*` 自写工具**都按 `exec` 同一条可信度规则**——它们本质上就是任意代码执行；

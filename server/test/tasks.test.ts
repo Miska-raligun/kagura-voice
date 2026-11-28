@@ -2,7 +2,7 @@
 import { describe, it, expect } from "vitest";
 import path from "node:path";
 import { makeRuntime } from "./helpers.ts";
-import { TaskQueue, nextWindowStart, verdictOf, MAX_ROUNDS, type TaskHost } from "../src/agent/tasks.ts";
+import { TaskQueue, nextWindowStart, verdictOf, MAX_ROUNDS, MAX_PUSHBACKS, type TaskHost } from "../src/agent/tasks.ts";
 import { taskTools, parseWhen } from "../src/agent/tools/tasks.ts";
 import type { RunScope } from "../src/agent/scope.ts";
 
@@ -14,6 +14,7 @@ function setup(hostPatch: Partial<TaskHost> = {}) {
   const runs: any[] = [], reports: any[] = [];
   let release: (() => void) | null = null;
   const host: TaskHost = {
+    ...(hostPatch.limits ? { limits: hostPatch.limits } : {}),
     run: async (req) => { runs.push(req); if (hostPatch.run) return hostPatch.run(req); return { text: `做完了：${req.sessionKey}\n状态：完成`, meta: {}, toolCalls: [], usage: { input: 10, output: 5, cost: 0.01 } }; },
     report: async (agentId, origin, text) => { reports.push({ agentId, origin, text }); return origin || ""; },
   };
@@ -197,5 +198,50 @@ describe("额度用完接着做", () => {
     await q2.tick(at(3)); await q2.idle();
     expect(runs2.length).toBe(3);
     expect(q2.get(b.id)!.status).toBe("partial");
+  });
+});
+
+describe("她说「时间 / 额度不够、下一轮再做」就收工（2026-11-28，主人「头雕待办做了一周，每次都只分析没产出」）", () => {
+  const R = (text: string, calls = 3) => ({ text, meta: {}, toolCalls: Array(calls).fill("read_file"), usage: { input: 1, output: 1, cost: 0 }, stopReason: "stop" });
+  const HER = "这轮没法交付……卡点是这一轮的时间：方案都想清楚了，还没落进 build.py。本轮预算用完了。要不要我下一轮直接动手？\n状态：没做完：方案与数值已算实，build.py 尚未落笔";
+  it("额度和时间都还多：顶回去（带真实数字），她接着动手做完；提示里一开始就写明真实额度", async () => {
+    const replies = [R(HER), R("build.py 改好了，跑 Blender 导出了 STL，四视图看过了。\n状态：完成", 12)];
+    const { q, runs } = setup({ run: async () => replies.shift()!, limits: () => ({ toolCalls: 240, tokens: 30_000_000 }) });
+    const a = q.add({ agent: "main", title: "头雕", detail: "改 build.py 出 STL" });
+    await q.tick(at(3)); await q.idle();
+    expect(runs[0].text).toContain("这件待办最多做 60 分钟；每一轮最多 240 次工具调用");
+    expect(runs[0].text).toContain("别因为觉得「时间不够」");
+    expect(runs).toHaveLength(2);
+    expect(runs[1].sessionKey).toBe(runs[0].sessionKey);
+    expect(runs[1].text).toMatch(/这一轮只调了 3 次工具（每轮上限 240 次/);
+    expect(runs[1].text).toContain("不是额度用完了");
+    expect(runs[1].text).toContain("别再分析");
+    expect(q.get(a.id)!.status).toBe("done");
+  });
+
+  it("一直推：最多顶回去 MAX_PUSHBACKS 次，之后照她说的记没做完；「需要主人：要不要下一轮动手」也算", async () => {
+    const { q, runs } = setup({ run: async () => R(HER) });
+    const a = q.add({ agent: "main", title: "头雕", detail: "改 build.py" });
+    await q.tick(at(3)); await q.idle();
+    expect(runs).toHaveLength(1 + MAX_PUSHBACKS);
+    expect(q.get(a.id)!.status).toBe("partial");
+    const replies = [R("方案写好了。\n状态：需要主人：要不要我下一轮直接动手改？"), R("改完了。\n状态：完成")];
+    const { q: q2, runs: runs2 } = setup({ run: async () => replies.shift()! });
+    const b = q2.add({ agent: "main", title: "x", detail: "y" });
+    await q2.tick(at(3)); await q2.idle();
+    expect(runs2).toHaveLength(2);
+    expect(q2.get(b.id)!.status).toBe("done");
+  });
+
+  it("真卡住了（不是推给时间）、或者单件时间真的不多了：不顶回去", async () => {
+    const { q, runs } = setup({ run: async () => R("Blender 启动就崩，日志里是 GPU 驱动报错。\n状态：没做完：Blender 崩溃（EXCEPTION_ACCESS_VIOLATION）") });
+    q.add({ agent: "main", title: "a", detail: "b" });
+    await q.tick(at(3)); await q.idle();
+    expect(runs).toHaveLength(1);
+    const { q: q2, runs: runs2 } = setup({ run: async () => R(HER) });
+    q2.setSettings({ max_minutes: 5 });
+    q2.add({ agent: "main", title: "a", detail: "b" });
+    await q2.tick(at(3)); await q2.idle();
+    expect(runs2).toHaveLength(1);
   });
 });

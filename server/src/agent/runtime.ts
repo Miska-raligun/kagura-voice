@@ -210,6 +210,12 @@ export class Runtime {
     if (l.maxTurnTokens !== undefined && l.maxTurnTokens >= 0) this.opts.maxTurnTokens = l.maxTurnTokens;
   }
 
+  /** 待办一轮的上限（同 execute 里 purpose = task 的算法：×3）：告诉她真实的额度，别让她自己猜「预算用完了」 */
+  taskLimits(): { toolCalls: number; tokens: number } {
+    return { toolCalls: Math.max(5, Math.round((this.opts.maxToolCalls || DEFAULT_MAX_TOOL_CALLS) * 3)),
+      tokens: this.opts.maxTurnTokens === 0 ? Infinity : (this.opts.maxTurnTokens || DEFAULT_MAX_TURN_TOKENS) * 3 };
+  }
+
   addTools(p: ToolProvider, opts: { plugin?: boolean } = {}) { (opts.plugin ? this.pluginProviders : this.providers).push(p); }
   private allProviders() { return [...this.providers, ...this.pluginProviders]; }
   /** 内置工具的名字（扩展里重名的会被挡掉，管理界面要标出来） */

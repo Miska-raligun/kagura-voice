@@ -241,7 +241,8 @@ export function toolGuide(tools: string[]): string {
   if (has("announce")) g.push("主人明确让你「跟家里说一声」时用 announce，平时回复不用它（系统会决定要不要播）。");
   if (has("set_presence")) g.push("主人说要出门 / 到家了，用 set_presence 记下在家状态。");
   if (has("read_file")) g.push("看、找、改文件用 read_file / search_files / list_files / edit_file / write_file，别用 exec 拼 cat、grep、sed、echo >。图片（照片、截图、渲染图）也用 read_file 看，别开浏览器。"
-    + "改之前先读；改完看 edit_file 返回的那几行对不对，写进去的东西别只凭印象说「改好了」。");
+    + "改之前先读；改完看 edit_file 返回的那几行对不对，写进去的东西别只凭印象说「改好了」。"
+    + "改代码 / 文本一律用 edit_file（Windows 换行、WSL 写法的 /mnt/c/… 路径它都认），别用 exec 跑自己写的 Python 补丁脚本去替换——换行、缩进差一点 assert 就失败，文件一个字没改。");
   if (has("exec")) g.push("exec 能在这台电脑上执行命令（跑脚本、装东西、调本机程序）；会删改文件、花钱、对外发东西的操作先跟主人确认。");
   if (has("exec_jobs")) g.push("估计要跑一两分钟以上的命令用 exec 的 background=true 放到后台，先回复主人；跑完结果会作为新消息交回给你。");
   if (has("sessions_steer")) g.push("子任务还在跑时主人追加了要求、或者你发现交代错了，用 sessions_steer 直接告诉它，别等它做完再重派。");

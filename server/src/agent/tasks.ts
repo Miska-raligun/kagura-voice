@@ -17,6 +17,7 @@ import { inActiveHours } from "./cron.ts";
 import type { RunRequest, RunResult } from "./runtime.ts";
 import { GUARD_STOP } from "./runtime.ts";
 import { WATCHDOG_TAG } from "./watchdog.ts";
+import { health } from "./health.ts";
 import type { AgentRegistry } from "./registry.ts";
 
 export type TaskStatus = "queued" | "running" | "done" | "partial" | "failed" | "cancelled";
@@ -47,6 +48,18 @@ export const MAX_ROUNDS = 4;
  * 症状「待办做到一半 token 触顶就停了，标成没做完，要人第二天手动点继续」）。和 MAX_ROUNDS、单件总时长一起封顶，不会无限续
  */
 export const MAX_GUARD_CONTINUES = 2;
+/**
+ * 她自己说「时间 / 额度不够了、下一轮再做」就收工，可额度和时间其实还剩很多：顶回去、让她接着动手，最多这么多次
+ * （2026-11-28，主人「头雕待办做了一周都没完成，每次都是只分析没有任何产出」：一轮只调了 3 次模型，她写「本轮预算用完了」+「状态：没做完」，
+ * 系统见到状态行就收了——每晚分析一遍、写个方案、说下一轮动手，一周没产出一个文件）
+ */
+export const MAX_PUSHBACKS = 2;
+/** 至少还剩这么多时间（秒，且不少于单件时长的四分之一）才顶回去 */
+const PUSH_MIN_LEFT = 600;
+/** 她把「没做完」推给时间 / 额度、或者推到下一轮 */
+export const DEFER_RE = /预算|额度|时间(不够|用完|到了|有限|不多)|没时间|时长|来不及|token|调用次数|(本|这一?)轮.{0,8}(用完|不够|到头|结束|的时间)|下一?轮|下次|明晚|改天/;
+/** 「需要主人」其实只是问要不要接着做 */
+const ASK_GO_RE = /(要不要|是否|可以).{0,20}(下一?轮|下次|继续|接着|动手|开始)/;
 const STATUS_LINE = /(?:^|\n)\s*[*_`#>\-\s]*状态\s*[:：]\s*(完成|没做完|需要主人)\s*[:：，,]?\s*([^\n]*)\s*$/;
 export type Verdict = { v: "done" | "partial" | "blocked" | "none"; why: string; body: string };
 
@@ -62,7 +75,7 @@ export function verdictOf(text: string): Verdict {
 
 const FINISH_RULE = "最后单独一行写状态（必须写，系统靠它判断做没做完）：\n"
   + "- 「状态：完成」——确实做完并检查过（改了代码就跑过测试 / 看过结果，写了文件就确认文件在）；\n"
-  + "- 「状态：没做完：原因」——卡住了、出错了或时间不够；\n"
+  + "- 「状态：没做完：原因」——真卡住了：报错修不好、缺文件 / 权限 / 信息。时间和额度由系统管（快到了会提醒、到了会叫停或续上），别因为觉得「时间不够」「额度不够」就停；\n"
   + "- 「状态：需要主人：要主人决定什么」。\n"
   + "别把计划当成完成：说了「接下来我会…」就接着去做，做完再写状态。";
 const GUARD_CONTINUE_PROMPT = "[继续待办] 上一轮的额度（工具调用次数 / token）用完了，系统给你换了一轮新的额度。"
@@ -87,6 +100,8 @@ const WINDOW = /^(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})$/;
 
 export interface TaskHost {
   run(req: RunRequest): Promise<RunResult>;
+  /** 待办一轮的上限（工具调用次数 / token），写进提示里、顶回去时说给她听 */
+  limits?(): { toolCalls: number; tokens: number };
   /** 清空某个会话的历史（「重新开始」时用） */
   reset?(agentId: string, sessionKey: string): void;
   /** 把汇报送到来源；返回实际送到哪（空 = 没送出去，只在管理界面看得到） */
@@ -291,16 +306,21 @@ export class TaskQueue {
     console.log(`[tasks] 🌙 ${t.resume ? "接着做" : "开始做"}「${t.title}」（${t.agent}）`);
     const deadline = Date.now() + s.max_minutes * 60_000;
     const usage = { input: 0, output: 0, cost: 0 };
+    const lim = (() => { try { return this.host.limits?.(); } catch { return undefined; } })();
+    // 真实的额度说给她听：不说的话她会自己猜「预算快用完了」，分析完就收工
+    const budget = `（额度：这件待办最多做 ${s.max_minutes} 分钟${lim ? `；每一轮最多 ${lim.toolCalls} 次工具调用，用完了系统会自动给你续上（最多再续 ${MAX_GUARD_CONTINUES} 轮）` : ""}。`
+      + "额度够用，不用省着，也别做到一半停下来汇报计划——想清楚了就直接动手：改文件、跑命令、出产物。快到上限系统会提醒你。）";
     try {
       const first = t.resume
-        ? `[继续待办「${t.title}」] 上次没做完，接着往下做（之前的过程都在上面）。${t.detail ? `\n原来的要求：${t.detail}` : ""}\n\n${FINISH_RULE}`
+        ? `[继续待办「${t.title}」] 上次没做完，接着往下做（之前的过程都在上面）。${t.detail ? `\n原来的要求：${t.detail}` : ""}\n${budget}\n\n${FINISH_RULE}`
         : `[待办「${t.title}」] ${t.detail}\n\n`
           + "（这是主人之前交代、安排在现在执行的待办。主人多半不在旁边：能自己判断的就直接做完，别停下来等确认；"
           + "删除、付钱、对外发消息这类不可撤回的事不要做，需要主人拍板的写进汇报。"
-          + "最后用几句话汇报做了什么、结果在哪、还有什么要主人处理——这段汇报会原样转给主人。）\n" + FINISH_RULE;
+          + "最后用几句话汇报做了什么、结果在哪、还有什么要主人处理——这段汇报会原样转给主人。）\n" + budget + "\n" + FINISH_RULE;
       let r: RunResult | null = null, verdict: Verdict = { v: "none", why: "", body: "" }, rounds = 0;
-      let guardContinues = 0, nextPrompt = first;
-      for (; rounds <= MAX_ROUNDS + MAX_GUARD_CONTINUES; rounds++) {
+      let guardContinues = 0, pushbacks = 0, nextPrompt = first;
+      const t0ms = Date.now();
+      for (; rounds <= MAX_ROUNDS + MAX_GUARD_CONTINUES + MAX_PUSHBACKS; rounds++) {
         const left = Math.floor((deadline - Date.now()) / 1000);
         if (rounds > 0 && left < 30) { console.log(`[tasks] ⏱️  「${t.title}」单件时长（${s.max_minutes} 分钟）用完了`); break; }
         let guarded = "";
@@ -329,9 +349,23 @@ export class TaskQueue {
           nextPrompt = GUARD_CONTINUE_PROMPT + FINISH_RULE;
           continue;
         }
+        // 她自己收工、理由是「时间 / 额度不够」「下一轮再动手」，可额度和时间都还剩很多：顶回去，把真实的数字告诉她，让她接着动手
+        const leftNow = Math.floor((deadline - Date.now()) / 1000);
+        const deferred = !guarded && r.stopReason !== "length" && pushbacks < MAX_PUSHBACKS && leftNow >= Math.max(PUSH_MIN_LEFT, s.max_minutes * 15)
+          && ((verdict.v === "partial" && DEFER_RE.test(r.text)) || (verdict.v === "blocked" && ASK_GO_RE.test(verdict.why)));
+        if (deferred) {
+          pushbacks++;
+          const used = Math.round((Date.now() - t0ms) / 60_000);
+          console.log(`[tasks] 👉 「${t.title}」第 ${rounds + 1} 轮她说「${verdict.why.slice(0, 40)}」就收工了，额度和时间都还多（这轮 ${r.toolCalls.length} 次工具调用，还剩 ${Math.round(leftNow / 60)} 分钟），顶回去接着做（${pushbacks}/${MAX_PUSHBACKS}）`);
+          health.record({ kind: "task_push", ok: true, agent: t.agent, session: sessionKeyOf(t), detail: { why: verdict.why.slice(0, 80), calls: r.toolCalls.length, leftMin: Math.round(leftNow / 60) } });
+          nextPrompt = `[继续待办] 你写了「${verdict.v === "partial" ? "没做完" : "需要主人"}：${verdict.why.slice(0, 60)}」，但额度和时间都还很多：`
+            + `这一轮只调了 ${r.toolCalls.length} 次工具${lim ? `（每轮上限 ${lim.toolCalls} 次，用完还会自动续）` : ""}，这件待办已经做了 ${used} 分钟、还剩 ${Math.round(leftNow / 60)} 分钟——不是额度用完了，也不用等下一轮、不用问主人要不要接着做。\n`
+            + "方案上面已经有了，别再分析、别再写计划：现在就动手做下一步（改文件、跑命令、产出文件），一步步做到出结果；真卡住了（报错修不好、缺东西）再写清楚卡在哪个错误上。\n" + FINISH_RULE;
+          continue;
+        }
         // 写了状态行、又不是被截断的，就是她的结论；否则催她接着做（这种催最多 MAX_ROUNDS 次）
         if (verdict.v !== "none" && r.stopReason !== "length") break;
-        if (rounds - guardContinues >= MAX_ROUNDS) break;
+        if (rounds - guardContinues - pushbacks >= MAX_ROUNDS) break;
         console.log(`[tasks] ↻ 「${t.title}」第 ${rounds + 1} 轮没给结论${r.stopReason === "length" ? "（输出被截断）" : ""}，催她接着做`);
         nextPrompt = CONTINUE_PROMPT;
       }

@@ -39,11 +39,24 @@ function remember(session: string, file: string, st: fs.Stats) {
 /** 测试用 */
 export function forgetReads() { seen.clear(); }
 
-export function resolvePath(p: string, workspace: string): string {
+/**
+ * 她给的路径 → 绝对路径。Windows 上认 WSL 的写法 /mnt/c/… → C:\…（2026-11-28，主人「头雕待办做了一周没产出」：
+ * 执行命令配成交给 WSL 时，她看到、写出的路径都是 /mnt/c/…，拿去给文件工具，Windows 上被解析成 C:\mnt\c\…、找不到；
+ * 她只好改用 exec 跑自己写的 Python 补丁脚本改文件，脚本里 assert 原文在文件里——文件是 Windows 换行，次次 assert 失败，八轮没改动一个字节）
+ */
+export function resolvePath(p: string, workspace: string, platform: string = process.platform): string {
   let s = String(p ?? "").trim();
   if (s === "~" || s.startsWith("~/") || s.startsWith("~\\")) s = path.join(os.homedir(), s.slice(1));
+  if (platform === "win32") {
+    const m = s.match(/^\/mnt\/([a-zA-Z])(?:\/(.*))?$/);
+    if (m) return path.win32.join(`${m[1].toUpperCase()}:\\`, (m[2] ?? "").replace(/\//g, "\\"));
+    return path.win32.resolve(workspace, s);
+  }
   return path.resolve(workspace, s);
 }
+/** 找不到文件时：她给的是 Linux / WSL 里的路径（/home/… 这种，Windows 上没有），说清楚 */
+const wslHint = (p: string) => process.platform === "win32" && /^\/(?!mnt\/[a-zA-Z](\/|$))/.test(String(p ?? "").trim())
+  ? "（这是 Linux / WSL 里的路径；文件工具跑在 Windows 上：/mnt/c/… 会自动换成 C:\\…，WSL 自己的文件请写成 \\\\wsl.localhost\\<发行版>\\… ）" : "";
 
 /** 通配 → 正则：** 跨目录、* 和 ? 不跨，{a,b} 任选其一。没有 / 的只比文件名 */
 export function globRe(glob: string): RegExp {
@@ -114,7 +127,7 @@ export function fileTools(cfg: ToolsConfig, canSee: (agent: AgentInfo) => boolea
         async execute(_id, p: any) {
           const abs = where(p.path);
           let st: fs.Stats;
-          try { st = await fsp.stat(abs); } catch { return fail(`没有这个文件：${show(abs)}`); }
+          try { st = await fsp.stat(abs); } catch { return fail(`没有这个文件：${show(abs)}${wslHint(p.path)}`); }
           if (st.isDirectory()) return fail(`${show(abs)} 是目录，用 list_files 看里面有什么`);
           if (st.size > MAX_FILE) return fail(`文件太大（${(st.size / 1048576).toFixed(1)}MB），用 search_files 找要看的那段，或者 exec 处理`);
           const mime = IMAGE_TYPES[path.extname(abs).toLowerCase()];
@@ -158,7 +171,7 @@ export function fileTools(cfg: ToolsConfig, canSee: (agent: AgentInfo) => boolea
           // 查过期 → 读 → 改 → 写 中间不 await（2026-11，主人「共享文件是否存在多 agent 读写并发问题」）：
           // 共享的 USER / AGENTS / TOOLS 几个 agent 都会写，中间一让出，别的 agent 的 memory_write / edit_file 插进来，就会被这次写回盖掉
           let st: fs.Stats;
-          try { st = fs.statSync(abs); } catch { return fail(`没有这个文件：${show(abs)}（新建用 write_file）`); }
+          try { st = fs.statSync(abs); } catch { return fail(`没有这个文件：${show(abs)}${wslHint(p.path) || "（新建用 write_file）"}`); }
           const not = mustHaveRead(abs, st);
           if (not) return fail(not);
           let text = fs.readFileSync(abs, "utf8");

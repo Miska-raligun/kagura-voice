@@ -22,6 +22,7 @@ export const KIND_LABEL: Record<string, string> = {
   im_merged: "连发消息合成一轮",
   memory_tidy: "记忆整理",
   tidy_retry: "整理重试",
+  task_push: "待办顶回去",
   recall: "翻原文没找到",
   unclean_exit: "上次没有正常退出",
 };

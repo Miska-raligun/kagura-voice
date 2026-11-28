@@ -343,7 +343,7 @@ export function attachAgentSystem(sys: AgentSystem, ctx: Ctx) {
   sys.wakeAgent = wakeAgent;
   sys.mcp.onWake = (server, text) => { void wakeAgent(server, text); };
   sys.mcp.onNotify = (server, text) => { void notifyOwner(server, text); };
-  const tasks = new TaskQueue(ctx.dirs.systemDb, registry, { run: (req) => runtime.run(req), report, reset: (a, k) => runtime.store(a).reset(k) });
+  const tasks = new TaskQueue(ctx.dirs.systemDb, registry, { run: (req) => runtime.run(req), report, reset: (a, k) => runtime.store(a).reset(k), limits: () => runtime.taskLimits() });
   sys.tasks = tasks;
   // 记忆整理：每 N 天在待办的静默时段、她空闲时做一次；结果按 heartbeat 的投递方式告诉主人
   const dailyLines = (agent: { workspace: string }, day: string): string[] => {
